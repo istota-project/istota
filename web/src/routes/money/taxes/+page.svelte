@@ -443,7 +443,7 @@
   /* A growing column so the whole-pane states (`.center-msg`) center in the
 	   section body rather than sitting against the top edge. */
   .tax-content {
-    padding: var(--space-2);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     flex: 1 0 auto;
@@ -452,7 +452,7 @@
   .tax-layout {
     display: grid;
     grid-template-columns: 280px 1fr;
-    gap: var(--space-6);
+    gap: var(--space-3);
     align-items: start;
   }
 

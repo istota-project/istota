@@ -29,12 +29,17 @@ const reportsLayout = readFileSync(
   join(process.cwd(), 'src/routes/money/reports/+layout.svelte'),
   'utf8',
 );
+const taxesLayout = readFileSync(
+  join(process.cwd(), 'src/routes/money/taxes/+layout.svelte'),
+  'utf8',
+);
 
 /** Every layout that adopts the column, so a new one is added in one place. */
 const adopters = [
   ['health/+layout.svelte', healthLayout],
   ['money/portfolio/+layout.svelte', portfolioLayout],
   ['money/reports/+layout.svelte', reportsLayout],
+  ['money/taxes/+layout.svelte', taxesLayout],
 ] as const;
 
 /**
@@ -142,4 +147,16 @@ describe('adopters', () => {
       expect(markup.slice(header, bodyAt)).not.toContain('content-frame');
     });
   }
+
+  it('money/taxes frames inside the section body', () => {
+    // Taxes renders no section header of its own — the money layout above it
+    // owns the bar — so the header half of the check has nothing to assert
+    // here. What still has to hold is the frame being inside the scroller, so
+    // the scrollbar stays at the pane's edge.
+    const markup = markupOnly(taxesLayout);
+    const bodyAt = markup.indexOf('money-section-body');
+
+    expect(bodyAt).toBeGreaterThan(-1);
+    expect(markup.indexOf('content-frame', bodyAt)).toBeGreaterThan(bodyAt);
+  });
 });
