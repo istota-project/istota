@@ -75,8 +75,11 @@
   // current (already filtered) rows would delete the option you just picked.
   let knownYears: string[] = $state([]);
 
+  // "All" rather than "All time", matching the year filter on transactions,
+  // accounts and reports — and worth ~26px, which is most of what this toolbar
+  // was over budget by on a phone.
   const periodOptions = $derived.by<SelectOption[]>(() => [
-    { value: '', label: 'All time' },
+    { value: '', label: 'All' },
     ...knownYears.map((y) => ({ value: y, label: y })),
   ]);
 
@@ -329,15 +332,43 @@
       <span class="money-result-count">
         {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
       </span>
+      <!-- Every width here is pinned, because the row does not wrap: a trigger
+           sized to its own selection re-flows the whole row each time you use
+           it, and on a phone that meant Add entry dropping to a line of its
+           own. Status and period take the longest label they can ever hold
+           ("Uninvoiced", a four-digit year). Client cannot be sized that way —
+           its labels are user data of no bounded length — so it takes a width
+           that reads most names rather than one that fits them all; raise it if
+           yours are longer, at the cost of the widths below.
+
+           Below ~400px the row runs out of room and the labels give ground
+           instead of it breaking. Which one gives way is not the order you
+           might expect: flex-shrink takes pixels in proportion to width, so
+           Client loses the most, but Status is the first to ellipsis because
+           it is the one carrying a label that nearly fills it. That is the
+           right way round anyway — a half-read client name still says which
+           client, where a clipped "Invoiced" and "Uninvoiced" are the same
+           word. -->
       <div class="filters">
         <Select
           value={statusFilter}
           options={statusOptions}
           ariaLabel="Status filter"
+          widthChars={9}
           onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
         />
-        <Select bind:value={clientFilter} options={clientFilterOptions} ariaLabel="Client filter" />
-        <Select bind:value={periodFilter} options={periodOptions} ariaLabel="Period filter" />
+        <Select
+          bind:value={clientFilter}
+          options={clientFilterOptions}
+          ariaLabel="Client filter"
+          widthChars={10}
+        />
+        <Select
+          bind:value={periodFilter}
+          options={periodOptions}
+          ariaLabel="Period filter"
+          widthChars={4}
+        />
         <Button variant="primary" onclick={openAdd}>Add entry</Button>
       </div>
     </div>
@@ -438,11 +469,23 @@
     min-height: 0;
   }
 
+  /* One line, always. Wrapping put Add entry on a row by itself on a phone,
+     which read as a second toolbar; the filters truncate instead (they are
+     pinned to a `ch` width and carry an ellipsis). min-width lets this shrink
+     below its own content as a toolbar item, or the truncation never gets a
+     chance to happen. */
   .filters {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  /* The one thing that does not give ground: a button truncated to "Add e…" is
+     not a button, and it is the row's only action. */
+  .filters :global(.btn) {
+    flex-shrink: 0;
   }
 
   /* Columns only — the toolbar/list/header/row/chip shell is shared, in

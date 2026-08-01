@@ -302,7 +302,19 @@
     padding: var(--space-2) var(--space-3) 0;
   }
 
+  /* Reserves the tier height rather than sitting at its own line-box height.
+     The count is shorter than a control, so left to itself its vertical
+     position is decided by whatever else is in the bar: on a toolbar that fits
+     on one line the min-height's leftover is split above and below it, and on
+     one that wraps to two lines there is no leftover left to split and it sits
+     flush on the top padding — the same count landing ~6px higher on Work than
+     on Invoices, for no reason visible on either page. Occupying the tier makes
+     it land identically in both regimes; inline-flex is what centres the text
+     in the taller box instead of leaving it at the top of it. */
   :global(.money-result-count) {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--control-height-lg);
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;

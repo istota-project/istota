@@ -44,6 +44,20 @@
      * moves with the text-scale preference.
      */
     minChars?: number;
+    /**
+     * Pin the label to exactly this many characters, truncating anything
+     * longer with the ellipsis it already carries.
+     *
+     * The difference from `minChars`, and the reason for a second prop: a
+     * min-width is a floor flex-shrink cannot take back, so in a row that must
+     * not wrap it pushes the row past the screen edge instead of truncating.
+     * `width` is a preferred size, so the label holds one size at any given
+     * container width — which is what stops a row re-flowing every time you
+     * change a selection — and still gives ground when the row genuinely runs
+     * out of room. The money Work filters are the case: three of these plus a
+     * button, on a phone.
+     */
+    widthChars?: number;
   }
 
   let {
@@ -57,9 +71,16 @@
     align = 'start',
     size = 'sm',
     minChars,
+    widthChars,
   }: Props = $props();
 
   const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
+
+  const labelStyle = $derived(
+    [minChars ? `min-width: ${minChars}ch` : '', widthChars ? `width: ${widthChars}ch` : '']
+      .filter(Boolean)
+      .join('; ') || undefined,
+  );
 </script>
 
 <BitsSelect.Root type="single" bind:value {onValueChange} {disabled}>
@@ -67,9 +88,7 @@
     class="ui-select-trigger ui-select-trigger--{size}{fullWidth ? ' ui-select-trigger--full' : ''}"
     aria-label={ariaLabel}
   >
-    <span class="ui-select-label" style={minChars ? `min-width: ${minChars}ch` : undefined}
-      >{selectedLabel}</span
-    >
+    <span class="ui-select-label" style={labelStyle}>{selectedLabel}</span>
     <ChevronDown size={12} />
   </BitsSelect.Trigger>
   <BitsSelect.Portal>

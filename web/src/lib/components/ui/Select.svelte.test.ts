@@ -42,4 +42,38 @@ describe('Select', () => {
       expect(label.style.minWidth).toBe('');
     });
   });
+
+  describe('widthChars', () => {
+    it('pins the label width so the trigger is one size whatever is selected', () => {
+      const { container } = render(Select, {
+        value: '',
+        options: yearOptions,
+        ariaLabel: 'Year',
+        widthChars: 4,
+      });
+      const label = container.querySelector('.ui-select-label') as HTMLElement;
+      expect(label.style.width).toBe('4ch');
+    });
+
+    it('sets no floor, so the label still shrinks rather than overflowing its row', () => {
+      // The difference from minChars, and the whole reason for a second prop: a
+      // min-width cannot be shrunk past, so in a row that must not wrap it
+      // pushes the row wider than the screen instead of truncating. `width` is
+      // a preferred size, which flex-shrink may take back — the label already
+      // carries min-width:0 and an ellipsis to land on.
+      const { container } = render(Select, {
+        value: '',
+        options: yearOptions,
+        widthChars: 4,
+      });
+      const label = container.querySelector('.ui-select-label') as HTMLElement;
+      expect(label.style.minWidth).toBe('');
+    });
+
+    it('pins nothing when unset', () => {
+      const { container } = render(Select, { value: '2026', options: yearOptions });
+      const label = container.querySelector('.ui-select-label') as HTMLElement;
+      expect(label.style.width).toBe('');
+    });
+  });
 });
