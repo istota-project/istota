@@ -45,7 +45,7 @@ describe('hourInZone', () => {
 
   it('reads the hour in the named zone, not the browser zone', () => {
     expect(hourInZone(noonUtc, 'UTC')).toBe(12);
-    expect(hourInZone(noonUtc, 'Europe/Lisbon')).toBe(14);
+    expect(hourInZone(noonUtc, 'Europe/Berlin')).toBe(14);
     expect(hourInZone(noonUtc, 'America/Los_Angeles')).toBe(5);
   });
 
@@ -194,7 +194,7 @@ describe('buildGreeting', () => {
     // 03:00 in Lisbon is 01:00 UTC — the late-night pool, not the morning one.
     const g = buildGreeting('Istota', {
       now: at('2026-07-27T01:00:00Z'),
-      timeZone: 'Europe/Lisbon',
+      timeZone: 'Europe/Berlin',
       random: () => 0,
     });
     expect(g.daypart).toBe('lateNight');

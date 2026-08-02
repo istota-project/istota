@@ -131,7 +131,7 @@ MONARCH_TOML = """\
 lookback_days = 30
 
 [monarch.profiles.acme]
-ledger = "cynium"
+ledger = "acme"
 default_account = "Assets:Acme:Bank"
 
 [monarch.profiles.acme.tags]
@@ -139,10 +139,10 @@ include = ["Alice Business"]
 
 [monarch.profiles.acme.accounts]
 "Acme Visa" = "Liabilities:Acme:Visa"
-"Cynium Bank" = "Assets:Acme:Bank"
+"Acme Bank" = "Assets:Acme:Bank"
 
 [monarch.profiles.acme.categories]
-"Software" = "Expenses:Cynium:Software"
+"Software" = "Expenses:Acme:Software"
 
 [monarch.profiles.personal]
 ledger = "personal"
@@ -359,17 +359,17 @@ class TestMonarchRoundTrip:
         assert loaded.sync.lookback_days == 30
         # Profiles preserved
         names = sorted(p.name for p in loaded.profiles)
-        assert names == ["cynium", "personal"]
+        assert names == ["acme", "personal"]
 
-        cynium = next(p for p in loaded.profiles if p.name == "cynium")
-        assert cynium.ledger == "cynium"
-        assert cynium.sync.default_account == "Assets:Acme:Bank"
-        assert cynium.tags.include == ["Alice Business"]
-        assert cynium.accounts == {
+        acme = next(p for p in loaded.profiles if p.name == "acme")
+        assert acme.ledger == "acme"
+        assert acme.sync.default_account == "Assets:Acme:Bank"
+        assert acme.tags.include == ["Alice Business"]
+        assert acme.accounts == {
             "Acme Visa": "Liabilities:Acme:Visa",
-            "Cynium Bank": "Assets:Acme:Bank",
+            "Acme Bank": "Assets:Acme:Bank",
         }
-        assert cynium.categories == {"Software": "Expenses:Cynium:Software"}
+        assert acme.categories == {"Software": "Expenses:Acme:Software"}
 
         personal = next(p for p in loaded.profiles if p.name == "personal")
         assert personal.sync.lookback_days == 60
@@ -419,16 +419,16 @@ class TestMonarchGranular:
     def test_profile_lifecycle(self, tmp_path):
         db_path = tmp_path / "money.db"
         prof, state = cs.upsert_monarch_profile(
-            db_path, "cynium", ledger="cynium",
+            db_path, "acme", ledger="acme",
         )
         assert state == "created"
-        assert prof["ledger"] == "cynium"
+        assert prof["ledger"] == "acme"
         prof, state = cs.upsert_monarch_profile(
-            db_path, "cynium", lookback_days=60,
+            db_path, "acme", lookback_days=60,
         )
         assert state == "updated"
-        assert cs.delete_monarch_profile(db_path, "cynium") is True
-        assert cs.delete_monarch_profile(db_path, "cynium") is False
+        assert cs.delete_monarch_profile(db_path, "acme") is True
+        assert cs.delete_monarch_profile(db_path, "acme") is False
 
     def test_global_profile_cannot_be_deleted(self, tmp_path):
         db_path = tmp_path / "money.db"
@@ -437,20 +437,20 @@ class TestMonarchGranular:
 
     def test_account_map_set_unset(self, tmp_path):
         db_path = tmp_path / "money.db"
-        cs.upsert_monarch_profile(db_path, "cynium", ledger="cynium")
+        cs.upsert_monarch_profile(db_path, "acme", ledger="acme")
         assert cs.set_account_map_entry(
-            db_path, "cynium", "Visa", "Liabilities:Visa",
+            db_path, "acme", "Visa", "Liabilities:Visa",
         ) == "created"
         assert cs.set_account_map_entry(
-            db_path, "cynium", "Visa", "Liabilities:Visa",
+            db_path, "acme", "Visa", "Liabilities:Visa",
         ) == "noop"
         assert cs.set_account_map_entry(
-            db_path, "cynium", "Visa", "Liabilities:NewVisa",
+            db_path, "acme", "Visa", "Liabilities:NewVisa",
         ) == "updated"
-        assert cs.get_account_map(db_path, "cynium") == {
+        assert cs.get_account_map(db_path, "acme") == {
             "Visa": "Liabilities:NewVisa",
         }
-        assert cs.unset_account_map_entry(db_path, "cynium", "Visa") is True
+        assert cs.unset_account_map_entry(db_path, "acme", "Visa") is True
 
     def test_account_map_global_scope(self, tmp_path):
         db_path = tmp_path / "money.db"
@@ -465,13 +465,13 @@ class TestMonarchGranular:
 
     def test_tag_filters(self, tmp_path):
         db_path = tmp_path / "money.db"
-        cs.upsert_monarch_profile(db_path, "cynium", ledger="cynium")
-        assert cs.add_tag_filter(db_path, "cynium", "include", "Biz") == "created"
-        assert cs.add_tag_filter(db_path, "cynium", "include", "Biz") == "noop"
-        assert cs.get_tag_filters(db_path, "cynium") == {
+        cs.upsert_monarch_profile(db_path, "acme", ledger="acme")
+        assert cs.add_tag_filter(db_path, "acme", "include", "Biz") == "created"
+        assert cs.add_tag_filter(db_path, "acme", "include", "Biz") == "noop"
+        assert cs.get_tag_filters(db_path, "acme") == {
             "include": ["Biz"], "exclude": [],
         }
-        assert cs.remove_tag_filter(db_path, "cynium", "include", "Biz") is True
+        assert cs.remove_tag_filter(db_path, "acme", "include", "Biz") is True
 
 
 class TestSchemaMeta:

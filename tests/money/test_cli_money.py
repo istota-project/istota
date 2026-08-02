@@ -213,35 +213,35 @@ class TestMonarch:
     def test_profile_lifecycle(self, patched_loader):
         rc, out, _ = _run([
             "money", "monarch", "profile", "add", "--user", "u1",
-            "--name", "cynium", "--ledger", "cynium",
+            "--name", "acme", "--ledger", "acme",
         ])
         assert "STATE: created" in out
         rc, out, _ = _run([
             "money", "monarch", "profile", "update", "--user", "u1",
-            "--name", "cynium", "--lookback-days", "60",
+            "--name", "acme", "--lookback-days", "60",
         ])
         assert "STATE: updated" in out
         rc, out, _ = _run([
             "money", "monarch", "profile", "remove", "--user", "u1",
-            "--name", "cynium",
+            "--name", "acme",
         ])
         assert "STATE: removed" in out
 
     def test_account_map_set_unset(self, patched_loader):
         _run([
             "money", "monarch", "profile", "add", "--user", "u1",
-            "--name", "cynium", "--ledger", "cynium",
+            "--name", "acme", "--ledger", "acme",
         ])
         rc, out, _ = _run([
             "money", "monarch", "account-map", "set", "--user", "u1",
-            "--profile", "cynium",
+            "--profile", "acme",
             "--monarch-name", "Acme Visa",
             "--account", "Liabilities:Visa",
         ])
         assert "STATE: created" in out
         rc, out, _ = _run([
             "money", "monarch", "account-map", "unset", "--user", "u1",
-            "--profile", "cynium",
+            "--profile", "acme",
             "--monarch-name", "Acme Visa",
         ])
         assert "STATE: removed" in out
@@ -257,11 +257,11 @@ class TestMonarch:
     def test_tag_filter_add(self, patched_loader):
         _run([
             "money", "monarch", "profile", "add", "--user", "u1",
-            "--name", "cynium", "--ledger", "cynium",
+            "--name", "acme", "--ledger", "acme",
         ])
         rc, out, _ = _run([
             "money", "monarch", "tag-filter", "add", "--user", "u1",
-            "--profile", "cynium",
+            "--profile", "acme",
             "--kind", "include", "--tag", "Biz",
         ])
         assert "STATE: created" in out
@@ -439,7 +439,7 @@ class TestMergeModePreservesScalars:
 
         toml_path = tmp_path / "in.toml"
         toml_path.write_text(
-            '[monarch.profiles.acme]\nledger = "cynium"\n'
+            '[monarch.profiles.acme]\nledger = "acme"\n'
         )
         rc, _, _ = _run([
             "money", "config", "import", "--user", "u1",
@@ -448,7 +448,7 @@ class TestMergeModePreservesScalars:
         assert rc == 0
         loaded = config_store.load_monarch(patched_loader.db_path)
         assert loaded.sync.lookback_days == 99
-        assert any(p.name == "cynium" for p in loaded.profiles)
+        assert any(p.name == "acme" for p in loaded.profiles)
 
 
 class TestCombinedImport:

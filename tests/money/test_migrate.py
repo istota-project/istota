@@ -46,7 +46,7 @@ MONARCH_TOML = """\
 lookback_days = 45
 
 [monarch.profiles.acme]
-ledger = "cynium"
+ledger = "acme"
 
 [monarch.profiles.acme.tags]
 include = ["Biz"]
@@ -176,7 +176,7 @@ class TestMigrateMonarch:
         _migrate.ensure_initialised(ctx)
         loaded = config_store.load_monarch(ctx.db_path)
         assert loaded.sync.lookback_days == 45
-        assert any(p.name == "cynium" for p in loaded.profiles)
+        assert any(p.name == "acme" for p in loaded.profiles)
 
 
 class TestPerSectionIndependence:

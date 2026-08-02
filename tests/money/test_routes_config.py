@@ -180,17 +180,17 @@ class TestMonarchProfiles:
     def test_create_then_account_map(self, ctx, client):
         resp = client.post(
             "/istota/api/money/config/monarch/profiles",
-            json={"name": "cynium", "ledger": "cynium"},
+            json={"name": "acme", "ledger": "acme"},
         )
         assert resp.json()["state"] == "created"
 
         resp = client.put(
-            "/istota/api/money/config/monarch/account-map?profile=cynium",
+            "/istota/api/money/config/monarch/account-map?profile=acme",
             json={"Acme Visa": "Liabilities:Visa"},
         )
         assert resp.status_code == 200
         body = client.get(
-            "/istota/api/money/config/monarch/account-map?profile=cynium",
+            "/istota/api/money/config/monarch/account-map?profile=acme",
         ).json()
         assert body["mapping"] == {"Acme Visa": "Liabilities:Visa"}
 
@@ -217,15 +217,15 @@ class TestMonarchTagFilters:
     def test_replace(self, ctx, client):
         client.post(
             "/istota/api/money/config/monarch/profiles",
-            json={"name": "cynium", "ledger": "cynium"},
+            json={"name": "acme", "ledger": "acme"},
         )
         resp = client.put(
-            "/istota/api/money/config/monarch/tag-filters?profile=cynium",
+            "/istota/api/money/config/monarch/tag-filters?profile=acme",
             json={"include": ["Biz"], "exclude": ["Hide"]},
         )
         assert resp.status_code == 200
         body = client.get(
-            "/istota/api/money/config/monarch/tag-filters?profile=cynium",
+            "/istota/api/money/config/monarch/tag-filters?profile=acme",
         ).json()
         assert body["tags"]["include"] == ["Biz"]
         assert body["tags"]["exclude"] == ["Hide"]
