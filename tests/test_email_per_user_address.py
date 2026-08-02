@@ -6,7 +6,7 @@ from istota.config import Config
 from istota.email_support import per_user_address
 
 
-def _config(*, enabled=True, bot_email="zorg@bot.example.com"):
+def _config(*, enabled=True, bot_email="istota@bot.example.com"):
     config = Config()
     config.email.enabled = enabled
     config.email.bot_email = bot_email
@@ -15,7 +15,7 @@ def _config(*, enabled=True, bot_email="zorg@bot.example.com"):
 
 class TestPerUserAddress:
     def test_builds_plus_address_from_bot_email(self):
-        assert per_user_address(_config(), "alice") == "zorg+alice@bot.example.com"
+        assert per_user_address(_config(), "alice") == "istota+alice@bot.example.com"
 
     def test_none_when_email_disabled(self):
         assert per_user_address(_config(enabled=False), "alice") is None
@@ -30,4 +30,4 @@ class TestPerUserAddress:
     def test_plus_in_the_local_part_is_kept(self):
         # A bot_email that already carries a tag would otherwise produce a
         # second '+', which no MTA routes back to us.
-        assert per_user_address(_config(bot_email="zorg+bot@x.com"), "alice") is None
+        assert per_user_address(_config(bot_email="istota+bot@x.com"), "alice") is None

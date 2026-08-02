@@ -191,14 +191,14 @@ class TestAccountRegistry:
             make_snapshot([
                 make_row(account_name="Roth IRA A"),
                 make_row(account_name="Active Trading (IBKR)", symbol="GOOG"),
-                make_row(account_name="SK Tax", symbol="CORE**", row_type="cash"),
+                make_row(account_name="Tax Reserve", symbol="CORE**", row_type="cash"),
                 make_row(account_name="Joint Brokerage", symbol="VOO"),
             ]),
         )
         accounts = {a.account_name: a for a in portfolio.list_accounts(conn)}
         assert accounts["Roth IRA A"].account_type == "retirement"
         assert accounts["Active Trading (IBKR)"].account_type == "trading"
-        assert accounts["SK Tax"].account_type == "cash"
+        assert accounts["Tax Reserve"].account_type == "cash"
         assert accounts["Joint Brokerage"].account_type == "taxable"
         assert all(a.group == "" for a in accounts.values())
         assert all(a.excluded is False for a in accounts.values())
@@ -411,10 +411,10 @@ class TestSummaryAndExclusion:
                 make_row(account_name="Taxable Brokerage", symbol="VTI", value=6000.0, cost_basis=5000.0),
                 make_row(account_name="Taxable Brokerage", symbol="SPAXX**", row_type="cash",
                          value=1000.0, cost_basis=None, quantity=None),
-                make_row(account_name="SK Tax", symbol="CORE**", row_type="cash",
+                make_row(account_name="Tax Reserve", symbol="CORE**", row_type="cash",
                          value=3000.0, cost_basis=None, quantity=None),
                 make_row(account_name="Joint Brokerage", symbol="VTI", value=2000.0, cost_basis=1500.0),
-            ], group_hints={"Taxable Brokerage": "Alice", "SK Tax": "Alice",
+            ], group_hints={"Taxable Brokerage": "Alice", "Tax Reserve": "Alice",
                             "Joint Brokerage": "Bob"}),
         )
 
@@ -445,10 +445,10 @@ class TestSummaryAndExclusion:
     def test_excluded_account_filtered_everywhere(self, conn):
         result = self._seed(conn)
         accounts = {a.account_name: a for a in portfolio.list_accounts(conn)}
-        portfolio.update_account(conn, accounts["SK Tax"].id, excluded=True)
+        portfolio.update_account(conn, accounts["Tax Reserve"].id, excluded=True)
         summary = portfolio.snapshot_summary(conn, result["snapshot_id"])
         assert summary["total_value"] == 9000.0
-        assert "SK Tax" not in {g["key"] for g in summary["by_account"]}
+        assert "Tax Reserve" not in {g["key"] for g in summary["by_account"]}
         series = portfolio.history_series(conn)
         assert series["series"][0]["total"] == 9000.0
         snaps = portfolio.list_snapshots(conn)

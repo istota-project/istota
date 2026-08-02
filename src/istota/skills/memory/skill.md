@@ -37,7 +37,7 @@ Before storing anything in memory, decide which of these branches it falls into:
 ```bash
 # Temporal events — always include --from
 istota-skill memory_search add-fact alice acquired "arc desk lamp" --from 2026-05-03
-istota-skill memory_search add-fact alice decided "standardize on short international cartridge pens with syringe-fill" --from 2026-05-04
+istota-skill memory_search add-fact alice decided "standardize on clamp-mount lamps with warm dimmable bulbs" --from 2026-05-04
 istota-skill memory_search add-fact alice disposed_of "arc desk lamp" --from 2026-05-04
 
 # Stable factual claims — no --from
@@ -119,7 +119,7 @@ Each user has a bot-managed workspace area:
 The nightly sleep cycle writes summaries to `/Users/{user_id}/memories/YYYY-MM-DD.md`. These are NOT auto-loaded — search them on demand:
 
 ```bash
-istota-skill memory_search search "fountain pen" --limit 5
+istota-skill memory_search search "desk lamp" --limit 5
 istota-skill memory_search search "Project Alpha" --since 2026-04-01
 ```
 

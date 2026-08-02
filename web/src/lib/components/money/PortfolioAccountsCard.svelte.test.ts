@@ -27,7 +27,7 @@ function account(overrides: Partial<PortfolioAccount> = {}): PortfolioAccount {
     id: 1,
     account_name: 'Taxable Brokerage',
     account_number: 'X111',
-    group: 'Alice',
+    group: 'Carol',
     account_type: 'taxable',
     excluded: false,
     first_seen_at: '2026-01-01T00:00:00Z',
@@ -88,8 +88,8 @@ describe('PortfolioAccountsCard', () => {
 
   it('offers existing groups as autocomplete suggestions on the group field', async () => {
     const { container } = await mount([
-      account({ group: 'Alice' }),
-      account({ id: 2, account_name: 'Joint Brokerage', group: 'Bob' }),
+      account({ group: 'Carol' }),
+      account({ id: 2, account_name: 'Joint Brokerage', group: 'Dana' }),
       account({ id: 3, account_name: 'Joint Cash', group: '' }),
     ]);
     const input = screen.getByLabelText('Group of Taxable Brokerage') as HTMLInputElement;
@@ -98,7 +98,7 @@ describe('PortfolioAccountsCard', () => {
       (o) => o.getAttribute('value'),
     );
     // Existing labels only, deduped, no entry for the ungrouped row.
-    expect(options).toEqual(['Bob', 'Alice']);
+    expect(options).toEqual(['Carol', 'Dana']);
   });
 
   it('marks the page dirty when the excluded flag is toggled', async () => {

@@ -54,7 +54,7 @@ class TestStatusWriter:
             assert data["queue"]["pending_background"] == 1
 
     def test_includes_bot_name_and_version(self):
-        cfg = _make_config(bot_name="Zorg")
+        cfg = _make_config(bot_name="Istota")
         init_status_writer()
 
         with _dav_ok() as mock_request:
@@ -62,7 +62,7 @@ class TestStatusWriter:
 
             content = _call(mock_request, "PUT").kwargs["content"]
             data = json.loads(content)
-            assert data["bot_name"] == "Zorg"
+            assert data["bot_name"] == "Istota"
             assert "version" in data
 
     def test_no_nextcloud_config_is_noop(self):

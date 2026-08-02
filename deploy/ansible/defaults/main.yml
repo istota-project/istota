@@ -862,7 +862,7 @@ istota_backup_log: "/var/log/{{ istota_namespace }}/{{ istota_namespace }}-backu
 # Optional command run when a backup run has one or more failures. Empty = no
 # alert (backup still exits non-zero + logs the failure). The command receives
 # the alert text in the ISTOTA_BACKUP_ALERT_MESSAGE env var, e.g.:
-#   'curl -s -H "Title: zorg backup failed" -d "$ISTOTA_BACKUP_ALERT_MESSAGE" https://ntfy.example.com/zorg'
+#   'curl -s -H "Title: istota backup failed" -d "$ISTOTA_BACKUP_ALERT_MESSAGE" https://ntfy.example.com/my-topic'
 istota_backup_alert_command: ""
 
 # Auto-update settings (poor man's CI)

@@ -287,7 +287,7 @@ def _daemon_config(tmp_path):
     cfg = Config(
         db_path=tmp_path / "istota.db",
         nextcloud_mount_path=tmp_path / "workspace",
-        users={"alice": UserConfig(display_name="Alice")},
+        users={"bob": UserConfig(display_name="Bob")},
         talk=TalkConfig(enabled=False),
         security=SecurityConfig(sandbox_enabled=False),
         web=WebConfig(enabled=False, auth="none"),

@@ -155,7 +155,7 @@ class TestSynthesizeUserContext:
         (ledgers_dir / "backups" / "old.beancount").write_text("")
         ctx = synthesize_user_context(tmp_path)
         assert ctx.ledgers == [
-            {"name": "cynium", "path": ledgers_dir / "acme.beancount"},
+            {"name": "acme", "path": ledgers_dir / "acme.beancount"},
             {"name": "personal", "path": ledgers_dir / "personal.beancount"},
         ]
 
@@ -171,10 +171,10 @@ class TestSynthesizeUserContext:
         ]
 
     def test_ledgers_short_form_strings(self, tmp_path):
-        ctx = synthesize_user_context(tmp_path, ledgers=["cynium", "personal"])
+        ctx = synthesize_user_context(tmp_path, ledgers=["acme", "personal"])
         data_dir = (tmp_path / "money").resolve()
         assert ctx.ledgers == [
-            {"name": "cynium", "path": data_dir / "ledgers" / "acme.beancount"},
+            {"name": "acme", "path": data_dir / "ledgers" / "acme.beancount"},
             {"name": "personal", "path": data_dir / "ledgers" / "personal.beancount"},
         ]
 

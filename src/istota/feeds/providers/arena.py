@@ -37,7 +37,7 @@ ARENA_API_BASE = "https://api.are.na/v3/channels"
 ARENA_BLOCK_URL = "https://www.are.na/block/{id}"
 ARENA_CHANNEL_URL = "https://www.are.na/channel/{slug}"
 
-USER_AGENT = "istota-feeds/0.1 (+https://github.com/cynium/istota)"
+USER_AGENT = "istota-feeds/0.1 (+https://github.com/istota-project/istota)"
 
 # The API rejects a larger page with a 400.
 MAX_PER_PAGE = 100

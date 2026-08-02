@@ -1000,7 +1000,7 @@ class TestCmdMemory:
         from istota.memory.knowledge_graph import ensure_table, add_fact
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
-            add_fact(conn, "alice", "alice", "speaks", "polish")
+            add_fact(conn, "alice", "alice", "speaks", "portuguese")
             conn.commit()
             client = AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))

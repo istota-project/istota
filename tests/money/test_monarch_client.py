@@ -1188,7 +1188,7 @@ class TestDebugMonarchCommand:
 
     def test_returns_ok_envelope_on_success(self, monkeypatch, tmp_path):
         _install_fake_session(monkeypatch, body=json.dumps({
-            "data": {"me": {"id": "u-1", "email": "alice@example.com"}},
+            "data": {"me": {"id": "u-1", "email": "bob@example.com"}},
         }))
 
         result = self._run(tmp_path)
@@ -1196,7 +1196,7 @@ class TestDebugMonarchCommand:
         envelope = json.loads(result.output)
         assert envelope == {
             "status": "ok", "auth_ok": True,
-            "who": {"id": "u-1", "email": "alice@example.com"},
+            "who": {"id": "u-1", "email": "bob@example.com"},
         }
 
     def test_returns_error_envelope_on_403(self, monkeypatch, tmp_path):

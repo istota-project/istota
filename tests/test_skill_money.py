@@ -312,11 +312,11 @@ class TestCommandDispatch:
     def test_portfolio_summary_with_group(self, captured):
         from istota.skills.money import main
 
-        main(["portfolio", "summary", "--snapshot", "5", "--group", "Alice"])
+        main(["portfolio", "summary", "--snapshot", "5", "--group", "Carol"])
         args = captured[-1]
         assert args[:2] == ["portfolio", "summary"]
         assert "--snapshot" in args and "5" in args
-        assert "--group" in args and "Alice" in args
+        assert "--group" in args and "Carol" in args
 
     def test_portfolio_history_grouped(self, captured):
         from istota.skills.money import main
@@ -344,10 +344,10 @@ class TestCommandDispatch:
     def test_portfolio_accounts_mutations(self, captured):
         from istota.skills.money import main
 
-        main(["portfolio", "accounts", "--set-group", "3", "Alice"])
+        main(["portfolio", "accounts", "--set-group", "3", "Carol"])
         args = captured[-1]
         assert args[:2] == ["portfolio", "accounts"]
-        assert "--set-group" in args and "3" in args and "Alice" in args
+        assert "--set-group" in args and "3" in args and "Carol" in args
         main(["portfolio", "accounts", "--exclude", "4"])
         args = captured[-1]
         assert "--exclude" in args and "4" in args

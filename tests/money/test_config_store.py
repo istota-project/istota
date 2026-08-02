@@ -135,7 +135,7 @@ ledger = "cynium"
 default_account = "Assets:Acme:Bank"
 
 [monarch.profiles.acme.tags]
-include = ["Consulting"]
+include = ["Alice Business"]
 
 [monarch.profiles.acme.accounts]
 "Acme Visa" = "Liabilities:Acme:Visa"
@@ -364,7 +364,7 @@ class TestMonarchRoundTrip:
         cynium = next(p for p in loaded.profiles if p.name == "cynium")
         assert cynium.ledger == "cynium"
         assert cynium.sync.default_account == "Assets:Acme:Bank"
-        assert cynium.tags.include == ["Consulting"]
+        assert cynium.tags.include == ["Alice Business"]
         assert cynium.accounts == {
             "Acme Visa": "Liabilities:Acme:Visa",
             "Cynium Bank": "Assets:Acme:Bank",

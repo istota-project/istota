@@ -60,7 +60,7 @@ istota-skill location update --name "coffee shop" --category food
 istota-skill location update --name "old name" --rename "new name"
 istota-skill location update --id 42 --radius 200 --notes "back entrance"
 istota-skill location update --id 42 --notes ""  # clear notes
-istota-skill location update --name "office" --lat 34.05 --lon -118.25
+istota-skill location update --name "office" --lat 40.71 --lon -74.01
 
 # Delete a place — identify by --name or --id
 # Also removes the place assignment from historical pings
@@ -74,7 +74,7 @@ istota-skill location attendance --date 2026-02-15
 istota-skill location attendance --event "dentist"
 
 # Reverse geocode a single coordinate pair
-istota-skill location reverse-geocode --lat 34.05 --lon -118.25
+istota-skill location reverse-geocode --lat 40.71 --lon -74.01
 
 # Day summary: clusters pings into stops, resolves names via saved places
 # or reverse geocoding, filters transit, merges consecutive same-location stops
@@ -90,7 +90,7 @@ istota-skill location discover
 istota-skill location discover --min-pings 20
 
 # Dismiss a cluster zone so it stops surfacing in discover
-istota-skill location dismiss-cluster --lat 34.05 --lon -118.4 --radius 200
+istota-skill location dismiss-cluster --lat 40.71 --lon -73.98 --radius 200
 
 # List / un-dismiss
 istota-skill location list-dismissed
@@ -107,8 +107,8 @@ Aliased as `last` (`istota-skill location last`).
 {
   "last_ping": {
     "timestamp": "2026-02-20T10:30:00Z",
-    "lat": 34.05,
-    "lon": -118.4,
+    "lat": 40.71,
+    "lon": -73.98,
     "accuracy": 5,
     "activity_type": "stationary",
     "place": "home"
@@ -128,8 +128,8 @@ Aliased as `last` (`istota-skill location last`).
 [
   {
     "timestamp": "2026-02-20T10:30:00Z",
-    "lat": 34.05,
-    "lon": -118.4,
+    "lat": 40.71,
+    "lon": -73.98,
     "accuracy": 5,
     "place": "home",
     "activity_type": "stationary"
@@ -144,8 +144,8 @@ Aliased as `last` (`istota-skill location last`).
   {
     "id": 1,
     "name": "home",
-    "lat": 34.05,
-    "lon": -118.4,
+    "lat": 40.71,
+    "lon": -73.98,
     "radius_meters": 150,
     "category": "home",
     "notes": null
@@ -159,10 +159,10 @@ Aliased as `last` (`istota-skill location last`).
 {
   "status": "ok",
   "place": "coffee shop",
-  "lat": 34.06,
-  "lon": -118.39,
+  "lat": 40.75,
+  "lon": -73.99,
   "radius_meters": 100,
-  "message": "Saved 'coffee shop' at 34.0600, -118.3900"
+  "message": "Saved 'coffee shop' at 40.7500, -73.9900"
 }
 ```
 
@@ -174,8 +174,8 @@ Aliased as `last` (`istota-skill location last`).
   "place": {
     "id": 42,
     "name": "coffee shop",
-    "lat": 34.06,
-    "lon": -118.39,
+    "lat": 40.75,
+    "lon": -73.99,
     "radius_meters": 100,
     "category": "food",
     "notes": null
@@ -212,8 +212,8 @@ Aliased as `last` (`istota-skill location last`).
 {
   "clusters": [
     {
-      "lat": 34.0612,
-      "lon": -118.4055,
+      "lat": 40.7580,
+      "lon": -73.9855,
       "total_pings": 38,
       "first_seen": "2026-03-01T08:00:00Z",
       "last_seen": "2026-04-25T17:30:00Z",
@@ -230,8 +230,8 @@ Aliased as `last` (`istota-skill location last`).
   "dismissed": [
     {
       "id": 7,
-      "lat": 34.05,
-      "lon": -118.4,
+      "lat": 40.71,
+      "lon": -73.98,
       "radius_meters": 100,
       "dismissed_at": "2026-04-20T12:00:00Z"
     }
@@ -243,11 +243,11 @@ Aliased as `last` (`istota-skill location last`).
 
 ```json
 {
-  "display_name": "123 Main St, Los Angeles, CA 90012, USA",
+  "display_name": "123 Main St, New York, NY 10001, USA",
   "neighborhood": "Downtown",
   "suburb": "Central LA",
   "road": "Main St",
-  "city": "Los Angeles",
+  "city": "New York",
   "source": "nominatim"
 }
 ```
@@ -269,8 +269,8 @@ Clusters the day's pings into stops. Resolves location names by: (1) direct plac
       "arrived": "08:00",
       "departed": "09:30",
       "ping_count": 20,
-      "lat": 34.05,
-      "lon": -118.25
+      "lat": 40.71,
+      "lon": -74.01
     },
     {
       "location": "Magnolia Park",
@@ -281,8 +281,8 @@ Clusters the day's pings into stops. Resolves location names by: (1) direct plac
       "arrived": "10:15",
       "departed": "12:30",
       "ping_count": 25,
-      "lat": 34.18,
-      "lon": -118.33
+      "lat": 40.78,
+      "lon": -73.96
     }
   ]
 }
@@ -304,8 +304,8 @@ Cross-references calendar events with GPS pings to confirm attendance. Skips all
       "location": "123 Main St",
       "location_resolved": true,
       "resolution_source": "geocode",
-      "event_lat": 34.05,
-      "event_lon": -118.4,
+      "event_lat": 40.71,
+      "event_lon": -73.98,
       "radius_meters": 200,
       "attended": true,
       "first_nearby_ping": "2026-02-20T09:45:00Z",

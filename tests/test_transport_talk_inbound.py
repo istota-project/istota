@@ -598,10 +598,10 @@ class TestDmTokenCache:
     async def test_dm_tokens_populated_during_poll(self, make_config):
         """1:1 conversations (type=1) should populate the DM token cache."""
         config = make_config()
-        config.users = {"alice": UserConfig()}
+        config.users = {"carol": UserConfig()}
 
         conversations = [
-            {"token": "dm_alice", "type": 1, "name": "alice"},
+            {"token": "dm_carol", "type": 1, "name": "carol"},
             {"token": "group_room", "type": 2, "name": "Project Chat"},
         ]
 
@@ -611,19 +611,19 @@ class TestDmTokenCache:
             mock_instance.poll_messages = AsyncMock(return_value=[])
 
             with db.get_db(config.db_path) as conn:
-                db.set_talk_poll_state(conn, "dm_alice", 50)
+                db.set_talk_poll_state(conn, "dm_carol", 50)
                 db.set_talk_poll_state(conn, "group_room", 50)
 
             await poll_talk_conversations(config)
 
-        assert get_dm_token("alice") == "dm_alice"
+        assert get_dm_token("carol") == "dm_carol"
         assert get_dm_token("unknown") is None
 
     @pytest.mark.asyncio
     async def test_dm_cache_ignores_unknown_users(self, make_config):
         """1:1 conversations with users not in config are not cached."""
         config = make_config()
-        config.users = {"alice": UserConfig()}
+        config.users = {"carol": UserConfig()}
 
         conversations = [
             {"token": "dm_stranger", "type": 1, "name": "stranger"},

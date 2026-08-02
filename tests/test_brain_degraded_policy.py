@@ -291,7 +291,7 @@ def _shared_block_config(tmp_path, *, cooldown=900):
     cfg = Config(
         db_path=tmp_path / "istota.db",
         nextcloud_mount_path=tmp_path / "mount",
-        users={"alice": UserConfig(timezone="UTC")},
+        users={"bob": UserConfig(timezone="UTC")},
     )
     cfg.brain = BrainConfig(kind="claude_code", fallback_cooldown_seconds=cooldown)
     return cfg

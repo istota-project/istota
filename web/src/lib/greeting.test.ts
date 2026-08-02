@@ -62,14 +62,14 @@ describe('hourInZone', () => {
 
 describe('availableTips', () => {
   const everything: TipContext = {
-    email: 'zorg+alice@bot.example.com',
+    email: 'istota+alice@bot.example.com',
     talk: true,
     features: { briefings: true, feeds: true, location: true, money: true, health: true },
   };
 
   it('names the real plus-address rather than a placeholder', () => {
     const tips = availableTips(everything);
-    expect(tips.some((t) => t.includes('zorg+alice@bot.example.com'))).toBe(true);
+    expect(tips.some((t) => t.includes('istota+alice@bot.example.com'))).toBe(true);
   });
 
   it('drops the email tip when no address is configured', () => {
@@ -101,7 +101,7 @@ describe('availableTips', () => {
   });
 
   it('substitutes the bot name', () => {
-    for (const tip of availableTips(everything, 'Zorg')) {
+    for (const tip of availableTips(everything, 'Istota')) {
       expect(tip).not.toContain('{bot}');
     }
   });
@@ -109,14 +109,14 @@ describe('availableTips', () => {
 
 describe('welcomeNotes', () => {
   const everything: TipContext = {
-    email: 'zorg+alice@bot.example.com',
+    email: 'istota+alice@bot.example.com',
     talk: true,
     features: { briefings: true, feeds: true, location: true, money: true, health: true },
   };
 
   it('mixes the deployment tips with the octopus facts', () => {
-    const notes = welcomeNotes(everything, 'Zorg');
-    for (const tip of availableTips(everything, 'Zorg')) expect(notes).toContain(tip);
+    const notes = welcomeNotes(everything, 'Istota');
+    for (const tip of availableTips(everything, 'Istota')) expect(notes).toContain(tip);
     for (const fact of OCTOPUS_FACTS) expect(notes).toContain(fact);
   });
 
@@ -136,7 +136,7 @@ describe('welcomeNotes', () => {
 });
 
 describe('noteSegments', () => {
-  const email = 'zorg+alice@bot.example.com';
+  const email = 'istota+alice@bot.example.com';
 
   it('splits the email tip so the address can be linked', () => {
     const note = availableTips({ email })[0];
@@ -178,8 +178,8 @@ describe('buildGreeting', () => {
   const base = { now: at('2026-07-27T09:00:00Z'), timeZone: 'UTC' };
 
   it('substitutes the bot name into the greeting', () => {
-    const g = buildGreeting('Zorg', base);
-    expect(g.greeting).toContain('Zorg');
+    const g = buildGreeting('Istota', base);
+    expect(g.greeting).toContain('Istota');
     expect(g.greeting).not.toContain('{bot}');
     expect(g.note).not.toContain('{bot}');
   });
@@ -192,34 +192,34 @@ describe('buildGreeting', () => {
 
   it('picks the greeting from the daypart the user is actually in', () => {
     // 03:00 in Lisbon is 01:00 UTC — the late-night pool, not the morning one.
-    const g = buildGreeting('Zorg', {
+    const g = buildGreeting('Istota', {
       now: at('2026-07-27T01:00:00Z'),
       timeZone: 'Europe/Lisbon',
       random: () => 0,
     });
     expect(g.daypart).toBe('lateNight');
-    expect(g.greeting).toBe(dayparts.lateNight[0].replace(/\{bot\}/g, 'Zorg'));
+    expect(g.greeting).toBe(dayparts.lateNight[0].replace(/\{bot\}/g, 'Istota'));
   });
 
   it('draws the note from the context, not from the daypart', () => {
-    const g = buildGreeting('Zorg', {
+    const g = buildGreeting('Istota', {
       ...base,
       random: () => 0,
-      tips: { email: 'zorg+alice@bot.example.com' },
+      tips: { email: 'istota+alice@bot.example.com' },
     });
-    expect(g.note).toBe(welcomeNotes({ email: 'zorg+alice@bot.example.com' }, 'Zorg')[0]);
+    expect(g.note).toBe(welcomeNotes({ email: 'istota+alice@bot.example.com' }, 'Istota')[0]);
   });
 
   it('rotates: a different random draw yields a different line', () => {
-    const first = buildGreeting('Zorg', { ...base, random: () => 0 });
-    const last = buildGreeting('Zorg', { ...base, random: () => 0.999 });
+    const first = buildGreeting('Istota', { ...base, random: () => 0 });
+    const last = buildGreeting('Istota', { ...base, random: () => 0.999 });
     expect(first.greeting).not.toBe(last.greeting);
     expect(first.note).not.toBe(last.note);
   });
 
   it('stays in range for the extreme random values', () => {
     for (const random of [() => 0, () => 0.999999, () => 1]) {
-      const g = buildGreeting('Zorg', { ...base, random });
+      const g = buildGreeting('Istota', { ...base, random });
       expect(g.greeting).toBeTruthy();
       expect(g.note).toBeTruthy();
     }

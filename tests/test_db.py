@@ -1007,7 +1007,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             rid = db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<abc123@example.com>",
                 to_addr="bob@example.com",
                 subject="Meeting request",
@@ -1018,7 +1018,7 @@ class TestSentEmails:
 
             found = db.find_sent_email_by_message_id(conn, "<abc123@example.com>")
             assert found is not None
-            assert found.user_id == "alice"
+            assert found.user_id == "carol"
             assert found.to_addr == "bob@example.com"
             assert found.subject == "Meeting request"
             assert found.conversation_token == "room42"
@@ -1031,7 +1031,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<msg1@example.com>",
                 to_addr="alice@example.com",
                 subject="Hello",
@@ -1039,7 +1039,7 @@ class TestSentEmails:
             )
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<msg2@example.com>",
                 to_addr="bob@example.com",
                 subject="Other",
@@ -1061,7 +1061,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<msg1@example.com>",
                 to_addr="alice@example.com",
                 subject="Hello",
@@ -1072,7 +1072,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<origin1@example.com>",
                 to_addr="bob@example.com",
                 conversation_token="rm_web123",
@@ -1089,7 +1089,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<noorigin@example.com>",
                 to_addr="bob@example.com",
             )
@@ -1101,7 +1101,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<old@example.com>",
                 to_addr="alice@example.com",
                 subject="Old",
@@ -1109,7 +1109,7 @@ class TestSentEmails:
             )
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<new@example.com>",
                 to_addr="alice@example.com",
                 subject="New",
@@ -1125,10 +1125,10 @@ class TestSentEmails:
 
     def test_record_with_all_fields(self, db_path):
         with db.get_db(db_path) as conn:
-            task_id = db.create_task(conn, prompt="send email", user_id="alice")
+            task_id = db.create_task(conn, prompt="send email", user_id="carol")
             rid = db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<full@example.com>",
                 to_addr="bob@example.com",
                 subject="Re: Meeting",
@@ -1152,7 +1152,7 @@ class TestSentEmails:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<dt@example.com>",
                 to_addr="bob@example.com",
                 subject="Hi",
@@ -2068,12 +2068,12 @@ class TestKnowledgeFactsDedupMigration:
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "carol", "knows", "python"),
         )
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "carol", "knows", "python"),
         )
         conn.commit()
         conn.close()
@@ -2088,7 +2088,7 @@ class TestKnowledgeFactsDedupMigration:
             "SELECT COUNT(*) FROM knowledge_facts "
             "WHERE user_id=? AND subject=? AND predicate=? AND object=? "
             "AND valid_until IS NULL",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "carol", "knows", "python"),
         ).fetchone()[0]
         assert current_count == 1  # Duplicate invalidated
 
@@ -2100,7 +2100,7 @@ class TestKnowledgeFactsDedupMigration:
             conn.execute(
                 "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
                 "VALUES (?, ?, ?, ?)",
-                ("user1", "alice", "knows", "python"),
+                ("user1", "carol", "knows", "python"),
             )
         conn.close()
 
@@ -2113,7 +2113,7 @@ class TestKnowledgeFactsDedupMigration:
             conn.execute(
                 "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
                 "VALUES (?, ?, ?, ?)",
-                ("user1", "alice", "knows", "python"),
+                ("user1", "carol", "knows", "python"),
             )
         conn.commit()
         conn.close()
@@ -2125,7 +2125,7 @@ class TestKnowledgeFactsDedupMigration:
             "SELECT id, valid_until FROM knowledge_facts "
             "WHERE user_id=? AND subject=? AND predicate=? AND object=? "
             "ORDER BY id",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "carol", "knows", "python"),
         ).fetchall()
         assert len(rows) == 3
         # Oldest two invalidated
@@ -2144,17 +2144,17 @@ class TestKnowledgeFactsDedupMigration:
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "carol", "knows", "python"),
         )
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "rust"),
+            ("user1", "carol", "knows", "rust"),
         )
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user2", "alice", "knows", "python"),
+            ("user2", "carol", "knows", "python"),
         )
         conn.commit()
         conn.close()
@@ -2176,12 +2176,12 @@ class TestKnowledgeFactsDedupMigration:
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python", "2026-01-01"),
+            ("user1", "carol", "knows", "python", "2026-01-01"),
         )
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python", "2026-02-01"),
+            ("user1", "carol", "knows", "python", "2026-02-01"),
         )
         conn.commit()
         conn.close()
@@ -2208,7 +2208,7 @@ class TestKnowledgeFactsDedupMigration:
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "carol", "knows", "python"),
         )
         conn.commit()
         conn.close()

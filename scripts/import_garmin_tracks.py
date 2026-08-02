@@ -48,7 +48,7 @@ def _print_report(result: ImportResult) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--user", default="alice")
+    p.add_argument("--user", required=True, help="istota user id to import for")
     p.add_argument("--days-back", type=int, default=7)
     p.add_argument("--guard-band", type=float, default=300.0,
                    help="temporal shadow band, seconds")

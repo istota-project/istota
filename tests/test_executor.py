@@ -2011,7 +2011,7 @@ class TestLoadChannelGuidelines:
         return Config(
             skills_dir=config_dir / "skills",
             bundled_skills_dir=tmp_path / "_empty_bundled",
-            bot_name="Zorg",
+            bot_name="Istota",
         )
 
     def test_substitutes_user_id(self, tmp_path):
@@ -2032,7 +2032,7 @@ class TestLoadChannelGuidelines:
         (tmp_path / "config" / "guidelines" / "web.md").write_text(
             "{BOT_NAME} in {BOT_DIR} for {user_id}",
         )
-        assert load_channel_guidelines(config, "web", "alice") == "Zorg in zorg for alice"
+        assert load_channel_guidelines(config, "web", "alice") == "Istota in istota for alice"
 
     def test_no_user_id_leaves_the_placeholder_rather_than_crashing(self, tmp_path):
         from istota.executor import load_channel_guidelines
@@ -3221,7 +3221,7 @@ class TestConfirmationContext:
     def _make_task(self, **kwargs):
         defaults = dict(
             id=1, status="running", source_type="email",
-            user_id="alice", prompt="Emissary reply from bob@ext.com",
+            user_id="carol", prompt="Emissary reply from bob@ext.com",
             conversation_token="room1",
         )
         defaults.update(kwargs)
@@ -4039,7 +4039,7 @@ class TestComposeHelpers:
 class TestPerUserEmailInPrompt:
     """Verify per-user plus-addressed email appears in prompt header."""
 
-    def _make_task(self, user_id="alice"):
+    def _make_task(self, user_id="carol"):
         return db.Task(
             id=1, status="running", prompt="hello", user_id=user_id,
             source_type="talk", conversation_token="room1",
@@ -4051,18 +4051,18 @@ class TestPerUserEmailInPrompt:
             enabled=True,
             imap_host="imap.test", imap_port=993,
             imap_user="u", imap_password="p",
-            bot_email="zorg@example.com",
+            bot_email="istota@example.com",
         )
-        task = self._make_task(user_id="alice")
+        task = self._make_task(user_id="carol")
         result = build_prompt(task, [], config)
-        assert "zorg+alice@example.com" in result
+        assert "istota+carol@example.com" in result
 
     def test_per_user_email_not_shown_when_email_disabled(self):
         config = Config()
         config.email = AppEmailConfig(enabled=False)
-        task = self._make_task(user_id="alice")
+        task = self._make_task(user_id="carol")
         result = build_prompt(task, [], config)
-        assert "+alice@" not in result
+        assert "+carol@" not in result
 
     def test_per_user_email_not_shown_when_no_bot_email(self):
         config = Config()
@@ -4072,9 +4072,9 @@ class TestPerUserEmailInPrompt:
             imap_user="u", imap_password="p",
             bot_email="",
         )
-        task = self._make_task(user_id="alice")
+        task = self._make_task(user_id="carol")
         result = build_prompt(task, [], config)
-        assert "+alice@" not in result
+        assert "+carol@" not in result
 
 
 # =============================================================================
@@ -4101,20 +4101,20 @@ class TestSmtpFrom:
                 imap_host="imap.test", imap_port=993,
                 imap_user="u", imap_password="p",
                 smtp_host="smtp.test", smtp_port=587,
-                bot_email="zorg@example.com",
+                bot_email="istota@example.com",
             ),
             security=SecurityConfig(skill_proxy_enabled=False),
         )
 
     def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
+        task_id = db.create_task(conn, prompt="test", user_id="carol", source_type="talk")
         return db.get_task(conn, task_id)
 
     @patch("istota.executor.subprocess.run")
     def test_smtp_from_uses_plain_bot_email(self, mock_run, tmp_path):
         """SMTP_FROM should be the plain bot email; plus-addressing is for inbound only."""
         config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        (tmp_path / "temp" / "carol").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         with db.get_db(config.db_path) as conn:
@@ -4124,7 +4124,7 @@ class TestSmtpFrom:
 
         call_args = mock_run.call_args
         env = call_args[1]["env"]
-        assert env["SMTP_FROM"] == "zorg@example.com"
+        assert env["SMTP_FROM"] == "istota@example.com"
 
 
 class TestWorkspaceDirBwrap:

@@ -83,7 +83,7 @@ def _seed(ctx: FeedsContext) -> dict:
 
 @pytest.fixture
 def ctx(tmp_path: Path) -> FeedsContext:
-    c = synthesize_feeds_context("alice", tmp_path)
+    c = synthesize_feeds_context("bob", tmp_path)
     c.ensure_dirs()
     feeds_db.init_db(c.db_path)
     return c
@@ -93,7 +93,7 @@ def ctx(tmp_path: Path) -> FeedsContext:
 def client(ctx: FeedsContext) -> TestClient:
     app = FastAPI()
     app.include_router(router, prefix="/istota/api/feeds")
-    app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+    app.dependency_overrides[require_auth] = lambda: {"username": "bob"}
     app.dependency_overrides[get_user_context] = lambda: ctx
     return TestClient(app)
 

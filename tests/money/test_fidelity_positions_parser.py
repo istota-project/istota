@@ -84,16 +84,16 @@ class TestParse2025:
 
     def test_currency_and_percent_cleaning(self, snap):
         (vgit,) = _rows_by(snap, symbol="VGIT")
-        assert vgit.quantity == 502
-        assert vgit.price == 59.07
+        assert vgit.quantity == 500
+        assert vgit.price == 60.00
         assert vgit.value == 30000.00
-        assert vgit.day_gain == -130.52
-        assert vgit.day_gain_pct == pytest.approx(-0.0044)
-        assert vgit.total_gain == -150.60
-        assert vgit.total_gain_pct == pytest.approx(-0.0051)
+        assert vgit.day_gain == -150.00
+        assert vgit.day_gain_pct == pytest.approx(-0.0050)
+        assert vgit.total_gain == -200.00
+        assert vgit.total_gain_pct == pytest.approx(-0.0066)
         assert vgit.pct_of_account == pytest.approx(0.2708)
         assert vgit.cost_basis == 30200.00
-        assert vgit.avg_cost_basis == 59.37
+        assert vgit.avg_cost_basis == 60.40
         assert vgit.security_type == "Margin"
         assert vgit.row_type == "position"
 
@@ -102,7 +102,7 @@ class TestParse2025:
         assert sgov.total_gain is None
         assert sgov.total_gain_pct is None
         assert sgov.avg_cost_basis is None
-        assert sgov.quantity == 120.441
+        assert sgov.quantity == 100.250
 
     def test_cash_rows_typed(self, snap):
         cash = _rows_by(snap, row_type="cash")
@@ -124,7 +124,7 @@ class TestParse2025:
     def test_pending_rows_extracted_both_signs(self, snap):
         pending = _rows_by(snap, row_type="pending")
         by_account = {r.account_name: r for r in pending}
-        assert by_account["Roth IRA A"].value == 45.72
+        assert by_account["Roth IRA A"].value == 40.00
         assert by_account["Joint Brokerage"].value == -40000.00
         for r in pending:
             assert r.symbol == ""
@@ -139,8 +139,8 @@ class TestParse2025:
         (mu,) = [r for r in opts if r.symbol == "MU"]
         assert mu.description == "MU 18JUL25 120 C"
         assert mu.quantity == 1
-        assert mu.value == 34.16
-        assert mu.cost_basis == 527.80
+        assert mu.value == 30.00
+        assert mu.cost_basis == 500.00
 
     def test_bare_star_star_rows(self, snap):
         stars = _rows_by(snap, symbol="**")
@@ -149,8 +149,8 @@ class TestParse2025:
             assert r.row_type == "cash"
             assert r.quantity is None
         values = {r.account_name: r.value for r in stars}
-        assert values["Active Trading (IBKR)"] == 4084.00
-        assert values["Charting (Schwab)"] == 504.00
+        assert values["Active Trading (IBKR)"] == 4000.00
+        assert values["Charting (Schwab)"] == 500.00
 
     def test_zero_value_cash(self, snap):
         (usd,) = _rows_by(snap, symbol="USD***")

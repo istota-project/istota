@@ -807,8 +807,8 @@
 
 # One-time migration for deploys that pre-date the istota.db rename.
 # The codebase standardized on `istota.db` and `istota_*` table names; the
-# per-deploy namespace only lives in dirs/services. Long-lived deploys (zorg)
-# still have <namespace>.db on disk plus dead per-namespace cruft tables.
+# per-deploy namespace only lives in dirs/services. A deploy predating the
+# rename still has <namespace>.db on disk plus dead per-namespace cruft tables.
 # Idempotent: skipped once istota.db exists or namespace is already 'istota'.
 - name: Detect legacy <namespace>.db
   stat:

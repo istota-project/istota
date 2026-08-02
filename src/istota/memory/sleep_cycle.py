@@ -609,7 +609,7 @@ do NOT also create a MEMORY bullet for it. MEMORIES are for events, decisions, o
 and situational context that don't reduce to a simple triple.
 
 Examples:
-- "Alice is allergic to sesame seeds" → FACT only (alice | allergic_to | tree_nuts)
+- "Alice is allergic to shellfish" → FACT only (alice | allergic_to | shellfish)
 - "Felix has an egg allergy" → FACT only (felix | allergic_to | eggs)
 - "Sent intro email to Dana about consulting" → MEMORY (event/outcome, not a triple)
 - "Project Alpha migrating to FastAPI, targeting Q2" → MEMORY (situational context)

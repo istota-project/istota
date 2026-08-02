@@ -69,9 +69,9 @@ class TestTalkCacheRecovery:
         db.register_room(conn, "tok", "u", origin="talk")
         # [human] -> [bot :ack] -> [bot system "edited"] -> [bot :result]
         self._tm(conn, "tok", 1, "alice", "what is 2+2", ref="hash1", ts=100)
-        self._tm(conn, "tok", 2, "zorg", "*Thinking* #5", ref="istota:task:5:ack", ts=101)
-        self._tm(conn, "tok", 3, "zorg", "You edited a message", mtype="system", ts=101)
-        self._tm(conn, "tok", 4, "zorg", "It is 4.", ref="istota:task:5:result", ts=102)
+        self._tm(conn, "tok", 2, "istota", "*Thinking* #5", ref="istota:task:5:ack", ts=101)
+        self._tm(conn, "tok", 3, "istota", "You edited a message", mtype="system", ts=101)
+        self._tm(conn, "tok", 4, "istota", "It is 4.", ref="istota:task:5:result", ts=102)
         n = db.backfill_room_messages_from_talk_cache(conn, "tok")
         assert n == 2
         msgs = db.get_messages(conn, "tok")
@@ -92,7 +92,7 @@ class TestTalkCacheRecovery:
             ("tok", 1, "alice", "comment", "look at {file0}",
              json.dumps({"file0": {"type": "file", "name": "scan.pdf"}}), "h", 100),
         )
-        self._tm(conn, "tok", 2, "zorg", "Got it.", ref="istota:task:9:result", ts=102)
+        self._tm(conn, "tok", 2, "istota", "Got it.", ref="istota:task:9:result", ts=102)
         db.backfill_room_messages_from_talk_cache(conn, "tok")
         bodies = [(m.role, m.body) for m in db.get_messages(conn, "tok")]
         assert bodies == [("user", "look at [scan.pdf]"), ("assistant", "Got it.")]
@@ -100,8 +100,8 @@ class TestTalkCacheRecovery:
     def test_skips_acks_and_system_and_is_idempotent(self, conn):
         db.register_room(conn, "tok", "u", origin="talk")
         self._tm(conn, "tok", 1, "alice", "q", ref="h", ts=100)
-        self._tm(conn, "tok", 2, "zorg", "*ack* #5", ref="istota:task:5:ack", ts=101)
-        self._tm(conn, "tok", 3, "zorg", "answer", ref="istota:task:5:result", ts=102)
+        self._tm(conn, "tok", 2, "istota", "*ack* #5", ref="istota:task:5:ack", ts=101)
+        self._tm(conn, "tok", 3, "istota", "answer", ref="istota:task:5:result", ts=102)
         db.backfill_room_messages_from_talk_cache(conn, "tok")
         again = db.backfill_room_messages_from_talk_cache(conn, "tok")
         assert again == 0  # idempotent — the messages unique index backstops it
@@ -109,7 +109,7 @@ class TestTalkCacheRecovery:
 
     def test_unpaired_result_inserts_assistant_only(self, conn):
         db.register_room(conn, "tok", "u", origin="talk")
-        self._tm(conn, "tok", 1, "zorg", "answer, no preceding question",
+        self._tm(conn, "tok", 1, "istota", "answer, no preceding question",
                  ref="istota:task:7:result", ts=100)
         n = db.backfill_room_messages_from_talk_cache(conn, "tok")
         assert n == 1
@@ -118,7 +118,7 @@ class TestTalkCacheRecovery:
     def test_historical_timestamps_preserved(self, conn):
         db.register_room(conn, "tok", "u", origin="talk")
         self._tm(conn, "tok", 1, "alice", "q", ref="h", ts=1_700_000_000)
-        self._tm(conn, "tok", 2, "zorg", "a", ref="istota:task:9:result", ts=1_700_000_050)
+        self._tm(conn, "tok", 2, "istota", "a", ref="istota:task:9:result", ts=1_700_000_050)
         db.backfill_room_messages_from_talk_cache(conn, "tok")
         msgs = db.get_messages(conn, "tok")
         # created_at is the Talk timestamp, not now() — so day-dividers / ordering

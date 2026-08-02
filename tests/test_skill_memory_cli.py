@@ -352,7 +352,7 @@ class TestBotDirFallback:
 
     def _setup_two_bots(self, tmp_path, monkeypatch, user_id="alice"):
         mount = tmp_path / "mount"
-        for bot_dir in ("istota", "zorg"):
+        for bot_dir in ("istota", "helper"):
             d = mount / "Users" / user_id / bot_dir / "config"
             d.mkdir(parents=True)
             (d / "USER.md").write_text(SEED_USER_MD)
@@ -370,7 +370,7 @@ class TestBotDirFallback:
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "error"
         assert "multiple bot dirs" in out["error"]
-        assert sorted(out["candidates"]) == ["istota", "zorg"]
+        assert sorted(out["candidates"]) == ["helper", "istota"]
 
     def test_single_candidate_used(self, tmp_path, monkeypatch, capsys):
         mount = tmp_path / "mount"

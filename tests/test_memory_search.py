@@ -616,11 +616,11 @@ class TestChunkMetadata:
         conn = _init_db(tmp_path / "test.db")
         with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
-                          ["Alice uses Python"], None, entities=["alice", "python"])
+                          ["Carol uses Python"], None, entities=["carol", "python"])
 
         row = conn.execute("SELECT entities FROM memory_chunks WHERE user_id = 'alice'").fetchone()
         import json
-        assert json.loads(row[0]) == ["alice", "python"]
+        assert json.loads(row[0]) == ["carol", "python"]
         conn.close()
 
     def test_insert_without_metadata_defaults_null(self, tmp_path):
@@ -649,7 +649,7 @@ class TestChunkMetadata:
         with patch("istota.memory.search.ensure_vec_table", return_value=False), \
              patch("istota.memory.search.enable_vec_extension", return_value=False):
             n = index_file(conn, "alice", "/path/mem.md", "Some content",
-                          topic="personal", entities=["alice"])
+                          topic="personal", entities=["carol"])
 
         assert n >= 1
         row = conn.execute("SELECT topic FROM memory_chunks WHERE user_id = 'alice'").fetchone()
@@ -698,14 +698,14 @@ class TestFilteredSearch:
         conn = _init_db(tmp_path / "test.db")
         with patch("istota.memory.search.ensure_vec_table", return_value=False):
             _insert_chunks(conn, "alice", "conversation", "1",
-                          ["Alice works on Istota project"], None,
-                          entities=["alice", "istota"])
+                          ["Carol works on Istota project"], None,
+                          entities=["carol", "istota"])
             _insert_chunks(conn, "alice", "conversation", "2",
                           ["Alice works on Hermes project"], None,
                           entities=["alice", "hermes"])
 
         with patch("istota.memory.search._search_vec", return_value=[]):
-            results = search(conn, "alice", "works on", entities=["alice"])
+            results = search(conn, "alice", "works on", entities=["carol"])
 
         source_ids = [r.source_id for r in results]
         assert "1" in source_ids

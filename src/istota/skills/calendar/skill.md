@@ -46,7 +46,7 @@ istota-skill calendar create \
 # Create an event with explicit timezone (use for travel/flights)
 istota-skill calendar create \
   --calendar "https://..." \
-  --summary "Flight LAX→WAW" \
+  --summary "Flight JFK→LHR" \
   --start "2026-04-26 19:10" \
   --end "2026-04-27 19:05" \
   --tz "America/Los_Angeles" \

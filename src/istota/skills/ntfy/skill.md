@@ -18,7 +18,7 @@ Send a push notification to the user's mobile device(s) via their configured ntf
 istota-skill ntfy send "build finished"
 
 # With title, priority (1-5, default 3), and tags
-istota-skill ntfy send "disk 91% full" --title "zorg" --priority 4 --tags "warning,floppy_disk"
+istota-skill ntfy send "disk 91% full" --title "istota" --priority 4 --tags "warning,floppy_disk"
 
 # Click action (opens URL when the notification is tapped)
 istota-skill ntfy send "PR ready for review" --click "https://github.com/foo/bar/pull/42"

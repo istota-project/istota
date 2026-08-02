@@ -2193,7 +2193,7 @@ class TestProcessOneTask:
         # transcript shows an orphaned answer (the bot can't post as the user).
         from istota.transport.web import default_web_room_token
         config = self._make_config(db_path, tmp_path)
-        config.users = {"testuser": UserConfig(display_name="Alice")}
+        config.users = {"testuser": UserConfig(display_name="Frank")}
         room_token = default_web_room_token(config, "testuser")
         with db.get_db(db_path) as conn:
             db.add_room_binding(conn, room_token, "talk", "talktok42")
@@ -2218,7 +2218,7 @@ class TestProcessOneTask:
         assert len(talk_calls) == 2
         repost_body = talk_calls[0].args[2]
         reply_body = talk_calls[1].args[2]
-        assert "Alice" in repost_body
+        assert "Frank" in repost_body
         assert "what's the weather?" in repost_body
         assert reply_body == "It's sunny."
 
@@ -2232,7 +2232,7 @@ class TestProcessOneTask:
         # create a duplicate user turn or pollute cross-surface context.
         from istota.transport.web import default_web_room_token
         config = self._make_config(db_path, tmp_path)
-        config.users = {"testuser": UserConfig(display_name="Alice")}
+        config.users = {"testuser": UserConfig(display_name="Frank")}
         room_token = default_web_room_token(config, "testuser")
         with db.get_db(db_path) as conn:
             db.add_room_binding(conn, room_token, "talk", "talktok42")
@@ -6057,7 +6057,7 @@ class TestNotifyConfirmedEmailResult:
         with patch("istota.notifications.send_notification") as mock_notify:
             mock_notify.return_value = True
             result = _notify_confirmed_email_result(
-                config, task, "Hi — thanks for reaching out. Let me check with Alice.",
+                config, task, "Hi — thanks for reaching out. Let me check with Frank.",
             )
 
         assert result is True
@@ -6065,7 +6065,7 @@ class TestNotifyConfirmedEmailResult:
         call_args = mock_notify.call_args
         assert call_args[0][1] == "alice"
         assert "joe@example.com" in call_args[0][2]
-        assert "Let me check with Alice" in call_args[0][2]
+        assert "Let me check with Frank" in call_args[0][2]
         # Routed by purpose so the user's notification routing / default
         # destination applies (resolves to the alerts/DM Talk channel by default).
         assert call_args[1]["purpose"] == "notification"
@@ -6205,7 +6205,7 @@ class TestRecordSentEmail:
 
         with db.get_db(db_path) as conn:
             task_id = db.create_task(
-                conn, prompt="reply", user_id="alice", source_type="email",
+                conn, prompt="reply", user_id="frank", source_type="email",
                 conversation_token="room5",
             )
             task = db.get_task(conn, task_id)
@@ -6220,7 +6220,7 @@ class TestRecordSentEmail:
         with db.get_db(db_path) as conn:
             found = db.find_sent_email_by_message_id(conn, "<reply@example.com>")
             assert found is not None
-            assert found.user_id == "alice"
+            assert found.user_id == "frank"
             assert found.task_id == task_id
             assert found.conversation_token == "room5"
             assert found.in_reply_to == "<orig@example.com>"
@@ -6233,7 +6233,7 @@ class TestRecordSentEmail:
 
         task = db.Task(
             id=1, status="completed", prompt="test",
-            user_id="alice", source_type="email",
+            user_id="frank", source_type="email",
         )
 
         # Should not raise
@@ -7715,7 +7715,7 @@ class TestReconcileVisitsMissingDb:
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount,
             location=LocationReceiverConfig(reconcile_enabled=True),
-            users={"alice": UserConfig()},
+            users={"frank": UserConfig()},
         )
 
     def test_reconcile_skips_user_with_no_location_db(self, tmp_path, caplog):

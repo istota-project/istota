@@ -380,11 +380,11 @@ class TestBuildMemoryExtractionPrompt:
 
     def test_prompt_includes_existing_facts_when_provided(self):
         """When existing_facts is given, the prompt should include them and tell the LLM not to re-emit."""
-        existing = "- alice works_at acme\n- felix allergic_to eggs"
+        existing = "- carol works_at acme\n- felix allergic_to eggs"
         prompt = build_memory_extraction_prompt(
             "alice", "data", None, "2026-01-28", existing_facts=existing
         )
-        assert "alice works_at acme" in prompt
+        assert "carol works_at acme" in prompt
         assert "felix allergic_to eggs" in prompt
         # Some form of "do not re-emit" guidance should appear near the facts section
         assert "knowledge graph" in prompt.lower()
@@ -1113,7 +1113,7 @@ class TestParseStructuredExtraction:
 
     def test_full_structured_output(self):
         output = """MEMORIES:
-- Alice switched to FastAPI (2026-04-08, ref:1234)
+- Carol switched to FastAPI (2026-04-08, ref:1234)
 - Prefers dark mode (2026-04-08, ref:1235)
 
 FACTS:
@@ -1123,7 +1123,7 @@ TOPICS:
 {"ref:1234": "tech", "ref:1235": "personal"}"""
 
         memories, facts, topics, _playbooks = _parse_structured_extraction(output)
-        assert "Alice switched to FastAPI" in memories
+        assert "Carol switched to FastAPI" in memories
         assert "Prefers dark mode" in memories
         assert len(facts) == 1
         assert facts[0]["subject"] == "istota"
@@ -1165,7 +1165,7 @@ TOPICS:
 - A memory (2026-04-08, ref:1)
 
 FACTS:
-[{"subject": "alice", "predicate": "knows", "object": "python"}]
+[{"subject": "carol", "predicate": "knows", "object": "python"}]
 
 TOPICS:
 broken json"""
@@ -1191,7 +1191,7 @@ TOPICS:
 - A memory (2026-04-08, ref:1)
 
 FACTS:
-[{"subject": "alice", "predicate": "knows", "object": "python"}]"""
+[{"subject": "carol", "predicate": "knows", "object": "python"}]"""
 
         memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "A memory" in memories
@@ -1204,14 +1204,14 @@ FACTS:
 - Memory (2026-04-08, ref:1)
 
 FACTS:
-[{"subject": "alice", "predicate": "knows", "object": "python"}, {"bad": "entry"}, "not a dict"]
+[{"subject": "carol", "predicate": "knows", "object": "python"}, {"bad": "entry"}, "not a dict"]
 
 TOPICS:
 {}"""
 
         memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 1
-        assert facts[0]["subject"] == "alice"
+        assert facts[0]["subject"] == "carol"
 
     def test_multiple_facts(self):
         output = """MEMORIES:
@@ -1219,8 +1219,8 @@ TOPICS:
 
 FACTS:
 [
-  {"subject": "alice", "predicate": "works_at", "object": "acme"},
-  {"subject": "alice", "predicate": "knows", "object": "python"},
+  {"subject": "carol", "predicate": "works_at", "object": "acme"},
+  {"subject": "carol", "predicate": "knows", "object": "python"},
   {"subject": "istota", "predicate": "uses_tech", "object": "svelte"}
 ]
 
@@ -1237,9 +1237,9 @@ TOPICS:
 
 FACTS:
 [
-  {"subject": "alice", "predicate": "knows", "object": "python"},
-  {"subject": "alice", "predicate": "allergic_to", "object": "sesame seeds"},
-  {"subject": "alice", "predicate": "favorite_color", "object": "blue"}
+  {"subject": "carol", "predicate": "knows", "object": "python"},
+  {"subject": "carol", "predicate": "allergic_to", "object": "sesame seeds"},
+  {"subject": "carol", "predicate": "favorite_color", "object": "blue"}
 ]
 
 TOPICS:
@@ -1270,7 +1270,7 @@ TOPICS:
 - Memory (2026-04-08, ref:1)
 
 FACTS:
-[{"subject": "alice", "predicate": "works_at", "object": "   "}]
+[{"subject": "carol", "predicate": "works_at", "object": "   "}]
 
 TOPICS:
 {}"""
@@ -1284,14 +1284,14 @@ TOPICS:
 - Memory (2026-04-08, ref:1)
 
 FACTS:
-[{"subject": "Alice", "predicate": "Works_At", "object": "Acme Corp"}]
+[{"subject": "Carol", "predicate": "Works_At", "object": "Acme Corp"}]
 
 TOPICS:
 {}"""
 
         memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 1
-        assert facts[0]["subject"] == "alice"
+        assert facts[0]["subject"] == "carol"
         assert facts[0]["predicate"] == "works_at"
         assert facts[0]["object"] == "acme corp"
 
@@ -1300,43 +1300,43 @@ class TestValidateFact:
     def test_rejects_overly_long_object(self):
         """Objects longer than 100 chars are rejected (item 4)."""
         long_obj = "x" * 101
-        assert not _validate_fact({"subject": "alice", "predicate": "decided", "object": long_obj})
+        assert not _validate_fact({"subject": "carol", "predicate": "decided", "object": long_obj})
 
     def test_accepts_object_at_length_limit(self):
         """Objects up to 100 chars are still accepted."""
         obj_at_limit = "x" * 100
-        assert _validate_fact({"subject": "alice", "predicate": "decided", "object": obj_at_limit})
+        assert _validate_fact({"subject": "carol", "predicate": "decided", "object": obj_at_limit})
 
     def test_valid_fact_passes(self):
-        assert _validate_fact({"subject": "alice", "predicate": "knows", "object": "python"})
+        assert _validate_fact({"subject": "carol", "predicate": "knows", "object": "python"})
 
     def test_missing_field_fails(self):
-        assert not _validate_fact({"subject": "alice", "predicate": "knows"})
+        assert not _validate_fact({"subject": "carol", "predicate": "knows"})
 
     def test_freeform_predicate_accepted(self):
         """Freeform predicates are accepted — validation only checks non-empty."""
-        assert _validate_fact({"subject": "alice", "predicate": "likes", "object": "cats"})
-        assert _validate_fact({"subject": "alice", "predicate": "allergic_to", "object": "sesame seeds"})
-        assert _validate_fact({"subject": "alice", "predicate": "speaks", "object": "polish"})
-        assert _validate_fact({"subject": "alice", "predicate": "enjoys", "object": "hiking"})
+        assert _validate_fact({"subject": "carol", "predicate": "likes", "object": "cats"})
+        assert _validate_fact({"subject": "carol", "predicate": "allergic_to", "object": "sesame seeds"})
+        assert _validate_fact({"subject": "carol", "predicate": "speaks", "object": "portuguese"})
+        assert _validate_fact({"subject": "carol", "predicate": "enjoys", "object": "hiking"})
 
     def test_empty_subject_fails(self):
         assert not _validate_fact({"subject": "", "predicate": "knows", "object": "python"})
 
     def test_empty_predicate_fails(self):
-        assert not _validate_fact({"subject": "alice", "predicate": "", "object": "python"})
+        assert not _validate_fact({"subject": "carol", "predicate": "", "object": "python"})
 
     def test_whitespace_predicate_fails(self):
-        assert not _validate_fact({"subject": "alice", "predicate": "   ", "object": "python"})
+        assert not _validate_fact({"subject": "carol", "predicate": "   ", "object": "python"})
 
     def test_whitespace_object_fails(self):
-        assert not _validate_fact({"subject": "alice", "predicate": "knows", "object": "   "})
+        assert not _validate_fact({"subject": "carol", "predicate": "knows", "object": "   "})
 
     def test_not_a_dict_fails(self):
         assert not _validate_fact("not a dict")
 
     def test_predicate_case_insensitive(self):
-        assert _validate_fact({"subject": "alice", "predicate": "Works_At", "object": "acme"})
+        assert _validate_fact({"subject": "carol", "predicate": "Works_At", "object": "acme"})
 
 
 class TestTopicsPerChunk:
@@ -1344,7 +1344,7 @@ class TestTopicsPerChunk:
         chunks = [
             "- Project Alpha is going great (2026-01-28, ref:1234)\n"
             "- Felix prefers vim (ref:1235)",
-            "- Alice likes hiking (ref:1236)",
+            "- Carol likes hiking (ref:1236)",
         ]
         topics = {"ref:1234": "tech", "ref:1235": "personal", "ref:1236": "personal"}
         assert _topics_per_chunk(chunks, topics) == ["tech", "personal"]

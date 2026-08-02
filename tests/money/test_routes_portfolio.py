@@ -73,7 +73,7 @@ class TestImportRoute:
         # same calendar date, different content
         variant = tmp_path / "variant.csv"
         text = CSV_2025.read_text(encoding="utf-8-sig")
-        variant.write_text(text.replace("502", "503"), encoding="utf-8")
+        variant.write_text(text.replace("500", "501"), encoding="utf-8")
         resp = _upload(client, variant)
         assert resp.status_code == 200
         body = resp.json()
@@ -89,7 +89,7 @@ class TestImportRoute:
         _upload(client, CSV_2025)
         variant = tmp_path / "variant.csv"
         text = CSV_2025.read_text(encoding="utf-8-sig")
-        variant.write_text(text.replace("502", "503"), encoding="utf-8")
+        variant.write_text(text.replace("500", "501"), encoding="utf-8")
         resp = _upload(client, variant, force=1)
         assert resp.json()["status"] == "ok"
         snaps = client.get("/api/money/portfolio/snapshots").json()["snapshots"]

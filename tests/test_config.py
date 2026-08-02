@@ -576,8 +576,8 @@ class TestResolveUserTimezone:
 
 class TestEmailReplyRouting:
     def test_default_when_unset(self):
-        cfg = Config(users={"alice": UserConfig()})
-        assert cfg.email_reply_routing_for("alice") == "origin+thread"
+        cfg = Config(users={"carol": UserConfig()})
+        assert cfg.email_reply_routing_for("carol") == "origin+thread"
 
     def test_default_for_unknown_user(self):
         cfg = Config()
@@ -585,52 +585,52 @@ class TestEmailReplyRouting:
 
     def test_valid_values_pass_through(self):
         for val in ("origin+thread", "origin", "thread"):
-            cfg = Config(users={"alice": UserConfig(email_reply_routing=val)})
-            assert cfg.email_reply_routing_for("alice") == val
+            cfg = Config(users={"carol": UserConfig(email_reply_routing=val)})
+            assert cfg.email_reply_routing_for("carol") == val
 
     def test_invalid_value_falls_back(self):
-        cfg = Config(users={"alice": UserConfig(email_reply_routing="bogus")})
-        assert cfg.email_reply_routing_for("alice") == "origin+thread"
+        cfg = Config(users={"carol": UserConfig(email_reply_routing="bogus")})
+        assert cfg.email_reply_routing_for("carol") == "origin+thread"
 
 
 class TestTrustedEmailSenders:
     def test_own_email_always_trusted(self):
         cfg = Config(users={
-            "alice": UserConfig(email_addresses=["alice@example.com"]),
+            "carol": UserConfig(email_addresses=["alice@example.com"]),
         })
-        assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
+        assert cfg.is_trusted_email_sender("carol", "alice@example.com") is True
 
     def test_own_email_case_insensitive(self):
         cfg = Config(users={
-            "alice": UserConfig(email_addresses=["Alice@Example.COM"]),
+            "carol": UserConfig(email_addresses=["Alice@Example.COM"]),
         })
-        assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
+        assert cfg.is_trusted_email_sender("carol", "alice@example.com") is True
 
     def test_exact_match(self):
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=["alice@example.com"]),
+            "carol": UserConfig(trusted_email_senders=["alice@example.com"]),
         })
-        assert cfg.is_trusted_email_sender("alice", "Alice@Example.com") is True
+        assert cfg.is_trusted_email_sender("carol", "Alice@Example.com") is True
 
     def test_domain_wildcard(self):
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=["*@corp.com"]),
+            "carol": UserConfig(trusted_email_senders=["*@corp.com"]),
         })
-        assert cfg.is_trusted_email_sender("alice", "anyone@corp.com") is True
-        assert cfg.is_trusted_email_sender("alice", "anyone@sub.corp.com") is False
+        assert cfg.is_trusted_email_sender("carol", "anyone@corp.com") is True
+        assert cfg.is_trusted_email_sender("carol", "anyone@sub.corp.com") is False
 
     def test_subdomain_wildcard(self):
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=["*@*.corp.com"]),
+            "carol": UserConfig(trusted_email_senders=["*@*.corp.com"]),
         })
-        assert cfg.is_trusted_email_sender("alice", "x@sub.corp.com") is True
-        assert cfg.is_trusted_email_sender("alice", "x@corp.com") is False
+        assert cfg.is_trusted_email_sender("carol", "x@sub.corp.com") is True
+        assert cfg.is_trusted_email_sender("carol", "x@corp.com") is False
 
     def test_no_match_returns_false(self):
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=[]),
+            "carol": UserConfig(trusted_email_senders=[]),
         })
-        assert cfg.is_trusted_email_sender("alice", "stranger@evil.com") is False
+        assert cfg.is_trusted_email_sender("carol", "stranger@evil.com") is False
 
     def test_unknown_user_returns_false(self):
         cfg = Config(users={})
@@ -638,14 +638,14 @@ class TestTrustedEmailSenders:
 
     def test_multiple_patterns(self):
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=[
+            "carol": UserConfig(trusted_email_senders=[
                 "alice@example.com",
                 "*@example.org",
             ]),
         })
-        assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
-        assert cfg.is_trusted_email_sender("alice", "bob@example.org") is True
-        assert cfg.is_trusted_email_sender("alice", "bob@evil.com") is False
+        assert cfg.is_trusted_email_sender("carol", "alice@example.com") is True
+        assert cfg.is_trusted_email_sender("carol", "bob@example.org") is True
+        assert cfg.is_trusted_email_sender("carol", "bob@evil.com") is False
 
     def test_alerts_channel_default_empty(self):
         uc = UserConfig()
@@ -661,16 +661,16 @@ class TestTrustedEmailSenders:
         db.init_db(db_path)
 
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=[]),
+            "carol": UserConfig(trusted_email_senders=[]),
         })
 
         with db.get_db(db_path) as conn:
             # Not trusted without DB entry
-            assert cfg.is_trusted_email_sender("alice", "joe@example.com", conn) is False
+            assert cfg.is_trusted_email_sender("carol", "joe@example.com", conn) is False
 
             # Add to DB
-            db.add_trusted_sender(conn, "alice", "joe@example.com")
-            assert cfg.is_trusted_email_sender("alice", "joe@example.com", conn) is True
+            db.add_trusted_sender(conn, "carol", "joe@example.com")
+            assert cfg.is_trusted_email_sender("carol", "joe@example.com", conn) is True
 
     def test_db_trusted_sender_not_checked_without_conn(self, tmp_path):
         from istota import db
@@ -678,14 +678,14 @@ class TestTrustedEmailSenders:
         db.init_db(db_path)
 
         cfg = Config(users={
-            "alice": UserConfig(trusted_email_senders=[]),
+            "carol": UserConfig(trusted_email_senders=[]),
         })
 
         with db.get_db(db_path) as conn:
-            db.add_trusted_sender(conn, "alice", "joe@example.com")
+            db.add_trusted_sender(conn, "carol", "joe@example.com")
 
         # Without conn, DB is not checked (backward compat)
-        assert cfg.is_trusted_email_sender("alice", "joe@example.com") is False
+        assert cfg.is_trusted_email_sender("carol", "joe@example.com") is False
 
 
 class TestEmailConfig:
@@ -2108,13 +2108,13 @@ class TestBriefingEmailHtmlFor:
     """Config.briefing_email_html_for — per-user HTML briefing email preference."""
 
     def test_defaults_on(self):
-        cfg = Config(users={"alice": UserConfig()})
-        assert cfg.briefing_email_html_for("alice") is True
+        cfg = Config(users={"carol": UserConfig()})
+        assert cfg.briefing_email_html_for("carol") is True
 
     def test_unknown_user_defaults_on(self):
         cfg = Config(users={})
         assert cfg.briefing_email_html_for("nobody") is True
 
     def test_opt_out(self):
-        cfg = Config(users={"alice": UserConfig(briefing_email_html=False)})
-        assert cfg.briefing_email_html_for("alice") is False
+        cfg = Config(users={"carol": UserConfig(briefing_email_html=False)})
+        assert cfg.briefing_email_html_for("carol") is False

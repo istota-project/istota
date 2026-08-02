@@ -45,10 +45,10 @@ class TestParse:
 
     def test_numeric_passthrough(self, snapshots):
         vti = next(r for r in snapshots[0].rows if r.symbol == "VTI")
-        assert vti.quantity == 258.0
-        assert vti.price == 257.43
+        assert vti.quantity == 250.0
+        assert vti.price == 260.0
         assert vti.value == 65000.0
-        assert vti.day_gain == 945.6
+        assert vti.day_gain == 900.0
         # fractions stored as-is, never re-divided
         assert vti.day_gain_pct == pytest.approx(0.0144)
         assert vti.pct_of_account == pytest.approx(0.6169)
@@ -56,7 +56,7 @@ class TestParse:
 
     def test_avg_cost_basis_cleaned_to_float(self, snapshots):
         vti = next(r for r in snapshots[0].rows if r.symbol == "VTI")
-        assert vti.avg_cost_basis == 253.76
+        assert vti.avg_cost_basis == 256.40
 
     def test_cash_rows_typed(self, snapshots):
         spaxx = next(r for r in snapshots[0].rows if r.symbol == "SPAXX**")

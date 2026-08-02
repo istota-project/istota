@@ -99,14 +99,14 @@ const BIOMARKER_REFS: Array<{
 })();
 
 const user = {
-  username: 'alice',
-  display_name: 'Alice',
+  username: 'carol',
+  display_name: 'Carol',
   bot_name: 'Istota',
   is_admin: true,
   // How the bot is reachable outside the web UI. `email` is null on an
   // instance with email switched off, which drops the dashboard's email tip.
   contact: {
-    email: 'istota+alice@bot.example.com',
+    email: 'istota+carol@bot.example.com',
     talk: true,
   } as { email: string | null; talk: boolean },
   // Present only when the instance runs [web] token_storage = "encrypted";
@@ -155,12 +155,12 @@ interface MockChatTask {
 /** Stored upload path → the workspace path `/chat/files` would take, or null
  * for one that isn't under the user's own workspace. */
 function mockWorkspacePath(stored: string): string | null {
-  return stored.startsWith('inbox/') ? `/Users/alice/${stored}` : null;
+  return stored.startsWith('inbox/') ? `/Users/carol/${stored}` : null;
 }
 const mockChatRooms: MockChatRoom[] = [
   {
     id: 1,
-    token: 'web-alice-general',
+    token: 'web-carol-general',
     name: 'general',
     archived: false,
     created_at: new Date().toISOString(),
@@ -203,7 +203,7 @@ let mockChatTaskSeq = 1000;
     const createdAt = newest - (SEED_COUNT - 1 - i) * STEP_MS;
     mockChatTasks.set(id, {
       id,
-      roomToken: 'web-alice-general',
+      roomToken: 'web-carol-general',
       prompt: `${SEED_PROMPTS[i % SEED_PROMPTS.length]} (#${id})`,
       createdAt,
     });
@@ -219,14 +219,14 @@ let mockChatTaskSeq = 1000;
   const base = Date.now() - 40_000; // 40s ago, finished
   mockChatTasks.set(200, {
     id: 200,
-    roomToken: 'web-alice-general',
+    roomToken: 'web-carol-general',
     prompt: 'tighten the moving-plan note',
     createdAt: base,
     variant: 'multiround',
   });
   mockChatTasks.set(201, {
     id: 201,
-    roomToken: 'web-alice-general',
+    roomToken: 'web-carol-general',
     prompt: 'fix the near-expiry 401s in auth',
     createdAt: base + 12_000,
     variant: 'multiround',
@@ -322,7 +322,7 @@ function mockTaskEvents(task: MockChatTask) {
     // A fenced block, so the preview covers a reply whose copy carries code:
     // the block copy is the markdown source, fences included.
     '```bash\n' +
-    'istota task "summarise today" -u alice --output-target both\n' +
+    'istota task "summarise today" -u carol --output-target both\n' +
     'istota list --status completed\n' +
     '```\n\n' +
     'Ask a follow-up, or try `!help` for commands.';
@@ -762,7 +762,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   if (path === '/istota/api/chat/rooms' && method === 'POST') {
     const room: MockChatRoom = {
       id: ++mockChatRoomSeq,
-      token: `web-alice-${mockChatRoomSeq}`,
+      token: `web-carol-${mockChatRoomSeq}`,
       name: (body?.name || 'room').slice(0, 80),
       archived: false,
       created_at: new Date().toISOString(),
@@ -953,8 +953,8 @@ const mockAdminStats = {
   },
   users: [
     {
-      username: 'alice',
-      display_name: 'Alice',
+      username: 'carol',
+      display_name: 'Carol',
       is_admin: true,
       tasks_total: 11281,
       tasks_last_24h: 1734,
@@ -994,7 +994,7 @@ const mockAdminStats = {
     jobs: [
       {
         id: 1,
-        user_id: 'alice',
+        user_id: 'carol',
         name: 'morning briefing',
         cron: '0 7 * * *',
         enabled: true,
@@ -1005,7 +1005,7 @@ const mockAdminStats = {
       },
       {
         id: 2,
-        user_id: 'alice',
+        user_id: 'carol',
         name: '_module.feeds.run_scheduled',
         cron: '*/5 * * * *',
         enabled: true,
@@ -1027,7 +1027,7 @@ const mockAdminStats = {
       },
       {
         id: 4,
-        user_id: 'alice',
+        user_id: 'carol',
         name: '_module.money.run_scheduled',
         cron: '*/30 * * * *',
         enabled: true,
@@ -1038,7 +1038,7 @@ const mockAdminStats = {
       },
       {
         id: 5,
-        user_id: 'alice',
+        user_id: 'carol',
         name: 'evening recap',
         cron: '0 21 * * *',
         enabled: false,
@@ -1050,7 +1050,7 @@ const mockAdminStats = {
     ],
     last_errors: [
       {
-        job_name: 'alice/feeds.poll',
+        job_name: 'carol/feeds.poll',
         error: 'timeout after 30s',
         timestamp: new Date(Date.now() - 12 * 60_000).toISOString(),
       },
@@ -1842,7 +1842,7 @@ const mockLogSources = {
 };
 
 const _MOCK_APP_LOG = [
-  ['2026-07-31T09:14:02', 'INFO', 'istota.scheduler', 'Task claimed by host-01-4411-alice'],
+  ['2026-07-31T09:14:02', 'INFO', 'istota.scheduler', 'Task claimed by worker-a1-4411-alice'],
   ['2026-07-31T09:14:03', 'DEBUG', 'istota.executor', 'skills: eager=7 menu=26'],
   ['2026-07-31T09:14:29', 'INFO', 'istota.executor', 'native cache hit_rate=0.81'],
   [
@@ -1890,7 +1890,7 @@ function mockLogPage(source: string, params: URLSearchParams) {
             timestamp: '2026-07-31T09:14:02',
             level: 'INFO',
             logger: null,
-            message: 'Task claimed by host-01-4411-alice',
+            message: 'Task claimed by worker-a1-4411-alice',
             task_id: 8821,
             user_id: 'alice',
             source_type: 'talk',
@@ -6429,7 +6429,7 @@ const handlers: MockHandler[] = [
         id: 1,
         account_name: 'Taxable Brokerage',
         account_number: 'X111',
-        group: 'Alice',
+        group: 'Carol',
         account_type: 'taxable',
         excluded: false,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6439,7 +6439,7 @@ const handlers: MockHandler[] = [
         id: 2,
         account_name: 'Roth IRA A',
         account_number: 'X222',
-        group: 'Alice',
+        group: 'Carol',
         account_type: 'retirement',
         excluded: false,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6449,7 +6449,7 @@ const handlers: MockHandler[] = [
         id: 3,
         account_name: 'Active Trading (IBKR)',
         account_number: 'X333',
-        group: 'Alice',
+        group: 'Carol',
         account_type: 'trading',
         excluded: false,
         first_seen_at: '2026-02-10T09:00:00Z',
@@ -6459,7 +6459,7 @@ const handlers: MockHandler[] = [
         id: 4,
         account_name: 'Joint Brokerage',
         account_number: 'X444',
-        group: 'Bob',
+        group: 'Dana',
         account_type: 'taxable',
         excluded: false,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6469,7 +6469,7 @@ const handlers: MockHandler[] = [
         id: 5,
         account_name: 'SK Tax',
         account_number: 'X555',
-        group: 'Alice',
+        group: 'Carol',
         account_type: 'cash',
         excluded: true,
         first_seen_at: '2026-01-05T09:00:00Z',

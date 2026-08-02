@@ -71,7 +71,7 @@ if [ ! -d "$BARE_DIR" ]; then
     # it branches from `origin/$DEFAULT_BRANCH` (below), not a local head.
     DEFAULT_BRANCH=$(git -C "$BARE_DIR" remote show origin | sed -n 's/.*HEAD branch: //p')
     git -C "$BARE_DIR" symbolic-ref HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
-    # Skip any head currently checked out by a worktree (a zorg/<task> branch);
+    # Skip any head currently checked out by a worktree (an istota/<task> branch);
     # only the unused clone-day main/master get dropped.
     CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
     for ref in $(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/); do

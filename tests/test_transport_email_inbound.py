@@ -365,7 +365,7 @@ class TestDeferredSentEmail:
             "ISTOTA_TASK_ID": "42",
             "ISTOTA_DEFERRED_DIR": str(tmp_path),
             "ISTOTA_CONVERSATION_TOKEN": "room1",
-            "ISTOTA_USER_ID": "alice",
+            "ISTOTA_USER_ID": "carol",
         }
         with patch.dict("os.environ", env, clear=False):
             _write_deferred_sent_email("<msg@test.com>", "bob@x.com", "Hello")
@@ -378,7 +378,7 @@ class TestDeferredSentEmail:
         assert data[0]["to_addr"] == "bob@x.com"
         assert data[0]["subject"] == "Hello"
         assert data[0]["conversation_token"] == "room1"
-        assert data[0]["user_id"] == "alice"
+        assert data[0]["user_id"] == "carol"
 
     def test_write_deferred_appends_multiple(self, tmp_path):
         from istota.skills.email import _write_deferred_sent_email
@@ -386,7 +386,7 @@ class TestDeferredSentEmail:
         env = {
             "ISTOTA_TASK_ID": "42",
             "ISTOTA_DEFERRED_DIR": str(tmp_path),
-            "ISTOTA_USER_ID": "alice",
+            "ISTOTA_USER_ID": "carol",
         }
         with patch.dict("os.environ", env, clear=False):
             _write_deferred_sent_email("<msg1@test.com>", "a@x.com", "First")
@@ -414,7 +414,7 @@ class TestDeferredSentEmail:
             "SMTP_FROM": "bot@test.com",
             "ISTOTA_TASK_ID": "99",
             "ISTOTA_DEFERRED_DIR": str(tmp_path),
-            "ISTOTA_USER_ID": "alice",
+            "ISTOTA_USER_ID": "carol",
         }
         args = MagicMock()
         args.to = "bob@example.com"
@@ -450,7 +450,7 @@ class TestMatchThread:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<sent1@bot.com>",
                 to_addr="bob@ext.com",
                 subject="Meeting",
@@ -466,7 +466,7 @@ class TestMatchThread:
 
             match = _match_thread(conn, email)
             assert match is not None
-            assert match.user_id == "alice"
+            assert match.user_id == "carol"
             assert match.conversation_token == "room1"
 
     def test_no_match_without_references(self, db_path):
@@ -494,7 +494,7 @@ class TestMatchThread:
         with db.get_db(db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<sent2@bot.com>",
                 to_addr="alice@ext.com",
                 subject="Hello",
@@ -520,13 +520,13 @@ class TestPollEmailsThreadMatching:
         """Reply from unknown sender matching a sent thread routes to originating user."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
-        # Pre-record an outbound email from alice
+        # Pre-record an outbound email from carol
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<outbound@bot.com>",
                 to_addr="external@proton.me",
                 subject="Set up a meeting",
@@ -554,7 +554,7 @@ class TestPollEmailsThreadMatching:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-            assert task.user_id == "alice"
+            assert task.user_id == "carol"
             assert task.output_target == "talk,email"
             assert task.conversation_token == "talk_room_42"
             assert "Emissary email reply" in task.prompt
@@ -565,7 +565,7 @@ class TestPollEmailsThreadMatching:
         """Unknown sender with no thread match is discarded as before."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         envelope = _envelope(id="3", sender="stranger@random.com", subject="Buy stuff")
         email = Email(
@@ -618,12 +618,12 @@ class TestPollEmailsThreadMatching:
         """If original sent email had no conversation_token, fall back to thread_id."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Hello",
@@ -651,7 +651,7 @@ class TestPollEmailsThreadMatching:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-            assert task.user_id == "alice"
+            assert task.user_id == "carol"
             assert task.output_target == "talk,email"
             # Should use thread_id since no conversation_token on sent email
             assert task.conversation_token is not None
@@ -660,12 +660,12 @@ class TestPollEmailsThreadMatching:
         """ISSUE-057: thread_match inherits talk_delivery_token from sent_emails row."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Plan",
@@ -701,15 +701,15 @@ class TestPollEmailsThreadMatching:
         """Record a sent_email with origin_target, poll a thread-matched reply,
         and return the created task. Shared by the origin-routing tests."""
         config.email = _email_config()
-        user = UserConfig(email_addresses=["alice@test.com"])
+        user = UserConfig(email_addresses=["carol@test.com"])
         if policy is not None:
             user.email_reply_routing = policy
-        config.users = {"alice": user}
+        config.users = {"carol": user}
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<origin_out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Question",
@@ -791,14 +791,14 @@ class TestPollEmailsThreadMatching:
         # external-emissary one).
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<origin_out@bot.com>",
-                to_addr="alice@test.com", subject="Question",
+                conn, user_id="carol", message_id="<origin_out@bot.com>",
+                to_addr="carol@test.com", subject="Question",
                 conversation_token="rm_web123", origin_target="web:rm_web123",
             )
-        task = self._poll_reply(config, sender="alice@test.com", to=("bot@test.com",))
+        task = self._poll_reply(config, sender="carol@test.com", to=("bot@test.com",))
         assert task is not None
         assert task.output_target == "web:rm_web123,email"
         assert task.conversation_token == "rm_web123"
@@ -809,17 +809,17 @@ class TestPollEmailsThreadMatching:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"], email_reply_routing="origin",
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"], email_reply_routing="origin",
             ),
         }
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<origin_out@bot.com>",
-                to_addr="alice@test.com", subject="Question",
+                conn, user_id="carol", message_id="<origin_out@bot.com>",
+                to_addr="carol@test.com", subject="Question",
                 conversation_token="rm_web123", origin_target="web:rm_web123",
             )
-        task = self._poll_reply(config, sender="alice@test.com", to=("bot@test.com",))
+        task = self._poll_reply(config, sender="carol@test.com", to=("bot@test.com",))
         assert task.output_target == "web:rm_web123"  # origin-only
 
     def test_plus_address_reply_recovers_origin(self, make_config):
@@ -828,15 +828,15 @@ class TestPollEmailsThreadMatching:
         # still be recovered.
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<origin_out@bot.com>",
+                conn, user_id="carol", message_id="<origin_out@bot.com>",
                 to_addr="ext@x.com", subject="Question",
                 conversation_token="rm_web123", origin_target="web:rm_web123",
             )
         task = self._poll_reply(
-            config, sender="ext@x.com", to=("bot+alice@test.com",),
+            config, sender="ext@x.com", to=("bot+carol@test.com",),
         )
         assert task is not None
         assert task.output_target == "web:rm_web123,email"
@@ -847,10 +847,10 @@ class TestPollEmailsThreadMatching:
         # purely by thread-match → emissary template AND origin routing.
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<origin_out@bot.com>",
+                conn, user_id="carol", message_id="<origin_out@bot.com>",
                 to_addr="ext@x.com", subject="Question",
                 conversation_token="rm_web123", origin_target="web:rm_web123",
             )
@@ -867,11 +867,11 @@ class TestPollEmailsThreadMatching:
         config.email = _email_config()
         config.users = {
             "alice": UserConfig(email_addresses=["alice@test.com"]),
-            "alice": UserConfig(email_addresses=["alice@test.com"]),
+            "carol": UserConfig(email_addresses=["carol@test.com"]),
         }
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<origin_out@bot.com>",
+                conn, user_id="carol", message_id="<origin_out@bot.com>",
                 to_addr="ext@x.com", subject="Question",
                 conversation_token="rm_web123", origin_target="web:rm_web123",
             )
@@ -888,18 +888,18 @@ class TestPollEmailsThreadMatching:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"], alerts_channel="alerts_room",
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"], alerts_channel="alerts_room",
             ),
         }
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<legacy_web@bot.com>",
                 to_addr="ext@x.com",
                 subject="Q",
-                conversation_token="web-alice-deadbeef",
+                conversation_token="web-carol-deadbeef",
                 origin_target=None,  # legacy row
             )
         envelope = _envelope(id="30", sender="ext@x.com", subject="Re: Q")
@@ -922,7 +922,7 @@ class TestPollEmailsThreadMatching:
         assert task.output_target == "talk,email"
         # The web token must not leak in as the Talk channel; the ladder falls
         # through to the resolved alerts room instead.
-        assert task.talk_delivery_token != "web-alice-deadbeef"
+        assert task.talk_delivery_token != "web-carol-deadbeef"
         assert task.talk_delivery_token == "alerts_room"
 
     def test_known_sender_resolves_talk_delivery_token_from_alerts(self, make_config):
@@ -968,15 +968,15 @@ class TestExtractUserFromRecipient:
         config = Config()
         config.email = _email_config()  # bot_email = "bot@test.com"
         config.users = {
-            "alice": UserConfig(email_addresses=["alice@example.com"]),
+            "carol": UserConfig(email_addresses=["carol@example.com"]),
             "alice": UserConfig(email_addresses=["alice@example.com"]),
         }
         return config
 
     def test_extracts_user_from_to_header(self):
         config = self._config_with_users()
-        email = _email(to=("bot+alice@test.com",))
-        assert _extract_user_from_recipient(config, email) == "alice"
+        email = _email(to=("bot+carol@test.com",))
+        assert _extract_user_from_recipient(config, email) == "carol"
 
     def test_extracts_user_from_cc_header(self):
         config = self._config_with_users()
@@ -995,12 +995,12 @@ class TestExtractUserFromRecipient:
 
     def test_case_insensitive_matching(self):
         config = self._config_with_users()
-        email = _email(to=("BOT+Alice@Test.Com",))
-        assert _extract_user_from_recipient(config, email) == "alice"
+        email = _email(to=("BOT+Carol@Test.Com",))
+        assert _extract_user_from_recipient(config, email) == "carol"
 
     def test_ignores_different_domain(self):
         config = self._config_with_users()
-        email = _email(to=("bot+alice@other-domain.com",))
+        email = _email(to=("bot+carol@other-domain.com",))
         assert _extract_user_from_recipient(config, email) is None
 
     def test_returns_none_when_no_recipients(self):
@@ -1011,8 +1011,8 @@ class TestExtractUserFromRecipient:
     def test_first_valid_match_wins(self):
         """If both To and Cc have plus-addresses, To wins."""
         config = self._config_with_users()
-        email = _email(to=("bot+alice@test.com",), cc=("bot+alice@test.com",))
-        assert _extract_user_from_recipient(config, email) == "alice"
+        email = _email(to=("bot+carol@test.com",), cc=("bot+alice@test.com",))
+        assert _extract_user_from_recipient(config, email) == "carol"
 
 
 # =============================================================================
@@ -1024,10 +1024,10 @@ class TestPollEmailsPlusAddressRouting:
     """Tests for plus-address routing in the poll loop."""
 
     def test_plus_address_routes_unknown_sender(self, make_config):
-        """Unknown sender emailing bot+alice@ should route to alice."""
+        """Unknown sender emailing bot+carol@ should route to carol."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         envelope = _envelope(id="10", sender="stranger@external.com", subject="Hello agent")
         email = Email(
@@ -1035,7 +1035,7 @@ class TestPollEmailsPlusAddressRouting:
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Can you help me?", attachments=[],
             message_id="<ext1@external.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1049,26 +1049,26 @@ class TestPollEmailsPlusAddressRouting:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-            assert task.user_id == "alice"
+            assert task.user_id == "carol"
             assert task.source_type == "email"
             assert "stranger@external.com" in task.prompt
 
     def test_plus_address_takes_precedence_over_sender_match(self, make_config):
-        """If sender matches alice but To is bot+alice@, route to alice."""
+        """If sender matches alice but To is bot+carol@, route to carol."""
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(email_addresses=["alice@test.com"]),
+            "carol": UserConfig(email_addresses=["carol@test.com"]),
             "alice": UserConfig(email_addresses=["alice@test.com"]),
         }
 
-        envelope = _envelope(id="11", sender="alice@test.com", subject="For alice")
+        envelope = _envelope(id="11", sender="alice@test.com", subject="For carol")
         email = Email(
-            id="11", subject="For alice", sender="alice@test.com",
+            id="11", subject="For carol", sender="alice@test.com",
             date="Mon, 01 Jan 2026 12:00:00 +0000",
-            body="Route this to alice", attachments=[],
+            body="Route this to carol", attachments=[],
             message_id="<a11@test.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1081,7 +1081,7 @@ class TestPollEmailsPlusAddressRouting:
         assert len(task_ids) == 1
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-            assert task.user_id == "alice"  # plus-address wins over sender
+            assert task.user_id == "carol"  # plus-address wins over sender
 
     def test_invalid_plus_address_falls_through_to_sender(self, make_config):
         """Plus-address with invalid user falls through to sender-based routing."""
@@ -1114,7 +1114,7 @@ class TestPollEmailsPlusAddressRouting:
         """routing_method should be 'plus_address' when routed via plus-addressing."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         envelope = _envelope(id="13", sender="stranger@ext.com", subject="Hi")
         email = Email(
@@ -1122,7 +1122,7 @@ class TestPollEmailsPlusAddressRouting:
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Hello", attachments=[],
             message_id="<s13@ext.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1166,12 +1166,12 @@ class TestPollEmailsPlusAddressRouting:
         """routing_method should be 'thread_match' for emissary reply routing."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out15@bot.com>",
                 to_addr="ext@x.com",
                 subject="Hello",
@@ -1205,7 +1205,7 @@ class TestPollEmailsPlusAddressRouting:
         """routing_method should be 'discarded' for unknown sender with no match."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         envelope = _envelope(id="16", sender="spam@nowhere.com", subject="Spam")
         email = Email(
@@ -1237,8 +1237,8 @@ class TestEmailConfirmationGate:
     def test_untrusted_sender_held_for_confirmation(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(
-            email_addresses=["alice@test.com"],
+        config.users = {"carol": UserConfig(
+            email_addresses=["carol@test.com"],
             alerts_channel="alerts_room",
         )}
 
@@ -1248,7 +1248,7 @@ class TestEmailConfirmationGate:
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Hello", attachments=[],
             message_id="<s20@evil.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1269,8 +1269,8 @@ class TestEmailConfirmationGate:
     def test_trusted_sender_proceeds_immediately(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(
-            email_addresses=["alice@test.com"],
+        config.users = {"carol": UserConfig(
+            email_addresses=["carol@test.com"],
             trusted_email_senders=["*@trusted.com"],
         )}
 
@@ -1280,7 +1280,7 @@ class TestEmailConfirmationGate:
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Hello", attachments=[],
             message_id="<s21@trusted.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1298,17 +1298,17 @@ class TestEmailConfirmationGate:
     def test_own_email_via_plus_address_not_gated(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(
-            email_addresses=["alice@test.com"],
+        config.users = {"carol": UserConfig(
+            email_addresses=["carol@test.com"],
         )}
 
-        envelope = _envelope(id="22", sender="alice@test.com", subject="Hi")
+        envelope = _envelope(id="22", sender="carol@test.com", subject="Hi")
         email = Email(
-            id="22", subject="Hi", sender="alice@test.com",
+            id="22", subject="Hi", sender="carol@test.com",
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Hello", attachments=[],
             message_id="<s22@test.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1327,14 +1327,14 @@ class TestEmailConfirmationGate:
         """Sender trusted via DB (not config) should bypass the confirmation gate."""
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(
-            email_addresses=["alice@test.com"],
+        config.users = {"carol": UserConfig(
+            email_addresses=["carol@test.com"],
             trusted_email_senders=[],  # No config patterns
         )}
 
         # Add sender to DB trusted list
         with db.get_db(config.db_path) as conn:
-            db.add_trusted_sender(conn, "alice", "friend@newcontact.com")
+            db.add_trusted_sender(conn, "carol", "friend@newcontact.com")
 
         envelope = _envelope(id="db1", sender="friend@newcontact.com", subject="Hi")
         email = Email(
@@ -1342,7 +1342,7 @@ class TestEmailConfirmationGate:
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Hello", attachments=[],
             message_id="<db1@newcontact.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1432,8 +1432,8 @@ class TestEmailConfirmationGate:
     def test_gate_no_alerts_channel_still_holds(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(
-            email_addresses=["alice@test.com"],
+        config.users = {"carol": UserConfig(
+            email_addresses=["carol@test.com"],
             # No alerts_channel set
         )}
 
@@ -1443,7 +1443,7 @@ class TestEmailConfirmationGate:
             date="Mon, 01 Jan 2026 12:00:00 +0000",
             body="Hello", attachments=[],
             message_id="<s24@evil.com>", references=None,
-            to=("bot+alice@test.com",), cc=(),
+            to=("bot+carol@test.com",), cc=(),
         )
 
         with (
@@ -1491,12 +1491,12 @@ class TestEmailPromptBoundaries:
     def test_emissary_reply_has_boundary_markers(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         # Set up a sent email for thread matching
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<orig@test.com>",
+                conn, user_id="carol", message_id="<orig@test.com>",
                 to_addr="external@reply.com", subject="Hello",
                 conversation_token="room1",
             )
@@ -1568,8 +1568,8 @@ class TestEmissaryReplyDeliveryTokenResolution:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"],
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"],
                 # alerts_channel set so the WRONG fallback would return it —
                 # if the test passes, we know we're using the sent_email row,
                 # not the user's resolved channel.
@@ -1580,7 +1580,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Plan",
@@ -1594,7 +1594,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-        assert task.user_id == "alice"
+        assert task.user_id == "carol"
         assert task.talk_delivery_token == "original_talk_room"
         # conversation_token also preserved as the original Talk room
         # (transport/email/inbound.py: inherits from sent_email)
@@ -1612,16 +1612,16 @@ class TestEmissaryReplyDeliveryTokenResolution:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"],
-                alerts_channel="alice_alerts",
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"],
+                alerts_channel="carol_alerts",
             ),
         }
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Plan",
@@ -1635,7 +1635,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-        assert task.talk_delivery_token == "alice_alerts"
+        assert task.talk_delivery_token == "carol_alerts"
         # conversation_token preserved as the synthetic email-thread key
         assert task.conversation_token == synthetic
 
@@ -1647,8 +1647,8 @@ class TestEmissaryReplyDeliveryTokenResolution:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"],
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"],
                 # alerts_channel deliberately empty so resolve_conversation_token
                 # would pick the briefing — same value as the sent_email's
                 # conversation_token. To prove we use the sent_email path
@@ -1664,7 +1664,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Briefing follow-up",
@@ -1689,16 +1689,16 @@ class TestEmissaryReplyDeliveryTokenResolution:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"],
-                alerts_channel="alice_alerts",
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"],
+                alerts_channel="carol_alerts",
             ),
         }
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Hello",
@@ -1712,7 +1712,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_ids[0])
-        assert task.talk_delivery_token == "alice_alerts"
+        assert task.talk_delivery_token == "carol_alerts"
 
     def test_explicit_delivery_token_wins_over_conversation_token(
         self, make_config,
@@ -1721,8 +1721,8 @@ class TestEmissaryReplyDeliveryTokenResolution:
         config = make_config()
         config.email = _email_config()
         config.users = {
-            "alice": UserConfig(
-                email_addresses=["alice@test.com"],
+            "carol": UserConfig(
+                email_addresses=["carol@test.com"],
                 alerts_channel="WRONG_alerts",
             ),
         }
@@ -1730,7 +1730,7 @@ class TestEmissaryReplyDeliveryTokenResolution:
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Plan",
@@ -1757,12 +1757,12 @@ class TestEmissaryReplyDeliveryTokenResolution:
         config = make_config()
         config.email = _email_config()
         # User exists for routing but has no alerts/briefing/DM
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
 
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
                 conn,
-                user_id="alice",
+                user_id="carol",
                 message_id="<out@bot.com>",
                 to_addr="ext@x.com",
                 subject="Plan",

@@ -55,7 +55,7 @@ def app_config(tmp_path):
     cfg.db_path = dbp
     cfg.email = AppEmailConfig(enabled=True, bot_email=BOT)
     cfg.users = {
-        "alice": UserConfig(email_addresses=["alice@personal.com"]),
+        "bob": UserConfig(email_addresses=["bob@personal.com"]),
         "dana": UserConfig(email_addresses=["dana@personal.com"]),
     }
     return cfg
@@ -65,7 +65,7 @@ def app_config(tmp_path):
 def skill_env(monkeypatch, app_config):
     """Wire load_config + _config_from_env + ISTOTA_USER_ID for the commands."""
     monkeypatch.setattr("istota.config.load_config", lambda *a, **k: app_config)
-    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_USER_ID", "bob")
     monkeypatch.setenv("SMTP_HOST", "smtp.test")
     monkeypatch.setenv("IMAP_HOST", "imap.test")
     monkeypatch.setenv("IMAP_USER", "u")
@@ -129,9 +129,9 @@ def _mock_mailbox(messages):
 
 class TestOwnership:
     def test_plus_address_owns(self, app_config):
-        env = _env("1", "stranger@out.com", to=["bot+alice@example.com"])
-        assert extract_user_from_recipient(app_config, env) == "alice"
-        assert resolve_email_owner(app_config, None, env) == "alice"
+        env = _env("1", "stranger@out.com", to=["bot+bob@example.com"])
+        assert extract_user_from_recipient(app_config, env) == "bob"
+        assert resolve_email_owner(app_config, None, env) == "bob"
 
     def test_plus_address_unknown_user_is_unowned(self, app_config):
         env = _env("1", "stranger@out.com", to=["bot+ghost@example.com"])
@@ -160,12 +160,12 @@ class TestOwnership:
         assert resolve_email_owner(app_config, None, env) is None
 
     @pytest.mark.parametrize("scope,owner,expected", [
-        ("mine", "alice", True), ("mine", "dana", False), ("mine", None, False),
-        ("shared", None, True), ("shared", "alice", False), ("shared", "dana", False),
-        ("all", "alice", True), ("all", None, True), ("all", "dana", False),
+        ("mine", "bob", True), ("mine", "dana", False), ("mine", None, False),
+        ("shared", None, True), ("shared", "bob", False), ("shared", "dana", False),
+        ("all", "bob", True), ("all", None, True), ("all", "dana", False),
     ])
     def test_owner_in_scope(self, scope, owner, expected):
-        assert owner_in_scope(owner, scope, "alice") is expected
+        assert owner_in_scope(owner, scope, "bob") is expected
 
 
 # --------------------------------------------------------------------------
@@ -176,8 +176,8 @@ class TestOwnership:
 class TestScopeLeak:
     def _inbox(self):
         return [
-            _env("mine-plus", "stranger@out.com", to=["bot+alice@example.com"]),
-            _env("mine-sender", "alice@personal.com", to=[BOT]),
+            _env("mine-plus", "stranger@out.com", to=["bot+bob@example.com"]),
+            _env("mine-sender", "bob@personal.com", to=[BOT]),
             _env("dana-plus", "stranger@out.com", to=["bot+dana@example.com"]),
             _env("dana-sender", "dana@personal.com", to=[BOT]),
             _env("bare", "stranger@out.com", to=[BOT]),
@@ -218,15 +218,15 @@ class TestScopeLeak:
     def test_thread_matched_mail_is_mine_and_invisible_to_others(self, skill_env, app_config):
         with db.get_db(app_config.db_path) as conn:
             db.record_sent_email(
-                conn, user_id="alice", message_id="<s1@example.com>",
+                conn, user_id="bob", message_id="<s1@example.com>",
                 to_addr="client@out.com",
             )
         inbox = [_env("emissary", "client@out.com", to=[BOT], references="<s1@example.com>")]
-        # As alice: it's mine.
+        # As bob: it's mine.
         args = MagicMock(scope="mine", limit=20, since=None, from_addr=None, unread=False)
         with patch("istota.skills.email.list_emails", return_value=inbox):
             assert self._ids(cmd_list(args)) == {"emissary"}
-        # As dana with scope=all: never surfaces (owned by alice via thread).
+        # As dana with scope=all: never surfaces (owned by bob via thread).
         args_all = MagicMock(scope="all", limit=20, since=None, from_addr=None, unread=False)
         with patch("istota.skills.email.list_emails", return_value=inbox):
             with patch.dict("os.environ", {"ISTOTA_USER_ID": "dana"}):
@@ -353,8 +353,8 @@ class TestListFilters:
         args = MagicMock(scope="mine", limit=5, since=None, from_addr=None, unread=False)
         with patch("istota.skills.email.list_emails", side_effect=fake_list):
             cmd_list(args)
-        assert 'TO "bot+alice@example.com"' in captured["criteria"]
-        assert 'FROM "alice@personal.com"' in captured["criteria"]
+        assert 'TO "bot+bob@example.com"' in captured["criteria"]
+        assert 'FROM "bob@personal.com"' in captured["criteria"]
         assert "OR" in captured["criteria"]
 
 
@@ -378,7 +378,7 @@ class TestParseSince:
 
 class TestReadVerb:
     def test_read_scoped_and_framed(self, skill_env):
-        mail = _mail("9", "stranger@out.com", to=["bot+alice@example.com"],
+        mail = _mail("9", "stranger@out.com", to=["bot+bob@example.com"],
                      body_text="secret plan", body_html="<p>secret plan</p>")
         args = MagicMock(scope="all", id="9")
         with patch("istota.skills.email.read_email", return_value=mail):
@@ -464,9 +464,9 @@ class TestThreadWalk:
         assert ids == ["1", "2"]  # ordered, unrelated excluded
 
     def test_thread_command_scoped(self, skill_env):
-        root = _mail("1", "stranger@out.com", to=["bot+alice@example.com"],
+        root = _mail("1", "stranger@out.com", to=["bot+bob@example.com"],
                      message_id="<root@x>", body_text="root body")
-        reply = _mail("2", "stranger@out.com", to=["bot+alice@example.com"],
+        reply = _mail("2", "stranger@out.com", to=["bot+bob@example.com"],
                       message_id="<reply@x>", references="<root@x>", body_text="reply body")
         args = MagicMock(scope="all", id="1", window=200)
         with patch("istota.skills.email.read_email", return_value=root), \

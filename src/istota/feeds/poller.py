@@ -79,7 +79,7 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
         http_get = httpx.get
 
     headers: dict[str, str] = {
-        "User-Agent": "istota-feeds/0.1 (+https://github.com/cynium/istota)",
+        "User-Agent": "istota-feeds/0.1 (+https://github.com/istota-project/istota)",
     }
     if feed.etag:
         headers["If-None-Match"] = feed.etag

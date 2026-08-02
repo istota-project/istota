@@ -1470,7 +1470,7 @@ def load_admin_users(path: str | None = None) -> set[str]:
     Args:
         path: Override file path. If None, checks ISTOTA_ADMINS_FILE env var,
               then falls back to /etc/istota/admins. The default path is
-              wrong for renamed-namespace installs (e.g. /etc/istota/admins);
+              wrong for renamed-namespace installs (e.g. /etc/mybot/admins);
               such deploys must set ISTOTA_ADMINS_FILE in every entry-point
               systemd unit. A WARNING is logged when the resolved path is
               missing so silent fail-closed admin in the web UI is visible

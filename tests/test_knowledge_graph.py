@@ -72,13 +72,13 @@ class TestEnsureTable:
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "bob", "knows", "python"),
         )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
                 "VALUES (?, ?, ?, ?)",
-                ("user1", "alice", "knows", "python"),
+                ("user1", "bob", "knows", "python"),
             )
 
     def test_unique_index_allows_historical_duplicates(self, conn):
@@ -86,18 +86,18 @@ class TestEnsureTable:
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python", "2026-01-01"),
+            ("user1", "bob", "knows", "python", "2026-01-01"),
         )
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object, valid_until) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python", "2026-02-01"),
+            ("user1", "bob", "knows", "python", "2026-02-01"),
         )
         # One current, two historical — no error
         conn.execute(
             "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
             "VALUES (?, ?, ?, ?)",
-            ("user1", "alice", "knows", "python"),
+            ("user1", "bob", "knows", "python"),
         )
 
     def test_ensure_table_survives_existing_duplicates(self, tmp_path, caplog):
@@ -128,7 +128,7 @@ class TestEnsureTable:
             conn.execute(
                 "INSERT INTO knowledge_facts (user_id, subject, predicate, object) "
                 "VALUES (?, ?, ?, ?)",
-                ("user1", "alice", "knows", "python"),
+                ("user1", "bob", "knows", "python"),
             )
         with caplog.at_level(logging.WARNING, logger="istota.knowledge_graph"):
             ensure_table(conn)
@@ -169,15 +169,15 @@ class TestAddFactRaceCondition:
                 real.execute(
                     "INSERT INTO knowledge_facts "
                     "(user_id, subject, predicate, object) VALUES (?, ?, ?, ?)",
-                    ("user1", "alice", "likes", "coffee"),
+                    ("user1", "bob", "likes", "coffee"),
                 )
                 inserted["done"] = True
 
         proxy = _ConnProxy(conn, on_execute=interceptor)
-        result = kg.add_fact(proxy, "user1", "alice", "likes", "coffee")
+        result = kg.add_fact(proxy, "user1", "bob", "likes", "coffee")
         assert result is None
         count = conn.execute(
-            "SELECT COUNT(*) FROM knowledge_facts WHERE subject='alice' "
+            "SELECT COUNT(*) FROM knowledge_facts WHERE subject='bob' "
             "AND predicate='likes' AND object='coffee'"
         ).fetchone()[0]
         assert count == 1
@@ -186,18 +186,18 @@ class TestAddFactRaceCondition:
         """Normal dedup (no race) still returns None via the SELECT check,
         without relying on the constraint.
         """
-        id1 = add_fact(conn, "user1", "alice", "enjoys", "hiking")
-        id2 = add_fact(conn, "user1", "alice", "enjoys", "hiking")
+        id1 = add_fact(conn, "user1", "bob", "enjoys", "hiking")
+        id2 = add_fact(conn, "user1", "bob", "enjoys", "hiking")
         assert id1 is not None
         assert id2 is None
 
 
 class TestAddFact:
     def test_basic_insert(self, conn):
-        fact_id = add_fact(conn, "user1", "Alice", "works_at", "Acme")
+        fact_id = add_fact(conn, "user1", "Bob", "works_at", "Acme")
         assert fact_id is not None
         fact = get_fact(conn, fact_id)
-        assert fact.subject == "alice"
+        assert fact.subject == "bob"
         assert fact.predicate == "works_at"
         assert fact.object == "acme"
         assert fact.user_id == "user1"
@@ -205,47 +205,47 @@ class TestAddFact:
         assert fact.temporary is False
 
     def test_normalizes_input(self, conn):
-        fact_id = add_fact(conn, "user1", "  Alice  ", "Works_At", "  Acme Corp  ")
+        fact_id = add_fact(conn, "user1", "  Bob  ", "Works_At", "  Acme Corp  ")
         fact = get_fact(conn, fact_id)
-        assert fact.subject == "alice"
+        assert fact.subject == "bob"
         assert fact.predicate == "works_at"
         assert fact.object == "acme corp"
 
     def test_duplicate_detection(self, conn):
-        id1 = add_fact(conn, "user1", "alice", "knows", "python")
-        id2 = add_fact(conn, "user1", "alice", "knows", "python")
+        id1 = add_fact(conn, "user1", "bob", "knows", "python")
+        id2 = add_fact(conn, "user1", "bob", "knows", "python")
         assert id1 is not None
         assert id2 is None  # Duplicate
 
     def test_duplicate_only_checks_current(self, conn):
         """A fact that has been invalidated can be re-added."""
-        id1 = add_fact(conn, "user1", "alice", "knows", "python")
+        id1 = add_fact(conn, "user1", "bob", "knows", "python")
         invalidate_fact(conn, id1, ended="2026-01-01")
-        id2 = add_fact(conn, "user1", "alice", "knows", "python")
+        id2 = add_fact(conn, "user1", "bob", "knows", "python")
         assert id2 is not None
         assert id2 != id1
 
     def test_different_users_not_duplicate(self, conn):
-        id1 = add_fact(conn, "user1", "alice", "knows", "python")
-        id2 = add_fact(conn, "user2", "alice", "knows", "python")
+        id1 = add_fact(conn, "user1", "bob", "knows", "python")
+        id2 = add_fact(conn, "user2", "bob", "knows", "python")
         assert id1 is not None
         assert id2 is not None
 
     def test_with_valid_from(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "works_at", "acme",
+        fact_id = add_fact(conn, "user1", "bob", "works_at", "acme",
                            valid_from="2025-06-01")
         fact = get_fact(conn, fact_id)
         assert fact.valid_from == "2025-06-01"
 
     def test_with_source_tracking(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "works_at", "acme",
+        fact_id = add_fact(conn, "user1", "bob", "works_at", "acme",
                            source_task_id=123, source_type="user_stated")
         fact = get_fact(conn, fact_id)
         assert fact.source_task_id == 123
         assert fact.source_type == "user_stated"
 
     def test_with_confidence(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "knows", "rust", confidence=0.7)
+        fact_id = add_fact(conn, "user1", "bob", "knows", "rust", confidence=0.7)
         fact = get_fact(conn, fact_id)
         assert fact.confidence == 0.7
 
@@ -253,9 +253,9 @@ class TestAddFact:
 class TestSupersession:
     def test_single_valued_supersedes(self, conn):
         """New value for single-valued predicate supersedes old one."""
-        id1 = add_fact(conn, "user1", "alice", "works_at", "acme",
+        id1 = add_fact(conn, "user1", "bob", "works_at", "acme",
                        valid_from="2025-01-01")
-        id2 = add_fact(conn, "user1", "alice", "works_at", "globex",
+        id2 = add_fact(conn, "user1", "bob", "works_at", "globex",
                        valid_from="2026-04-01")
 
         old = get_fact(conn, id1)
@@ -266,16 +266,16 @@ class TestSupersession:
     def test_single_valued_supersession_uses_today_when_no_valid_from(self, conn):
         """When new fact has no valid_from, supersession date is today."""
         from datetime import date as date_cls
-        id1 = add_fact(conn, "user1", "alice", "lives_in", "brooklyn")
-        id2 = add_fact(conn, "user1", "alice", "lives_in", "manhattan")
+        id1 = add_fact(conn, "user1", "bob", "lives_in", "brooklyn")
+        id2 = add_fact(conn, "user1", "bob", "lives_in", "manhattan")
 
         old = get_fact(conn, id1)
         assert old.valid_until == date_cls.today().isoformat()
 
     def test_multi_valued_no_supersession(self, conn):
         """Multi-valued predicates allow concurrent facts."""
-        id1 = add_fact(conn, "user1", "alice", "knows", "python")
-        id2 = add_fact(conn, "user1", "alice", "knows", "go")
+        id1 = add_fact(conn, "user1", "bob", "knows", "python")
+        id2 = add_fact(conn, "user1", "bob", "knows", "go")
 
         fact1 = get_fact(conn, id1)
         fact2 = get_fact(conn, id2)
@@ -292,8 +292,8 @@ class TestSupersession:
 
     def test_supersession_scoped_to_user(self, conn):
         """Supersession only affects same user's facts."""
-        id1 = add_fact(conn, "user1", "alice", "works_at", "acme")
-        id2 = add_fact(conn, "user2", "alice", "works_at", "globex")
+        id1 = add_fact(conn, "user1", "bob", "works_at", "acme")
+        id2 = add_fact(conn, "user2", "bob", "works_at", "globex")
 
         fact1 = get_fact(conn, id1)
         assert fact1.valid_until is None  # User1's fact untouched
@@ -301,20 +301,20 @@ class TestSupersession:
 
 class TestTemporaryFacts:
     def test_temporary_flag_set(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "works_at", "acme", temporary=True)
+        fact_id = add_fact(conn, "user1", "bob", "works_at", "acme", temporary=True)
         fact = get_fact(conn, fact_id)
         assert fact.temporary is True
 
     def test_temporary_predicate_auto_flags(self, conn):
         """Predicates in TEMPORARY_PREDICATES are auto-flagged as temporary."""
-        fact_id = add_fact(conn, "user1", "alice", "staying_in", "lisbon")
+        fact_id = add_fact(conn, "user1", "bob", "staying_in", "lisbon")
         fact = get_fact(conn, fact_id)
         assert fact.temporary is True
 
     def test_temporary_does_not_supersede_permanent(self, conn):
         """Temporary facts coexist with permanent facts."""
-        id_perm = add_fact(conn, "user1", "alice", "lives_in", "brooklyn")
-        id_temp = add_fact(conn, "user1", "alice", "lives_in", "lisbon",
+        id_perm = add_fact(conn, "user1", "bob", "lives_in", "brooklyn")
+        id_temp = add_fact(conn, "user1", "bob", "lives_in", "lisbon",
                            temporary=True, valid_until="2026-07-01")
 
         perm = get_fact(conn, id_perm)
@@ -325,10 +325,10 @@ class TestTemporaryFacts:
 
     def test_permanent_supersedes_even_with_temporary_present(self, conn):
         """A new permanent fact supersedes old permanent, ignoring temporaries."""
-        id_old = add_fact(conn, "user1", "alice", "lives_in", "brooklyn")
-        add_fact(conn, "user1", "alice", "staying_in", "lisbon",
+        id_old = add_fact(conn, "user1", "bob", "lives_in", "brooklyn")
+        add_fact(conn, "user1", "bob", "staying_in", "lisbon",
                  temporary=True, valid_until="2026-07-01")
-        id_new = add_fact(conn, "user1", "alice", "lives_in", "manhattan",
+        id_new = add_fact(conn, "user1", "bob", "lives_in", "manhattan",
                           valid_from="2026-08-01")
 
         old = get_fact(conn, id_old)
@@ -357,7 +357,7 @@ class TestEphemeralAutoExpiry:
         return (date.fromisoformat(base) + timedelta(days=DEFAULT_EPHEMERAL_TTL_DAYS)).isoformat()
 
     def test_interested_in_gets_default_valid_until(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "interested_in", "arc desk lamp")
+        fact_id = add_fact(conn, "user1", "bob", "interested_in", "orion eco")
         fact = get_fact(conn, fact_id)
         assert fact.valid_until == self._expected_expiry(date.today().isoformat())
 
@@ -365,7 +365,7 @@ class TestEphemeralAutoExpiry:
         """When valid_from (the event date) is given, the TTL counts from it,
         not from today — a project completed long ago is already historical."""
         fact_id = add_fact(
-            conn, "user1", "alice", "completed", "globex",
+            conn, "user1", "bob", "completed", "globex",
             valid_from="2026-01-01",
         )
         fact = get_fact(conn, fact_id)
@@ -377,13 +377,13 @@ class TestEphemeralAutoExpiry:
             ("disposed_of", "clamp lamp"),
             ("traveled_to", "lisbon"),
         ]:
-            fid = add_fact(conn, "user1", "alice", pred, obj)
+            fid = add_fact(conn, "user1", "bob", pred, obj)
             assert get_fact(conn, fid).valid_until is not None, pred
 
     def test_explicit_valid_until_wins(self, conn):
         """A caller/extractor-supplied valid_until is never overridden."""
         fact_id = add_fact(
-            conn, "user1", "alice", "interested_in", "clamp lamp",
+            conn, "user1", "bob", "interested_in", "vega piston",
             valid_until="2026-06-05",
         )
         fact = get_fact(conn, fact_id)
@@ -392,18 +392,18 @@ class TestEphemeralAutoExpiry:
     def test_decided_not_auto_expired(self, conn):
         """`decided` is excluded — durable decisions legitimately persist;
         the extractor sets valid_until case-by-case for short-lived ones."""
-        fact_id = add_fact(conn, "user1", "alice", "decided", "go remote-first")
+        fact_id = add_fact(conn, "user1", "bob", "decided", "go remote-first")
         fact = get_fact(conn, fact_id)
         assert fact.valid_until is None
 
     def test_durable_predicate_not_auto_expired(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "works_at", "acme")
+        fact_id = add_fact(conn, "user1", "bob", "works_at", "acme")
         assert get_fact(conn, fact_id).valid_until is None
 
     def test_temporary_ephemeral_not_auto_expired(self, conn):
         """Temporary facts have their own lifecycle — skip the default."""
         fact_id = add_fact(
-            conn, "user1", "alice", "acquired", "rental car",
+            conn, "user1", "bob", "acquired", "rental car",
             temporary=True,
         )
         assert get_fact(conn, fact_id).valid_until is None
@@ -411,7 +411,7 @@ class TestEphemeralAutoExpiry:
     def test_old_ephemeral_fact_excluded_from_current(self, conn):
         """An ephemeral fact whose anchored window has closed is not current."""
         add_fact(
-            conn, "user1", "alice", "completed", "ancient project",
+            conn, "user1", "bob", "completed", "ancient project",
             valid_from="2020-01-01",
         )
         current = get_current_facts(conn, "user1")
@@ -420,7 +420,7 @@ class TestEphemeralAutoExpiry:
 
 class TestInvalidateFact:
     def test_invalidate(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "knows", "python")
+        fact_id = add_fact(conn, "user1", "bob", "knows", "python")
         result = invalidate_fact(conn, fact_id, ended="2026-04-08")
         assert result is True
         fact = get_fact(conn, fact_id)
@@ -428,13 +428,13 @@ class TestInvalidateFact:
 
     def test_invalidate_defaults_to_today(self, conn):
         from datetime import date as date_cls
-        fact_id = add_fact(conn, "user1", "alice", "knows", "python")
+        fact_id = add_fact(conn, "user1", "bob", "knows", "python")
         invalidate_fact(conn, fact_id)
         fact = get_fact(conn, fact_id)
         assert fact.valid_until == date_cls.today().isoformat()
 
     def test_invalidate_already_invalidated(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "knows", "python")
+        fact_id = add_fact(conn, "user1", "bob", "knows", "python")
         invalidate_fact(conn, fact_id, ended="2026-01-01")
         result = invalidate_fact(conn, fact_id, ended="2026-04-08")
         assert result is False  # Already had valid_until
@@ -446,7 +446,7 @@ class TestInvalidateFact:
 
 class TestDeleteFact:
     def test_delete(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "knows", "python")
+        fact_id = add_fact(conn, "user1", "bob", "knows", "python")
         result = delete_fact(conn, fact_id)
         assert result is True
         assert get_fact(conn, fact_id) is None
@@ -458,8 +458,8 @@ class TestDeleteFact:
 
 class TestGetCurrentFacts:
     def test_returns_only_current(self, conn):
-        add_fact(conn, "user1", "alice", "works_at", "acme")
-        add_fact(conn, "user1", "alice", "works_at", "globex",
+        add_fact(conn, "user1", "bob", "works_at", "acme")
+        add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-04-01")
 
         facts = get_current_facts(conn, "user1")
@@ -467,16 +467,16 @@ class TestGetCurrentFacts:
         assert facts[0].object == "globex"
 
     def test_filter_by_subject(self, conn):
-        add_fact(conn, "user1", "alice", "knows", "python")
+        add_fact(conn, "user1", "bob", "knows", "python")
         add_fact(conn, "user1", "istota", "uses_tech", "svelte")
 
-        facts = get_current_facts(conn, "user1", subject="alice")
+        facts = get_current_facts(conn, "user1", subject="bob")
         assert len(facts) == 1
-        assert facts[0].subject == "alice"
+        assert facts[0].subject == "bob"
 
     def test_filter_by_predicate(self, conn):
-        add_fact(conn, "user1", "alice", "knows", "python")
-        add_fact(conn, "user1", "alice", "works_at", "acme")
+        add_fact(conn, "user1", "bob", "knows", "python")
+        add_fact(conn, "user1", "bob", "works_at", "acme")
 
         facts = get_current_facts(conn, "user1", predicate="knows")
         assert len(facts) == 1
@@ -487,19 +487,19 @@ class TestGetCurrentFacts:
         assert facts == []
 
     def test_scoped_to_user(self, conn):
-        add_fact(conn, "user1", "alice", "knows", "python")
+        add_fact(conn, "user1", "bob", "knows", "python")
         add_fact(conn, "user2", "alice", "knows", "go")
 
         facts = get_current_facts(conn, "user1")
         assert len(facts) == 1
-        assert facts[0].subject == "alice"
+        assert facts[0].subject == "bob"
 
 
 class TestGetFactsAsOf:
     def test_historical_query(self, conn):
-        id1 = add_fact(conn, "user1", "alice", "works_at", "acme",
+        id1 = add_fact(conn, "user1", "bob", "works_at", "acme",
                        valid_from="2025-01-01")
-        add_fact(conn, "user1", "alice", "works_at", "globex",
+        add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-04-01")
 
         # Query when at Acme
@@ -508,9 +508,9 @@ class TestGetFactsAsOf:
         assert facts[0].object == "acme"
 
     def test_current_date_query(self, conn):
-        add_fact(conn, "user1", "alice", "works_at", "acme",
+        add_fact(conn, "user1", "bob", "works_at", "acme",
                  valid_from="2025-01-01")
-        add_fact(conn, "user1", "alice", "works_at", "globex",
+        add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-04-01")
 
         facts = get_facts_as_of(conn, "user1", "2026-06-01")
@@ -518,7 +518,7 @@ class TestGetFactsAsOf:
         assert facts[0].object == "globex"
 
     def test_before_any_facts(self, conn):
-        add_fact(conn, "user1", "alice", "works_at", "acme",
+        add_fact(conn, "user1", "bob", "works_at", "acme",
                  valid_from="2025-01-01")
 
         facts = get_facts_as_of(conn, "user1", "2024-01-01")
@@ -526,30 +526,30 @@ class TestGetFactsAsOf:
 
     def test_null_valid_from_always_matches(self, conn):
         """Facts with no valid_from are considered always valid from the start."""
-        add_fact(conn, "user1", "alice", "knows", "python")  # No valid_from
+        add_fact(conn, "user1", "bob", "knows", "python")  # No valid_from
 
         facts = get_facts_as_of(conn, "user1", "2020-01-01")
         assert len(facts) == 1
 
     def test_filter_by_subject(self, conn):
-        add_fact(conn, "user1", "alice", "knows", "python")
+        add_fact(conn, "user1", "bob", "knows", "python")
         add_fact(conn, "user1", "istota", "uses_tech", "svelte")
 
-        facts = get_facts_as_of(conn, "user1", "2026-06-01", subject="alice")
+        facts = get_facts_as_of(conn, "user1", "2026-06-01", subject="bob")
         assert len(facts) == 1
-        assert facts[0].subject == "alice"
+        assert facts[0].subject == "bob"
 
 
 class TestGetEntityTimeline:
     def test_chronological_order(self, conn):
-        add_fact(conn, "user1", "alice", "works_at", "acme",
+        add_fact(conn, "user1", "bob", "works_at", "acme",
                  valid_from="2025-01-01")
-        add_fact(conn, "user1", "alice", "works_at", "globex",
+        add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-04-01")
-        add_fact(conn, "user1", "alice", "knows", "python",
+        add_fact(conn, "user1", "bob", "knows", "python",
                  valid_from="2020-01-01")
 
-        timeline = get_entity_timeline(conn, "user1", "alice")
+        timeline = get_entity_timeline(conn, "user1", "bob")
         assert len(timeline) == 3
         # Ordered by valid_from (or created_at if null)
         assert timeline[0].object == "python"
@@ -557,13 +557,13 @@ class TestGetEntityTimeline:
         assert timeline[2].object == "globex"
 
     def test_includes_historical_facts(self, conn):
-        id1 = add_fact(conn, "user1", "alice", "works_at", "acme",
+        id1 = add_fact(conn, "user1", "bob", "works_at", "acme",
                        valid_from="2025-01-01")
         invalidate_fact(conn, id1, ended="2026-01-01")
-        add_fact(conn, "user1", "alice", "works_at", "globex",
+        add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-01-01")
 
-        timeline = get_entity_timeline(conn, "user1", "alice")
+        timeline = get_entity_timeline(conn, "user1", "bob")
         assert len(timeline) == 2
 
     def test_empty_timeline(self, conn):
@@ -571,14 +571,14 @@ class TestGetEntityTimeline:
         assert timeline == []
 
     def test_normalizes_subject(self, conn):
-        add_fact(conn, "user1", "Alice", "knows", "python")
-        timeline = get_entity_timeline(conn, "user1", "  alice  ")
+        add_fact(conn, "user1", "Bob", "knows", "python")
+        timeline = get_entity_timeline(conn, "user1", "  bob  ")
         assert len(timeline) == 1
 
 
 class TestGetFact:
     def test_returns_fact(self, conn):
-        fact_id = add_fact(conn, "user1", "alice", "knows", "python")
+        fact_id = add_fact(conn, "user1", "bob", "knows", "python")
         fact = get_fact(conn, fact_id)
         assert fact is not None
         assert fact.id == fact_id
@@ -589,11 +589,11 @@ class TestGetFact:
 
 class TestGetFactCount:
     def test_counts(self, conn):
-        add_fact(conn, "user1", "alice", "works_at", "acme",
+        add_fact(conn, "user1", "bob", "works_at", "acme",
                  valid_from="2025-01-01")
-        add_fact(conn, "user1", "alice", "works_at", "globex",
+        add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-04-01")
-        add_fact(conn, "user1", "alice", "knows", "python")
+        add_fact(conn, "user1", "bob", "knows", "python")
 
         counts = get_fact_count(conn, "user1")
         assert counts["total"] == 3
@@ -607,21 +607,21 @@ class TestGetFactCount:
 
 class TestFormatFactsForPrompt:
     def test_basic_format(self, conn):
-        add_fact(conn, "user1", "alice", "works_at", "acme",
+        add_fact(conn, "user1", "bob", "works_at", "acme",
                  valid_from="2025-06-01")
-        add_fact(conn, "user1", "alice", "knows", "python")
+        add_fact(conn, "user1", "bob", "knows", "python")
 
         facts = get_current_facts(conn, "user1")
         text = format_facts_for_prompt(facts)
-        assert "alice works_at acme (since 2025-06-01)" in text
-        assert "alice knows python" in text
+        assert "bob works_at acme (since 2025-06-01)" in text
+        assert "bob knows python" in text
 
     def test_temporary_marker(self, conn):
         # A future valid_until so the fact is still "current" and carries the
         # [temporary] marker. Computed (not hardcoded) so it can't rot past the
         # date the way a literal "2026-07-01" did.
         future = (date.today() + timedelta(days=30)).isoformat()
-        add_fact(conn, "user1", "alice", "staying_in", "lisbon",
+        add_fact(conn, "user1", "bob", "staying_in", "lisbon",
                  valid_until=future)
 
         facts = get_current_facts(conn, "user1")
@@ -634,7 +634,7 @@ class TestFormatFactsForPrompt:
 
 class TestNormalize:
     def test_lowercase_and_strip(self):
-        assert _normalize("  Alice  ") == "alice"
+        assert _normalize("  Bob  ") == "bob"
 
     def test_preserves_known_predicates(self):
         """Known predicates pass through unchanged (lowercase only)."""
@@ -656,8 +656,8 @@ class TestFactSimilarity:
         assert _fact_similarity("allergic_to sesame seeds", "lives_in lisbon") == 0.0
 
     def test_partial_overlap(self):
-        sim = _fact_similarity("allergic_to tree_nuts", "allergic_to sesame seeds")
-        # Words: {allergic_to, tree_nuts} vs {allergic_to, tree, nuts}
+        sim = _fact_similarity("allergic_to sesame_seeds", "allergic_to sesame seeds")
+        # Words: {allergic_to, sesame_seeds} vs {allergic_to, sesame, seeds}
         # Intersection: {allergic_to} = 1, Union: 4 → 0.25
         assert 0.0 < sim < 0.5
 
@@ -674,15 +674,15 @@ class TestFactSimilarity:
 class TestFuzzyDedup:
     def test_exact_duplicate_still_skipped(self, conn):
         """Existing exact-dedup behavior is preserved."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
-        id2 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
         assert id1 is not None
         assert id2 is None
 
     def test_near_duplicate_with_word_variant_inserts(self, conn):
-        """`tree nut` and `sesame seeds` are different tokens — not deduped."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
-        id2 = add_fact(conn, "user1", "alice", "allergic_to", "tree nut")
+        """`sesame seed` and `sesame seeds` are different tokens — not deduped."""
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seed")
         assert id1 is not None
         # Tokens {tree, nut} vs {tree, nuts} — neither is a subset, Jaccard
         # 1/3 < 0.6 → both insert. Word-boundary precision is the trade-off
@@ -691,48 +691,48 @@ class TestFuzzyDedup:
 
     def test_high_overlap_deduped(self, conn):
         """High word overlap triggers dedup."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds and peanuts")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds and peanuts")
         # Same words, slightly different phrasing
-        id2 = add_fact(conn, "user1", "alice", "allergic_to", "peanuts and sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "allergic_to", "peanuts and sesame seeds")
         assert id1 is not None
         assert id2 is None  # Same words, Jaccard=1.0
 
     def test_different_predicate_object_inserted(self, conn):
         """Completely different predicate+object is inserted normally."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
-        id2 = add_fact(conn, "user1", "alice", "lives_in", "lisbon")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "lives_in", "lisbon")
         assert id1 is not None
         assert id2 is not None
 
     def test_same_fact_different_subject_inserted(self, conn):
         """Same predicate+object but different subject → not deduped."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
         id2 = add_fact(conn, "user1", "felix", "allergic_to", "sesame seeds")
         assert id1 is not None
         assert id2 is not None
 
     def test_same_fact_different_user_inserted(self, conn):
         """Same everything but different user_id → not deduped."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
-        id2 = add_fact(conn, "user2", "alice", "allergic_to", "sesame seeds")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user2", "bob", "allergic_to", "sesame seeds")
         assert id1 is not None
         assert id2 is not None
 
     def test_predicate_variant_fuzzy_dedup(self, conn):
         """Predicate variants caught by fuzzy dedup (word overlap)."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
         # "is_allergic_to sesame seeds" vs "allergic_to sesame seeds"
-        # Words: {is_allergic_to, tree, nuts} vs {allergic_to, tree, nuts}
-        # Intersection: {tree, nuts} = 2, Union: {is_allergic_to, allergic_to, tree, nuts} = 4
+        # Words: {is_allergic_to, sesame, seeds} vs {allergic_to, sesame, seeds}
+        # Intersection: {sesame, seeds} = 2, Union: {is_allergic_to, allergic_to, sesame, seeds} = 4
         # Jaccard = 0.5 — below 0.7, so this is NOT caught by fuzzy dedup
         # This is acceptable — the extraction prompt guides consistent naming
-        id2 = add_fact(conn, "user1", "alice", "is_allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "is_allergic_to", "sesame seeds")
         assert id1 is not None
         assert id2 is not None  # Different predicate, low Jaccard
 
     def test_freeform_predicate_inserted(self, conn):
         """Freeform predicates not in any known set are accepted."""
-        fact_id = add_fact(conn, "user1", "alice", "enjoys", "hiking")
+        fact_id = add_fact(conn, "user1", "bob", "enjoys", "hiking")
         assert fact_id is not None
         fact = get_fact(conn, fact_id)
         assert fact.predicate == "enjoys"
@@ -740,8 +740,8 @@ class TestFuzzyDedup:
 
     def test_freeform_predicate_is_multi_valued(self, conn):
         """Unknown predicates don't supersede — they're multi-valued by default."""
-        id1 = add_fact(conn, "user1", "alice", "enjoys", "hiking")
-        id2 = add_fact(conn, "user1", "alice", "enjoys", "cooking")
+        id1 = add_fact(conn, "user1", "bob", "enjoys", "hiking")
+        id2 = add_fact(conn, "user1", "bob", "enjoys", "cooking")
         fact1 = get_fact(conn, id1)
         fact2 = get_fact(conn, id2)
         assert fact1.valid_until is None  # Both current
@@ -749,23 +749,23 @@ class TestFuzzyDedup:
 
     def test_fuzzy_dedup_only_checks_current_facts(self, conn):
         """Invalidated facts should not trigger fuzzy dedup."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
         invalidate_fact(conn, id1, ended="2026-01-01")
         # Re-add same fact — should succeed since the old one is invalidated
-        id2 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
         assert id2 is not None
 
     def test_substring_object_collapses_refined_value(self, conn):
         """Same predicate, refined object — substring fast-path catches it."""
-        id1 = add_fact(conn, "user1", "alice", "uses_tech", "python")
-        id2 = add_fact(conn, "user1", "alice", "uses_tech", "python 3")
+        id1 = add_fact(conn, "user1", "bob", "uses_tech", "python")
+        id2 = add_fact(conn, "user1", "bob", "uses_tech", "python 3")
         assert id1 is not None
         assert id2 is None  # "python" ⊂ "python 3" (same predicate)
 
     def test_substring_object_collapses_added_qualifier(self, conn):
         # Use a multi-valued predicate so substring fires before supersession.
-        id1 = add_fact(conn, "user1", "alice", "owns", "acme")
-        id2 = add_fact(conn, "user1", "alice", "owns", "acme corp")
+        id1 = add_fact(conn, "user1", "bob", "owns", "acme")
+        id2 = add_fact(conn, "user1", "bob", "owns", "acme corp")
         assert id1 is not None
         assert id2 is None  # "acme" ⊂ "acme corp" (same predicate)
 
@@ -775,26 +775,26 @@ class TestFuzzyDedup:
         Tokens (incl. predicate): {prefers, morning, briefings} vs
         {prefers, weekly, briefings}. Jaccard = 2/4 = 0.5 < 0.6.
         """
-        id1 = add_fact(conn, "user1", "alice", "prefers", "morning briefings")
-        id2 = add_fact(conn, "user1", "alice", "prefers", "weekly briefings")
+        id1 = add_fact(conn, "user1", "bob", "prefers", "morning briefings")
+        id2 = add_fact(conn, "user1", "bob", "prefers", "weekly briefings")
         assert id1 is not None
         assert id2 is not None
 
     def test_substring_does_not_merge_unrelated(self, conn):
         """Genuinely different objects don't merge."""
-        id1 = add_fact(conn, "user1", "alice", "prefers", "morning briefings")
-        id2 = add_fact(conn, "user1", "alice", "prefers", "evening summaries")
+        id1 = add_fact(conn, "user1", "bob", "prefers", "morning briefings")
+        id2 = add_fact(conn, "user1", "bob", "prefers", "evening summaries")
         assert id1 is not None
         # No shared content tokens; Jaccard 1/4 = 0.25 < 0.6 → inserted.
         assert id2 is not None
 
     def test_substring_scoped_to_predicate(self, conn):
         """Different predicates must not substring-merge even if objects share text."""
-        id1 = add_fact(conn, "user1", "alice", "allergic_to", "sesame seeds")
+        id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
         # Different predicate ("is_allergic_to" was the spec's example): the
         # substring path is scoped to identical predicates, so this is
         # judged by Jaccard alone.
-        id2 = add_fact(conn, "user1", "alice", "is_allergic_to", "sesame seeds")
+        id2 = add_fact(conn, "user1", "bob", "is_allergic_to", "sesame seeds")
         assert id1 is not None
         assert id2 is not None
 
@@ -813,7 +813,7 @@ class TestTokenize:
         assert "s" in tokens
 
     def test_mixed_case(self):
-        assert _tokenize("Alice WORKS at Acme") == {"alice", "works", "at", "acme"}
+        assert _tokenize("Bob WORKS at Acme") == {"bob", "works", "at", "acme"}
 
     def test_empty_string(self):
         assert _tokenize("") == set()
@@ -834,13 +834,13 @@ class TestSelectRelevantFacts:
 
     def test_identity_facts_always_included(self):
         facts = [
-            self._make_fact("alice", "works_at", "acme"),
-            self._make_fact("alice", "lives_in", "lisbon"),
+            self._make_fact("bob", "works_at", "acme"),
+            self._make_fact("bob", "lives_in", "lisbon"),
             self._make_fact("project_alpha", "has_status", "active"),
         ]
-        result = select_relevant_facts(facts, "unrelated prompt", "alice")
+        result = select_relevant_facts(facts, "unrelated prompt", "bob")
         assert len(result) == 2
-        assert all(f.subject == "alice" for f in result)
+        assert all(f.subject == "bob" for f in result)
 
     def test_subject_match_in_prompt(self):
         facts = [
@@ -848,7 +848,7 @@ class TestSelectRelevantFacts:
             self._make_fact("project_beta", "has_status", "paused"),
         ]
         result = select_relevant_facts(
-            facts, "How is project_alpha going?", "alice",
+            facts, "How is project_alpha going?", "bob",
         )
         assert len(result) == 1
         assert result[0].subject == "project_alpha"
@@ -859,7 +859,7 @@ class TestSelectRelevantFacts:
             self._make_fact("project_beta", "uses_tech", "react"),
         ]
         result = select_relevant_facts(
-            facts, "Tell me about our svelte projects", "alice",
+            facts, "Tell me about our svelte projects", "bob",
         )
         assert len(result) == 1
         assert result[0].object == "svelte"
@@ -869,26 +869,26 @@ class TestSelectRelevantFacts:
             self._make_fact("project_gamma", "has_status", "archived"),
         ]
         result = select_relevant_facts(
-            facts, "What's for lunch?", "alice",
+            facts, "What's for lunch?", "bob",
         )
         assert len(result) == 0
 
     def test_identity_plus_matched(self):
         facts = [
-            self._make_fact("alice", "works_at", "acme"),
+            self._make_fact("bob", "works_at", "acme"),
             self._make_fact("acme", "has_status", "growing"),
             self._make_fact("project_beta", "has_status", "paused"),
         ]
         result = select_relevant_facts(
-            facts, "Tell me about acme", "alice",
+            facts, "Tell me about acme", "bob",
         )
-        # alice (identity) + acme (subject match)
+        # bob (identity) + acme (subject match)
         assert len(result) == 2
         subjects = {f.subject for f in result}
-        assert subjects == {"alice", "acme"}
+        assert subjects == {"bob", "acme"}
 
     def test_empty_facts(self):
-        result = select_relevant_facts([], "some prompt", "alice")
+        result = select_relevant_facts([], "some prompt", "bob")
         assert result == []
 
     def test_max_facts_does_not_truncate_identity(self):
@@ -896,37 +896,37 @@ class TestSelectRelevantFacts:
         Matched facts (subject/object in prompt) get cut instead.
         """
         facts = [
-            self._make_fact("alice", "knows", "python", created_at="2026-01-01"),
-            self._make_fact("alice", "knows", "go", created_at="2026-02-01"),
-            self._make_fact("alice", "works_at", "acme", created_at="2026-03-01"),
+            self._make_fact("bob", "knows", "python", created_at="2026-01-01"),
+            self._make_fact("bob", "knows", "go", created_at="2026-02-01"),
+            self._make_fact("bob", "works_at", "acme", created_at="2026-03-01"),
         ]
         result = select_relevant_facts(
-            facts, "anything", "alice", max_facts=2,
+            facts, "anything", "bob", max_facts=2,
         )
         # All 3 identity facts kept — cap is a soft target when identity exceeds it.
         assert len(result) == 3
-        assert all(f.subject == "alice" for f in result)
+        assert all(f.subject == "bob" for f in result)
 
     def test_max_facts_prioritizes_identity_over_matched(self):
         facts = [
-            self._make_fact("alice", "works_at", "acme"),
-            self._make_fact("alice", "knows", "python"),
+            self._make_fact("bob", "works_at", "acme"),
+            self._make_fact("bob", "knows", "python"),
             self._make_fact("project_alpha", "has_status", "active"),
         ]
         result = select_relevant_facts(
-            facts, "project_alpha update", "alice", max_facts=2,
+            facts, "project_alpha update", "bob", max_facts=2,
         )
         # 2 identity facts saturate the cap; project_alpha is dropped.
         assert len(result) == 2
-        assert all(f.subject == "alice" for f in result)
+        assert all(f.subject == "bob" for f in result)
 
     def test_max_facts_zero_means_unlimited(self):
         facts = [
-            self._make_fact("alice", "knows", f"lang{i}")
+            self._make_fact("bob", "knows", f"lang{i}")
             for i in range(20)
         ]
         result = select_relevant_facts(
-            facts, "anything", "alice", max_facts=0,
+            facts, "anything", "bob", max_facts=0,
         )
         assert len(result) == 20
 
@@ -935,7 +935,7 @@ class TestSelectRelevantFacts:
             self._make_fact("project_alpha", "has_status", "active"),
         ]
         result = select_relevant_facts(
-            facts, "What about Project_Alpha?", "alice",
+            facts, "What about Project_Alpha?", "bob",
         )
         assert len(result) == 1
 
@@ -945,33 +945,33 @@ class TestSelectRelevantFacts:
             self._make_fact("alice smith", "works_at", "acme"),
         ]
         result = select_relevant_facts(
-            facts, "Send alice the report", "alice",
+            facts, "Send alice the report", "bob",
         )
         assert len(result) == 1
 
     def test_user_id_match_is_case_insensitive(self):
         facts = [
-            self._make_fact("alice", "works_at", "acme"),
+            self._make_fact("bob", "works_at", "acme"),
         ]
         result = select_relevant_facts(
-            facts, "unrelated", "Alice",
+            facts, "unrelated", "Bob",
         )
         assert len(result) == 1
 
     def test_max_facts_matched_sorted_by_recency(self):
         facts = [
-            self._make_fact("alice", "works_at", "acme"),  # identity
+            self._make_fact("bob", "works_at", "acme"),  # identity
             self._make_fact("project_old", "uses_tech", "python",
                            created_at="2025-01-01"),
             self._make_fact("project_new", "uses_tech", "python",
                            created_at="2026-04-01"),
         ]
         result = select_relevant_facts(
-            facts, "python projects", "alice", max_facts=2,
+            facts, "python projects", "bob", max_facts=2,
         )
         # 1 identity + 1 matched (most recent)
         assert len(result) == 2
-        non_identity = [f for f in result if f.subject != "alice"]
+        non_identity = [f for f in result if f.subject != "bob"]
         assert len(non_identity) == 1
         assert non_identity[0].subject == "project_new"
 
@@ -979,39 +979,39 @@ class TestSelectRelevantFacts:
         """ISSUE-109 lever 2: a user-subject fact with an ephemeral predicate
         is NOT force-loaded as identity — it must earn its place via relevance."""
         facts = [
-            self._make_fact("alice", "interested_in", "arc desk lamp"),
-            self._make_fact("alice", "decided", "sell clamp lamp"),
+            self._make_fact("bob", "interested_in", "orion eco"),
+            self._make_fact("bob", "decided", "sell clamp lamp"),
         ]
-        result = select_relevant_facts(facts, "what's the weather today?", "alice")
+        result = select_relevant_facts(facts, "what's the weather today?", "bob")
         assert result == []
 
     def test_ephemeral_user_fact_included_when_relevant(self):
         """Demoted ephemeral facts still surface when the prompt is about them."""
         facts = [
-            self._make_fact("alice", "interested_in", "arc desk lamp"),
+            self._make_fact("bob", "interested_in", "orion eco"),
         ]
         result = select_relevant_facts(
-            facts, "should I buy the orion pen?", "alice",
+            facts, "should I buy the orion pen?", "bob",
         )
         assert len(result) == 1
-        assert result[0].object == "arc desk lamp"
+        assert result[0].object == "orion eco"
 
     def test_durable_user_facts_still_identity_when_ephemeral_demoted(self):
         """Durable identity facts stay always-on; only ephemeral ones demote."""
         facts = [
-            self._make_fact("alice", "works_at", "acme"),
-            self._make_fact("alice", "speaks", "polish"),
-            self._make_fact("alice", "completed", "globex"),
-            self._make_fact("alice", "acquired", "arc desk lamp"),
+            self._make_fact("bob", "works_at", "acme"),
+            self._make_fact("bob", "speaks", "portuguese"),
+            self._make_fact("bob", "completed", "globex"),
+            self._make_fact("bob", "acquired", "arc desk lamp"),
         ]
-        result = select_relevant_facts(facts, "unrelated prompt", "alice")
+        result = select_relevant_facts(facts, "unrelated prompt", "bob")
         objects = {f.object for f in result}
-        assert objects == {"acme", "polish"}
+        assert objects == {"acme", "portuguese"}
 
 
 class TestKnowledgeFactsAudit:
     def test_insert_writes_audit_row(self, conn):
-        fact_id = add_fact(conn, "alice", "alice", "uses_tech", "python")
+        fact_id = add_fact(conn, "alice", "bob", "uses_tech", "python")
         rows = get_fact_history(conn, "alice")
         assert len(rows) == 1
         assert rows[0].op == "insert"
@@ -1021,8 +1021,8 @@ class TestKnowledgeFactsAudit:
         assert "python" in rows[0].after_json
 
     def test_supersede_writes_audit_row(self, conn):
-        a = add_fact(conn, "alice", "alice", "works_at", "acme")
-        b = add_fact(conn, "alice", "alice", "works_at", "globex")
+        a = add_fact(conn, "alice", "bob", "works_at", "acme")
+        b = add_fact(conn, "alice", "bob", "works_at", "globex")
         ops = [r.op for r in get_fact_history(conn, "alice")]
         # Two inserts + one supersede on the prior row.
         assert ops.count("insert") == 2
@@ -1036,8 +1036,8 @@ class TestKnowledgeFactsAudit:
     def test_fuzzy_dedup_skip_writes_audit_row(self, conn):
         # 3-of-4 token overlap → Jaccard 0.75 ≥ 0.7 threshold. Use a
         # multi-valued predicate so fuzzy fires before supersession.
-        first = add_fact(conn, "alice", "alice", "uses_tech", "python java")
-        second = add_fact(conn, "alice", "alice", "uses_tech", "python java rust")
+        first = add_fact(conn, "alice", "bob", "uses_tech", "python java")
+        second = add_fact(conn, "alice", "bob", "uses_tech", "python java rust")
         # First inserted, second skipped via fuzzy dedup.
         assert first is not None
         assert second is None
@@ -1048,26 +1048,26 @@ class TestKnowledgeFactsAudit:
         assert skip.fact_id == first
 
     def test_invalidate_writes_audit_row(self, conn):
-        fact_id = add_fact(conn, "alice", "alice", "uses_tech", "python")
+        fact_id = add_fact(conn, "alice", "bob", "uses_tech", "python")
         invalidate_fact(conn, fact_id, ended="2026-04-01")
         ops = [r.op for r in get_fact_history(conn, "alice")]
         assert "invalidate" in ops
 
     def test_delete_writes_audit_row(self, conn):
-        fact_id = add_fact(conn, "alice", "alice", "uses_tech", "python")
+        fact_id = add_fact(conn, "alice", "bob", "uses_tech", "python")
         delete_fact(conn, fact_id)
         ops = [r.op for r in get_fact_history(conn, "alice")]
         assert "delete" in ops
 
     def test_history_filter_by_entity(self, conn):
-        add_fact(conn, "alice", "alice", "uses_tech", "python")
+        add_fact(conn, "alice", "bob", "uses_tech", "python")
         add_fact(conn, "alice", "felix", "lives_in", "lisbon")
         rows = get_fact_history(conn, "alice", entity="felix")
         assert len(rows) == 1
         assert "felix" in (rows[0].after_json or "")
 
     def test_cleanup_old_audit_rows_skips_when_zero(self, conn):
-        add_fact(conn, "alice", "alice", "uses_tech", "python")
+        add_fact(conn, "alice", "bob", "uses_tech", "python")
         n = cleanup_old_audit_rows(conn, "alice", 0)
         assert n == 0
         # Row still there.

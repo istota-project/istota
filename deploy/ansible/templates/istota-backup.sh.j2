@@ -176,7 +176,7 @@ backup_db() {
 
     if [ "$failed" -gt 0 ]; then
         log "ERROR: Database backup completed with ${failed} failure(s)"
-        _alert "$(hostname): database backup had ${failed} DB failure(s) — see zorg-backup.log"
+        _alert "$(hostname): database backup had ${failed} DB failure(s) — see {{ istota_namespace }}-backup.log"
         return 1
     fi
 
@@ -210,7 +210,7 @@ backup_files() {
 {% endfor %}
     if [ "$failed" -gt 0 ]; then
         log "ERROR: Files backup completed with ${failed} sync failure(s)"
-        _alert "$(hostname): files backup had ${failed} rclone sync failure(s) — see zorg-backup.log"
+        _alert "$(hostname): files backup had ${failed} rclone sync failure(s) — see {{ istota_namespace }}-backup.log"
         return 1
     fi
 

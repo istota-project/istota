@@ -62,60 +62,60 @@ class TestMembershipPrimitives:
 
 
 class TestSharedTalkRoomVisibleToAllMembers:
-    def test_lisbon_case_second_human_sees_room(self, web_config, db_path):
-        """The #lisbon bug: bob registered the room first; alice's later
+    def test_shared_room_second_human_sees_room(self, web_config, db_path):
+        """The shared-room bug: erin registered the room first; dave's later
         turns must still make him a member and surface the room in his web list.
         """
         from istota import web_app
         from istota.transport.ingest import record_inbound
 
         with db.get_db(db_path) as conn:
-            # bob is first into the group Talk room — she registers it.
-            db.register_room(conn, "r77", "bob", origin="talk", name="#lisbon")
+            # erin is first into the group Talk room — she registers it.
+            db.register_room(conn, "r77", "erin", origin="talk", name="#team")
             db.add_room_binding(conn, "r77", "talk", "r77")
-            # alice later sends into the already-registered room.
+            # dave later sends into the already-registered room.
             room_token, task_id = record_inbound(
                 conn,
                 web_config,
                 surface="talk",
                 surface_ref="r77",
-                user_id="alice",
+                user_id="dave",
                 text="hi",
                 source_type="talk",
-                channel_name="#lisbon",
+                channel_name="#team",
             )
             assert room_token == "r77"
             assert task_id is not None
 
-        # Both humans now see #lisbon in their own web room list.
-        bob_rooms = {r["token"] for r in web_app._chat_list_rooms("bob")}
-        alice_rooms = {r["token"] for r in web_app._chat_list_rooms("alice")}
-        assert "r77" in bob_rooms
-        assert "r77" in alice_rooms
+        # Both humans now see #team in their own web room list.
+        erin_rooms = {r["token"] for r in web_app._chat_list_rooms("erin")}
+        dave_rooms = {r["token"] for r in web_app._chat_list_rooms("dave")}
+        assert "r77" in erin_rooms
+        assert "r77" in dave_rooms
 
     def test_each_member_gets_their_own_web_handle(self, web_config, db_path):
         from istota import web_app
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "bob", origin="talk", name="#lisbon")
-            db.add_room_member(conn, "r77", "alice")
+            db.register_room(conn, "r77", "erin", origin="talk", name="#team")
+            db.add_room_member(conn, "r77", "dave")
 
-        web_app._chat_list_rooms("bob")
-        web_app._chat_list_rooms("alice")
+        web_app._chat_list_rooms("erin")
+        web_app._chat_list_rooms("dave")
         with db.get_db(db_path) as conn:
             rows = conn.execute(
                 "SELECT user_id FROM web_chat_rooms WHERE token = 'r77' ORDER BY user_id"
             ).fetchall()
         owners = [r["user_id"] for r in rows]
-        assert owners == ["bob", "alice"]
+        assert owners == ["dave", "erin"]
 
     def test_ensure_web_chat_handle_is_user_scoped(self, db_path):
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "bob", origin="talk", name="#lisbon")
-            h1 = db.ensure_web_chat_handle(conn, "bob", "r77", "#lisbon")
-            h2 = db.ensure_web_chat_handle(conn, "alice", "r77", "#lisbon")
-            assert h1.user_id == "bob"
-            assert h2.user_id == "alice"
+            db.register_room(conn, "r77", "erin", origin="talk", name="#team")
+            h1 = db.ensure_web_chat_handle(conn, "erin", "r77", "#team")
+            h2 = db.ensure_web_chat_handle(conn, "dave", "r77", "#team")
+            assert h1.user_id == "erin"
+            assert h2.user_id == "dave"
             assert h1.id != h2.id
             assert h1.token == h2.token == "r77"
 
@@ -127,17 +127,17 @@ class TestPerUserHideDoesNotAffectOthers:
         from istota import web_app
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "bob", origin="talk", name="#lisbon")
+            db.register_room(conn, "r77", "erin", origin="talk", name="#team")
             db.add_room_binding(conn, "r77", "talk", "r77")
-            db.add_room_member(conn, "r77", "alice")
-        # alice opens it in web (mints his handle), then deletes it from web.
-        rooms = web_app._chat_list_rooms("alice")
+            db.add_room_member(conn, "r77", "dave")
+        # dave opens it in web (mints his handle), then deletes it from web.
+        rooms = web_app._chat_list_rooms("dave")
         rid = next(r["id"] for r in rooms if r["token"] == "r77")
-        assert web_app._chat_delete_room("alice", rid) == "ok"
+        assert web_app._chat_delete_room("dave", rid) == "ok"
 
-        # alice no longer sees it; bob still does; the room/transcript live.
-        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("alice")}
-        assert "r77" in {r["token"] for r in web_app._chat_list_rooms("bob")}
+        # dave no longer sees it; erin still does; the room/transcript live.
+        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("dave")}
+        assert "r77" in {r["token"] for r in web_app._chat_list_rooms("erin")}
         with db.get_db(db_path) as conn:
             assert db.get_room(conn, "r77") is not None
             assert db.get_room(conn, "r77").archived is False
@@ -150,15 +150,15 @@ class TestPerUserHideDoesNotAffectOthers:
         from istota import web_app
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "alice", origin="talk", name="#lisbon")
+            db.register_room(conn, "r77", "dave", origin="talk", name="#team")
             db.add_room_binding(conn, "r77", "talk", "r77")
-        rooms = web_app._chat_list_rooms("alice")
+        rooms = web_app._chat_list_rooms("dave")
         rid = next(r["id"] for r in rooms if r["token"] == "r77")
-        assert web_app._chat_delete_room("alice", rid) == "ok"
+        assert web_app._chat_delete_room("dave", rid) == "ok"
         with db.get_db(db_path) as conn:
-            assert db.is_room_dismissed(conn, "r77", "alice")
-            db.add_room_member(conn, "r77", "alice")  # poll re-seed
-        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("alice")}
+            assert db.is_room_dismissed(conn, "r77", "dave")
+            db.add_room_member(conn, "r77", "dave")  # poll re-seed
+        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("dave")}
 
 
 class TestHideTombstone:
@@ -211,12 +211,12 @@ class TestReviewFixes:
         from istota.transport.ingest import record_inbound
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "bob", origin="talk", name="#lisbon")
+            db.register_room(conn, "r77", "erin", origin="talk", name="#team")
             db.set_room_archived(conn, "r77", True)  # bot was removed from NC
-            # bot is re-added; bob messages again
+            # bot is re-added; erin messages again
             record_inbound(
                 conn, web_config, surface="talk", surface_ref="r77",
-                user_id="bob", text="back?", channel_name="#lisbon",
+                user_id="erin", text="back?", channel_name="#team",
             )
             assert db.get_room(conn, "r77").archived is False
 
@@ -227,21 +227,21 @@ class TestReviewFixes:
         from istota.transport.ingest import record_inbound
 
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "bob", origin="talk", name="#lisbon")
+            db.register_room(conn, "r77", "erin", origin="talk", name="#team")
             db.add_room_binding(conn, "r77", "talk", "r77")
-            db.add_room_member(conn, "r77", "alice")
-        # alice opens it, then hides (deletes from web).
-        rooms = web_app._chat_list_rooms("alice")
+            db.add_room_member(conn, "r77", "dave")
+        # dave opens it, then hides (deletes from web).
+        rooms = web_app._chat_list_rooms("dave")
         rid = next(r["id"] for r in rooms if r["token"] == "r77")
-        web_app._chat_delete_room("alice", rid)
-        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("alice")}
-        # alice messages the room again → re-added as a member.
+        web_app._chat_delete_room("dave", rid)
+        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("dave")}
+        # dave messages the room again → re-added as a member.
         with db.get_db(db_path) as conn:
             record_inbound(
                 conn, web_config, surface="talk", surface_ref="r77",
-                user_id="alice", text="hi again", channel_name="#lisbon",
+                user_id="dave", text="hi again", channel_name="#team",
             )
-        listed = {r["token"]: r for r in web_app._chat_list_rooms("alice")}
+        listed = {r["token"]: r for r in web_app._chat_list_rooms("dave")}
         assert "r77" in listed
         assert listed["r77"]["archived"] is False  # stale flag cleared
 
@@ -282,13 +282,13 @@ class TestReviewFixes:
 class TestMembershipBackfillMigration:
     def test_backfill_makes_every_talk_sender_a_member(self, db_path):
         with db.get_db(db_path) as conn:
-            # A group Talk room registered (arbitrarily) under bob, no members.
+            # A group Talk room registered (arbitrarily) under erin, no members.
             conn.execute(
                 "INSERT INTO rooms (token, user_id, name, origin) "
-                "VALUES ('r77', 'bob', '#lisbon', 'talk')"
+                "VALUES ('r77', 'erin', '#team', 'talk')"
             )
             # Two distinct talk senders in the room's task history.
-            for uid in ("bob", "alice", "alice"):
+            for uid in ("erin", "dave", "dave"):
                 conn.execute(
                     "INSERT INTO tasks (status, source_type, user_id, prompt, "
                     "conversation_token) VALUES ('completed', 'talk', ?, 'x', 'r77')",
@@ -309,7 +309,7 @@ class TestMembershipBackfillMigration:
 
             db._migrate_room_members(conn)
 
-            assert sorted(db.list_room_members(conn, "r77")) == ["bob", "alice"]
+            assert sorted(db.list_room_members(conn, "r77")) == ["dave", "erin"]
             assert db.list_room_members(conn, "web-carol-1") == ["carol"]
 
 
@@ -331,7 +331,7 @@ class TestLegacySchemaMigration:
             " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
             " updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
             "INSERT INTO web_chat_rooms (id, user_id, token, name)"
-            " VALUES (5, 'bob', 'r77', '#lisbon');"
+            " VALUES (5, 'erin', 'r77', '#team');"
         )
         db._migrate_web_chat_rooms_peruser(conn)
         # id preserved (a live frontend room id stays valid)
@@ -341,7 +341,7 @@ class TestLegacySchemaMigration:
         # a second participant can now hold a handle for the same Talk token
         conn.execute(
             "INSERT INTO web_chat_rooms (user_id, token, name) "
-            "VALUES ('alice', 'r77', '#lisbon')"
+            "VALUES ('dave', 'r77', '#team')"
         )
         assert conn.execute(
             "SELECT COUNT(*) c FROM web_chat_rooms WHERE token='r77'"
@@ -377,9 +377,9 @@ class TestLegacySchemaMigration:
 class TestWebChatRoomsPerUserUnique:
     def test_two_users_one_token_both_handles_persist(self, db_path):
         with db.get_db(db_path) as conn:
-            db.register_room(conn, "r77", "bob", origin="talk")
-            db.ensure_web_chat_handle(conn, "bob", "r77", "#lisbon")
-            db.ensure_web_chat_handle(conn, "alice", "r77", "#lisbon")
+            db.register_room(conn, "r77", "erin", origin="talk")
+            db.ensure_web_chat_handle(conn, "erin", "r77", "#team")
+            db.ensure_web_chat_handle(conn, "dave", "r77", "#team")
             count = conn.execute(
                 "SELECT COUNT(*) c FROM web_chat_rooms WHERE token = 'r77'"
             ).fetchone()["c"]

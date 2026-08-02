@@ -469,5 +469,5 @@ class TestTasksFilePattern:
         assert not TASKS_FILE_PATTERN.match("README.md")
         assert not TASKS_FILE_PATTERN.match("notes.txt")
         assert not TASKS_FILE_PATTERN.match("TASKS.txt")
-        assert not TASKS_FILE_PATTERN.match("ZORG.md")
+        assert not TASKS_FILE_PATTERN.match("ISTOTA.md")
         assert not TASKS_FILE_PATTERN.match("_TASKS.md")

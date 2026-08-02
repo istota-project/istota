@@ -175,7 +175,7 @@ istota-skill money portfolio snapshots
 
 # Current state: total value, allocation by asset class / account / account
 # type / group / geography, aggregated holdings with P&L
-istota-skill money portfolio summary [--snapshot ID] [--group Alice]
+istota-skill money portfolio summary [--snapshot ID] [--group Retirement]
 
 # Value over time, optionally stacked
 istota-skill money portfolio history [--group-by total|group|account_type|asset_class] [--group G]

@@ -11,8 +11,8 @@ from istota.skills import devbox
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
-    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-    monkeypatch.setenv("ISTOTA_DEVBOX_CONTAINER", "devbox-alice")
+    monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+    monkeypatch.setenv("ISTOTA_DEVBOX_CONTAINER", "devbox-bob")
     monkeypatch.setenv("ISTOTA_DEVBOX_DOCKER_CLI", "/usr/bin/docker")
     monkeypatch.delenv("ISTOTA_DEVBOX_EXEC_TIMEOUT", raising=False)
     monkeypatch.delenv("ISTOTA_DEVBOX_MAX_OUTPUT_BYTES", raising=False)
@@ -22,7 +22,7 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
 
 
-def _ownership_sequence(*, owner: str = "alice", running: bool = True) -> list[tuple[int, bytes, bytes]]:
+def _ownership_sequence(*, owner: str = "bob", running: bool = True) -> list[tuple[int, bytes, bytes]]:
     """The _check_owned() helper makes two inspect calls. Return the standard
     "container is running, owned by current user" response pair."""
     return [
@@ -39,11 +39,11 @@ def _drain(returns):
 
 class TestContainerName:
     def test_uses_env_var(self):
-        assert devbox._container_name() == "devbox-alice"
+        assert devbox._container_name() == "devbox-bob"
 
     def test_falls_back_to_user_id(self, monkeypatch):
         monkeypatch.delenv("ISTOTA_DEVBOX_CONTAINER")
-        assert devbox._container_name() == "devbox-alice"
+        assert devbox._container_name() == "devbox-bob"
 
     def test_returns_none_when_unset(self, monkeypatch):
         monkeypatch.delenv("ISTOTA_DEVBOX_CONTAINER")
@@ -51,8 +51,8 @@ class TestContainerName:
         assert devbox._container_name() is None
 
     @pytest.mark.parametrize("bad", [
-        "devbox alice",          # space
-        "devbox-alice;rm -rf /", # shell metachars
+        "devbox bob",          # space
+        "devbox-bob;rm -rf /", # shell metachars
         "../escape",              # path traversal
         "$(whoami)",              # command substitution
     ])
@@ -90,7 +90,7 @@ class TestTruncate:
 
 class TestValidateCommand:
     def test_accepts_normal(self):
-        assert devbox._validate_command("dig MX cynium.com") is None
+        assert devbox._validate_command("dig MX example.com") is None
 
     def test_rejects_nul_byte(self):
         err = devbox._validate_command("echo hi\x00; rm -rf /")
@@ -141,7 +141,7 @@ class TestValidateHostPath:
         nc = tmp_path / "nc"
         nc.mkdir()
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(nc))
-        candidate = nc / "Users" / "alice" / "f.txt"
+        candidate = nc / "Users" / "bob" / "f.txt"
         candidate.parent.mkdir(parents=True)
         candidate.write_text("hi")
         assert devbox._validate_host_path(candidate, must_exist=True) is None
@@ -232,7 +232,7 @@ class TestExec:
         assert result["stdout"] == "hi\n"
         exec_argv = invocations[-1]
         assert exec_argv[0] == "exec"
-        assert "devbox-alice" in exec_argv
+        assert "devbox-bob" in exec_argv
         assert exec_argv[-3] == "bash"
         assert exec_argv[-2] == "-c"
         assert exec_argv[-1] == "echo hi"
@@ -348,7 +348,7 @@ class TestCp:
         result = devbox.cmd_cp_in(args)
         assert result["status"] == "ok"
         assert calls[-1][0] == "cp"
-        assert calls[-1][2] == "devbox-alice:/workspace/a.txt"
+        assert calls[-1][2] == "devbox-bob:/workspace/a.txt"
 
     def test_cp_in_rejects_path_outside_allowlist(self):
         args = type("A", (), {"src": "/etc/passwd", "dest": "/workspace/p"})()
@@ -392,7 +392,7 @@ class TestStatus:
     def test_status_parses_inspect_output(self, monkeypatch):
         # status now also surfaces the owner label as the 6th field.
         seq = iter([
-            (0, b"true|2026-05-13T10:00:00Z|istota-devbox:latest|deadbeef1234abcd|0|alice", b""),
+            (0, b"true|2026-05-13T10:00:00Z|istota-devbox:latest|deadbeef1234abcd|0|bob", b""),
             (0, b"42M\n", b""),
         ])
         monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: next(seq))
@@ -403,7 +403,7 @@ class TestStatus:
         assert result["id"] == "deadbeef1234"
         assert result["restart_count"] == 0
         assert result["home_size"] == "42M"
-        assert result["owner"] == "alice"
+        assert result["owner"] == "bob"
 
     def test_status_propagates_inspect_error(self, monkeypatch):
         monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: (1, b"", b"No such container"))
@@ -449,7 +449,7 @@ class TestReset:
         wipe = [c for c in calls if c[0] == "exec" and "find" in " ".join(c)]
         assert wipe and "-u" in wipe[0] and "root" in wipe[0]
         # restart fires
-        assert calls[-1] == ["restart", "devbox-alice"]
+        assert calls[-1] == ["restart", "devbox-bob"]
 
 
 class TestMain:

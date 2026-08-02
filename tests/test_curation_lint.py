@@ -46,7 +46,7 @@ class TestFindTemporalBullets:
 
     def test_temporal_under_behavior_heading_is_skipped(self):
         doc = _doc(
-            "## Communication style\n\n- started signing emails as Zorg on 2026-04-12\n\n"
+            "## Communication style\n\n- started signing emails as Istota on 2026-04-12\n\n"
         )
         out = find_temporal_bullets(doc, kg_facts_text="")
         assert out == []
