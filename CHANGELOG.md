@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-08-01
+
 ### Added
 
 - New portfolio positions classify themselves. Importing a snapshot looks each new ticker up in public market data (falling back to reading the export's own descriptions) and files it under the right asset class, sub-class and geography, so the allocation charts work without hand-classifying every symbol. Auto-filled rows are badged in Money settings and editing one makes your version permanent — an automatic guess never overwrites you. An Auto-classify button and a `portfolio autoclass` command fill in symbols imported before this existed.
@@ -1379,7 +1381,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.37.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.38.0...main
+[0.38.0]: https://gitlab.com/cynium/istota/-/releases/v0.38.0
 [0.37.0]: https://gitlab.com/cynium/istota/-/releases/v0.37.0
 [0.36.0]: https://gitlab.com/cynium/istota/-/releases/v0.36.0
 [0.35.0]: https://gitlab.com/cynium/istota/-/releases/v0.35.0
