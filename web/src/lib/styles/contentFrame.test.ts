@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readCascade, readLayer } from './cascade';
 
 /**
  * `.content-frame` — the wide-dashboard content column: a cap, centred in
@@ -19,7 +20,7 @@ import { join } from 'node:path';
  * and nothing about the rendered page says so.
  */
 
-const appCss = readFileSync(join(process.cwd(), 'src/app.css'), 'utf8');
+const appCss = readCascade();
 const healthLayout = readFileSync(join(process.cwd(), 'src/routes/health/+layout.svelte'), 'utf8');
 const portfolioLayout = readFileSync(
   join(process.cwd(), 'src/routes/money/portfolio/+layout.svelte'),
@@ -51,8 +52,11 @@ const adopters = [
 const markupOnly = (source: string): string =>
   source.replace(/<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
 
-/** The `:root` block — the token roster, excluding the theme and media blocks. */
-const rootBlock = appCss.slice(appCss.indexOf(':root {'), appCss.indexOf('*,\n*::before'));
+/** The `:root` block — the token roster, excluding the theme and media blocks.
+ *  Read from the token layer rather than the whole cascade: the marker that
+ *  used to end it (`*, *::before`) is in a different file now. */
+const tokensCss = readLayer('tokens');
+const rootBlock = tokensCss.slice(tokensCss.indexOf(':root {'), tokensCss.indexOf('@media'));
 
 const tokenValue = (css: string, name: string): string | undefined =>
   css.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1]?.trim();

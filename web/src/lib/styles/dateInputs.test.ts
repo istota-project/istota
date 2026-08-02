@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { readCascade, layerPaths } from './cascade';
 
 /**
  * iOS renders a date input with no value as *nothing* — there is no
@@ -19,7 +20,8 @@ import { join, resolve } from 'node:path';
  */
 
 const SRC = resolve(process.cwd(), 'src');
-const css = readFileSync(join(SRC, 'app.css'), 'utf8');
+const css = readCascade();
+const TOKEN_HOME = new Set(layerPaths());
 
 const TEMPORAL_TYPES = ['date', 'datetime-local', 'time', 'month', 'week'];
 
@@ -102,7 +104,10 @@ describe('app.css temporal input sizing', () => {
 describe('no stylesheet overrides the temporal input floor', () => {
   const offenders: string[] = [];
   for (const file of stylesheets(SRC)) {
-    if (file.endsWith('app.css')) continue;
+    // Every layer of the token home, not just app.css: the floor itself now
+    // lives in primitives.css, and scanning it would report the rule as its
+    // own override.
+    if (TOKEN_HOME.has(file)) continue;
     for (const m of stripComments(readFileSync(file, 'utf8')).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const selector = m[1].replace(/\s+/g, ' ').trim();
       const targetsTemporal = TEMPORAL_TYPES.some((t) => selector.includes(`input[type='${t}']`));

@@ -7,7 +7,7 @@ Root `AGENTS.md` ("Web UI" section) carries the _rationale_ — why `HintPopover
 ## Before you write anything
 
 1. `cat src/lib/components/ui/index.ts` — the full primitive inventory. If a primitive fits, use it; do not hand-roll a second one.
-2. `grep -n '^\s*--' src/app.css` — the token roster. Every color you write must be an existing token, or a new token pair added to **both** theme blocks in `app.css`.
+2. `grep -n '^\s*--' src/lib/styles/tokens.css` — the token roster. Every color you write must be an existing token, or a new token pair added to **both** theme blocks in `tokens.css`.
 3. `ls src/lib/platform/` — the native-shell facade. Anything that behaves differently inside the iOS app goes through it and nowhere else.
 4. Find the nearest sibling page and read it. A new money page copies `routes/money/transactions`; a new module settings page copies `routes/feeds/settings`. Match its structure before inventing one.
 5. `npm run lint:design` before you commit. Nine rules: a color literal in any notation (`raw-color`), a `var()` naming a token nothing defines — two rules, split by whether a fallback is written (`undefined-token`, `undefined-token-fallback`) — a spacing value off the scale (`off-scale-space`), a redefined primitive class (`redefined-primitive`), a per-page theme override (`theme-override`), a native dialog (`native-dialog`, which catches `confirm`/`alert` bare as well as on `window`), a deep import past the barrel (`deep-import`), and a `:global(.money-*)` written outside the money layout (`stray-money-global`).
@@ -200,7 +200,22 @@ The one exception is `routes/+error.svelte`, which renders no `AppShell` — an 
 
 **Loading and empty states** use `.center-msg`, the one shared whole-pane status message, and the page holds its chrome back behind the load so the message centres on the pane rather than under a half-drawn header. The older `.loading` / `.error-msg` pair survives only for a line inside a card.
 
-**Small shared blocks live as globals in `app.css`**, because each had been written out verbatim in a dozen files. Use them; do not re-declare them.
+**The stylesheet is four layers behind `src/app.css`, and the order is the contract.** `app.css` is now nothing but an ordered `@import` list; the rules live in `lib/styles/`.
+
+| Layer            | Holds                                                                                                                   | Travels?      |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `tokens.css`     | the palette, the scales, both themes, the text-scale roots                                                              | yes           |
+| `primitives.css` | the reset, the shared blocks below, `:focus-visible`, the iOS input fixes, `.control-row`, `.content-frame`, `body`/`a` | yes           |
+| `app-shell.css`  | `.app-nav`, the wordmark and sigil, `.app-content`, `.center-msg`                                                       | no — this app |
+| `markdown.css`   | `.markdown`, `.prose` links, the highlight.js palette                                                                   | optional      |
+
+The three module sheets (`settings.css`, `cards.css`, `sidebar.css`) load between the reusable layers and the app's own, which is where they were before the split and where their specificity assumes they are. `tokens.css` leads because it declares custom properties on `:root` and nothing else, so it can win no cascade it does not already own — that is what made moving it to the front safe, and it is the only thing the split reordered.
+
+Layers 1 and 2 are the design system: they name no page, no module and no product, and a second project takes the pair unchanged and writes its own `app-shell.css`. The brand seam is the surface/text/border/accent values in `tokens.css`'s two theme blocks — everything downstream reads them by name. Splitting the file is what makes that line visible; as one 1267-line file it was a matter of knowing which third you were in.
+
+Tests read the stylesheet through `lib/styles/cascade.ts` (`readCascade()` for "does a rule exist anywhere", `readLayer('tokens')` for "what does `:root` declare"), which parses the import list out of `app.css` rather than restating it. Do not hardcode a layer path in a test.
+
+**Small shared blocks live as globals in `lib/styles/primitives.css`** (loaded by `app.css`, see the layering above), because each had been written out verbatim in a dozen files. Use them; do not re-declare them.
 
 - `.content-frame` — the wide-dashboard content column: caps at `--content-max` (1280px) and centres in whatever pane it is given. Health, money's portfolio and money's reports share it; health carried the four declarations privately until portfolio wanted the same column. Geometry only, no padding — the adopter's own shell pads it (`.health-frame`, `.report-frame`), and spacing stays at the call site the way `.micro-label`'s does. It caps **content, not chrome**: a bar above it (the app bar, a money section header) stays full-bleed. Pinned by `lib/styles/contentFrame.test.ts`, which fails if a module restates the cap instead of reading the token, or frames a section header.
 - `.micro-label` — the small uppercase section heading or `<dt>` label (43 hand-written copies across 23 files). Deliberately typography only: a section heading and a `<dt>` want different space around them, and folding margins in is what produced the variants. Spacing stays at the call site.

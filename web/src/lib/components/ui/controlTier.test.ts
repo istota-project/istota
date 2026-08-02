@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readCascade } from '$lib/styles/cascade';
 
 /**
  * The field tier — the bigger, squarer controls a body form/toolbar uses, as
@@ -17,7 +18,7 @@ import { join } from 'node:path';
  */
 
 const uiDir = join(process.cwd(), 'src/lib/components/ui');
-const appCss = readFileSync(join(process.cwd(), 'src/app.css'), 'utf8');
+const appCss = readCascade();
 
 /** The `:root` block — the token roster, excluding the theme and media blocks. */
 const rootBlock = appCss.slice(appCss.indexOf(':root {'), appCss.indexOf('*,\n*::before'));

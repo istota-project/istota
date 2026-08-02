@@ -82,6 +82,27 @@ describe('raw-color', () => {
     expect(rules('.x { color: #abc; }', 'src/app.css')).toHaveLength(0);
   });
 
+  // app.css was one file until it was split into four layers behind
+  // @imports. The literals did not move out of the token home — the token
+  // home became four files — so each layer keeps the exemption the single
+  // file had. Miss one and the split reports 82 "violations" that are the
+  // palette itself.
+  it.each([
+    'src/lib/styles/tokens.css',
+    'src/lib/styles/primitives.css',
+    'src/lib/styles/app-shell.css',
+    'src/lib/styles/markdown.css',
+  ])('does not lint %s, a layer of the token home', (file) => {
+    expect(rules('.x { color: #abc; }', file)).toHaveLength(0);
+  });
+
+  it('still lints the module sheets, which are not the token home', () => {
+    // settings.css / cards.css / sidebar.css were always separate files and
+    // were always linted. The split must not quietly widen the exemption to
+    // everything under lib/styles.
+    expect(rules('.x { color: #abc; }', 'src/lib/styles/settings.css')).toContain('raw-color');
+  });
+
   it('does not lint tests, whose fixtures are the literals', () => {
     expect(rules("expect(meta).toBe('#111111');", 'src/lib/theme.test.ts')).toHaveLength(0);
   });
@@ -297,6 +318,15 @@ describe('off-scale-space', () => {
 
   it('does not lint app.css, which defines the ramp', () => {
     expect(rules(styled('padding: 0.3rem;'), 'src/app.css')).toHaveLength(0);
+  });
+
+  it.each([
+    'src/lib/styles/tokens.css',
+    'src/lib/styles/primitives.css',
+    'src/lib/styles/app-shell.css',
+    'src/lib/styles/markdown.css',
+  ])('does not lint %s, a layer of the same file', (file) => {
+    expect(rules(styled('padding: 0.3rem;'), file)).toHaveLength(0);
   });
 });
 

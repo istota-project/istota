@@ -1,0 +1,436 @@
+/* The app-agnostic layer: the reset, the shared blocks, the focus ring, the
+   platform input fixes and the two layout scopes.
+
+   LAYER 2 of four, and the second half of the reusable pair — nothing here
+   names a page or a module, and every rule reads a token from `tokens.css`
+   rather than a literal.
+
+   In source order, which is also cascade order:
+     - the box-sizing reset
+     - the named shared blocks: .micro-label, .caption, .muted, .empty,
+       .spinner + @keyframes spin, .banner and its status variants
+     - one global :focus-visible ring, and the text-field exception to it
+     - the iOS date-input and 16px-zoom-floor fixes (see @media pointer:coarse)
+     - .control-row (the field tier) and .content-frame (the content column)
+     - body / a base rules, .nav-hang, .overlay-safe
+
+   Each block carries its own rationale below; AGENTS.md "Small shared blocks"
+   is the index. Pinned by contentFrame / controlTier / touchZoom / dateInputs
+   / captions tests in this directory. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* The small uppercase heading over a section, a sidebar list, or a definition
+   term. Written out in some form 43 times across 23 files — the typography was
+   consistent (dim, --text-xs, uppercase, 0.04-0.05em) and only the margins
+   varied, so the type lives here and the spacing stays at the call site.
+
+   Deliberately typography-only: a section heading and a <dt> want different
+   space around them, and folding that in is what produced the variants. */
+.micro-label {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* The two supporting-text roles, and the lowercase siblings of .micro-label
+   above. Both were everywhere and named nowhere: "small dim text" was spelled
+   `.hint` on four pages, `.meta` on five more and `.small` on two, and
+   "de-emphasized at the current size" was `.muted` in nine files. settings.css
+   had them already, but scoped under `.settings`, so a page anywhere else
+   could only get them by writing them out again.
+
+   They are two roles rather than one because --text-dim (#666) and
+   --text-muted (#888) are two distinct steps. `.caption` takes the size down
+   with the colour — a hint under a field, a timestamp under a title, the
+   detail line under a value. `.muted` changes colour ONLY, so it can be
+   dropped onto a span mid-sentence without shrinking it.
+
+   Typography-only, for the reason .micro-label is: spacing varied at every
+   call site and folding it in is what produced the variants. A `margin: 0`
+   reset on a <p> stays with the <p>. */
+.caption {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+/* "Nothing here yet" inside a card or a section — a list with no rows, a
+   panel with no data. Fourteen files carried this verbatim.
+
+   Distinct from .center-msg below, which is for a state that IS the whole
+   pane. `.small` is the tighter variant for a sub-list inside a card; the
+   three copies at 0.75rem win over the two at 0.5rem. */
+.empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.empty.small {
+  padding: 0.75rem 0;
+  font-size: var(--text-sm);
+}
+
+/* An inline "working…" spinner, beside its label. Declared in three files,
+   and @keyframes is scoped per component in Svelte — so the three were three
+   separate animations driving three separate rules. */
+.spinner {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A tinted inline message box: a form error, a "module disabled" note, the
+   result of an action. Global rather than scoped to a settings page — the same
+   shape was independently reimplemented as `.msg` on twelve health pages, each
+   with the status fills written out as rgba() literals and so frozen to their
+   dark values.
+
+   Variants are named for the status scale. `.error` is kept as the alias for
+   `.danger` because a dozen call sites use it and the two mean the same thing.
+   `.info` is blue, which it was not: it rendered green, so every "this module
+   is disabled" note read as a confirmation. Anything that genuinely reports a
+   completed action uses `.success`. */
+.banner {
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-card);
+  font-size: var(--text-sm);
+}
+.banner.error,
+.banner.danger {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+.banner.warn {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+}
+.banner.info {
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+}
+.banner.success {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
+/* One keyboard-focus ring for everything focusable. :focus-visible, so a mouse
+   click never draws it — which is what makes a global rule safe here, and what
+   the per-component `outline: none` rules were reaching for by hand.
+   A full-bleed row (a money table row) pulls the ring inside itself with
+   `outline-offset: calc(-1 * var(--focus-ring-width))` rather than removing it. */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Text fields are the exception to the rule above. A browser treats a focused
+   text input as focus-visible however it was focused, so unlike a button they
+   draw the ring on a plain mouse click too — which reads as an error state
+   rather than a focus hint. They keep a caret and their own focus styling, so
+   the ring is dropped for them alone. Checkboxes, radios and the
+   input-as-button types are left out: they have no caret, and nothing but the
+   ring would show that they are focused. */
+input:not(
+    [type='checkbox'],
+    [type='radio'],
+    [type='button'],
+    [type='submit'],
+    [type='reset'],
+    [type='file']
+  ):focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
+/* iOS Safari gives date/time inputs a native control with an intrinsic content
+   width that ignores `width`/`max-width` while the platform appearance is on —
+   so a field sized to its container on desktop overflows the card on an iPhone.
+   Dropping the native appearance makes them size like any other text input. */
+input[type='date'],
+input[type='datetime-local'],
+input[type='time'],
+input[type='month'],
+input[type='week'] {
+  -webkit-appearance: none;
+  appearance: none;
+  /* An unset value renders nothing at all on iOS — there is no `mm/dd/yyyy`
+     hint the way desktop has one — so with the native control gone the box
+     collapses horizontally exactly as the pseudo-element below collapses it
+     vertically, and an empty field reads as a blank sliver rather than a date
+     you can tap. Floor it at a date's width, capped at the container so the
+     overflow this block exists to fix cannot come back: a floor written as a
+     bare length would reintroduce it on the narrowest cards. */
+  min-width: min(100%, 8em);
+  max-width: 100%;
+}
+
+/* With the native appearance gone, iOS centres the value text and collapses an
+   empty input to zero height. Pin both back to the desktop rendering. */
+input[type='date']::-webkit-date-and-time-value,
+input[type='datetime-local']::-webkit-date-and-time-value,
+input[type='time']::-webkit-date-and-time-value,
+input[type='month']::-webkit-date-and-time-value,
+input[type='week']::-webkit-date-and-time-value {
+  text-align: left;
+  min-height: 1.2em;
+}
+
+/* iOS zooms the page whenever a focused input, select or textarea computes
+   under 16px, and then does not cleanly zoom back out — so opening any dialog
+   with a field in it left the app scaled up with that field filling the width.
+   Every control here renders at a small type token (--text-sm is 12-14px
+   depending on the text-scale preference), so this fired on every form in the
+   app rather than on any one of them.
+
+   The floor is the fix rather than a locked viewport: `maximum-scale=1` would
+   end the zoom by ending pinch-zoom, and only inside the installed app at that.
+
+   Two rules, because a control's size arrives two ways. The type tokens are
+   redefined *on the control itself* — custom properties inherit, so whichever
+   `font-size: var(--text-sm)` rule a component wins with resolves against
+   these, and no component needs editing (nor can one quietly opt out by
+   out-specifying a global rule). `max()` rather than a flat 16px, so the large
+   text-scale preference is never scaled back *down*. Every token below the line
+   is listed whether or not a control names one today — touchZoom.test.ts fails
+   if a new one is added without a floor. Checkboxes, radios and the two
+   types that render no text (`range`, `color`) are excluded: some platforms
+   size the box from the font.
+
+   The second rule is the fallback for a control that declares no `font-size` at
+   all, since the UA font is ~13px and also under the line. A control naming a
+   token is already handled above, and one taking its size from a wrapper via
+   `font: inherit` is reached by neither — that is a call-site bug, and
+   touchZoom.test.ts is the net for it. It is wrapped in
+   `:where()` to make it weightless: the `:not()` chain above scores higher than
+   almost every component rule, so left unwrapped this would stop being a
+   fallback and start clamping a control that asks for something larger. It
+   names --text-sm, which on the control is already floored.
+
+   The one control this does not reach is the chat composer's textarea, whose
+   size is inherited from the pill around it (every internal metric there is
+   em-relative to that one font-size). It carries its own guard — see the
+   viewport swap in Composer.svelte. */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+  select,
+  textarea {
+    --text-2xs: max(0.55rem, 16px);
+    --text-xs: max(0.7rem, 16px);
+    --text-sm: max(0.75rem, 16px);
+    --text-base: max(0.85rem, 16px);
+  }
+
+  :where(
+    input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+    select,
+    textarea
+  ) {
+    font-size: var(--text-sm);
+  }
+
+  /* The full-width Select trigger is a <button>, so it never zoomed and needs
+     no floor of its own — but it is the settings-form sibling of a text input,
+     and Select.svelte pins its line-height for the express purpose of matching
+     input height ("~4px shorter than the inputs it sits beside in forms").
+     Floating the inputs up without it puts the two back out of step, which is
+     visible wherever a form stacks a field over a dropdown. Same mechanism, so
+     its own `font-size: var(--text-sm)` resolves floored.
+
+     Deliberately only the `--full` variant. The compact `sm`/`md` triggers sit
+     in dense toolbars beside Chips and Buttons, which are actions rather than
+     fields and stay at their own size — see the shared-height note in
+     web/AGENTS.md. */
+  .ui-select-trigger--full {
+    --text-sm: max(0.75rem, 16px);
+  }
+
+  /* The field tier has to rise with the floor above, or the row it exists to
+	   even out lands back where it started: the input grows to fit 16px text
+	   while the Button and Select beside it keep a height set in rem.
+
+	   32px is what clears a 16px-floored input plus its padding at every text
+	   scale — the small scale is the tight one, since the text stops shrinking
+	   at the floor while the rem tier keeps going. Deliberately not the 44px
+	   touch minimum: the job here is keeping the row level, and reaching a
+	   target size is what the out-of-flow ::before overlays are for (see the
+	   touch-target note in web/AGENTS.md) rather than a reason to grow every
+	   field. `max()` so a raised browser base size still wins. */
+  :root {
+    --control-height-lg: max(1.75rem, 32px);
+  }
+}
+
+/* The field tier's scope. A body form or toolbar — anywhere a text input
+   shares a row with buttons and selects — marks its container with this, and
+   every control inside resolves the taller, squarer box.
+
+   Inherited custom properties rather than a size prop per call site, which is
+   the same mechanism as the touch floor above and buys the same two things: a
+   container gets the whole row right without 13 call sites being found and
+   edited, and a control cannot quietly opt out by out-specifying a rule.
+   Both compact tiers collapse onto the field height, not just `md` — a row
+   routinely mixes a default Button (md) with a Select, whose default is `sm`.
+
+   Deliberately tokens only, no layout: the containers that take this class
+   already own their own flex arrangement, so adding it can never move
+   anything sideways. */
+.control-row {
+  --control-height-sm: var(--control-height-lg);
+  --control-height-md: var(--control-height-lg);
+  --control-radius: var(--radius-sm);
+}
+
+/* The wide-dashboard content column. A module whose pages are grids, charts
+   and wide tables — health, money's portfolio — marks the box its content
+   lives in with this, and the column stops growing at `--content-max` and
+   centres in whatever pane it was given.
+
+   Health carried this geometry privately as `.health-frame`, which is what
+   made it worth extracting: portfolio wanted the same column and the only way
+   to get it was to write the four declarations out a second time, at which
+   point the two caps drift the way the four record-table implementations did
+   before the money shell.
+
+   Deliberately geometry only, no padding — the inset a module wants differs
+   (health pads the frame itself; the money pages pad their own sections, and
+   baking a value in here would land on top of theirs). Spacing stays at the
+   call site, the same division `.micro-label` draws.
+
+   It caps *content*, not chrome. A bar above the content — the app bar, a
+   money section header — stays full-bleed and keeps spanning the pane, the
+   way health's app bar already does over its framed column.
+
+   The flex column matters as much as the cap: a page's whole-pane state
+   (`.center-msg`) centres itself with `flex: 1`, which needs an unbroken chain
+   of growing flex columns up to `.shell-main`. `flex: 1 0 auto` — basis auto
+   and no shrink — so content taller than the pane still extends the scroll
+   area rather than being pinned to it. */
+.content-frame {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+}
+
+/* Brings a raw <input>/<select> into the row — the components resolve the
+   channel themselves, but a page's own hand-rolled control does not.
+   `:where()` keeps it weightless so a call site's own rules still win.
+
+   The line-height is what keeps the input's *natural* height under the tier at
+   every text scale; the box then comes from min-height, and a single-line
+   input centres its value in it. Textareas are excluded from both: a
+   multi-line control is sized by its rows, and does not belong in a row of
+   inline controls anyway. */
+.control-row
+  :where(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color'])),
+.control-row :where(select) {
+  min-height: var(--control-height-md);
+  line-height: 1.2;
+}
+
+/* Scrollbars are left entirely to the platform. Do NOT add `::-webkit-scrollbar`
+   rules (or `scrollbar-width`/`scrollbar-color`) to a scroll container: styling
+   one at all opts that element out of the OS overlay scrollbar, so instead of a
+   thumb that fades in while scrolling, it gets a permanent classic scrollbar
+   with a track occupying layout width. The app is one screen tall and scrolls
+   inside its panes, so that turns into a strip beside every list. Hiding a
+   scrollbar outright (`display: none`) is a different thing and is fine where a
+   control has no room for one — the composer textarea does that. */
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  /* Definite height, so a flex child can resolve `flex: 1` against it — that is
+     what lets AppShell be `height: 100%` instead of subtracting a hardcoded nav
+     height from 100vh. dvh tracks the *visible* viewport, so a collapsing mobile
+     browser toolbar no longer pushes the bottom row off-screen; the 100% above
+     stays as the fallback for pre-dvh browsers.
+
+     --app-height is set by lib/viewport.ts in an installed iOS web app only,
+     where a WebKit regression (bug 297779) leaves dvh short after the soft
+     keyboard closes. Unset everywhere else, so every other context keeps dvh.
+
+     --kb-height is the soft keyboard, and only the native shell ever sets it:
+     the viewport units deliberately ignore virtual keyboards, so nothing here
+     shrinks on its own when the keyboard arrives and a bottom-docked composer
+     ends up behind it. The shell knows the height before the keys animate, so
+     subtracting it here is what puts the composer above the keyboard in the
+     same moment. 0 in every browser, where the WebView cannot report it. */
+  height: calc(var(--app-height, 100dvh) - var(--kb-height, 0px));
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--surface-base);
+  color: var(--text-primary);
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+}
+
+a {
+  color: var(--text-primary);
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+/* Use on a flex nav container whose first chip/link is the leftmost element of
+   its row. Pulls the row left by one chip's horizontal padding so chip TEXT
+   visually aligns with the heading text on the row above. */
+.nav-hang {
+  margin-inline-start: calc(-1 * var(--chip-padding-x));
+}
+
+/* Safe-area padding for a viewport-pinned overlay backdrop.
+
+   There is no way to enforce this from above: a `position: fixed` element is
+   out of the document flow, so no ancestor's padding — not .app-content's, not
+   AppShell's — reaches it. Every full-bleed overlay has to carry the insets
+   itself, and this is that expression written once instead of per component.
+
+   Apply it to the BACKDROP, not the panel: the scrim must still run edge to
+   edge (it covers the status-bar strip, which is the point), and it is the
+   backdrop's padding that keeps the panel inside it clear of the notch, the
+   Dynamic Island and the home indicator. A panel sized against the backdrop
+   should use `max-height: 100%`, which resolves against the padded content box
+   and so tracks the insets for free.
+
+   Set --overlay-pad-block / --overlay-pad-inline to the padding the overlay
+   wants where there are no insets (desktop, and any browser tab); each edge
+   then takes whichever of the two is larger, so this is inert there. */
+.overlay-safe {
+  padding-top: max(var(--overlay-pad-block, 1rem), var(--safe-top));
+  padding-bottom: max(var(--overlay-pad-block, 1rem), var(--safe-bottom));
+  padding-left: max(var(--overlay-pad-inline, 1rem), var(--safe-left));
+  padding-right: max(var(--overlay-pad-inline, 1rem), var(--safe-right));
+}

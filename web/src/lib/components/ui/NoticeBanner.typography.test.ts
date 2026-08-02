@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import { readCascade } from '$lib/styles/cascade';
 
 /**
  * `NoticeBanner` has two type sizes and they belong to the component: the title
@@ -25,7 +26,7 @@ import { join, relative, resolve } from 'node:path';
  */
 
 const SRC = resolve(process.cwd(), 'src');
-const appCss = readFileSync(join(SRC, 'app.css'), 'utf8');
+const appCss = readCascade();
 const componentPath = join(SRC, 'lib/components/ui/NoticeBanner.svelte');
 const component = readFileSync(componentPath, 'utf8');
 

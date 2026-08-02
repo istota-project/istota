@@ -1,0 +1,283 @@
+/* Rendered prose: the `.markdown` container and the highlight.js palette.
+
+   LAYER 4 of four, and optional — a project that renders no markdown drops
+   this file and loses nothing else. It is separate from `primitives.css`
+   because a syntax-highlighting palette is a third-party contract (the class
+   names are highlight.js's, not ours) rather than part of the design language,
+   and because at ~270 lines it was a fifth of app.css on its own.
+
+   `.markdown` and `.prose` share the link rule: this is the ONE place a
+   content link's colour is decided. A surface joins by putting `prose` on its
+   container, never by writing a local `a` rule. */
+
+/* Rendered markdown — shared by every chat surface that draws bot output
+   (the Message answer body + command output). Global so the rules apply across
+   component boundaries; the `.markdown` container class scopes them to rendered
+   output only. */
+.markdown p {
+  margin: 0 0 1rem;
+}
+.markdown p:last-child {
+  margin-bottom: 0;
+}
+/* The container supplies the space below its last block; a trailing margin
+   lands on top of it and reads as a gap twice the size. `p` was already reset
+   above (that rule also covers a nested last paragraph, inside a blockquote);
+   this covers every other block type — a reply ending in a list, a quote or a
+   fenced code block, all of which carry `0 0 1rem`. Direct children only, so
+   nested list rhythm is untouched. */
+.markdown > *:last-child {
+  margin-bottom: 0;
+}
+.markdown ul,
+.markdown ol {
+  margin: 0 0 1rem;
+  padding-left: 1.3rem;
+}
+.markdown li {
+  margin: 0.5rem 0;
+}
+.markdown li > ul,
+.markdown li > ol {
+  margin: 0.5rem 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 0.4rem 0 0.3rem;
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+.markdown blockquote {
+  margin: 0 0 1rem;
+  padding: 0.1rem 0.7rem;
+  border-left: 3px solid var(--border-default);
+  color: var(--text-secondary);
+}
+.markdown code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  background: #2d2d2d;
+  color: #e6e6e6;
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.25rem;
+}
+.markdown pre {
+  background: #2d2d2d;
+  color: #e6e6e6;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.35rem;
+  padding: 0.5rem 0.65rem;
+  overflow-x: auto;
+  margin: 0 0 1rem;
+}
+.markdown pre code {
+  background: none;
+  padding: 0;
+}
+/* Links inside rendered body content. This is the ONE place a content link's
+   color is decided — chat markdown, the briefings reader and feed entries all
+   draw prose from outside the app and must read the same. A surface joins by
+   putting `prose` on its container, not by writing a local `a` rule; that is
+   how the app ended up with three different link treatments (amber / plain
+   body text / hard-coded #aaa) for the same kind of content. */
+.markdown a,
+.prose a {
+  color: var(--link);
+  text-decoration: none;
+}
+/* Hover adds the underline and nothing else. Shifting the color as well made
+   the link move on the amber ramp — lighter in dark, darker in light — which
+   reads as a second, competing signal for the one state change. */
+.markdown a:hover,
+.prose a:hover {
+  text-decoration: underline;
+}
+.markdown del {
+  color: var(--text-muted);
+}
+.markdown table {
+  border-collapse: collapse;
+  margin: 0 0 1rem;
+  font-size: var(--text-sm);
+  display: block;
+  overflow-x: auto;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border-subtle);
+  padding: 0.2rem 0.45rem;
+  text-align: left;
+}
+.markdown th {
+  background: var(--surface-base);
+  font-weight: 600;
+}
+
+:root[data-theme='light'] .markdown code,
+:root[data-theme='light'] .markdown pre {
+  background: #f3f3f5;
+  color: #1a1a1a;
+}
+
+/* highlight.js token palette. The renderer (src/lib/markdown) tags fenced code
+   with `.hljs` + per-token `.hljs-*` spans; these rules color them. Dark values
+   sit on the #2d2d2d block background; the light overrides below sit on #ececef.
+   Tuned to the One Dark / One Light families for familiarity. */
+.markdown .hljs-comment,
+.markdown .hljs-quote {
+  color: #7f848e;
+  font-style: italic;
+}
+.markdown .hljs-keyword,
+.markdown .hljs-selector-tag,
+.markdown .hljs-literal,
+.markdown .hljs-section,
+.markdown .hljs-doctag,
+.markdown .hljs-name {
+  color: #c678dd;
+}
+.markdown .hljs-string,
+.markdown .hljs-regexp,
+.markdown .hljs-addition,
+.markdown .hljs-attribute,
+.markdown .hljs-meta .hljs-string {
+  color: #98c379;
+}
+.markdown .hljs-number,
+.markdown .hljs-symbol,
+.markdown .hljs-bullet,
+.markdown .hljs-link {
+  color: #d19a66;
+}
+.markdown .hljs-title,
+.markdown .hljs-title.function_,
+.markdown .hljs-section {
+  color: #61afef;
+}
+.markdown .hljs-built_in,
+.markdown .hljs-class .hljs-title,
+.markdown .hljs-title.class_,
+.markdown .hljs-type {
+  color: #e5c07b;
+}
+.markdown .hljs-variable,
+.markdown .hljs-template-variable,
+.markdown .hljs-attr,
+.markdown .hljs-selector-attr,
+.markdown .hljs-selector-class,
+.markdown .hljs-selector-id,
+.markdown .hljs-deletion {
+  color: #e06c75;
+}
+.markdown .hljs-meta,
+.markdown .hljs-comment .hljs-doctag {
+  color: #56b6c2;
+}
+.markdown .hljs-emphasis {
+  font-style: italic;
+}
+.markdown .hljs-strong {
+  font-weight: 600;
+}
+
+:root[data-theme='light'] .markdown .hljs-comment,
+:root[data-theme='light'] .markdown .hljs-quote {
+  color: #a0a1a7;
+}
+:root[data-theme='light'] .markdown .hljs-keyword,
+:root[data-theme='light'] .markdown .hljs-selector-tag,
+:root[data-theme='light'] .markdown .hljs-literal,
+:root[data-theme='light'] .markdown .hljs-doctag,
+:root[data-theme='light'] .markdown .hljs-name {
+  color: #a626a4;
+}
+:root[data-theme='light'] .markdown .hljs-string,
+:root[data-theme='light'] .markdown .hljs-regexp,
+:root[data-theme='light'] .markdown .hljs-addition,
+:root[data-theme='light'] .markdown .hljs-attribute,
+:root[data-theme='light'] .markdown .hljs-meta .hljs-string {
+  color: #50a14f;
+}
+:root[data-theme='light'] .markdown .hljs-number,
+:root[data-theme='light'] .markdown .hljs-symbol,
+:root[data-theme='light'] .markdown .hljs-bullet,
+:root[data-theme='light'] .markdown .hljs-link {
+  color: #b76b01;
+}
+:root[data-theme='light'] .markdown .hljs-title,
+:root[data-theme='light'] .markdown .hljs-title.function_,
+:root[data-theme='light'] .markdown .hljs-section {
+  color: #4078f2;
+}
+:root[data-theme='light'] .markdown .hljs-built_in,
+:root[data-theme='light'] .markdown .hljs-class .hljs-title,
+:root[data-theme='light'] .markdown .hljs-title.class_,
+:root[data-theme='light'] .markdown .hljs-type {
+  color: #c18401;
+}
+:root[data-theme='light'] .markdown .hljs-variable,
+:root[data-theme='light'] .markdown .hljs-template-variable,
+:root[data-theme='light'] .markdown .hljs-attr,
+:root[data-theme='light'] .markdown .hljs-selector-attr,
+:root[data-theme='light'] .markdown .hljs-selector-class,
+:root[data-theme='light'] .markdown .hljs-selector-id,
+:root[data-theme='light'] .markdown .hljs-deletion {
+  color: #e45649;
+}
+:root[data-theme='light'] .markdown .hljs-meta {
+  color: #0184bc;
+}
+
+/* An errored assistant turn tints its rendered answer. Global so it reaches the
+   `.markdown` answer body across the `.msg.error` row owned by Message. */
+.msg.error .markdown {
+  color: #e0a0a0;
+}
+:root[data-theme='light'] .msg.error .markdown {
+  color: #c0271d;
+}
+
+@media (max-width: 640px) {
+  /* Both blocks re-state the safe-area longhands: the padding shorthand below
+     resets them, and these rules win on source order. */
+  .app-nav {
+    padding: 0.5rem 0.75rem;
+    padding-top: max(0.5rem, var(--safe-top));
+    padding-left: max(0.75rem, var(--safe-left));
+    padding-right: max(0.75rem, var(--safe-right));
+    gap: 0.5rem;
+  }
+  .app-nav .nav-links {
+    display: none;
+  }
+  /* Wide enough that the ~44px hit areas below stay disjoint. The icons are
+     14–18px glyphs, so at the old 0.75rem their targets would have overlapped
+     and a tap in the seam would land on whichever won the stacking order —
+     which is the accidental-logout bug, not a fix for it. */
+  .app-nav .nav-right {
+    gap: 1.25rem;
+  }
+  /* Touch target, decoupled from the visible box: out of flow, so it reaches
+     the ~44px minimum without making the nav taller. Same device as
+     SidebarToggle uses in the shell header. */
+  .app-nav .nav-right .nav-icon-btn {
+    position: relative;
+  }
+  .app-nav .nav-right .nav-icon-btn::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 2.5rem;
+    height: 2.5rem;
+    transform: translate(-50%, -50%);
+  }
+  .app-content {
+    padding: 1rem 0.75rem;
+    padding-bottom: max(1rem, var(--safe-bottom));
+    padding-left: max(0.75rem, var(--safe-left));
+    padding-right: max(0.75rem, var(--safe-right));
+  }
+}

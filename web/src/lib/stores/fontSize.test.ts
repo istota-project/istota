@@ -9,6 +9,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readLayer } from '$lib/styles/cascade';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -102,7 +103,7 @@ describe('fontSize store', () => {
 });
 
 describe('font-size CSS', () => {
-  const css = readFileSync(resolve(__dirname, '../../app.css'), 'utf8');
+  const css = readLayer('tokens');
 
   // The store is inert without a matching root rule — guard against the
   // attribute being set while nothing scales.

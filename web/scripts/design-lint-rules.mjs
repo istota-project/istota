@@ -5,8 +5,22 @@
 //
 // design-lint.mjs owns the filesystem walk, the baseline, and the CLI.
 
-// app.css is where tokens are defined; app.html holds the pre-paint theme script.
-export const EXEMPT_FILES = new Set(['src/app.css', 'src/app.html']);
+// Where tokens are defined. This was one file, `src/app.css`, until it was
+// split into four layers behind @imports — the literals did not move out of
+// the token home, the token home became four files, so each layer keeps the
+// exemption the single file had. Deliberately NOT all of lib/styles:
+// settings.css, cards.css and sidebar.css were always separate module sheets
+// and were always linted, and widening the exemption to the directory would
+// silently stop checking them.
+export const STYLE_LAYERS = [
+  'src/app.css',
+  'src/lib/styles/tokens.css',
+  'src/lib/styles/primitives.css',
+  'src/lib/styles/app-shell.css',
+  'src/lib/styles/markdown.css',
+];
+// app.html holds the pre-paint theme script.
+export const EXEMPT_FILES = new Set([...STYLE_LAYERS, 'src/app.html']);
 export const SCAN_EXTENSIONS = ['.svelte', '.ts', '.css'];
 export const SKIP_DIRS = new Set(['node_modules', 'build', '.svelte-kit', 'vitest-stubs']);
 // Tests are not shipped UI. They assert on the very literals the rules forbid —
@@ -166,7 +180,7 @@ export const RULES = [
   {
     id: 'off-scale-space',
     match: (line) => offScaleSpacing(line),
-    exempt: ['src/app.css'],
+    exempt: STYLE_LAYERS,
     hint: 'use a --space-* token, or mark the exception with a reason',
   },
   {

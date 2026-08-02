@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readLayer } from './cascade';
 import { describe, expect, it } from 'vitest';
 
 // app.css is the token home, so the invariants that make the tokens usable have
@@ -7,7 +8,9 @@ import { describe, expect, it } from 'vitest';
 // Read from the project root: vitest serves this file over a vite-style URL, so
 // import.meta.url is not a file: URL here.
 
-const APP_CSS = readFileSync(resolve(process.cwd(), 'src/app.css'), 'utf8');
+// The token layer specifically: this file asks what :root declares, and the
+// other layers declare no tokens.
+const APP_CSS = readLayer('tokens');
 
 /** The declarations inside one top-level block, by selector. */
 function block(selector: string): Record<string, string> {

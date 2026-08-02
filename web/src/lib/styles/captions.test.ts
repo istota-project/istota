@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { readCascade } from './cascade';
 
 /**
  * The two supporting-text roles: `.caption` and `.muted`.
@@ -26,7 +27,7 @@ import { join } from 'node:path';
  * Same reasoning as contentFrame.test.ts and controlTier.test.ts.
  */
 
-const appCss = readFileSync(join(process.cwd(), 'src/app.css'), 'utf8');
+const appCss = readCascade();
 
 /** The body of a top-level rule, by selector. */
 const ruleBody = (css: string, selector: string): string | undefined => {

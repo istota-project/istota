@@ -1,0 +1,430 @@
+/* Design tokens: the palette, the scales and the two themes.
+   Imported first by src/app.css.
+
+   LAYER 1 of four. This file and `primitives.css` are the design system
+   proper — they name no page, no module and no product, and a second project
+   could take the pair unchanged. `app-shell.css` is the layer that could not
+   travel, and the split exists so the line between them is visible rather
+   than remembered.
+
+   Everything here declares on :root and declares custom properties only, bar
+   `color-scheme` and the text-scale `font-size`. That is what makes the file
+   safe to load ahead of every other sheet: it can win no cascade it does not
+   already own.
+
+   The brand seam, for a project reusing this: the surface, text, border and
+   accent values in the two theme blocks are the whole of what makes this app
+   look like itself. Everything downstream reads them by name.
+
+   Invariants (theme parity, the z ladder, control heights) are pinned by
+   lib/styles/tokens.test.ts. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --surface-base: #111;
+  --surface-card: #1a1a1a;
+  --surface-raised: #222;
+  --surface-badge: #252525;
+  /* Chrome that floats *over* content rather than sitting in the layout — a
+	   feed card's title overlay, the fixed status badge, an autocomplete popover,
+	   the jump-to-latest button. Sits between base and card so it separates from
+	   both. */
+  --surface-overlay: #161616;
+  /* Long-form reading surface: the chat transcript and the briefings reader.
+	   Card-colored in dark, but pure white in light — a reading pane wants more
+	   contrast against the shell than a card does. */
+  --surface-reading: var(--surface-card);
+
+  /* Text */
+  --text-primary: #e0e0e0;
+  --text-secondary: #bbb;
+  --text-muted: #888;
+  --text-dim: #666;
+  /* Body text inside a reading surface, softened a step from --text-primary to
+	   ease sustained light-on-dark reading. Flips to a soft *dark* in light. */
+  --text-reading: #cfcfcf;
+
+  /* Borders */
+  --border-default: #333;
+  --border-subtle: #222;
+  /* One step stronger than --border-default: the hover state of an interactive
+	   card, chip or link-tile. Defined in both themes so a hover affordance does
+	   not silently vanish on white. */
+  --border-hover: #555;
+
+  /* Interactive */
+  --accent: #e0e0e0;
+  --accent-hover: #fff;
+  /* Amber terminal accent — the bot's identity color + highlights (links). */
+  --accent-amber: #f5a623;
+  /* The same accent as a solid FILL, with dark text on it. Deliberately one
+	   value across both themes, like --status-dot-*: the light theme darkens
+	   --accent-amber so amber *text* passes on white, and that darkening is
+	   exactly wrong for a fill — it turns a bright accent button into a muddy
+	   brown. A fill sets its own text color, so it needs no such compensation. */
+  --accent-amber-fill: #f5a623;
+  --accent-amber-fill-hover: #ffc05c;
+  --accent-amber-fill-fg: #111;
+  /* Blue interactive accent — primary buttons, active tabs, focus rings,
+	   in-app cross-references. Distinct from --status-info-fg: this marks
+	   something you can act on, not a severity. */
+  --accent-blue: #7aa3d8;
+  /* Links inside rendered body content — chat markdown, the briefings reader,
+	   feed entries. Amber, following the bot's accent. Kept as its own token
+	   rather than using --accent-amber directly so a link can be retuned without
+	   moving the identity color. Hover is the underline only — see `.prose a`. */
+  --link: var(--accent-amber);
+
+  /* Status severities — the standardized chip/badge palette. `-fg` is the text
+	   color for a bare status label; `-bg` is the fill for a filled chip, which
+	   pairs with the same `-fg`. Four severities only; a categorical palette (the
+	   encounter-type badges, the admin source colors) is a separate concern and
+	   deliberately does NOT collapse into these. Both themes define every token,
+	   so a chip built on them needs no per-page light override. */
+  --status-danger-fg: #ee8888;
+  --status-danger-bg: #4a2020;
+  --status-warn-fg: #e6b96b;
+  --status-warn-bg: #3a3017;
+  --status-success-fg: #9bd6a6;
+  --status-success-bg: #204028;
+  --status-info-fg: #9cc7f8;
+  --status-info-bg: #20384a;
+  /* An off-severity state: part-done rather than late. The immunization badges
+	   need it distinct from the danger/warn/success ramp, or "series incomplete"
+	   reads as a worse "overdue". Purple keeps it off the ramp. */
+  --status-partial-bg: hsla(280, 45%, 65%, 0.22);
+  --status-partial-fg: #d0aeec;
+  /* A step above danger, for a value that is not merely out of range but
+	   clinically critical (the bloodwork flag-C cell). Unlike the four above it
+	   is a *solid saturated fill* rather than a tint, so `-fg` is the text laid
+	   on `-bg` — white in both themes, like --accent-amber-fill-fg. */
+  --status-critical-bg: #6b0000;
+  --status-critical-fg: #fff;
+
+  /* Indicator dots — the same four severities, but saturated. A dot carries no
+	   text, so it can be far more vivid than a `-fg` label without hurting
+	   legibility, and at 8px it needs the extra chroma to read at a glance.
+	   Deliberately one value per severity across both themes: these are mid-tone
+	   enough to read on the dark surface and on white, so they are NOT redefined
+	   in the light block. */
+  --status-dot-ok: #1bd43d;
+  --status-dot-bad: #e8392c;
+  --status-dot-warn: #eb9a09;
+  --status-dot-info: #2e8fe6;
+
+  /* Money direction — a signed-amount pair, NOT a severity. An expense is not
+	   an error and income is not a success, so these stay off the status scale
+	   even though the hues rhyme with it. */
+  --money-income: #4adbc0;
+  --money-expense: #d46ab5;
+
+  /* Overlay + scrim chrome. These sit on a surface whose lightness the theme
+	   does NOT control — a filled accent button, a translucent scrim over a
+	   photo, a dark pill over the map canvas — so several are deliberately one
+	   value across both themes, like --status-dot-*. */
+  /* Text on a filled accent (primary/send button, toast action). */
+  --on-accent-fg: #fff;
+  /* Text on a dark scrim that stays dark in both themes (map hints, media
+	   captions). Softer than pure white so it does not glare. */
+  --on-scrim-fg: #ececef;
+  /* The scrim behind a dialog. One value in both themes, like --on-scrim-fg:
+	   its job is to darken whatever is under it, which the theme does not
+	   change. A media viewer (lightbox, feed reader) deliberately goes heavier
+	   and keeps its own literal behind an allow comment. */
+  --scrim-bg: rgba(0, 0, 0, 0.6);
+  /* A small pill laid over media of unknown lightness — it flips scrim
+	   direction with the theme so it reads on a dark card and a light one. */
+  --scrim-pill-bg: rgba(0, 0, 0, 0.55);
+  --scrim-pill-fg: var(--text-muted);
+  /* The moving highlight in a loading shimmer. Lightens in dark, darkens in
+	   light — a white sweep washes out entirely on a light surface. */
+  --shimmer-tint: rgba(255, 255, 255, 0.11);
+  /* Drop shadow for chrome floating over content. Heavier in dark, where it has
+	   to separate two dark surfaces; a black shadow that strong reads harsh on
+	   white. */
+  --shadow-overlay: 0 1px 3px rgba(0, 0, 0, 0.22);
+  /* Two elevations above --shadow-overlay, each written out five times before
+	   it became a token. --shadow-md is a popover/menu/dropdown: it separates a
+	   small floating panel from the surface a few pixels below it.
+	   --shadow-lg is a dialog or reading panel — the thing on top of a scrim. */
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
+  /* The octopus sigil ships as one flat near-white silhouette on transparency,
+	   so light theme inverts it to near-black rather than carrying a second file.
+	   A token rather than a per-site override, because more than one surface
+	   draws it (the nav wordmark, the dashboard welcome card). */
+  --sigil-filter: none;
+
+  /* Radii. --radius-sm is 4px at the unscaled root, matching the px literals it
+	   replaces, but stays in rem so it tracks the text-scale preference like the
+	   rest of the scale. --radius-card is the semantic name for the medium step;
+	   both spellings are in the tree, and they must not be able to drift apart. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-card: var(--radius-md);
+  --radius-pill: 999px;
+
+  /* Spacing ramp — 4px steps at the unscaled root, in rem so they track the
+	   text-scale preference. Nine off-ramp values (0.3 / 0.35 / 0.4 / 0.45 /
+	   0.6 / 0.65 / 0.7 / 0.85 / 0.9rem, ~410 declarations) were collapsed onto
+	   these, which is where the sub-2px shifts across the app came from.
+
+	   Values below 0.25rem are deliberately NOT on this ramp: 0.05-0.2rem are
+	   hairline optical nudges and icon gaps, and rounding them to 4px is a
+	   visible change rather than a tidy-up. Same for the sparse tail above
+	   1rem. Both are reported by the off-scale-space lint rule and baselined,
+	   so they are counted rather than quietly accepted. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Inline control heights. Button, Chip and the Select trigger each computed
+	   their own box out of a font size, a padding and (for Select) a border, and
+	   landed on four different answers — so a Select beside a Button in a form
+	   row sat ~2.6px short, by an amount that *changed with the text-scale
+	   preference*, since everything but the border is in rem.
+
+	   A min-height rather than a fixed height: the content still sets the box
+	   when it is taller (a wrapped option label), and every one of these
+	   controls is an inline-flex with align-items:center, so the content
+	   centres in the guaranteed box. Set both on any new control that shares a
+	   row with these. */
+  --control-height-sm: 1.2rem;
+  --control-height-md: 1.4rem;
+  /* The field tier — a body form or toolbar, where a text input shares a row
+	   with buttons and selects. Bigger than the two above because it has to be:
+	   the app bar never holds a text input, so its chrome can stay compact,
+	   while a row containing one is sized by that input. Only far enough above
+	   `md` to clear that input and read as the other tier — the row is chrome
+	   around a table, not the subject of the page. See .control-row. */
+  --control-height-lg: 1.75rem;
+
+  /* The corner a control resolves. The root value is the app-bar shape, so a
+	   component adopting this channel changes nothing outside a .control-row;
+	   there the field tier squares it off to match the input beside it. Text
+	   inputs are not on this channel — an input is always the field shape. */
+  --control-radius: var(--radius-pill);
+
+  /* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
+	   container can use `margin-inline-start: calc(-1 * var(--chip-padding-x))`
+	   to make the chip *text* align with surrounding content. */
+  --chip-padding-x: 0.5rem;
+  /* Gap between sibling chips/nav-links in a flex row. */
+  --chip-gap: 0.1rem;
+
+  /* How wide a dashboard's content column is allowed to get before it stops
+	   growing and centres instead. A cap rather than a preference: a stat grid
+	   or a holdings table stretched across a 34" monitor puts the label at one
+	   edge and its value at the other, and the eye has to travel the whole row.
+	   See `.content-frame`.
+
+	   Deliberately `px` while nearly everything else here is `rem`: this bounds
+	   the *screen* a layout may claim, not the type inside it, so it should not
+	   move when the text-scale preference does — at 120% a rem-based cap would
+	   widen the column at exactly the setting a user picked to make lines
+	   easier to follow. */
+  --content-max: 1280px;
+
+  /* Chat row metrics: the message row's horizontal padding, the avatar column
+	   it opens with, the avatar inside that column, and the gap from that column to
+	   the message text. Tokens rather than literals in Message.svelte so the gutter
+	   can shrink at a breakpoint without the avatar drifting out of alignment with
+	   it — and so `inline + gutter + gap`, which is where the message text starts,
+	   is adjustable in one place (see the mobile block below). */
+  --chat-row-inline: 0.75rem;
+  --chat-gutter: 2.25rem;
+  --chat-avatar: 2.1rem;
+  --chat-avatar-gap: 0.6rem;
+  /* Device safe-area insets — the rounded screen corners, the notch, and the
+	   home-indicator strip. Non-zero only because app.html opts into
+	   `viewport-fit=cover`; without that the browser letterboxes the page for us
+	   and every one of these reads 0 (as it does on every desktop browser).
+	   Anything pinned to a viewport edge pads by `max(<its own padding>, <inset>)`
+	   so the inset raises the floor on a curved device and changes nothing
+	   elsewhere. Theme-independent, so there is no light-theme counterpart.
+
+	   These `env()` values are the fallback, not the steady state: lib/viewport.ts
+	   latches measured pixel values onto :root at runtime (inline style wins), so
+	   a soft keyboard — which makes iOS report every inset as 0 while it is up —
+	   cannot resize anything sized from them. See that file for why. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* Stacking order, bottom to top. Modal, Select, KebabMenu and Lightbox all
+	   portal to <body>, so their values compete directly in the root stacking
+	   context — six of them used to tie at 100, and which one won was DOM order.
+	   The one hard constraint: --z-popover must clear --z-modal-panel, because a
+	   Select opened inside a dialog has to render above the dialog it is in.
+	   --z-lightbox clears --z-viewer-control for the same reason one step up:
+	   the image zoom opens from inside the feed reader.
+
+	   Small integers *inside* a component's own stacking context — a sticky
+	   table corner, a chat FAB over its transcript — are deliberately not on
+	   this scale. They order siblings, not layers, and naming them after
+	   app-wide chrome would say something false about their reach. */
+  --z-sticky: 10;
+  --z-drawer-backdrop: 19;
+  --z-drawer: 20;
+  --z-notice: 30;
+  --z-modal: 50;
+  --z-modal-panel: 51;
+  --z-viewer: 60;
+  --z-viewer-control: 61;
+  --z-lightbox: 70;
+  --z-popover: 100;
+  --z-toast: 200;
+
+  /* Keyboard focus. One ring, in the interactive accent, applied globally
+	   below — before this, twenty rules covered roughly two hundred focusable
+	   elements and the four that existed disagreed: two rang in --accent (the
+	   near-white primary fill), two in --border-default, which on a card is
+	   almost the resting border and so read as no ring at all.
+	   2px rather than the 1px most of them used: a focus ring that has to be
+	   looked for is not doing its job, and 2px is the WCAG 2.2 floor. */
+  --focus-ring-color: var(--accent-blue);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Transitions */
+  --transition-fast: 0.15s ease;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, sans-serif;
+  /* One monospace stack. Five slightly different ones were written out as
+	   var(--font-mono, …) fallbacks, so the token they all named never existed
+	   and each site quietly used its own. */
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  /* Uppercase status chips only — caps read a size larger, so a chip set at
+     --text-xs sits heavier than the table header above it. */
+  --text-2xs: 0.55rem;
+  --text-xs: 0.7rem;
+  --text-sm: 0.75rem;
+  --text-base: 0.85rem;
+  /* Headings. Undefined for a long time, which is worse than it sounds:
+	   `font-size: var(--text-lg)` on an undefined property is invalid at
+	   computed-value time, so it inherits rather than falling back to the UA
+	   heading size — seven <h1>s rendered at body-text size. */
+  --text-lg: 1.05rem;
+  --text-xl: 1.25rem;
+}
+
+/* Mobile: the avatar column is pure chrome, so it is what gives up width to the
+   message text.
+
+   The sizes here are not free — they put the message text on the same left edge
+   as the two headings stacked above it. On a phone the app nav, the page bar and
+   the transcript are three rows deep, and each opened at a different inset
+   (2.26 / 2.50 / 3.10rem), which reads as three ragged left edges rather than one
+   column. The wordmark is the anchor, because its inset falls out of the sigil's
+   own width: `0.75` (nav padding) + `~1.11` (sigil) + `0.4` (gap) ≈ 2.25rem. So
+   `--chat-row-inline + --chat-gutter + --chat-avatar-gap` must total 2.25rem, and
+   ShellHeader's mobile gap is tightened to land its title there too. Changing any
+   one of the three means re-checking the other two.
+
+   Only the gutter *width* is load-bearing for that sum; the avatar inside it is
+   free, so it is sized to the sigil (~1.11rem) and left-justified in the column
+   rather than centred. Both rows then open with a mark of the same size on the
+   same left edge, which is the point — centring it would inset it half the
+   leftover and put it 0.075rem off the sigil. */
+@media (max-width: 768px) {
+  :root {
+    --chat-gutter: 1.25rem;
+    --chat-avatar: 1.1rem;
+    --chat-avatar-gap: 0.25rem;
+  }
+}
+
+/* Text scale — a client-local readability preference (lib/stores/fontSize.ts)
+   reflected onto <html> as `data-font-size`. Scaling the *root* font-size moves
+   every rem-based value together — the --text-* tokens above, the handful of
+   literal-rem sizes, and the padding/gaps around them — so the layout keeps its
+   proportions rather than growing text inside fixed boxes.
+
+   `medium` is the default; `small` is the historical unscaled size and so
+   deliberately has no rule — it leaves the browser's own base size in place.
+   Percentages (not px) throughout, so a user who has raised their browser font
+   size keeps that gain at every level instead of having it overwritten. Sizes
+   fixed in px — borders and the SVG chart labels on the health pages — stay put
+   by design. */
+:root[data-font-size='medium'] {
+  font-size: 110%;
+}
+:root[data-font-size='large'] {
+  font-size: 120%;
+}
+
+/* Light theme — overrides the surface/text/border/accent variables. Everything
+   built on these variables flips automatically; only the dark-tuned status and
+   chart colors on data-heavy pages keep their hardcoded values. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* Surfaces */
+  --surface-base: #ffffff;
+  --surface-card: #f4f4f5;
+  --surface-raised: #e8e8ea;
+  --surface-badge: #e0e0e3;
+  --surface-overlay: #ececef;
+  /* Pure white rather than the soft-gray card: a reading pane wants to be the
+	   brightest thing on the page. */
+  --surface-reading: #ffffff;
+
+  /* Text */
+  --text-primary: #1a1a1a;
+  --text-secondary: #3f3f46;
+  --text-muted: #6b6b72;
+  --text-dim: #9a9aa2;
+  --text-reading: #2a2a2e;
+
+  /* Borders */
+  --border-default: #d4d4d8;
+  --border-subtle: #e4e4e7;
+  --border-hover: #a1a1aa;
+
+  /* Interactive */
+  --accent: #1a1a1a;
+  --accent-hover: #000000;
+  /* Darker amber so the bot's accent stays legible on a light surface. */
+  --accent-amber: #b9740a;
+  --accent-blue: #2563b0;
+  --link: var(--accent-amber);
+
+  /* Status severities — darkened foregrounds that hold contrast on white, and
+	   pale tinted fills in place of the dark-theme blocks. */
+  --status-danger-fg: #c0271d;
+  --status-danger-bg: #f7dada;
+  --status-warn-fg: #946a00;
+  --status-warn-bg: #f6eccd;
+  --status-success-fg: #0a8f45;
+  --status-success-bg: #d7ecdd;
+  --status-info-fg: #2563b0;
+  --status-info-bg: #dbe9fb;
+  /* Lighter than the dark theme's near-black block, which lands as a hole on a
+	   white table. --status-critical-fg stays white on both. */
+  --status-partial-bg: hsla(280, 45%, 88%, 0.6);
+  --status-partial-fg: #7c3aed;
+  --status-critical-bg: #b3261e;
+
+  /* Money direction */
+  --money-income: #0d8f7e;
+  --money-expense: #a3157e;
+
+  /* Overlay + scrim chrome. --on-accent-fg and --on-scrim-fg are deliberately
+	   NOT redefined: both sit on a surface this theme does not lighten. */
+  --scrim-pill-bg: rgba(255, 255, 255, 0.82);
+  --scrim-pill-fg: var(--text-secondary);
+  --shimmer-tint: rgba(0, 0, 0, 0.06);
+  --shadow-overlay: 0 1px 2px rgba(0, 0, 0, 0.1);
+  /* Much lighter than their dark counterparts. A shadow at 0.4 alpha separates
+	   two dark surfaces; on white the same value reads as a smudge. */
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16);
+  --sigil-filter: invert(1);
+}

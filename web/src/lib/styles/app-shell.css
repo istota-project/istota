@@ -1,0 +1,202 @@
+/* This app's chrome: the top nav, the page container and the whole-pane
+   status messages.
+
+   LAYER 3 of four, and the layer that does NOT travel. `.app-nav`, the
+   wordmark and its octopus sigil, `.app-content` and the `app-content-fill`
+   contract with routes/+layout.svelte are all specific to this product. A
+   project reusing `tokens.css` + `primitives.css` writes its own version of
+   this file and takes nothing from here.
+
+   It loads after the primitives because it is more specific than they are and
+   must win where the two meet — the fill route's scroll locking against the
+   base `body` rules in particular. */
+
+/* App shell */
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  /* Never absorb the shrink when a fill page below wants the rest of the body. */
+  flex-shrink: 0;
+  padding: 0.75rem;
+  /* The nav is the top edge of the app, so it clears the status bar itself. In a
+     browser tab that inset is 0 (the browser chrome already occupies the strip)
+     and this is inert; installed to the home screen the web view runs full
+     bleed under the status bar and without this the wordmark sits under the
+     clock. Landscape on a notched phone puts the notch on one side — the
+     left/right insets keep the row clear of it. */
+  padding-top: max(0.75rem, var(--safe-top));
+  padding-left: max(0.75rem, var(--safe-left));
+  padding-right: max(0.75rem, var(--safe-right));
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+}
+
+.app-nav .app-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-decoration: none;
+  color: var(--text-primary);
+}
+
+/* Sized in em so the sigil tracks the text-scale preference with the wordmark,
+   and kept to the wordmark's line box so adding it can't make the nav taller.
+   --sigil-filter carries the light-theme inversion. */
+.app-nav .app-name .sigil {
+  height: 1.3em;
+  width: auto;
+  flex-shrink: 0;
+  filter: var(--sigil-filter);
+}
+
+.app-nav .nav-links {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.app-nav .nav-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 0.15rem 0;
+}
+
+.app-nav .nav-links a:hover,
+.app-nav .nav-links a.active {
+  color: var(--text-primary);
+}
+
+.app-nav .nav-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.app-nav .nav-right a {
+  color: var(--text-dim);
+  text-decoration: none;
+}
+
+.app-nav .nav-right a:hover {
+  color: var(--text-secondary);
+}
+
+/* The nav's icon controls — theme, logout, menu. Shared here rather than in
+   each component because their touch targets have to be reasoned about
+   together: they sit in one row and the mistap they invite is between
+   *neighbours* (ISSUE-209). Resting color stays with each control. */
+.app-nav .nav-right .nav-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  border: none;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-pill);
+  touch-action: manipulation;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+/* All three share one hover; only the resting color differs. It lives here
+   rather than beside each control because the reset above sets `background`,
+   and a component-scoped hover rule ties it on specificity — which side wins
+   would then come down to stylesheet order. `[data-state]` is the menu
+   trigger's open state and never matches the other two. */
+.app-nav .nav-right .nav-icon-btn:hover,
+.app-nav .nav-right .nav-icon-btn[data-state='open'] {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+/* Page padding is safe-area-aware on all three exposed edges. AppShell cancels
+   this padding with a negative margin, so it mirrors the same max() expressions
+   — keep the two in step or a shell page grows a background strip at the edge. */
+.app-content {
+  padding: 1.5rem;
+  padding-bottom: max(1.5rem, var(--safe-bottom));
+  padding-left: max(1.5rem, var(--safe-left));
+  padding-right: max(1.5rem, var(--safe-right));
+}
+
+/* Full-height pages — the eight that render an AppShell. The shell wants the whole
+   area edge to edge, so this drops the page padding rather than having the shell
+   cancel it with a negative margin, and AppShell carries the safe-area insets
+   itself. Compound selector so it also beats the `.app-content` padding
+   shorthand in the breakpoint further down, which would otherwise win on order. */
+.app-content.app-content-fill {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* On a full-height route nothing scrolls the document — the panes inside the
+   shell do. Say so, or the document stays bounceable and a touch that starts in
+   a pane can be claimed by the page instead: on mobile the transcript sits still
+   while the whole page rubber-bands and the browser toolbar slides, and the pane
+   only takes the gesture after a priming tap.
+
+   Scoped with `:has()` rather than set on `html, body` outright: the ordinary
+   padded routes (`.app-content` without the fill modifier) DO scroll the
+   document, and locking it globally would freeze them. */
+html:has(.app-content-fill),
+body:has(.app-content-fill) {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* A route's whole-pane status message — the loading placeholder, and the empty
+   and error states that occupy the same slot. One rule so every module reads the
+   same: centered in the content area both ways, dim, small.
+
+   `flex: 1` rather than `min-height: 100%` is what does the vertical centering:
+   the pane it lands in is always a growing flex column (`.shell-main` and every
+   module frame below it), and a percentage height would instead measure the
+   *whole* pane and overflow it wherever a toolbar sits above the message. The
+   `min-height` is a floor for the few parents that size to their content.
+
+   `.error-msg` is the older, top-aligned pair of `.loading`; both survive for
+   in-card status lines that are not a pane state (an inline "Generating…", a
+   banner above a still-rendered layout). Reach for `.center-msg` for anything
+   that is the only thing on screen. */
+.center-msg {
+  flex: 1;
+  min-height: 8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1rem;
+  box-sizing: border-box;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.center-msg.error {
+  color: var(--status-danger-fg);
+}
+
+/* Inline loading / error states (in a card, above a rendered layout) */
+.loading,
+.error-msg {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.error-msg {
+  color: var(--status-danger-fg);
+}

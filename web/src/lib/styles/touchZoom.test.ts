@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { readCascade } from './cascade';
 
 /**
  * iOS zooms the page whenever a focused text control computes under 16px, and
@@ -14,7 +15,7 @@ import { join, resolve } from 'node:path';
  */
 
 const SRC = resolve(process.cwd(), 'src');
-const css = readFileSync(join(SRC, 'app.css'), 'utf8');
+const css = readCascade();
 
 /**
  * The `small` text-scale preference sets no root font-size, so with the browser

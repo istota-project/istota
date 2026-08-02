@@ -8,6 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readLayer } from '$lib/styles/cascade';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -109,7 +110,7 @@ describe('theme store', () => {
 
 describe('theme-color drift', () => {
   const root = resolve(__dirname, '../..');
-  const css = readFileSync(resolve(root, 'app.css'), 'utf8');
+  const css = readLayer('tokens');
   const html = readFileSync(resolve(root, 'app.html'), 'utf8');
 
   /** `#111` and `#111111` are the same colour; compare them as such. */
