@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The date filters on Medical history look like date fields and fit one line. On a phone they were two blank rounded boxes stacked below the type dropdown, with nothing to say they were dates — iOS draws an empty date input as nothing at all. They now sit beside the dropdown at the same height, reading "Start" and "End" until you pick a date. The Location history filter bar levels up the same way.
+- The date filters on Medical history look like date fields and fit one line. On a phone they were two blank rounded boxes stacked below the type dropdown, with nothing to say they were dates — iOS draws an empty date input as nothing at all. They now sit beside the dropdown at the same height, reading "Start" and "End" until you pick a date. The two fields also hold one width as you pick dates instead of resizing to whatever each value happens to need, and a date too wide for its box is trimmed rather than wrapping the field onto a second line. The Location history filter bar levels up the same way.
 
 ## [0.38.0] - 2026-08-01
 

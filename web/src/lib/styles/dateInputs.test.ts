@@ -99,6 +99,24 @@ describe('app.css temporal input sizing', () => {
     expect(declaration(valuePseudoRule!, 'min-height')).not.toBeNull();
     expect(declaration(valuePseudoRule!, 'text-align')).toBe('left');
   });
+
+  it('clips an over-wide value rather than letting it wrap', () => {
+    // The other half of dropping the platform appearance: iOS lays the value
+    // out as ordinary inline content, so a field narrower than the rendered
+    // date wraps it and the input — auto-height now — becomes two lines tall,
+    // breaking the single height every control in its row holds to. Both
+    // halves are needed: nowrap stops the wrap, overflow clips what nowrap
+    // then pushes past the edge.
+    expect(declaration(valuePseudoRule!, 'white-space')).toBe('nowrap');
+    expect(declaration(valuePseudoRule!, 'overflow')).toBe('hidden');
+  });
+
+  it('does not try to set overflow on the input itself', () => {
+    // A UA sheet sets it on a text control with `!important` (Blink resolves
+    // a date input to `clip` whatever the author writes), so a declaration
+    // there is dead code that reads like a working guard.
+    expect(declaration(appearanceRule!, 'overflow')).toBeNull();
+  });
 });
 
 describe('no stylesheet overrides the temporal input floor', () => {

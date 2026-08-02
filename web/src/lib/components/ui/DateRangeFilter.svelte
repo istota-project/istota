@@ -126,11 +126,18 @@
   .date-field {
     position: relative;
     display: flex;
-    /* The floor in primitives.css is `min(100%, 8em)` — the input can only
+    /* Basis 0, so the two fields are equal halves of whatever the row has
+       left and neither is sized by what it contains. iOS gives a date input
+       an intrinsic width that changes with its value, so under `auto` the
+       fields were different widths from each other and the whole row
+       re-flowed every time a date was picked. The value is clipped instead
+       (primitives.css), which is the trade this basis commits to.
+
+       The floor in primitives.css is `min(100%, 8em)` — the input can only
        stay inside a narrow row if the box it measures that 100% against can
        itself shrink. Set on the wrapper, not the input, so it does not
        outrank that floor (see dateInputs.test.ts). */
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
     /* A date is ~10 characters wide and never more. Past that the field is a
        wider box around the same value, so cap it rather than let a desktop

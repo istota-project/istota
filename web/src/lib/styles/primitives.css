@@ -234,10 +234,22 @@ input[type='week'] {
      bare length would reintroduce it on the narrowest cards. */
   min-width: min(100%, 8em);
   max-width: 100%;
+  /* Deliberately no `overflow` here: a browser's UA sheet sets it on a text
+     control with `!important`, so an author declaration is inert. What the
+     value does inside the control is the pseudo-element's business, below. */
 }
 
 /* With the native appearance gone, iOS centres the value text and collapses an
-   empty input to zero height. Pin both back to the desktop rendering. */
+   empty input to zero height. Pin both back to the desktop rendering.
+
+   `nowrap` is the third of those: iOS lays the value out as ordinary inline
+   content, so a field narrower than the rendered date wraps it and the input
+   — auto-height, since the appearance is gone — becomes two lines tall. That
+   breaks the single height every control in its row is holding to, and a
+   clipped last digit is the better of the two outcomes. `overflow` clips what
+   `nowrap` then pushes past the edge; it belongs here rather than on the
+   input, both because this is where the overrun is and because here it is
+   not overridden. */
 input[type='date']::-webkit-date-and-time-value,
 input[type='datetime-local']::-webkit-date-and-time-value,
 input[type='time']::-webkit-date-and-time-value,
@@ -245,6 +257,8 @@ input[type='month']::-webkit-date-and-time-value,
 input[type='week']::-webkit-date-and-time-value {
   text-align: left;
   min-height: 1.2em;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 /* iOS zooms the page whenever a focused input, select or textarea computes

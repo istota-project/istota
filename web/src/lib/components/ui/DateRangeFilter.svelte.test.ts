@@ -205,6 +205,15 @@ describe('the styles it carries', () => {
     expect(rule).toMatch(/max-width:/);
   });
 
+  it('sizes the two fields from the row, not from their contents', () => {
+    // `auto` takes the base size from the content, and on iOS a date input's
+    // intrinsic width changes with its value — so the two fields were
+    // different widths from each other and the row re-flowed on every pick.
+    // A zero basis makes them equal halves of what the row has left.
+    const rule = source.match(/\.date-field \{([^}]*)\}/)?.[1]?.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(rule).toMatch(/flex:\s*1 1 0/);
+  });
+
   it('leaves the field wrappers shrinkable', () => {
     // The floor in primitives.css is `min(100%, 8em)`, so an input can only
     // stay inside a narrow row if the box it measures that 100% against can
