@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Button, IconButton, Input } from '$lib/components/ui';
   import { Plus, X } from 'lucide-svelte';
 
@@ -34,17 +35,35 @@
   let rows: Row[] = $state([]);
   let lastSerialized = $state('');
 
+  // Resync when the *incoming* value changes, and at no other time. The guard
+  // has to be read untracked or the effect depends on state `emit` writes: an
+  // edit would re-run this, find the prop still holding the pre-edit table
+  // (the consumer stashes the patch rather than echoing it back), and rebuild
+  // the rows from it — reverting the keystroke that had just been typed.
   $effect(() => {
     const serialized = JSON.stringify(value);
-    if (serialized === lastSerialized) return;
-    lastSerialized = serialized;
-    rows = (value ?? []).map(([threshold, rate]) => ({
-      threshold: String(threshold),
-      // toFixed would render 9.3 as "9.300"; a round-trip through Number
-      // drops the float noise that 0.093 * 100 otherwise leaves behind.
-      ratePercent: String(Number((rate * 100).toFixed(6))),
-    }));
+    untrack(() => {
+      if (serialized === lastSerialized) return;
+      lastSerialized = serialized;
+      rows = (value ?? []).map(([threshold, rate]) => ({
+        threshold: String(threshold),
+        // toFixed would render 9.3 as "9.300"; a round-trip through Number
+        // drops the float noise that 0.093 * 100 otherwise leaves behind.
+        ratePercent: String(Number((rate * 100).toFixed(6))),
+      }));
+    });
   });
+
+  // Read out of the DOM rather than `bind:value`, which is what keeps the rows
+  // a *string* buffer. Svelte's binding coerces a number input to a number and
+  // writes `null` when it is emptied, so clearing a field put a null where the
+  // buffer promises a string and `emit` threw on the next keystroke — in its
+  // own oninput handler, so the field could not be cleared at all. Matches how
+  // the sibling number fields on the taxes page already read their input.
+  function edit(row: Row, field: keyof Row, e: Event) {
+    row[field] = (e.currentTarget as HTMLInputElement).value;
+    emit();
+  }
 
   function emit() {
     const next: number[][] = [];
@@ -98,7 +117,16 @@
     return '';
   });
 
-  $effect(() => onproblem?.(problem));
+  // Untracked, and not a nicety: the consumer holds these reports in its own
+  // state and writes a fresh record per report, so reading that record inside
+  // the callback would make this effect a dependent of what the callback
+  // writes — the first report re-invalidates the effect that produced it, and
+  // the page dies on mount with effect_update_depth_exceeded. The dependency is
+  // `problem` and nothing the parent happens to touch.
+  $effect(() => {
+    const current = problem;
+    untrack(() => onproblem?.(current));
+  });
 </script>
 
 <div class="bracket-editor">
@@ -109,12 +137,12 @@
   </div>
 
   {#each rows as row, i (i)}
-    <div class="row control-row">
+    <div class="bracket-row control-row">
       <div class="col-threshold">
         <Input
           type="number"
-          bind:value={row.threshold}
-          oninput={emit}
+          value={row.threshold}
+          oninput={(e) => edit(row, 'threshold', e)}
           {disabled}
           aria-label="Bracket {i + 1} income threshold"
         />
@@ -123,8 +151,8 @@
         <Input
           type="number"
           step="0.001"
-          bind:value={row.ratePercent}
-          oninput={emit}
+          value={row.ratePercent}
+          oninput={(e) => edit(row, 'ratePercent', e)}
           {disabled}
           aria-label="Bracket {i + 1} rate, percent"
         />
@@ -168,8 +196,14 @@
     gap: var(--space-1);
   }
 
+  /* Not `.row`: settings.css carries a global `.settings .row { display: flex }`
+     for the settings pages this editor renders inside, and a Svelte-scoped
+     `.row.s-xxxx` has exactly the same specificity — so which one applied came
+     down to stylesheet order, and the grid collapsed to a flex row (columns no
+     longer under their headers, inputs at a third of their width) on whichever
+     build put settings.css last. */
   .head,
-  .row {
+  .bracket-row {
     display: grid;
     grid-template-columns: 1fr 1fr auto;
     gap: var(--space-2);
