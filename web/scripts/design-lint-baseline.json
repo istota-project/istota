@@ -84,6 +84,9 @@
   "src/lib/components/ui/Select.svelte": {
     "off-scale-space": 2
   },
+  "src/lib/styles/moneyTable.css": {
+    "off-scale-space": 5
+  },
   "src/lib/styles/settings.css": {
     "off-scale-space": 5
   },
@@ -169,7 +172,7 @@
     "off-scale-space": 3
   },
   "src/routes/money/+layout.svelte": {
-    "off-scale-space": 8
+    "off-scale-space": 3
   },
   "src/routes/money/business/invoices/+page.svelte": {
     "off-scale-space": 3

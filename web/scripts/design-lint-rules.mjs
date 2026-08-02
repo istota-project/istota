@@ -163,7 +163,7 @@ export const RULES = [
     id: 'stray-money-global',
     test: MONEY_GLOBAL,
     exempt: ['src/routes/money/+layout.svelte'],
-    hint: 'the money table shell is defined once in routes/money/+layout.svelte',
+    hint: 'the money table shell is lib/styles/moneyTable.css — do not redefine a .money-* class',
   },
   {
     id: 'redefined-primitive',

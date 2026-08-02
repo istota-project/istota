@@ -4,21 +4,25 @@ import { join } from 'node:path';
 
 /**
  * The money record-table shell — the toolbar/list/header/row rules every money
- * list page inherits, defined once in this layout.
+ * list page inherits, defined once in `lib/styles/moneyTable.css`.
  *
  * Same reasoning as controlTier.test.ts: these are inherited-token and
  * reserved-height invariants that are invisible at any one call site, so a page
  * can silently opt out of them and nothing fails until someone eyeballs two
  * tabs side by side.
+ *
+ * The shell lived in the layout's own style block until it was 380 lines of
+ * `:global()` wrappers; it is a plain stylesheet now, imported by that layout.
+ * The selectors are bare as a result — no wrapper to match around them.
  */
 
-const layout = readFileSync(join(process.cwd(), 'src/routes/money/+layout.svelte'), 'utf8');
+const shell = readFileSync(join(process.cwd(), 'src/lib/styles/moneyTable.css'), 'utf8');
 
-/** The declarations inside a `:global(<selector>)` rule. */
+/** The declarations inside a top-level rule. */
 const ruleBody = (selector: string): string => {
-  const start = layout.indexOf(`:global(${selector}) {`);
-  if (start === -1) throw new Error(`no :global(${selector}) rule in the money layout`);
-  return layout.slice(start, layout.indexOf('}', start));
+  const start = shell.indexOf(`\n${selector} {`);
+  if (start === -1) throw new Error(`no ${selector} rule in lib/styles/moneyTable.css`);
+  return shell.slice(start, shell.indexOf('}', start));
 };
 
 describe('.money-result-count', () => {
