@@ -366,6 +366,13 @@ newsletter_max_links_per_source = {{ istota_briefing_newsletter_max_links | defa
 [health]
 max_document_bytes = {{ istota_health_max_document_bytes | default(26214400) }}
 
+{# Money module config. autoclass_lookup gates the portfolio module's ticker
+   metadata lookup, which sends newly imported symbols to a third-party quote
+   API from the unsandboxed web/daemon process. Off keeps the offline
+   description heuristics, which need no network. #}
+[money]
+autoclass_lookup = {{ (istota_money_autoclass_lookup | default(true)) | lower }}
+
 {# Module-owned shared briefing blocks (shared-kv-curated-content). Rendered as
    the top-level [[briefing_shared_blocks]] section; generated once globally by
    the scheduler and written into shared_kv. An empty/undefined var renders

@@ -282,6 +282,14 @@ previous_tasks_count = 3
 # Talk API-based context shows all participants' messages, not just bot interactions
 talk_context_limit = 100
 
+[money]
+# Whether the portfolio module may look up ticker metadata from a third-party
+# quote API when classifying a newly imported symbol. The request carries the
+# symbol — private financial data — and runs in the unsandboxed web/daemon
+# process, outside the CONNECT allowlist. Off falls back to offline
+# description heuristics, which need no network.
+# autoclass_lookup = true
+
 [logging]
 # Log level: INFO (default) or DEBUG (verbose)
 level = "INFO"

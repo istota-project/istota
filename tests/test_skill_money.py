@@ -303,6 +303,12 @@ class TestCommandDispatch:
         args = captured[-1]
         assert "--replace" in args and "3" in args
 
+    def test_portfolio_autoclass(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "autoclass"])
+        assert captured[-1] == ["portfolio", "autoclass"]
+
     def test_portfolio_summary_with_group(self, captured):
         from istota.skills.money import main
 
@@ -356,6 +362,12 @@ class TestCommandDispatch:
         assert "--asset-class" in args and "Stocks" in args
         main(["portfolio", "unclassify", "GOOG"])
         assert captured[-1] == ["portfolio", "unclassify", "GOOG"]
+
+    def test_portfolio_classifications(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "classifications"])
+        assert captured[-1] == ["portfolio", "classifications"]
 
 
 class TestExecutorIntegration:

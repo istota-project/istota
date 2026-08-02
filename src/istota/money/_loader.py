@@ -128,6 +128,9 @@ def resolve_for_user(
     if callable(resolver):
         db_override = resolver(user_id, "money")
     ctx = synthesize_user_context(workspace, db_path=db_override)
+    # Operator gate on the portfolio module's third-party ticker lookup.
+    money_cfg = getattr(istota_config, "money", None)
+    ctx.autoclass_lookup = bool(getattr(money_cfg, "autoclass_lookup", True))
     # Lazy import — _migrate imports config_store, which imports model
     # dataclasses. Keeping the import here avoids a startup-time cost when
     # the module isn't enabled for any user.

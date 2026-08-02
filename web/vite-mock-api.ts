@@ -6483,6 +6483,7 @@ const handlers: MockHandler[] = [
         asset_class: 'Stocks',
         sub_class: 'Total Market',
         geography: 'US',
+        source: 'seed',
         updated_at: '2026-01-05T09:00:00Z',
       },
       {
@@ -6490,6 +6491,7 @@ const handlers: MockHandler[] = [
         asset_class: 'Stocks',
         sub_class: 'Total Market',
         geography: 'International',
+        source: 'seed',
         updated_at: '2026-01-05T09:00:00Z',
       },
       {
@@ -6497,6 +6499,7 @@ const handlers: MockHandler[] = [
         asset_class: 'Fixed Income',
         sub_class: 'Short-Term',
         geography: 'US',
+        source: 'seed',
         updated_at: '2026-01-05T09:00:00Z',
       },
       {
@@ -6504,6 +6507,7 @@ const handlers: MockHandler[] = [
         asset_class: 'Commodities',
         sub_class: 'Broad Basket',
         geography: 'Global',
+        source: 'seed',
         updated_at: '2026-01-05T09:00:00Z',
       },
       {
@@ -6511,6 +6515,7 @@ const handlers: MockHandler[] = [
         asset_class: 'Cash & Equivalents',
         sub_class: 'Money Market',
         geography: 'US',
+        source: 'seed',
         updated_at: '2026-01-05T09:00:00Z',
       },
       {
@@ -6518,6 +6523,7 @@ const handlers: MockHandler[] = [
         asset_class: 'Alternative',
         sub_class: 'Cryptocurrency',
         geography: 'US',
+        source: 'seed',
         updated_at: '2026-01-05T09:00:00Z',
       },
     ];
@@ -6618,6 +6624,63 @@ const handlers: MockHandler[] = [
       if (p.symbol === 'FZDXX' || p.symbol === 'CORE')
         return { asset_class: 'Cash & Equivalents', sub_class: 'Money Market', geography: 'US' };
       return { asset_class: 'Unclassified', sub_class: 'Unclassified', geography: 'Unclassified' };
+    }
+
+    // Symbols the server's two tiers both give up on: no ticker metadata and
+    // a description carrying no signal. Keeping one means the "could not
+    // classify" branch is reachable under VITE_MOCK_API=1 — it was not, and
+    // neither was the import-time auto-classified notice, because the import
+    // handler returned a hardcoded unclassified list and never ran the fill-in.
+    const MOCK_UNRESOLVABLE = new Set(['ZZZT']);
+
+    function autoClassifyPositions(scope?: MockSnapshot): {
+      classified: {
+        symbol: string;
+        asset_class: string;
+        sub_class: string;
+        geography: string;
+        method: string;
+      }[];
+      unresolved: string[];
+    } {
+      const classified: {
+        symbol: string;
+        asset_class: string;
+        sub_class: string;
+        geography: string;
+        method: string;
+      }[] = [];
+      const unresolved: string[] = [];
+      const seen = new Set<string>();
+      for (const snap of scope ? [scope] : snapshots) {
+        for (const p of snap.positions) {
+          if (p.row_type !== 'position' || !p.symbol) continue;
+          if (seen.has(p.symbol)) continue;
+          if (classify(p).asset_class !== 'Unclassified') continue;
+          seen.add(p.symbol);
+          if (MOCK_UNRESOLVABLE.has(p.symbol)) {
+            unresolved.push(p.symbol);
+            continue;
+          }
+          const record = {
+            symbol: p.symbol,
+            asset_class: 'Stocks',
+            sub_class: 'Individual Stock',
+            geography: 'US',
+            source: 'auto',
+            updated_at: new Date().toISOString(),
+          };
+          classifications.push(record);
+          classified.push({
+            symbol: p.symbol,
+            asset_class: record.asset_class,
+            sub_class: record.sub_class,
+            geography: record.geography,
+            method: 'lookup',
+          });
+        }
+      }
+      return { classified, unresolved: unresolved.sort() };
     }
 
     function visiblePositions(snap: MockSnapshot, group?: string | null) {
@@ -6756,6 +6819,9 @@ const handlers: MockHandler[] = [
           positions: template ? template.positions.map((p) => ({ ...p })) : [],
         };
         snapshots.push(snap);
+        // Same order the server takes: the snapshot commits, then one
+        // classification pass fills in what it can and reports the rest.
+        const auto = autoClassifyPositions(snap);
         return {
           status: 'ok',
           snapshot_id: snap.id,
@@ -6764,7 +6830,8 @@ const handlers: MockHandler[] = [
           position_count: snap.positions.length,
           total_value: snap.positions.reduce((a, p) => a + p.value, 0),
           new_accounts: [],
-          unclassified_symbols: ['ZZZT'],
+          auto_classified: auto.classified,
+          unclassified_symbols: auto.unresolved,
           warnings: [],
           source_file: snap.source_file,
         };
@@ -6922,6 +6989,23 @@ const handlers: MockHandler[] = [
         return { status: 'ok', classifications };
       }
 
+      if (path === '/classifications/auto' && method === 'POST') {
+        // Mirrors the server: fill in any position symbol still resolving to
+        // Unclassified with a plausible lookup result, marked source 'auto',
+        // and report the ones neither tier could place.
+        const auto = autoClassifyPositions();
+        // Reachability, not fidelity: hardcoding `true` left the card's
+        // "ticker lookup unavailable — heuristics only" wording unreachable
+        // under VITE_MOCK_API=1, which is the failure the mock-mirrors-
+        // invariants rule exists to prevent. Once the tier has nothing left
+        // to place, a second click shows the degraded branch.
+        return {
+          status: 'ok',
+          ...auto,
+          lookups_available: auto.classified.length > 0 || auto.unresolved.length === 0,
+        };
+      }
+
       const clsMatch = path.match(/^\/classifications\/([^/]+)$/);
       if (clsMatch) {
         const symbol = decodeURIComponent(clsMatch[1]).replace(/\*+$/, '').toUpperCase();
@@ -6934,6 +7018,7 @@ const handlers: MockHandler[] = [
             asset_class: body.asset_class,
             sub_class: body.sub_class ?? '',
             geography: body.geography ?? '',
+            source: 'user',
             updated_at: new Date().toISOString(),
           };
           if (existing) Object.assign(existing, record);

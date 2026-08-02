@@ -240,3 +240,113 @@ class TestAccountsAndClassify:
     def test_unclassify_missing_errors(self, runner, seeded):
         result, payload = _invoke(runner, seeded, ["portfolio", "unclassify", "NOPE"])
         assert result.exit_code == 1
+
+    def test_classifications_lists_seeded_rows(self, runner, seeded):
+        _, payload = _invoke(runner, seeded, ["portfolio", "classifications"])
+        assert payload["status"] == "ok"
+        rows = {c["symbol_norm"]: c for c in payload["classifications"]}
+        # The bundled seed map is installed once per DB by ensure_schema, so the
+        # catalogue is queryable before the user has classified anything.
+        assert rows["VTI"]["asset_class"] == "Stocks"
+        assert rows["VTI"]["geography"] == "US"
+        assert "GOOG" not in rows
+
+    def test_classifications_reflects_classify_and_unclassify(self, runner, seeded):
+        _invoke(
+            runner, seeded,
+            ["portfolio", "classify", "GOOG", "--asset-class", "Stocks",
+             "--sub-class", "Technology", "--geography", "US"],
+        )
+        _, payload = _invoke(runner, seeded, ["portfolio", "classifications"])
+        row = next(c for c in payload["classifications"] if c["symbol_norm"] == "GOOG")
+        assert row["sub_class"] == "Technology"
+        assert row["updated_at"]
+
+        _invoke(runner, seeded, ["portfolio", "unclassify", "GOOG"])
+        _, payload = _invoke(runner, seeded, ["portfolio", "classifications"])
+        assert "GOOG" not in {c["symbol_norm"] for c in payload["classifications"]}
+
+
+class TestAutoClassification:
+    def test_import_auto_classifies_via_heuristic(self, runner, obj, tmp_path):
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        variant.write_text(text.replace("VGIT", "ZZZQ"), encoding="utf-8")
+        result, payload = _invoke(runner, obj, ["portfolio", "import", str(variant)])
+        assert result.exit_code == 0
+        classified = {c["symbol"]: c for c in payload["auto_classified"]}
+        assert classified["ZZZQ"]["asset_class"] == "Fixed Income"
+        assert "ZZZQ" not in payload["unclassified_symbols"]
+
+    def test_autoclass_backfills(self, runner, obj, tmp_path, monkeypatch):
+        from istota.money import portfolio_autoclass
+
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        text = text.replace("VGIT", "ZZZQ").replace(
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS", "OPAQUE HOLDINGS CO"
+        )
+        variant.write_text(text, encoding="utf-8")
+        _, payload = _invoke(runner, obj, ["portfolio", "import", str(variant)])
+        assert "ZZZQ" in payload["unclassified_symbols"]
+
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s: {"quoteType": "EQUITY", "sector": "Energy",
+                       "country": "United States"},
+        )
+        result, payload = _invoke(runner, obj, ["portfolio", "autoclass"])
+        assert result.exit_code == 0
+        assert payload["status"] == "ok"
+        classified = {c["symbol"]: c for c in payload["classified"]}
+        assert classified["ZZZQ"]["method"] == "lookup"
+
+    def test_autoclass_nothing_to_do(self, runner, obj):
+        result, payload = _invoke(runner, obj, ["portfolio", "autoclass"])
+        assert result.exit_code == 0
+        assert payload["classified"] == []
+        assert payload["unresolved"] == []
+
+    def test_import_survives_a_classification_failure(
+        self, runner, obj, tmp_path, monkeypatch,
+    ):
+        """The route wraps classification fail-soft; the CLI's equivalent
+        block was bare, so the same outage failed an import that had already
+        committed."""
+        from istota.money import portfolio_autoclass
+
+        def boom(conn, snapshots, **kwargs):
+            raise RuntimeError("classification exploded")
+
+        monkeypatch.setattr(
+            portfolio_autoclass, "auto_classify_snapshots", boom,
+        )
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        variant.write_text(text.replace("VGIT", "ZZZQ"), encoding="utf-8")
+        result, payload = _invoke(runner, obj, ["portfolio", "import", str(variant)])
+        assert result.exit_code == 0
+        assert payload["status"] == "ok"
+        assert "ZZZQ" in payload["unclassified_symbols"]
+        assert payload["auto_classified"] == []
+
+    def test_operator_gate_skips_the_third_party_lookup(
+        self, runner, obj, tmp_path, monkeypatch,
+    ):
+        from istota.money import portfolio_autoclass
+
+        calls = []
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s, **kw: calls.append(s) or {"quoteType": "EQUITY"},
+        )
+        obj.autoclass_lookup = False
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        variant.write_text(text.replace("VGIT", "ZZZQ"), encoding="utf-8")
+        _invoke(runner, obj, ["portfolio", "import", str(variant)])
+        assert calls == []
+        result, payload = _invoke(runner, obj, ["portfolio", "autoclass"])
+        assert result.exit_code == 0
+        assert calls == []
+        assert payload["lookups_available"] is False

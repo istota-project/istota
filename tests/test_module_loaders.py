@@ -95,3 +95,30 @@ class TestMoneyLoader:
             "bob": UserConfig(disabled_modules=["money"]),
         })
         assert list_users(cfg) == ["alice"]
+
+    def test_autoclass_lookup_gate_reaches_the_user_context(self, tmp_path):
+        """`[money] autoclass_lookup` is a security control — it keeps held
+        symbols off a third-party wire — and the UserContext hop is its only
+        production wiring, so it needs a test that fails if the hop is
+        removed."""
+        from istota.config import MoneyModuleConfig
+        from istota.money import resolve_for_user
+
+        cfg = _config(tmp_path, users={"alice": UserConfig()})
+        assert resolve_for_user("alice", cfg).autoclass_lookup is True
+
+        cfg.money = MoneyModuleConfig(autoclass_lookup=False)
+        assert resolve_for_user("alice", cfg).autoclass_lookup is False
+
+    def test_activate_user_propagates_the_lookup_gate(self, tmp_path):
+        """The CLI reads the gate off the activated Context, not the
+        UserContext, so the copy in activate_user is the second half of the
+        same wire."""
+        from istota.money.cli import Context, UserContext
+
+        ctx = Context()
+        ctx.users["alice"] = UserContext(
+            data_dir=tmp_path, ledgers=[], autoclass_lookup=False,
+        )
+        ctx.activate_user("alice")
+        assert ctx.autoclass_lookup is False

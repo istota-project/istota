@@ -38,6 +38,12 @@
         return;
       }
       notifySuccess(describeResult(result), { key: 'portfolio:import' });
+      if (result.auto_classified?.length) {
+        notifyInfo(
+          `Auto-classified ${result.auto_classified.map((c) => c.symbol).join(', ')} — review in Money settings`,
+          { key: 'portfolio:autoclassified' },
+        );
+      }
       if (result.unclassified_symbols?.length) {
         notifyInfo(
           `Unclassified symbols: ${result.unclassified_symbols.join(', ')} — classify them in Money settings`,

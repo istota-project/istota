@@ -286,3 +286,206 @@ class TestEnsureInitialisedCreatesPortfolioSchema:
             assert portfolio.list_classifications(conn)
         finally:
             conn.close()
+
+
+class TestAutoClassification:
+    def _variant(self, tmp_path, replacements):
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        p = tmp_path / "variant.csv"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_import_heuristic_classifies_new_fund(self, client, tmp_path):
+        # VGIT -> ZZZQ keeps its TREAS description, so the offline
+        # heuristic classifies it with no lookup (conftest disables fetch).
+        variant = self._variant(tmp_path, {"VGIT": "ZZZQ"})
+        body = _upload(client, variant).json()
+        assert body["status"] == "ok"
+        classified = {c["symbol"]: c for c in body["auto_classified"]}
+        assert classified["ZZZQ"]["asset_class"] == "Fixed Income"
+        assert classified["ZZZQ"]["method"] == "heuristic"
+        assert "ZZZQ" not in body["unclassified_symbols"]
+        rows = client.get("/api/money/portfolio/classifications").json()
+        row = next(c for c in rows["classifications"] if c["symbol"] == "ZZZQ")
+        assert row["source"] == "auto"
+
+    def test_import_lookup_classifies_equity(self, client, tmp_path, monkeypatch):
+        from istota.money import portfolio_autoclass
+
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s: {"quoteType": "EQUITY", "sector": "Energy",
+                       "country": "United States"},
+        )
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        body = _upload(client, variant).json()
+        classified = {c["symbol"]: c for c in body["auto_classified"]}
+        assert classified["ZZZQ"]["method"] == "lookup"
+        assert classified["ZZZQ"]["sub_class"] == "Energy"
+
+    def test_import_unresolved_stays_unclassified(self, client, tmp_path):
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        body = _upload(client, variant).json()
+        assert "ZZZQ" in body["unclassified_symbols"]
+        assert body["auto_classified"] == []
+
+    def test_backfill_endpoint(self, client, tmp_path, monkeypatch):
+        from istota.money import portfolio_autoclass
+
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        _upload(client, variant)
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s: {"quoteType": "EQUITY", "sector": "Energy",
+                       "country": "Germany"},
+        )
+        resp = client.post("/api/money/portfolio/classifications/auto")
+        assert resp.status_code == 200
+        body = resp.json()
+        classified = {c["symbol"]: c for c in body["classified"]}
+        assert classified["ZZZQ"]["geography"] == "Germany"
+        rows = client.get("/api/money/portfolio/classifications").json()
+        row = next(c for c in rows["classifications"] if c["symbol"] == "ZZZQ")
+        assert row["source"] == "auto"
+
+    def test_backfill_endpoint_empty_portfolio(self, client):
+        resp = client.post("/api/money/portfolio/classifications/auto")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["classified"] == []
+        assert body["unresolved"] == []
+
+    def test_fina_import_classifies_once_across_every_snapshot(
+        self, client, tmp_path, monkeypatch,
+    ):
+        """The fina history file parses into one snapshot per export date, and
+        an unresolvable symbol writes no row — so classifying per snapshot
+        re-fetched the same symbols on every one of them. This is the
+        advertised one-time migration, i.e. the worst case."""
+        from istota.money import portfolio_autoclass
+
+        calls = []
+
+        def fetch(symbol, **kwargs):
+            calls.append(symbol)
+            return None  # never resolvable, so nothing suppresses a re-fetch
+
+        monkeypatch.setattr(portfolio_autoclass, "fetch_symbol_info", fetch)
+        text = CSV_FINA.read_text(encoding="utf-8-sig").replace(
+            "VANGUARD INDEX FDS TOTAL STK", "OPAQUE HOLDINGS CO",
+        ).replace(",VTI,", ",ZZZQ,")
+        variant = tmp_path / "fina_variant.csv"
+        variant.write_text(text, encoding="utf-8")
+
+        body = _upload(client, variant).json()
+        assert body["imported"] == 3
+        assert calls == ["ZZZQ"]
+        # every ok result still reports its own leftovers
+        for r in body["results"]:
+            if r["status"] == "ok":
+                assert r["unclassified_symbols"] == ["ZZZQ"]
+                assert r["auto_classified"] == []
+
+    def test_backfill_refuses_a_concurrent_run(self, client, tmp_path, monkeypatch):
+        """Two clients, or the card plus an in-flight import, otherwise pay
+        for the same lookups twice."""
+        import threading
+
+        from istota.money import portfolio_autoclass
+
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        _upload(client, variant)
+        in_lookup = threading.Event()
+        release = threading.Event()
+
+        def fetch(symbol, **kwargs):
+            in_lookup.set()
+            release.wait(5)
+            return None
+
+        monkeypatch.setattr(portfolio_autoclass, "fetch_symbol_info", fetch)
+        first: list = []
+        worker = threading.Thread(
+            target=lambda: first.append(
+                client.post("/api/money/portfolio/classifications/auto")
+            )
+        )
+        worker.start()
+        try:
+            assert in_lookup.wait(5)
+            second = client.post("/api/money/portfolio/classifications/auto")
+            assert second.status_code == 409
+        finally:
+            release.set()
+            worker.join(10)
+        assert first[0].status_code == 200
+
+    def test_backfill_reports_a_dead_lookup_tier(self, client, tmp_path, monkeypatch):
+        from istota.money import portfolio_autoclass
+
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        _upload(client, variant)
+        monkeypatch.setattr(
+            portfolio_autoclass, "lookup_backend_available", lambda: False
+        )
+        body = client.post("/api/money/portfolio/classifications/auto").json()
+        assert body["unresolved"] == ["ZZZQ"]
+        assert body["lookups_available"] is False
+
+    def test_operator_gate_skips_the_third_party_lookup(
+        self, tmp_path, monkeypatch,
+    ):
+        """[money] autoclass_lookup = false keeps held symbols off the wire;
+        the offline heuristics still run."""
+        from istota.money import portfolio_autoclass
+
+        calls = []
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s, **kw: calls.append(s) or {"quoteType": "EQUITY"},
+        )
+        db_path = tmp_path / "data" / "money.db"
+        db_path.parent.mkdir(parents=True)
+        init_db(db_path)
+        ctx = UserContext(
+            data_dir=tmp_path, ledgers=[], db_path=db_path,
+            autoclass_lookup=False,
+        )
+        app = FastAPI()
+        app.include_router(router, prefix="/api/money")
+        app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+        app.dependency_overrides[get_user_config] = lambda: ctx
+        gated = TestClient(app)
+        text = CSV_2025.read_text(encoding="utf-8-sig").replace("VGIT", "ZZZQ")
+        variant = tmp_path / "gated.csv"
+        variant.write_text(text, encoding="utf-8")
+        body = _upload(gated, variant).json()
+        assert calls == []
+        # ZZZQ keeps its TREAS description, so the offline tier still places it
+        assert [c["symbol"] for c in body["auto_classified"]] == ["ZZZQ"]
+
+    def test_classifications_carry_source(self, client):
+        rows = client.get("/api/money/portfolio/classifications").json()
+        assert all(c["source"] == "seed" for c in rows["classifications"])
+        resp = client.put(
+            "/api/money/portfolio/classifications/zzzt",
+            json={"asset_class": "Stocks"},
+        )
+        assert resp.json()["classification"]["source"] == "user"

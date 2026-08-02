@@ -423,6 +423,10 @@ def cmd_portfolio_accounts(args):
     _output(_run(cli_args))
 
 
+def cmd_portfolio_classifications(args):  # noqa: ARG001
+    _output(_run(["portfolio", "classifications"]))
+
+
 def cmd_portfolio_classify(args):
     cli_args = ["portfolio", "classify", args.symbol, "--asset-class", args.asset_class]
     if args.sub_class:
@@ -434,6 +438,10 @@ def cmd_portfolio_classify(args):
 
 def cmd_portfolio_unclassify(args):
     _output(_run(["portfolio", "unclassify", args.symbol]))
+
+
+def cmd_portfolio_autoclass(args):
+    _output(_run(["portfolio", "autoclass"]))
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +640,8 @@ def build_parser():
     p_pf_acc.add_argument("--exclude", type=int, help="Exclude account from summaries")
     p_pf_acc.add_argument("--include", type=int, help="Re-include account")
 
+    pf_sub.add_parser("classifications", help="List symbol classifications")
+
     p_pf_cls = pf_sub.add_parser("classify", help="Set a symbol classification")
     p_pf_cls.add_argument("symbol", help="Ticker symbol")
     p_pf_cls.add_argument("--asset-class", dest="asset_class", required=True)
@@ -640,6 +650,11 @@ def build_parser():
 
     p_pf_uncls = pf_sub.add_parser("unclassify", help="Remove a symbol classification")
     p_pf_uncls.add_argument("symbol", help="Ticker symbol")
+
+    pf_sub.add_parser(
+        "autoclass",
+        help="Auto-classify unclassified symbols (ticker lookup + heuristics)",
+    )
 
     return parser
 
@@ -700,8 +715,10 @@ def main(argv=None):
             "symbol": cmd_portfolio_symbol,
             "delete-snapshot": cmd_portfolio_delete_snapshot,
             "accounts": cmd_portfolio_accounts,
+            "classifications": cmd_portfolio_classifications,
             "classify": cmd_portfolio_classify,
             "unclassify": cmd_portfolio_unclassify,
+            "autoclass": cmd_portfolio_autoclass,
         }
         fn = portfolio_commands.get(getattr(args, "portfolio_command", None))
         if fn:

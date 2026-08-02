@@ -9,10 +9,12 @@ fed by the istota config attached to ``request.app.state.istota_config``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import re
+import threading
 
 from pathlib import Path
 
@@ -26,6 +28,11 @@ from istota.money.config_store import FILING_STATUSES
 from istota.money.core.tax_data import load_tax_rates
 
 logger = logging.getLogger(__name__)
+
+# Per-money-DB backfill locks (see _autoclass_lock). Process-local: the
+# invariant they protect is cost, not correctness.
+_AUTOCLASS_LOCKS: dict[str, threading.Lock] = {}
+_AUTOCLASS_LOCKS_GUARD = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -2699,6 +2706,26 @@ async def api_portfolio_import(
             ]
         finally:
             conn.close()
+
+        # Auto-classify new symbols after the import commits. Off the event
+        # loop (ticker lookups are network I/O), on its own connection
+        # (sqlite conns are thread-bound), and fail-soft — a lookup outage
+        # leaves symbols in unclassified_symbols, never fails the import.
+        for r in results:
+            if r["status"] == "ok":
+                r.setdefault("auto_classified", [])
+        if any(
+            r["status"] == "ok" and r.get("unclassified_symbols")
+            for r in results
+        ):
+            try:
+                await asyncio.to_thread(
+                    _auto_classify_imported, user_ctx, snapshots, results
+                )
+            except Exception:
+                logger.warning(
+                    "portfolio auto-classification failed", exc_info=True
+                )
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -2714,10 +2741,15 @@ async def api_portfolio_import(
         if result["status"] == "duplicate":
             return JSONResponse(result, status_code=409)
         return result
+    from istota.money import portfolio_autoclass
+
     return {
         "status": "ok",
         "imported": sum(1 for r in results if r["status"] == "ok"),
         "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+        # Hoisted so a client reading the top level sees the classification
+        # outcome of a multi-snapshot import (the fina migration) at all.
+        **portfolio_autoclass.summarize_auto_results(results),
         "results": results,
     }
 
@@ -2901,12 +2933,40 @@ async def api_portfolio_account_patch(
         conn.close()
 
 
+def _auto_classify_imported(user_ctx, snapshots, results) -> None:
+    """Runs in a worker thread: mutates each ok result's classification keys.
+
+    One pass across every snapshot the upload produced — a fina history file
+    parses into one per export date, and classifying each separately spent
+    the whole lookup budget again on every one of them.
+
+    Takes the same per-DB lock the backfill button does, so an import and a
+    backfill can't run overlapping lookups for the same symbols. Blocking
+    rather than skipping: the other holder is bounded by its own wall-clock
+    budget, this already runs off the event loop, and the import has
+    committed — the classification is worth waiting for.
+    """
+    from istota.money import portfolio_autoclass
+
+    with _autoclass_lock(user_ctx):
+        conn = _portfolio_conn(user_ctx)
+        try:
+            auto = portfolio_autoclass.auto_classify_snapshots(
+                conn, snapshots,
+                allow_lookups=bool(getattr(user_ctx, "autoclass_lookup", True)),
+            )
+            portfolio_autoclass.apply_auto_results(results, auto)
+        finally:
+            conn.close()
+
+
 def _classification_to_dict(cls) -> dict:
     return {
         "symbol": cls.symbol_norm,
         "asset_class": cls.asset_class,
         "sub_class": cls.sub_class,
         "geography": cls.geography,
+        "source": cls.source,
         "updated_at": cls.updated_at,
     }
 
@@ -2926,6 +2986,64 @@ async def api_portfolio_classifications(user_ctx: UserContext = Depends(get_user
         }
     finally:
         conn.close()
+
+
+def _autoclass_lock(user_ctx) -> threading.Lock:
+    """One classification lock per money DB, shared by the import path and
+    the backfill button.
+
+    The card's own ``disabled`` guards one tab. Two clients, or the card plus
+    an in-flight import, otherwise issue overlapping lookups for the same
+    symbols — wasteful rather than corrupting now that the write is
+    INSERT OR IGNORE, but there is nothing to gain by paying for it twice.
+    """
+    if user_ctx.db_path is None:
+        raise HTTPException(500, "money DB not configured for this user")
+    key = str(user_ctx.db_path)
+    with _AUTOCLASS_LOCKS_GUARD:
+        lock = _AUTOCLASS_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _AUTOCLASS_LOCKS[key] = lock
+        return lock
+
+
+@router.post("/portfolio/classifications/auto")
+async def api_portfolio_classifications_auto(
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Auto-classify every imported symbol that still resolves to
+    Unclassified (the backfill behind the settings-page button)."""
+    from istota.money import portfolio_autoclass
+
+    lock = _autoclass_lock(user_ctx)
+
+    def run() -> dict | None:
+        # Acquired and released by the worker itself, so the lock's lifetime
+        # tracks the work rather than the request: `to_thread` cancels the
+        # awaiting future, never the thread, so releasing in the route's
+        # `finally` would free the lock on a client disconnect while the
+        # lookups it guards were still running.
+        if not lock.acquire(blocking=False):
+            return None
+        try:
+            conn = _portfolio_conn(user_ctx)
+            try:
+                candidates = portfolio_autoclass.candidates_from_positions(conn)
+                return portfolio_autoclass.auto_classify_symbols(
+                    conn, candidates,
+                    allow_lookups=bool(getattr(user_ctx, "autoclass_lookup", True)),
+                )
+            finally:
+                conn.close()
+        finally:
+            lock.release()
+
+    result = await asyncio.to_thread(run)
+    if result is None:
+        return _error("auto-classification is already running", 409)
+    return {"status": "ok", **result}
 
 
 @router.put("/portfolio/classifications/{symbol}")

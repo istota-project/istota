@@ -15,11 +15,21 @@ export const ASSET_CLASSES = [
 ];
 
 export const SUB_CLASSES: Record<string, string[]> = {
+  // The size/style entries mirror what auto-classification emits, so a
+  // symbol it placed and one you place by hand are offered the same
+  // spelling. A missing entry costs a suggestion rather than correctness —
+  // `subClassOptions` unions in whatever the user's rows already carry.
   Stocks: [
     'Total Market',
     'Large Cap',
     'Large Cap Growth',
+    'Large Cap Value',
+    'Mid Cap',
+    'Mid Cap Growth',
+    'Mid Cap Value',
     'Small Cap',
+    'Small Cap Growth',
+    'Small Cap Value',
     'Technology',
     'Dividend',
     'Developed Markets',
@@ -27,7 +37,7 @@ export const SUB_CLASSES: Record<string, string[]> = {
   ],
   'Fixed Income': ['Short-Term', 'Intermediate', 'Long-Term', 'TIPS', 'Municipal', 'High Yield'],
   'Cash & Equivalents': ['Cash', 'Money Market', 'CD'],
-  Commodities: ['Gold', 'Silver', 'Broad Basket'],
+  Commodities: ['Gold', 'Silver', 'Platinum', 'Palladium', 'Broad Basket'],
   'Real Estate': ['REIT'],
   Alternative: ['Cryptocurrency', 'Private Equity', 'SPAC'],
 };
