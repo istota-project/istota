@@ -342,14 +342,14 @@ class TestClientCaseInsensitiveMatching:
             'invoice_output = "invoices"\n'
             'next_invoice_number = 1\n\n'
             '[company]\nname = "My Co"\n\n'
-            '[clients.globex]\nname = "Globex Inc"\nterms = 30\n\n'
+            '[clients.acme]\nname = "Acme Inc"\nterms = 30\n\n'
             '[services.dev]\ndisplay_name = "Development"\nrate = 150\ntype = "hours"\n'
             'income_account = "Income:Dev"\n'
         )
         config = parse_invoicing_config(config_file)
 
         # add_work_entry now normalizes to lowercase, so this tests the full flow
-        add_work_entry(tmp_path, "2026-03-01", "globex", "dev", qty=8)
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -357,7 +357,7 @@ class TestClientCaseInsensitiveMatching:
             dry_run=True,
         )
         assert len(results) == 1
-        assert results[0]["client"] == "Globex Inc"
+        assert results[0]["client"] == "Acme Inc"
         assert results[0]["total"] == 1200.0
 
 
@@ -1005,18 +1005,18 @@ class TestNextInvoiceNumberDerivation:
             'invoice_output = "invoices"\n'
             'next_invoice_number = 236\n\n'
             '[company]\nname = "My Co"\n\n'
-            '[clients.globex]\nname = "Globex Inc"\nterms = 30\n\n'
+            '[clients.acme]\nname = "Acme Inc"\nterms = 30\n\n'
             '[services.dev]\ndisplay_name = "Dev"\nrate = 150\ntype = "hours"\n'
             'income_account = "Income:Dev"\n'
         )
         config = parse_invoicing_config(config_file)
 
         # Already-issued invoices, counter never advanced past 236
-        add_work_entry(tmp_path, "2026-05-01", "globex", "dev", qty=1, invoice="INV-000236")
-        add_work_entry(tmp_path, "2026-05-01", "globex", "dev", qty=1, invoice="INV-000237")
-        add_work_entry(tmp_path, "2026-05-01", "globex", "dev", qty=1, invoice="INV-000238")
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1, invoice="INV-000236")
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1, invoice="INV-000237")
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1, invoice="INV-000238")
         # New uninvoiced work
-        add_work_entry(tmp_path, "2026-06-15", "globex", "dev", qty=8)
+        add_work_entry(tmp_path, "2026-06-15", "acme", "dev", qty=8)
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,
@@ -1037,13 +1037,13 @@ class TestNextInvoiceNumberDerivation:
             'invoice_output = "invoices"\n'
             'next_invoice_number = 500\n\n'
             '[company]\nname = "My Co"\n\n'
-            '[clients.globex]\nname = "Globex Inc"\nterms = 30\n\n'
+            '[clients.acme]\nname = "Acme Inc"\nterms = 30\n\n'
             '[services.dev]\ndisplay_name = "Dev"\nrate = 150\ntype = "hours"\n'
             'income_account = "Income:Dev"\n'
         )
         config = parse_invoicing_config(config_file)
-        add_work_entry(tmp_path, "2026-05-01", "globex", "dev", qty=1, invoice="INV-000238")
-        add_work_entry(tmp_path, "2026-06-15", "globex", "dev", qty=8)
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1, invoice="INV-000238")
+        add_work_entry(tmp_path, "2026-06-15", "acme", "dev", qty=8)
 
         results = generate_invoices_for_period(
             config=config, config_path=config_file,

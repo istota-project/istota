@@ -365,7 +365,7 @@ class TestEphemeralAutoExpiry:
         """When valid_from (the event date) is given, the TTL counts from it,
         not from today — a project completed long ago is already historical."""
         fact_id = add_fact(
-            conn, "user1", "bob", "completed", "globex",
+            conn, "user1", "bob", "completed", "project-x",
             valid_from="2026-01-01",
         )
         fact = get_fact(conn, fact_id)
@@ -1001,7 +1001,7 @@ class TestSelectRelevantFacts:
         facts = [
             self._make_fact("bob", "works_at", "acme"),
             self._make_fact("bob", "speaks", "portuguese"),
-            self._make_fact("bob", "completed", "globex"),
+            self._make_fact("bob", "completed", "project-x"),
             self._make_fact("bob", "acquired", "arc desk lamp"),
         ]
         result = select_relevant_facts(facts, "unrelated prompt", "bob")
