@@ -136,7 +136,7 @@
     "off-scale-space": 1
   },
   "src/routes/health/history/+page.svelte": {
-    "off-scale-space": 9,
+    "off-scale-space": 8,
     "redefined-primitive": 2,
     "raw-color": 4
   },
@@ -167,9 +167,6 @@
   },
   "src/routes/location/+layout.svelte": {
     "off-scale-space": 3
-  },
-  "src/routes/location/history/+page.svelte": {
-    "off-scale-space": 1
   },
   "src/routes/money/+layout.svelte": {
     "off-scale-space": 8

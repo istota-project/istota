@@ -16,6 +16,7 @@ export { default as Input } from './Input.svelte';
 export { default as TextArea } from './TextArea.svelte';
 export { default as Field } from './Field.svelte';
 export { default as AutocompleteInput } from './AutocompleteInput.svelte';
+export { default as DateRangeFilter } from './DateRangeFilter.svelte';
 export { default as FileDropZone } from './FileDropZone.svelte';
 export { default as Modal } from './Modal.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';

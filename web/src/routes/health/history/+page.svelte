@@ -10,7 +10,7 @@
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
-  import { Button, Field, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, DateRangeFilter, Field, Select, type SelectOption } from '$lib/components/ui';
   import {
     conditionOptionLabel,
     linkableConditionOptions,
@@ -319,15 +319,7 @@
     }}
     ariaLabel="Type filter"
   />
-  <div class="date-inputs">
-    <!-- The leading field needs no label: a date input followed by "to" and a
-         second date input reads as a range on its own, and dropping the word
-         buys most of a phone's width back. The inputs keep aria-labels so the
-         range is still named for a screen reader. -->
-    <input type="date" bind:value={sinceFilter} onchange={load} aria-label="From date" />
-    <span class="range-sep">to</span>
-    <input type="date" bind:value={untilFilter} onchange={load} aria-label="To date" />
-  </div>
+  <DateRangeFilter bind:from={sinceFilter} bind:to={untilFilter} onChange={load} />
 </div>
 
 {#if loading}
@@ -541,34 +533,6 @@
     align-items: center;
     gap: var(--space-3);
     margin-bottom: var(--space-4);
-  }
-  .date-inputs {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-  .range-sep {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-  .date-inputs input[type='date'] {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font-family: inherit;
-    font-size: var(--text-xs);
-    padding: 0.2rem var(--space-2);
-    border-radius: var(--radius-sm);
-    /* Sizing is app.css's job: it drops the native appearance (which is what
-       made these overflow a phone row) and floors the width so an unset date
-       still renders as a field. Restating `min-width: 0` here outranked that
-       floor and collapsed both filters to blank slivers on iOS, which is the
-       whole reason this rule is now only paint. */
-  }
-  .date-inputs input[type='date']::-webkit-calendar-picker-indicator {
-    filter: invert(0.7);
   }
 
   .layout {
@@ -787,14 +751,6 @@
     color: var(--status-danger-fg);
   }
 
-  /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
-     pseudo-element we cannot restyle directly. The icon ships dark, so the dark
-     theme inverts it and the light theme must undo that. */
-  :global(:root[data-theme='light'])
-    .date-inputs
-    input[type='date']::-webkit-calendar-picker-indicator {
-    filter: none;
-  }
   /* design-lint-allow-begin: light half of the categorical encounter-type
      palette above. */
   :global(:root[data-theme='light']) .badge.type-visit {

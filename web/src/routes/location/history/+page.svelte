@@ -27,7 +27,7 @@
   } from '$lib/stores/location';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { Chip, ConfirmDialog, Select } from '$lib/components/ui';
+  import { Chip, ConfirmDialog, DateRangeFilter, Select } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   let pings: LocationPing[] = $state([]);
@@ -265,24 +265,13 @@
       onValueChange={handlePresetChange}
       ariaLabel="Date range"
     />
-    <div class="date-inputs">
-      <label for="hist-start">From</label>
-      <input
-        id="hist-start"
-        type="date"
-        bind:value={startStr}
-        onchange={handleRangeInput}
-        max={today}
-      />
-      <label for="hist-end">To</label>
-      <input
-        id="hist-end"
-        type="date"
-        bind:value={endStr}
-        onchange={handleRangeInput}
-        max={today}
-      />
-    </div>
+    <DateRangeFilter
+      bind:from={startStr}
+      bind:to={endStr}
+      onChange={handleRangeInput}
+      labelled
+      max={today}
+    />
     {#if !isSingleDay && pings.length > 0}
       <Chip checked={showHeat} onclick={() => (showHeat = !showHeat)}>Heat map</Chip>
     {/if}
@@ -397,37 +386,6 @@
     flex-shrink: 0;
   }
 
-  .date-inputs {
-    display: flex;
-    align-items: center;
-    /* A date input renders at a font-driven intrinsic width on iOS, and the
-       touch floor in app.css lifts it to 16px — so two of them plus their
-       labels no longer fit one phone row. Wrap rather than squeeze, matching
-       the same row on /health/history. */
-    flex-wrap: wrap;
-    min-width: 0;
-    gap: var(--space-2);
-  }
-
-  .date-inputs label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
-  .date-inputs input[type='date'] {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font-size: var(--text-xs);
-    padding: 0.2rem var(--space-2);
-    border-radius: var(--radius-sm);
-    font-family: inherit;
-  }
-
-  .date-inputs input[type='date']::-webkit-calendar-picker-indicator {
-    filter: invert(0.7);
-  }
-
   .map-area {
     flex: 1;
     min-height: 0;
@@ -494,16 +452,13 @@
   }
 
   @media (max-width: 768px) {
-    .date-inputs {
+    /* The preset chips are the phone affordance; the explicit range is the
+       desktop one. :global because the subject is DateRangeFilter's root now,
+       and Svelte prunes a selector whose subject it cannot see — silently.
+       Scoped under the page's own bar, so it is placement rather than a leak.
+       The picker-icon theme pair moved into the component with the rest. */
+    .controls-bar :global(.date-range) {
       display: none;
     }
-  }
-  /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
-     pseudo-element we cannot restyle directly. The icon ships dark, so the dark
-     theme inverts it and the light theme must undo that. */
-  :global(:root[data-theme='light'])
-    .date-inputs
-    input[type='date']::-webkit-calendar-picker-indicator {
-    filter: none;
   }
 </style>
