@@ -83,7 +83,7 @@
           </span>
         {/each}
         {#if senders.length === 0}
-          <span class="muted small">No senders yet.</span>
+          <span class="caption">No senders yet.</span>
         {/if}
       </div>
       <div class="chip-add">
@@ -128,7 +128,7 @@
     />
   </SettingsField>
   {#if rssOptions.length === 0}
-    <p class="muted small">No feeds available — subscribe in the Feeds module first.</p>
+    <p class="caption">No feeds available — subscribe in the Feeds module first.</p>
   {/if}
   <div class="inline-fields">
     <SettingsField label="Max entries">
@@ -175,7 +175,7 @@
     </SettingsField>
   {/if}
 {:else if kind === 'markets'}
-  <p class="muted small">Leave blank for the default index &amp; futures set.</p>
+  <p class="caption">Leave blank for the default index &amp; futures set.</p>
   <SettingsField label="Indices" hint="Comma-separated symbols, e.g. ^GSPC, ^IXIC">
     <input
       type="text"
@@ -205,7 +205,7 @@
     />
   </SettingsField>
 {:else if kind === 'calendar'}
-  <p class="muted small">Pulls from your connected calendars. No configuration needed.</p>
+  <p class="caption">Pulls from your connected calendars. No configuration needed.</p>
 {:else if kind === 'shared_block'}
   <SettingsField
     label="Shared block"
@@ -221,7 +221,7 @@
     />
   </SettingsField>
   {#if sharedBlockOptions.length === 0}
-    <p class="muted small">No shared blocks available yet.</p>
+    <p class="caption">No shared blocks available yet.</p>
   {/if}
   <SettingsField label="Max age (hours)" hint="Omit stale content older than this. Blank = 24h.">
     <input
@@ -241,13 +241,8 @@
     align-items: flex-end;
     flex-wrap: wrap;
   }
-  .muted {
-    color: var(--text-muted);
-  }
-  .small {
-    font-size: var(--text-xs);
-  }
-  p.muted.small {
+  /* Typography is the global .caption; only the <p> reset stays here. */
+  p.caption {
     margin: 0.1rem 0;
   }
   .chip-list {

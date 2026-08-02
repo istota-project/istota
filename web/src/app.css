@@ -433,6 +433,31 @@
   text-transform: uppercase;
 }
 
+/* The two supporting-text roles, and the lowercase siblings of .micro-label
+   above. Both were everywhere and named nowhere: "small dim text" was spelled
+   `.hint` on four pages, `.meta` on five more and `.small` on two, and
+   "de-emphasized at the current size" was `.muted` in nine files. settings.css
+   had them already, but scoped under `.settings`, so a page anywhere else
+   could only get them by writing them out again.
+
+   They are two roles rather than one because --text-dim (#666) and
+   --text-muted (#888) are two distinct steps. `.caption` takes the size down
+   with the colour — a hint under a field, a timestamp under a title, the
+   detail line under a value. `.muted` changes colour ONLY, so it can be
+   dropped onto a span mid-sentence without shrinking it.
+
+   Typography-only, for the reason .micro-label is: spacing varied at every
+   call site and folding it in is what produced the variants. A `margin: 0`
+   reset on a <p> stays with the <p>. */
+.caption {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
 /* "Nothing here yet" inside a card or a section — a list with no rows, a
    panel with no data. Fourteen files carried this verbatim.
 

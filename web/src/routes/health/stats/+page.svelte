@@ -415,9 +415,9 @@
           <canvas bind:this={canvases[metric]}></canvas>
         </div>
         {#if metric === 'weight' && bmi() != null}
-          <div class="meta">BMI {bmi()}</div>
+          <div class="caption">BMI {bmi()}</div>
         {:else if latestByMetric[metric]}
-          <div class="meta">
+          <div class="caption">
             {new Date(latestByMetric[metric].measured_at).toLocaleDateString(undefined, {
               month: 'short',
               day: 'numeric',
@@ -448,7 +448,7 @@
         <div class="chart">
           <canvas bind:this={canvases['blood_pressure']}></canvas>
         </div>
-        {#if bpLatestDate()}<div class="meta">{bpLatestDate()}</div>{/if}
+        {#if bpLatestDate()}<div class="caption">{bpLatestDate()}</div>{/if}
       </button>
     {/if}
   </div>
@@ -580,9 +580,8 @@
     min-height: 70px;
     margin-top: var(--space-2);
   }
-  .meta {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
+  /* Typography is the global .caption; the spacing stays at the call site. */
+  .caption {
     margin-top: var(--space-1);
   }
 

@@ -461,8 +461,4 @@
     color: var(--text-primary);
     overflow-wrap: anywhere;
   }
-
-  .muted {
-    color: var(--text-muted);
-  }
 </style>

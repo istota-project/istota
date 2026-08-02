@@ -142,7 +142,7 @@
       ariaLabel="Room model default"
       fullWidth
     />
-    <p class="hint">
+    <p class="caption">
       Applies to every message in this room, on both web and Nextcloud Talk. A
       <code>!model</code> prefix still overrides it for a single message.
     </p>
@@ -167,14 +167,14 @@
         {copied ? 'Copied!' : 'Copy'}
       </button>
     </div>
-    <p class="hint">Use this to link to or route output to this room.</p>
+    <p class="caption">Use this to link to or route output to this room.</p>
     {#if copyError}<p class="copy-error">{copyError}</p>{/if}
   </div>
 
   <div class="field">
     <span>Nextcloud Talk</span>
     {#if onTalk}
-      <p class="hint talk-on">
+      <p class="caption talk-on">
         This room is also open in Nextcloud Talk — replies sync to your phone.
       </p>
     {:else if onPromote}
@@ -186,14 +186,14 @@
       >
         {promoting ? 'Opening…' : 'Also open in Talk'}
       </button>
-      <p class="hint">
+      <p class="caption">
         Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
       </p>
     {/if}
   </div>
 
   {#if isImported}
-    <p class="hint hide-hint">
+    <p class="caption hide-hint">
       Hiding only removes this room from your web chat list. The Nextcloud Talk conversation and its
       messages aren't deleted, and it reappears here if you post in it again.
     </p>
@@ -278,9 +278,8 @@
     color: var(--text-primary);
   }
 
-  .hint {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
+  /* Typography is the global .caption; only the <p> reset stays here. */
+  p.caption {
     margin: 0.1rem 0 0;
   }
 

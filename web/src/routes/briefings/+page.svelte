@@ -189,8 +189,4 @@
     font-size: 1.1rem;
     margin: 0 0 var(--space-2);
   }
-
-  .muted {
-    color: var(--text-muted);
-  }
 </style>

@@ -984,8 +984,10 @@
     font-size: var(--text-xs);
   }
 
-  .muted {
-    color: var(--text-dim);
+  /* The colour is the global .muted. What stays here is the *value* case:
+     a KPI whose number is de-emphasized has to give up the tile's 600 weight
+     and step down a size, which is about this tile and not about .muted. */
+  .kpi-value.muted {
     font-size: var(--text-sm);
     font-weight: 400;
   }

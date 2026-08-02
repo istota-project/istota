@@ -248,7 +248,7 @@
               >{immunizationStatusLabel(c.status)}</Badge
             >
             <div class="card-body">
-              <div class="muted">
+              <div class="caption">
                 {#if c.last_given}
                   Last: {formatDate(c.last_given)}{#if c.dose_count > 1}
                     · {c.dose_count} doses{/if}
@@ -257,7 +257,7 @@
                 {/if}
               </div>
               {#if c.next_due}
-                <div class="muted">
+                <div class="caption">
                   Next due: {formatDate(c.next_due)}
                   {#if c.days_until_due !== null}
                     {#if c.days_until_due < 0}
@@ -289,7 +289,7 @@
                   >{immunizationStatusLabel(c.status)}</Badge
                 >
                 <div class="card-body">
-                  <div class="muted">
+                  <div class="caption">
                     {#if c.last_given}
                       Last: {formatDate(c.last_given)}
                     {:else}
@@ -315,7 +315,7 @@
                 {c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
               </Badge>
               <div class="card-body">
-                <div class="muted">Last: {formatDate(c.last_given)}</div>
+                <div class="caption">Last: {formatDate(c.last_given)}</div>
               </div>
             </div>
           </li>
@@ -508,11 +508,6 @@
     flex-direction: column;
     gap: 0.15rem;
   }
-  .muted {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
   .risk-based {
     margin-top: var(--space-3);
   }

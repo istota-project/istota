@@ -129,7 +129,7 @@
       Drop, paste, or pick a screenshot or PDF of your visit paperwork — after-visit summary,
       discharge note, referral letter, etc.
     </p>
-    <p class="hint">
+    <p class="caption">
       The LLM extracts date, provider, facility, reason, and any diagnoses listed, then matches each
       to the canonical encounter type. You'll review everything before it's saved.
     </p>
@@ -171,7 +171,7 @@
   <div class="review-head">
     <h2 class="micro-label">Review {parsed.length} encounter{parsed.length === 1 ? '' : 's'}</h2>
     {#if extractMode}
-      <span class="meta">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
+      <span class="caption">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
     {/if}
   </div>
 
@@ -364,9 +364,8 @@
     gap: var(--space-3);
   }
 
-  .hint {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
+  /* Typography is the global .caption; only the <p> reset stays here. */
+  p.caption {
     margin: 0;
   }
 
@@ -403,11 +402,6 @@
     gap: var(--space-2);
     margin: var(--space-3) 0 var(--space-2);
   }
-  .meta {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .enc-card {
     background: var(--surface-card);
     border: 1px solid var(--border-default);

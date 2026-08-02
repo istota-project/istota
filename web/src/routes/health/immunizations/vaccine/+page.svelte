@@ -106,7 +106,7 @@
         <Badge variant={immunizationStatusVariant(entry.status)}
           >{immunizationStatusLabel(entry.status)}</Badge
         >
-        <span class="muted small">{ref.category} · {ref.schedule}</span>
+        <span class="caption">{ref.category} · {ref.schedule}</span>
       </div>
       <dl class="grid-stats">
         <div>
@@ -133,7 +133,7 @@
       <p class="description">{ref.description}</p>
     {/if}
     {#if ref.typical_age_range}
-      <p class="muted small">Typical age range: {ref.typical_age_range}</p>
+      <p class="caption">Typical age range: {ref.typical_age_range}</p>
     {/if}
   </section>
 
@@ -258,12 +258,6 @@
     color: var(--text-secondary);
     line-height: 1.55;
     max-width: 75ch;
-  }
-  .muted {
-    color: var(--text-muted);
-  }
-  .small {
-    font-size: var(--text-xs);
   }
 
   .explainer h2 {

@@ -156,7 +156,7 @@
   <div class="card">
     <FileDropZone bind:file onClear={() => (documentId = null)}>
       <p>Drop, paste, or pick a screenshot or PDF of your immunization list.</p>
-      <p class="hint">
+      <p class="caption">
         The LLM extracts vaccine name + date and matches each row to a canonical family. You'll
         review the table before anything is saved.
       </p>
@@ -174,7 +174,7 @@
   </div>
 {:else}
   <div class="card">
-    <p class="hint">
+    <p class="caption">
       Paste a MyChart / EHR vaccine list below. Lines like
       <code>"Influenza (Given 11/28/2025)"</code> are recognised and matched to a canonical vaccine family.
       Review the table before importing.
@@ -222,7 +222,7 @@
   <div class="review-head">
     <h2 class="micro-label">Review {parsed.length} row{parsed.length === 1 ? '' : 's'}</h2>
     {#if extractMode}
-      <span class="meta">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
+      <span class="caption">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
     {/if}
   </div>
 
@@ -340,9 +340,8 @@
     gap: var(--space-3);
   }
 
-  .hint {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
+  /* Typography is the global .caption; only the <p> reset stays here. */
+  p.caption {
     margin: 0;
   }
 
@@ -394,10 +393,6 @@
     justify-content: space-between;
     gap: var(--space-2);
     margin: var(--space-3) 0 var(--space-2);
-  }
-  .meta {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
   code {
     background: var(--surface-raised);

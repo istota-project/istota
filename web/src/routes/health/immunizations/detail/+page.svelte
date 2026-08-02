@@ -221,7 +221,7 @@
           (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
       ></textarea>
     </Field>
-    <div class="meta">
+    <div class="caption">
       Source: {immunization.source}
       {#if immunization.created_at}
         · Created: {immunization.created_at}
@@ -249,7 +249,7 @@
           <span class="date">{encounter.encounter_date}</span>
         </div>
         {#if encounter.provider || encounter.facility}
-          <div class="muted">
+          <div class="caption">
             {encounter.provider || ''}{encounter.provider && encounter.facility
               ? ' · '
               : ''}{encounter.facility || ''}
@@ -325,11 +325,6 @@
     display: flex;
     justify-content: flex-end;
   }
-  .meta {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .linked {
     margin-top: 1.25rem;
   }
@@ -353,9 +348,5 @@
   .date {
     font-size: var(--text-xs);
     color: var(--text-dim);
-  }
-  .muted {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 </style>

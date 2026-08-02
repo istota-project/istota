@@ -165,7 +165,7 @@
     <div class="card">
       <FileDropZone bind:file>
         <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
-        <p class="hint">
+        <p class="caption">
           Date drawn, lab, and panel type are extracted automatically; you'll review them next.
         </p>
       </FileDropZone>
@@ -329,10 +329,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-  }
-  .hint {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
   }
   .metadata {
     display: grid;

@@ -129,7 +129,7 @@
 
 <Modal bind:open {title} onOpenChange={handleOpenChange} width="320px">
   {#if cluster && !editing}
-    <div class="meta">{cluster.total_pings} pings recorded here</div>
+    <div class="caption">{cluster.total_pings} pings recorded here</div>
   {/if}
 
   <label class="field">
@@ -191,9 +191,8 @@
 />
 
 <style>
-  .meta {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
+  /* Typography is the global .caption; the spacing stays at the call site. */
+  .caption {
     margin-bottom: var(--space-2);
   }
 

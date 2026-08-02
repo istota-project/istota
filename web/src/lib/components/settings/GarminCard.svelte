@@ -254,7 +254,4 @@
     gap: var(--space-2);
     margin-top: var(--space-3);
   }
-  .muted {
-    color: var(--text-muted);
-  }
 </style>
