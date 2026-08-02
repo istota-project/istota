@@ -637,12 +637,6 @@
     resize: vertical;
     font-family: inherit;
   }
-  .form-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
-  }
-
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab
      alongside the name rather than being one big link. */

@@ -382,14 +382,6 @@
 	   web/src/lib/styles/settings.css (imported by app.css). Only money-specific
 	   styling (kv, entity grid, numeric column tweaks) stays. */
 
-  .kv {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: var(--space-1) var(--space-3);
-    margin: 0;
-    font-size: var(--text-sm);
-  }
-
   .kv.compact {
     /* design-lint-allow: sub---space-1 hairline between the rows of a compact
        definition list — the ramp starts a step above what this wants */

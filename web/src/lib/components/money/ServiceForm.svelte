@@ -185,9 +185,8 @@
     margin: 0;
   }
 
+  /* Type is the global .form-error; only the space above it is this form's. */
   .form-error {
-    font-size: var(--text-xs);
-    color: var(--status-danger-fg);
     margin-top: var(--space-2);
   }
 </style>

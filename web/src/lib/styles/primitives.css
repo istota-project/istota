@@ -136,6 +136,54 @@
   color: var(--status-success-fg);
 }
 
+/* A form-level error: the one a submit produced, sitting under the fields
+   rather than beside any one of them. Five money forms carried this
+   byte-identically and disagreed on a single declaration — whether the space
+   belonged above it or below it — so the type lives here and the margin stays
+   at the call site, the division .micro-label draws.
+
+   NOT Field's `error` slot, which reports one field and renders inside it.
+   This is the whole form failing. */
+.form-error {
+  font-size: var(--text-xs);
+  color: var(--status-danger-fg);
+}
+
+/* The button row that ends a form, flush right. Five health pages. Four of
+   them held one button, so their missing gap was invisible rather than
+   deliberate; the fifth had two and had to add it. */
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* A definition list as a two-column grid: the <dt> at its content width, the
+   <dd> filling the rest. Four files carried it, differing only in the column
+   gap — /admin's rows are short pairs that read better further apart — so
+   that one value is a hook, the way cards.css does --card-min. */
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--kv-gap, var(--space-3));
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* A card's header row: the title at one end, its actions or timestamp at the
+   other. Five files in two clusters.
+
+   Deliberately does NOT set align-items, which is the one thing the clusters
+   disagreed on and where both are right: `flex-start` where a long record
+   name wraps to a second line and a centred row would float its actions
+   against the middle of it, `center` where the title is always one line.
+   Folding that in would pick a winner silently. */
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
 /* One keyboard-focus ring for everything focusable. :focus-visible, so a mouse
    click never draws it — which is what makes a global rule safe here, and what
    the per-component `outline: none` rules were reaching for by hand.

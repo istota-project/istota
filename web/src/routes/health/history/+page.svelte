@@ -477,11 +477,6 @@
     resize: vertical;
     font-family: inherit;
   }
-  .form-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
   /* Not a <label>: the control is a Select whose trigger is a button, and
      wrapping it would make clicking the field name open the dropdown. */
   .conditions-field {
@@ -604,8 +599,6 @@
     border-color: var(--border-hover);
   }
   .card-head {
-    display: flex;
-    justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-2);
   }

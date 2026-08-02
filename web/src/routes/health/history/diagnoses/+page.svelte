@@ -585,11 +585,6 @@
     resize: vertical;
     font-family: inherit;
   }
-  .form-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
   .encounters-field {
     display: flex;
     flex-direction: column;
@@ -672,11 +667,9 @@
   .list.resolved li {
     opacity: 0.7;
   }
+  /* flex-start: a long diagnosis name wraps to a second line. */
   .card-head {
-    display: flex;
     align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-2);
   }
   .name {
     margin: 0;

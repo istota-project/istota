@@ -457,11 +457,6 @@
     cursor: pointer;
     user-select: none;
   }
-  .form-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
   .coverage {
     margin-bottom: 1.25rem;
   }

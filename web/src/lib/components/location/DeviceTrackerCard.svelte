@@ -518,14 +518,6 @@
     word-break: break-all;
   }
 
-  .kv {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: var(--space-1) var(--space-3);
-    margin: 0;
-    font-size: var(--text-sm);
-  }
-
   .kv dt {
     color: var(--text-dim);
   }

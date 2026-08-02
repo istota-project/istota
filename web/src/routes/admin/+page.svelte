@@ -1051,12 +1051,10 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* Short key/value pairs, which read better with the columns further
+     apart than the shared default. */
   .kv {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: var(--space-1) var(--space-6);
-    margin: 0;
-    font-size: var(--text-sm);
+    --kv-gap: var(--space-6);
   }
 
   .kv dt {

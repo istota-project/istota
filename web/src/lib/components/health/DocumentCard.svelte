@@ -68,11 +68,10 @@
     min-width: 0;
   }
 
+  /* flex-start: a long document name wraps, and a centred row would float
+     the kebab against the middle of it. */
   .card-head {
-    display: flex;
     align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-2);
   }
 
   .name {
