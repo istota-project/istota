@@ -34,6 +34,30 @@ const taxesLayout = readFileSync(
   join(process.cwd(), 'src/routes/money/taxes/+layout.svelte'),
   'utf8',
 );
+const adminLayout = readFileSync(join(process.cwd(), 'src/routes/admin/+layout.svelte'), 'utf8');
+
+/**
+ * The three admin pages. They are the one module that reaches the shared cap
+ * without `.content-frame`: each wears the settings shell (`class="settings
+ * admin-page"`) for its .card / .section-header / .grid primitives, and used
+ * to widen that shell's 980px form column by hand — all three landing on the
+ * same 1100px with nothing saying they had to agree. The width is one rule in
+ * the admin layout now, and it reads the token.
+ */
+const adminPages = (
+  [
+    ['+page.svelte', 'admin-page'],
+    ['config/+page.svelte', 'config-page'],
+    ['logs/+page.svelte', 'logs-page'],
+  ] as const
+).map(
+  ([f, wrapper]) =>
+    [
+      `admin/${f}`,
+      wrapper,
+      readFileSync(join(process.cwd(), 'src/routes/admin', f), 'utf8'),
+    ] as const,
+);
 
 /** Every layout that adopts the column, so a new one is added in one place. */
 const adopters = [
@@ -41,6 +65,7 @@ const adopters = [
   ['money/portfolio/+layout.svelte', portfolioLayout],
   ['money/reports/+layout.svelte', reportsLayout],
   ['money/taxes/+layout.svelte', taxesLayout],
+  ['admin/+layout.svelte', adminLayout],
 ] as const;
 
 /**
@@ -163,4 +188,31 @@ describe('adopters', () => {
     expect(bodyAt).toBeGreaterThan(-1);
     expect(markup.indexOf('content-frame', bodyAt)).toBeGreaterThan(bodyAt);
   });
+
+  it('admin reaches the cap once, in its layout', () => {
+    // Not via .content-frame: admin's pages are the settings shell, and the
+    // cap is a widening of that shell's form column rather than a column of
+    // its own. What matters is the same thing the frame exists for — one
+    // answer, read from the token.
+    expect(adminLayout).toContain('max-width: var(--content-max)');
+  });
+
+  for (const [name, wrapper, source] of adminPages) {
+    it(`${name} caps nothing on its own wrapper`, () => {
+      // The failure this guards is the one admin already had: three pages
+      // each widening the settings column by hand, agreeing by coincidence,
+      // and any one of them free to drift a step without anything saying so.
+      //
+      // Asserted against the wrapper rule alone, not the whole <style>. A
+      // breakpoint is spelled `max-width` too, and an inner element is
+      // entitled to its own measure — config's value column caps at 22rem so
+      // a long TOML string wraps instead of stretching the row. Neither is
+      // the page claiming a width.
+      const rule = source
+        .slice(source.indexOf('<style'))
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .match(new RegExp(`\\.${wrapper}\\s*\\{([^}]*)\\}`))?.[1];
+      expect(rule ?? '').not.toMatch(/max-width/);
+    });
+  }
 });

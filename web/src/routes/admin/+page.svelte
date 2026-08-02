@@ -663,10 +663,6 @@
 	   .section-header / .hint) come from web/src/lib/styles/settings.css.
 	   Admin-specific bits below: KPIs, source bars, dot indicators. */
 
-  .admin-page {
-    max-width: 1100px;
-  }
-
   /* Page metadata, not content. It sat in the app bar until the admin sidebar
 	   moved that bar into the layout, which is shared with Configuration and
 	   Logs — neither of which auto-refreshes, so the note belongs with the data

@@ -119,10 +119,6 @@
 </div>
 
 <style>
-  .config-page {
-    max-width: 1100px;
-  }
-
   .config-toolbar {
     display: flex;
     align-items: center;

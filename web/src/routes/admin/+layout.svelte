@@ -67,3 +67,23 @@
 
   {@render children()}
 </AppShell>
+
+<style>
+  /* The admin column, defined once for the three pages instead of three times.
+     Each of them wears the settings shell — `class="settings admin-page"` —
+     because they are built out of its .card / .section-header / .grid
+     primitives, and each then widened its 980px form column by hand, all three
+     landing on the same 1100px with nothing saying they had to agree.
+
+     It reads --content-max, so "how wide may a dashboard column get" has one
+     answer here and on health, money's portfolio and money's reports rather
+     than two. Admin is the last module that was answering it privately.
+
+     :global because the subject is on the page's own element, one level down,
+     and Svelte prunes a selector whose subject it cannot see in this file. */
+  :global(.settings.admin-page),
+  :global(.settings.config-page),
+  :global(.settings.logs-page) {
+    max-width: var(--content-max);
+  }
+</style>

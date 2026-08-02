@@ -456,7 +456,7 @@
 
 <style>
   .logs-page {
-    max-width: 1100px;
+    /* Width comes from the admin layout, shared with the other two pages. */
     display: flex;
     flex-direction: column;
     min-height: 0;
