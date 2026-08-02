@@ -32,6 +32,19 @@ uv sync --extra docs             # mkdocs + mkdocs-material
 
 Skills with missing dependencies are automatically excluded from prompt selection. Use `!skills` in Talk to check availability.
 
+## Enable the pre-commit scan
+
+This repository is public, so commits are scanned for credentials and private
+data. The hook is checked in but has to be enabled per clone:
+
+```bash
+brew install gitleaks                                # or see the gitleaks README
+git config core.hooksPath .githooks                  # scripts/setup.sh also does this
+cp .private-data-local.example .private-data-local   # gitignored; add your own terms
+```
+
+See [Secret scanning](secret-scanning.md).
+
 ## Initialize
 
 ```bash

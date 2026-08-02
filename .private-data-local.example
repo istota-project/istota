@@ -1,0 +1,36 @@
+# Template for .private-data-local — copy it, then fill in your own values:
+#
+#   cp .private-data-local.example .private-data-local
+#
+# .private-data-local is gitignored, because on a public repo the denylist would
+# itself be the leak. Everything here is a POSIX extended regex, one per line
+# (a plain literal is a valid regex); matching is case-insensitive. `#` comments
+# and blank lines are ignored.
+#
+# The scanner already derives two things at runtime with no configuration —
+# your home directory path and your git `user.email` — so those need no entry.
+#
+# Add the terms that a scrub would have to remove from this tree. Past leaks in
+# this repo were: the operator's real name and family names, the production
+# hostname, the live bot's mail domain, brokerage account numbers, and the real
+# user id used as a test identity.
+
+# --- People ---------------------------------------------------------------
+# Real first/last names used as placeholders in examples or fixtures.
+# \bJane Roe\b
+# \bRoe\b
+
+# --- Hosts and domains ----------------------------------------------------
+# Production hostnames and any internal domain. Include the bare label so a
+# hostname like "prod-01.internal" is caught by "internal" alone.
+# \bprod-01\.example-internal\.net\b
+# \bexample-internal\b
+
+# --- Accounts and identifiers --------------------------------------------
+# Brokerage/bank account numbers, real user ids, device ids.
+# \bZ[0-9]{8}\b
+# \bmy-real-user-id\b
+
+# --- Places ---------------------------------------------------------------
+# Home address fragments, hometown, employer.
+# \b123 Real Street\b

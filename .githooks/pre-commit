@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged content for credentials and private data.
+#
+# Enabled by `git config core.hooksPath .githooks` (scripts/setup.sh does this).
+# Bypass in an emergency with `git commit --no-verify` — and then go clean up.
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT" || exit 1
+
+status=0
+
+# --- 1. credentials ---------------------------------------------------------
+
+echo "Pre-commit: scanning staged files for secrets..."
+
+if ! command -v gitleaks &>/dev/null; then
+  echo "  WARNING: gitleaks not installed, skipping secret scan"
+  echo "  Install: brew install gitleaks (macOS) or see https://github.com/gitleaks/gitleaks#installing"
+else
+  # Output is suppressed on purpose: gitleaks prints the matched secret, and a
+  # terminal is the wrong place for it. Re-run by hand to see details.
+  if ! gitleaks git . --staged --no-banner -c .gitleaks.toml >/dev/null 2>&1; then
+    echo ""
+    echo "  ERROR: secrets detected in staged files."
+    echo "  To see details (prints the secret — keep it out of chat logs):"
+    echo "    gitleaks git . --staged -v -c .gitleaks.toml"
+    echo "  See docs/development/secret-scanning.md"
+    echo ""
+    status=1
+  else
+    echo "Pre-commit: no secrets detected"
+  fi
+fi
+
+# --- 2. private data --------------------------------------------------------
+
+echo "Pre-commit: scanning staged files for private data..."
+
+if [ -x scripts/check-private-data.sh ]; then
+  if ! scripts/check-private-data.sh --staged; then
+    status=1
+  fi
+else
+  echo "  WARNING: scripts/check-private-data.sh missing or not executable, skipping"
+fi
+
+if [ "$status" -ne 0 ]; then
+  echo ""
+  echo "Commit aborted."
+fi
+
+exit "$status"

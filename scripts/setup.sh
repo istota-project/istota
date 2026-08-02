@@ -10,6 +10,21 @@ cd "$PROJECT_DIR"
 
 echo "Setting up istota..."
 
+# Configure git hooks (pre-commit secret + private-data scan)
+echo "Configuring git hooks..."
+git config core.hooksPath .githooks
+echo "  Git hooks configured"
+
+if ! command -v gitleaks &> /dev/null; then
+    echo "  WARNING: gitleaks not found — the pre-commit secret scan will be skipped"
+    echo "  Install: brew install gitleaks"
+fi
+
+if [ ! -f ".private-data-local" ]; then
+    echo "  No .private-data-local yet — copy .private-data-local.example and add"
+    echo "  your own names, hostnames and account numbers (the file is gitignored)"
+fi
+
 # Check for uv
 if ! command -v uv &> /dev/null; then
     echo "Error: uv not found. Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh"

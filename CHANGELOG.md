@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
+
 ## [0.38.0] - 2026-08-01
 
 ### Added

@@ -1,0 +1,46 @@
+# gitleaks configuration for istota.
+#
+# The pre-commit hook (.githooks/pre-commit) runs gitleaks over staged content;
+# this file extends the default ruleset with allowlists for the synthetic values
+# the test suite uses. Regenerate the noise baseline with:
+#
+#   gitleaks dir . --no-banner --report-format json --report-path /tmp/gl.json
+#
+# Never add a real secret to this file, not even to allowlist it — allowlist the
+# shape or the path instead.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic Talk/web conversation tokens in tests (16 hex chars, or a repl-/web- prefixed handle)"
+regexTarget = "line"
+regexes = [
+  '''conversation_token\s*=\s*["'][0-9a-fA-F]{16}["']''',
+  '''conversation_token\s*=\s*["'](repl|web)-[A-Za-z0-9_-]+["']''',
+  '''token\s*=\s*["'][0-9a-fA-F]{16}["']''',
+]
+
+[[allowlists]]
+description = "Dict-key equality comparisons that look like assignments to the generic rule"
+regexTarget = "line"
+regexes = [
+  '''\bkey\s*==\s*["'][A-Za-z0-9_.\/-]+["']''',
+  '''\.key\s*==\s*["'][A-Za-z0-9_.\/-]+["']''',
+]
+
+[[allowlists]]
+description = "Paths that never carry real credentials"
+paths = [
+  '''^\.ruff_cache/''',
+  '''^\.mypy_cache/''',
+  '''^\.pytest_cache/''',
+  '''^node_modules/''',
+  '''^web/node_modules/''',
+  '''^uv\.lock$''',
+  '''^web/package-lock\.json$''',
+]
+
+# CHANGELOG.md and DEVLOG.md are deliberately NOT allowlisted: prose written
+# from a terminal session is exactly where a copy-pasted credential or hostname
+# lands.

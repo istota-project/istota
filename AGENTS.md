@@ -317,6 +317,10 @@ Nothing here changes the server/Ansible/Docker path: every field defaults to the
 
 Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces (ruff-managed), everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
 
+## Committing
+
+This repo is public, so `.githooks/pre-commit` scans staged content twice: `gitleaks` for credentials (shape + entropy) and `scripts/check-private-data.sh` for private data (a real name, a production hostname, a home-directory path, an account number — things that have no universal shape and that gitleaks therefore cannot see). Enabled per clone by `git config core.hooksPath .githooks`, which `scripts/setup.sh` does. Patterns come from the committed `.private-data-patterns` (generic shapes only), the **gitignored** `.private-data-local` (your own literals — on a public repo a checked-in denylist is itself the leak), and two terms derived at runtime (`$HOME` path, `git config user.email`). Neither scan prints the matched value; you get `file:line` and a class. A false positive is fixed by narrowing the pattern or by putting `private-data-ok` on the line; documentation placeholders (`xxxx`, `<your-token>`, `CHANGEME`) are exempt automatically. `CHANGELOG.md` and `DEVLOG.md` are deliberately not allowlisted in `.gitleaks.toml` — prose written up from a terminal session is where a pasted credential lands. `tests/test_private_data_scan.py` gives every pattern class a positive control, because a scanner whose regex quietly stops matching reports a clean tree. Full reference in `docs/development/secret-scanning.md`.
+
 ## Testing
 
 TDD with pytest + pytest-asyncio, class-based, `unittest.mock`, real SQLite via `tmp_path`. Integration tests `@pytest.mark.integration`.
