@@ -10,7 +10,8 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Button, NoticeBanner } from '$lib/components/ui';
+  import { Button, NoticeBanner, StatTile } from '$lib/components/ui';
+  import { directionColor } from '$lib/money/direction';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
   Chart.register(DoughnutController, ArcElement, Tooltip, Legend);
@@ -187,28 +188,17 @@
 
   <div class="portfolio-body">
     <div class="summary-cards">
-      <div class="card">
-        <div class="card-value">{usd(summary.total_value)}</div>
-        <div class="card-label">Total value</div>
-      </div>
-      <div class="card">
-        <div
-          class="card-value"
-          class:positive={(totalGain ?? 0) > 0}
-          class:negative={(totalGain ?? 0) < 0}
-        >
-          {usd(totalGain)}
-        </div>
-        <div class="card-label">Unrealized P&amp;L</div>
-      </div>
-      <div class="card">
-        <div class="card-value">{summary.holdings.length}</div>
-        <div class="card-label">Holdings</div>
-      </div>
-      <div class="card">
-        <div class="card-value">{summary.by_account.length}</div>
-        <div class="card-label">Accounts</div>
-      </div>
+      <StatTile label="Total value" surface align="center">{usd(summary.total_value)}</StatTile>
+      <StatTile
+        label="Unrealized P&amp;L"
+        surface
+        align="center"
+        valueColor={directionColor(totalGain ?? 0)}
+      >
+        {usd(totalGain)}
+      </StatTile>
+      <StatTile label="Holdings" surface align="center">{summary.holdings.length}</StatTile>
+      <StatTile label="Accounts" surface align="center">{summary.by_account.length}</StatTile>
     </div>
 
     <div class="donut-grid">
@@ -312,35 +302,6 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--space-3);
     padding: 0 var(--space-3) var(--space-3);
-  }
-
-  .card {
-    text-align: center;
-    padding: var(--space-3) var(--space-2);
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
-  }
-
-  .card-value {
-    font-size: 1.1rem;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    margin-bottom: var(--space-1);
-  }
-
-  .card-label {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .positive {
-    color: var(--money-income);
-  }
-
-  .negative {
-    color: var(--money-expense);
   }
 
   .donut-grid {

@@ -11,7 +11,7 @@
     "off-scale-space": 2
   },
   "src/lib/components/chat/Message.svelte": {
-    "off-scale-space": 9
+    "off-scale-space": 7
   },
   "src/lib/components/chat/RoomSettings.svelte": {
     "redefined-primitive": 3,
@@ -51,9 +51,6 @@
   "src/lib/components/money/WorkEntryForm.svelte": {
     "redefined-primitive": 3
   },
-  "src/lib/components/settings/SecretField.svelte": {
-    "off-scale-space": 2
-  },
   "src/lib/components/ui/Badge.svelte": {
     "off-scale-space": 1
   },
@@ -70,9 +67,6 @@
     "off-scale-space": 1
   },
   "src/lib/components/ui/Field.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/HeaderNav.svelte": {
     "off-scale-space": 1
   },
   "src/lib/components/ui/IconButton.svelte": {
@@ -103,7 +97,7 @@
     "off-scale-space": 2
   },
   "src/routes/admin/+page.svelte": {
-    "off-scale-space": 11,
+    "off-scale-space": 10,
     "redefined-primitive": 1,
     "raw-color": 1
   },
@@ -114,7 +108,7 @@
     "off-scale-space": 1
   },
   "src/routes/briefings/settings/+page.svelte": {
-    "off-scale-space": 7
+    "off-scale-space": 6
   },
   "src/routes/chat/+page.svelte": {
     "off-scale-space": 2
@@ -178,7 +172,7 @@
     "off-scale-space": 1
   },
   "src/routes/money/+layout.svelte": {
-    "off-scale-space": 9
+    "off-scale-space": 8
   },
   "src/routes/money/business/invoices/+page.svelte": {
     "off-scale-space": 3
@@ -187,10 +181,10 @@
     "off-scale-space": 1
   },
   "src/routes/money/settings/+page.svelte": {
-    "off-scale-space": 3
+    "off-scale-space": 2
   },
   "src/routes/money/taxes/+page.svelte": {
-    "off-scale-space": 5
+    "off-scale-space": 3
   },
   "src/routes/money/transactions/+layout.svelte": {
     "off-scale-space": 4

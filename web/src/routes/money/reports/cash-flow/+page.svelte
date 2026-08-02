@@ -14,7 +14,9 @@
     Tooltip,
     Legend,
   } from 'chart.js';
+  import { StatTile } from '$lib/components/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
+  import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, selectedAccount } from '$lib/money/stores/transactions';
   import { parseAmount, formatAmount } from '$lib/money/utils/accounts';
@@ -333,34 +335,25 @@
       </div>
 
       <div class="summary-cards">
-        <div class="card">
-          <div class="card-value income">
-            {formatAmount(activeMonth.income, activeMonth.currency)}
-          </div>
-          <div class="card-label">Income</div>
-        </div>
-        <div class="card">
-          <div class="card-value expense">
-            {formatAmount(activeMonth.expenses, activeMonth.currency)}
-          </div>
-          <div class="card-label">Expenses</div>
-        </div>
-        <div class="card">
-          <div
-            class="card-value"
-            class:positive={activeMonth.net >= 0}
-            class:negative={activeMonth.net < 0}
-          >
-            {formatAmount(activeMonth.net, activeMonth.currency)}
-          </div>
-          <div class="card-label">Net income</div>
-        </div>
-        <div class="card">
-          <div class="card-value" class:positive={savingsRate > 0} class:negative={savingsRate < 0}>
-            {savingsRate}%
-          </div>
-          <div class="card-label">Margin</div>
-        </div>
+        <StatTile label="Income" surface align="center" valueColor={INCOME_COLOR}>
+          {formatAmount(activeMonth.income, activeMonth.currency)}
+        </StatTile>
+        <StatTile label="Expenses" surface align="center" valueColor={EXPENSE_COLOR}>
+          {formatAmount(activeMonth.expenses, activeMonth.currency)}
+        </StatTile>
+        <!-- `>= 0` rather than `> 0`: a net of exactly zero reads as the
+             break-even it is, which is the income side of the line here. -->
+        <StatTile
+          label="Net income"
+          surface
+          align="center"
+          valueColor={activeMonth.net >= 0 ? INCOME_COLOR : EXPENSE_COLOR}
+        >
+          {formatAmount(activeMonth.net, activeMonth.currency)}
+        </StatTile>
+        <StatTile label="Margin" surface align="center" valueColor={directionColor(savingsRate)}>
+          {savingsRate}%
+        </StatTile>
       </div>
 
       <div class="breakdowns">
@@ -456,39 +449,13 @@
     margin-bottom: var(--space-3);
   }
 
-  .card {
-    text-align: center;
-    padding: var(--space-3) var(--space-2);
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
-  }
-
-  .card-value {
-    font-size: 1rem;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    margin-bottom: var(--space-1);
-  }
-
-  .card-label {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .card-value.income,
+  /* The summary tiles are `StatTile`; the breakdown rows below still carry
+     their own direction colours, since they are table cells rather than
+     tiles. Both read the same mapping — see lib/money/direction.ts. */
   .breakdown-amount.income {
     color: var(--money-income);
   }
-  .card-value.expense,
   .breakdown-amount.expense {
-    color: var(--money-expense);
-  }
-  .card-value.positive {
-    color: var(--money-income);
-  }
-  .card-value.negative {
     color: var(--money-expense);
   }
 

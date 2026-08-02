@@ -8,6 +8,7 @@ export { default as HeaderNav } from './HeaderNav.svelte';
 export type { NavItem } from './HeaderNav.svelte';
 export { default as Chip } from './Chip.svelte';
 export { default as Badge } from './Badge.svelte';
+export { default as StatTile } from './StatTile.svelte';
 export { default as Button } from './Button.svelte';
 export { default as IconButton } from './IconButton.svelte';
 export { default as Select } from './Select.svelte';

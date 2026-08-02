@@ -7,6 +7,7 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
+  import { StatTile } from '$lib/components/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
 
@@ -304,20 +305,34 @@
         <h2>Estimate</h2>
 
         <div class="summary-cards">
-          <div class="summary-card">
-            <span class="card-label">Federal due</span>
-            <span class="card-amount">{fmtDollar(data.federal_quarterly_amount)}</span>
-          </div>
+          <StatTile
+            label="Federal due"
+            surface
+            borderColor="var(--border-default)"
+            valueSize="var(--text-base)"
+          >
+            {fmtDollar(data.federal_quarterly_amount)}
+          </StatTile>
           {#if showState}
-            <div class="summary-card">
-              <span class="card-label">{data.state_name || 'State'} due</span>
-              <span class="card-amount">{fmtDollar(data.state_quarterly_amount)}</span>
-            </div>
+            <StatTile
+              label="{data.state_name || 'State'} due"
+              surface
+              borderColor="var(--border-default)"
+              valueSize="var(--text-base)"
+            >
+              {fmtDollar(data.state_quarterly_amount)}
+            </StatTile>
           {/if}
-          <div class="summary-card total">
-            <span class="card-label">Total due this quarter</span>
-            <span class="card-amount">{fmtDollar(totalQuarterly)}</span>
-          </div>
+          <!-- The total is ranked above its parts by a stronger outline, which
+               is why the border is a per-tile colour rather than baked in. -->
+          <StatTile
+            label="Total due this quarter"
+            surface
+            borderColor="var(--text-dim)"
+            valueSize="var(--text-base)"
+          >
+            {fmtDollar(totalQuarterly)}
+          </StatTile>
         </div>
 
         <div class="breakdown-table">
@@ -683,31 +698,12 @@
     margin-bottom: var(--space-4);
   }
 
-  .summary-card {
+  /* The tiles are `StatTile`; only their share of the row is this page's.
+     :global because the children are components now, and Svelte prunes a
+     selector whose subject it cannot see — silently. Scoped under the row, so
+     it is placement rather than a leak. */
+  .summary-cards > :global(*) {
     flex: 1;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-2) var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-
-  .summary-card.total {
-    border-color: var(--text-dim);
-  }
-
-  .card-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
-  .card-amount {
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
   }
 
   /* Breakdown table */

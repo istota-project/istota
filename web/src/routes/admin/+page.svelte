@@ -7,7 +7,7 @@
     type AdminStatsUser,
     type AdminStatsUserSource,
   } from '$lib/api';
-  import { NoticeBanner } from '$lib/components/ui';
+  import { NoticeBanner, StatTile } from '$lib/components/ui';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
@@ -437,31 +437,30 @@
         <h2>Task activity</h2>
       </header>
       <div class="kpi-grid card-grid">
-        <div class="kpi">
-          <div class="kpi-label">Interactive 24h</div>
-          <div class="kpi-value">{formatNumber(stats.tasks.interactive_24h)}</div>
-          <div class="kpi-sub">{stats.tasks.interactive_avg_per_day_30d}/day (30d)</div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">Automated 24h</div>
-          <div class="kpi-value muted">{formatNumber(stats.tasks.automated_24h)}</div>
-          <div class="kpi-sub">
-            {formatNumber(stats.tasks.automated_avg_per_day_30d)}/day (30d)
-          </div>
-        </div>
-        <div class="kpi">
-          <div class="kpi-label">Avg duration</div>
-          <div class="kpi-value">{stats.tasks.avg_duration_seconds}s</div>
-        </div>
-        <div class="kpi" class:kpi-warn={stats.tasks.failed_24h > 0}>
-          <div class="kpi-label">Failed 24h</div>
-          <div class="kpi-value">{stats.tasks.failed_24h}</div>
-          <div class="kpi-sub">{(stats.tasks.error_rate_24h * 100).toFixed(2)}% error rate</div>
-        </div>
-        <div class="kpi col-total-kpi">
-          <div class="kpi-label">Total tasks</div>
-          <div class="kpi-value">{formatNumber(stats.tasks.total)}</div>
-        </div>
+        <StatTile label="Interactive 24h" sub="{stats.tasks.interactive_avg_per_day_30d}/day (30d)">
+          {formatNumber(stats.tasks.interactive_24h)}
+        </StatTile>
+        <!-- De-emphasized by colour alone. The row reads as one set of figures,
+             so stepping this one's size down as well made it look like a
+             different kind of measurement rather than a quieter one. -->
+        <StatTile
+          label="Automated 24h"
+          sub="{formatNumber(stats.tasks.automated_avg_per_day_30d)}/day (30d)"
+          valueColor="var(--text-muted)"
+        >
+          {formatNumber(stats.tasks.automated_24h)}
+        </StatTile>
+        <StatTile label="Avg duration">{stats.tasks.avg_duration_seconds}s</StatTile>
+        <StatTile
+          label="Failed 24h"
+          sub="{(stats.tasks.error_rate_24h * 100).toFixed(2)}% error rate"
+          valueColor={stats.tasks.failed_24h > 0 ? 'var(--status-warn-fg)' : ''}
+        >
+          {stats.tasks.failed_24h}
+        </StatTile>
+        <StatTile label="Total tasks" class="col-total-kpi">
+          {formatNumber(stats.tasks.total)}
+        </StatTile>
       </div>
       {#if Object.keys(stats.tasks.by_source).length > 0}
         {@const maxN = Math.max(...Object.values(stats.tasks.by_source))}
@@ -812,42 +811,10 @@
     color: var(--accent-amber);
   }
 
+  /* The tiles themselves are `StatTile`; this sizes the wall they sit in. */
   .kpi-grid {
     --card-min: 140px;
     --card-gap: 0.75rem 1.5rem;
-  }
-
-  .kpi {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    min-width: 0;
-  }
-
-  .kpi-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .kpi-value {
-    font-size: 1.2rem;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .kpi-value.muted {
-    color: var(--text-muted);
-  }
-
-  .kpi-sub {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
-  .kpi-warn .kpi-value {
-    color: var(--status-warn-fg);
   }
 
   /* Source distribution bars (horizontal, one per source_type). */
@@ -982,14 +949,6 @@
     color: var(--status-danger-fg);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
-  }
-
-  /* The colour is the global .muted. What stays here is the *value* case:
-     a KPI whose number is de-emphasized has to give up the tile's 600 weight
-     and step down a size, which is about this tile and not about .muted. */
-  .kpi-value.muted {
-    font-size: var(--text-sm);
-    font-weight: 400;
   }
 
   /* Scheduler table */
@@ -1196,9 +1155,9 @@
     .admin-badge {
       display: none;
     }
-    .kpi-value {
-      font-size: 1.1rem;
-    }
+    /* The narrow-screen step-down for the KPI numerals is gone with the
+       hand-rolled tile: StatTile's default sits at --text-lg (1.05rem), which
+       is already under the 1.1rem this breakpoint was asking for. */
   }
 
   @media (max-width: 640px) {
@@ -1206,7 +1165,11 @@
     .col-cron {
       display: none;
     }
-    .col-total-kpi {
+    /* :global because the subject is a class handed to StatTile now, and
+       Svelte prunes a selector whose subject it cannot see in the markup —
+       silently. Scoped under the page container, so it is placement rather
+       than a leak. */
+    .admin-page :global(.col-total-kpi) {
       display: none;
     }
     .jobs-grid {
