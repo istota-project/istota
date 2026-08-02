@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
 
+### Fixed
+
+- The date filters on Medical history look like date fields and fit one line. On a phone they were two blank rounded boxes stacked below the type dropdown, with nothing to say they were dates — iOS draws an empty date input as nothing at all. They now sit beside the dropdown at the same height, reading "Start" and "End" until you pick a date. The Location history filter bar levels up the same way.
+
 ## [0.38.0] - 2026-08-01
 
 ### Added

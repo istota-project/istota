@@ -309,7 +309,7 @@
   </form>
 {/if}
 
-<div class="filter-bar">
+<div class="filter-bar control-row">
   <Select
     value={typeFilter}
     options={typeFilterOptions}
@@ -318,6 +318,7 @@
       load();
     }}
     ariaLabel="Type filter"
+    widthChars={9}
   />
   <DateRangeFilter bind:from={sinceFilter} bind:to={untilFilter} onChange={load} />
 </div>
@@ -522,17 +523,26 @@
     color: var(--text-primary);
   }
 
-  /* Mirrors the location-history controls bar: inline labels rather than
-	   stacked ones, everything at --text-xs, and the <Select> left on its own
-	   default trigger. The previous version pinned a 2rem --text-sm box on
-	   both the trigger and the date inputs, which read as a form rather than
-	   a filter strip and cost most of a phone's width. */
+  /* The money section-tools pattern: a `control-row` so the Select and the
+	   date inputs resolve one height and corner rather than each computing its
+	   own, `nowrap` so the type filter and the range stay one line, and the
+	   only flexible member giving ground. Without the tier the trigger sat a
+	   third shorter than the inputs beside it; without nowrap the range broke
+	   into a three-line column on a phone. */
   .filter-bar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2);
     margin-bottom: var(--space-4);
+  }
+
+  /* :global because the subject is DateRangeFilter's root. Placement, not
+	   paint: the range is what absorbs a narrow phone, and the Select holds the
+	   width its own `widthChars` reserves. */
+  .filter-bar :global(.date-range) {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .layout {

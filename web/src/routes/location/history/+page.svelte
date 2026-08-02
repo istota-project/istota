@@ -258,7 +258,10 @@
 </script>
 
 <div class="page-fill">
-  <div class="controls-bar">
+  <!-- A Select, two date inputs and two Chips on one row: the field tier, so
+       the whole bar resolves one height and one corner rather than each
+       control computing its own. -->
+  <div class="controls-bar control-row">
     <Select
       value={activePreset}
       options={rangeOptions}
