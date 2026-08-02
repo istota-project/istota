@@ -97,12 +97,15 @@ describe('the styles it carries', () => {
     expect(rule).not.toMatch(/min-width/);
   });
 
-  it('undoes the icon inversion in the light theme', () => {
-    // Without this half the calendar glyph stays inverted on white, which
-    // reads as a smudge rather than an icon. Both pages had it; it lives in
-    // one place now so a third cannot ship without it.
-    expect(source).toContain("data-theme='light'");
-    expect(source).toMatch(/filter:\s*none/);
+  it('filters the picker glyph through the token, not a theme rule', () => {
+    // The glyph is drawn by a UA pseudo-element that can only be filtered, and
+    // it ships dark: the dark theme lifts it, the light theme leaves it. That
+    // used to be two rules, one of them naming the theme, and BOTH pages had
+    // to carry both halves — several hundred lines apart in one of them.
+    // --calendar-icon-filter carries the direction, so there is one rule and
+    // no half to forget. tokens.test.ts holds the parity.
+    expect(source).toContain('filter: var(--calendar-icon-filter)');
+    expect(source, 'no theme-conditional rule should remain').not.toContain("data-theme='light'");
   });
 
   it('wraps rather than squeezing', () => {

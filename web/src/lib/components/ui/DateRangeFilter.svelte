@@ -106,21 +106,11 @@
        which is a bug one of these filters already shipped. */
   }
 
+  /* One rule for both themes. The glyph is drawn by a UA pseudo-element we
+     cannot restyle, only filter, and it ships dark — the token carries which
+     way each theme needs it, so there is no theme-conditional rule here and
+     no half of a pair to forget. */
   .date-range input[type='date']::-webkit-calendar-picker-indicator {
-    /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
-       pseudo-element we cannot restyle directly. The icon ships dark, so the
-       dark theme inverts it and the light theme must undo that. */
-    filter: invert(0.7);
-  }
-
-  /* design-lint-allow: not a color — the other half of the `filter` pair
-     above, undoing the dark theme's inversion on white. The rule has to name
-     the theme because a UA pseudo-element cannot read a token through the
-     shadow boundary reliably; a --calendar-icon-filter token pair in
-     tokens.css would be the better home and is a follow-up. */
-  :global(:root[data-theme='light'])
-    .date-range
-    input[type='date']::-webkit-calendar-picker-indicator {
-    filter: none;
+    filter: var(--calendar-icon-filter);
   }
 </style>

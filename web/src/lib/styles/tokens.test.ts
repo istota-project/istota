@@ -63,11 +63,34 @@ describe('theme parity', () => {
     // The --text-* scale is half type sizes and half colors; sizes are rem.
     !/^\d|rem|px|%/.test(dark[name] ?? '');
 
+  /**
+   * A `filter` that corrects an asset the theme does not control — the octopus
+   * sigil, the browser's calendar glyph. Not a colour by prefix, but it fails
+   * exactly the same way: define it in dark only and the light theme renders
+   * an inverted mark it never asked for.
+   *
+   * The prefix list missed both of these. `--sigil-filter` had carried the gap
+   * since it was introduced; `--calendar-icon-filter` would have inherited it.
+   */
+  const isThemeFilter = (name: string) => name.endsWith('-filter');
+
+  const needsBothThemes = (name: string) => isColorToken(name) || isThemeFilter(name);
+
   it('every color token has a light-theme value', () => {
     const missing = Object.keys(dark).filter(
-      (name) => isColorToken(name) && !THEME_INVARIANT.has(name) && !(name in light),
+      (name) => needsBothThemes(name) && !THEME_INVARIANT.has(name) && !(name in light),
     );
     expect(missing).toEqual([]);
+  });
+
+  it('covers the theme-correcting filters, which are not colors by name', () => {
+    // Guards the guard: if the prefix list or the suffix test stops matching
+    // these, the parity check above goes quiet rather than failing, which is
+    // the failure mode this whole file exists to prevent.
+    const filters = Object.keys(dark).filter(isThemeFilter);
+    expect(filters).toContain('--sigil-filter');
+    expect(filters).toContain('--calendar-icon-filter');
+    for (const name of filters) expect(light, `${name} needs a light value`).toHaveProperty(name);
   });
 
   it('the light theme defines no token the dark theme lacks', () => {
