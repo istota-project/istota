@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import Button from './Button.svelte';
 
   interface Props {
     /** The picked file, bindable. `null` shows the prompt. */
@@ -77,17 +78,20 @@
     </div>
   {:else}
     {@render children()}
+    <!-- Withheld once a file is picked: the .picked row above is the
+         affordance then, and a second control offering "choose file" beside it
+         reads as a different action. -->
+    <div class="pick">
+      <Button variant="secondary" size="sm" onclick={() => fileInput?.click()}>Choose file</Button>
+    </div>
   {/if}
-  <!-- Hidden once a file is picked: the .picked row above is the affordance
-       then, and a second control offering "choose file" beside it reads as a
-       different action. -->
-  <input
-    bind:this={fileInput}
-    type="file"
-    {accept}
-    onchange={pickFile}
-    class:hidden={file !== null}
-  />
+  <!-- The picker is a button rather than the bare control, whose platform
+       rendering ("Choose File — no file selected") is as wide as its longest
+       state and cannot be narrowed. Centred in this column it overflowed both
+       sides on a phone, putting the button outside the dashed border. `hidden`
+       rather than a class, so the input leaves the a11y tree with it: the
+       button is the affordance, and .click() reaches it either way. -->
+  <input bind:this={fileInput} type="file" {accept} onchange={pickFile} hidden />
 </div>
 
 <style>
@@ -127,13 +131,10 @@
     color: var(--text-primary);
   }
 
-  input[type='file'] {
-    align-self: center;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-
-  input[type='file'].hidden {
-    display: none;
+  /* A row of its own rather than `align-self`, so a long prompt sentence above
+     it wraps against the zone's width and the button stays centred under it. */
+  .pick {
+    display: flex;
+    justify-content: center;
   }
 </style>
