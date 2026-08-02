@@ -7,9 +7,15 @@
     type ParsedDiagnosis,
     type ParsedEncounter,
   } from '$lib/api';
-  import { Badge, Button, Field, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    Field,
+    FileDropZone,
+    Select,
+    type SelectOption,
+  } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
-  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
 
   const ENCOUNTER_TYPES = [
     'visit',

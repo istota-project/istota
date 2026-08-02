@@ -8,8 +8,7 @@
     accept?: string;
     /** Runs after the file is cleared — for whatever the page derived from it. */
     onClear?: () => void;
-    /** The empty-state prose. The only part that differed between the three
-     *  pages this replaces. */
+    /** The empty-state prose. The only part that differs between call sites. */
     children: Snippet;
   }
 
@@ -56,7 +55,9 @@
   Drop / paste / pick, with the picked file and a clear button. The three
   health import screens each carried this verbatim — the same handlers, the
   same markup, the same CSS — differing only in the sentence describing what
-  to drop.
+  to drop. It lived under `components/health/` until money's portfolio import
+  wanted the same control and had to reach across modules for it, which is the
+  line between a module block and a primitive.
 -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
@@ -69,7 +70,7 @@
   {#if file}
     <div class="picked">
       {file.name}
-      <span class="hint">({Math.round(file.size / 1024)} KB)</span>
+      <span class="caption">({Math.round(file.size / 1024)} KB)</span>
       <button type="button" class="clear" onclick={clearFile} aria-label="Clear selected file"
         >×</button
       >
@@ -124,11 +125,6 @@
   .clear:hover {
     background: var(--surface-raised);
     color: var(--text-primary);
-  }
-
-  .dropzone :global(.hint) {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   input[type='file'] {

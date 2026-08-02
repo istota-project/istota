@@ -10,9 +10,8 @@
     type ImmunizationRef,
     type ParsedImmunization,
   } from '$lib/api';
-  import { Badge, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Button, FileDropZone, Select, type SelectOption } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
-  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
 
   type Mode = 'file' | 'paste';
   let mode: Mode = $state('file');

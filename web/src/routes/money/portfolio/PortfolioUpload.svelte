@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
-  import { Button, Modal } from '$lib/components/ui';
+  import { Button, FileDropZone, Modal } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import { ApiError, importPortfolioFile, type PortfolioImportResult } from '$lib/money/api';
 

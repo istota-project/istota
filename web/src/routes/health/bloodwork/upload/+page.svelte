@@ -9,8 +9,7 @@
     healthPanelSourceUrl,
     type Biomarker,
   } from '$lib/api';
-  import { Button, Field, Select } from '$lib/components/ui';
-  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
+  import { Button, Field, FileDropZone, Select } from '$lib/components/ui';
 
   const flagOptions = [
     { value: '', label: '—' },
