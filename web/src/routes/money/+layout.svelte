@@ -74,7 +74,7 @@
     { href: `${moneyBase}/accounts`, label: 'Accounts', active: isActive('/accounts') },
     { href: `${moneyBase}/transactions`, label: 'Transactions', active: isActive('/transactions') },
     {
-      href: `${moneyBase}/reports/income-statement`,
+      href: `${moneyBase}/reports/cash-flow`,
       label: 'Reports',
       active: isActive('/reports'),
     },
