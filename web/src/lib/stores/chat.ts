@@ -1854,8 +1854,8 @@ function createSession(): ChatSession {
   }
 
   /**
-   * The shared body of a first send and a retry: append the assistant
-   * placeholder, open the echo buffer, POST, settle.
+   * The shared body of a first send and a retry: open the echo buffer, POST,
+   * settle, then hand the turn to its assistant placeholder.
    *
    * Retry re-enters here with the *same* `userCid` deliberately — the echo
    * dedup in `appendStreamedRow` keys on `(role, task_id)`, so stamping the new
@@ -1879,18 +1879,13 @@ function createSession(): ChatSession {
     // forever — and on a *retry* that is unrecoverable, since `retrySend`'s own
     // guard only accepts a row whose state is 'failed'.
     try {
-      messages.update((a) => [
-        ...a,
-        {
-          cid: phCid,
-          role: 'assistant',
-          text: '',
-          segments: [],
-          streaming: true,
-          progress: randomAckVerb(),
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      // The assistant placeholder is NOT appended here — `sendTurn` adds it on
+      // the ack. Appended up front it spun its ack verb ("Sleuthing…") before
+      // the message had reached the server, so once the grace below opened
+      // `Sending…` the turn carried two progress indicators at once, and the
+      // assistant one was claiming work that had not started. A `!command`
+      // makes that certain rather than occasional: it runs inside the request,
+      // so the POST stays open for the command's whole duration.
       status.set('sending');
       cancelRequested = false;
 
@@ -1899,6 +1894,10 @@ function createSession(): ChatSession {
       // appears and vanishes inside one frame is noise that trains you to ignore
       // it — so the row carries the truthful `sendState` immediately and the
       // render gate opens only if the POST is still open after the grace.
+      //
+      // With the placeholder deferred this is also the turn's *only* indicator
+      // until the ack, which is what keeps the count at one: pre-ack the user
+      // row owns it, post-ack the assistant row does.
       graceTimer = setTimeout(() => {
         updateMsg(userCid, (m) => {
           if (m.sendState === 'sending') m.showSending = true;
@@ -2069,6 +2068,31 @@ function createSession(): ChatSession {
     // pending mark clearing is the ack's visible form; there is no receipt to
     // leave behind.
     settleSend(userCid, roomId);
+    // Hand the turn over to its assistant row. Deferred to here rather than
+    // appended before the POST so the transcript never carries two progress
+    // indicators for one message — see `runTurn`.
+    //
+    // Guarded on the room, because this now runs after an await: `messages` is
+    // rebuilt per room, so an unguarded append would drop this turn's spinner
+    // into whichever transcript is on screen. The updates below then no-op on
+    // their own (`updateMsg` is a no-op on an absent cid, and `enqueueStream`
+    // streams into nothing) — the same already-tolerated state a room switch
+    // produced before, when the switch wiped the placeholder out from under a
+    // send in flight.
+    if (get(activeRoomId) === roomId) {
+      messages.update((a) => [
+        ...a,
+        {
+          cid: phCid,
+          role: 'assistant',
+          text: '',
+          segments: [],
+          streaming: true,
+          progress: randomAckVerb(),
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+    }
     if (res.task_id == null) {
       // !command ran inline — no task, no stream.
       const cd = res.command_data as SearchResultsData | null | undefined;

@@ -278,6 +278,66 @@ describe('chat store — send lifecycle', () => {
       expect(get(s.messages)[0].showSending).toBeFalsy();
       expect(get(s.messages)[0].sendState).toBeUndefined();
     });
+
+    it('is the only indicator on screen — the placeholder waits for the ack', async () => {
+      // Both halves of a turn used to claim progress at once: the assistant
+      // placeholder was appended before the POST went out, so once the grace
+      // opened `Sending…` the transcript carried two spinners for one message.
+      // A `!command` made it certain rather than occasional — it runs inside
+      // the request, so the POST stays open for the whole command.
+      vi.useFakeTimers();
+      const s = await freshSession();
+      await s.init();
+      let settle: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          settle = r;
+        }),
+      );
+
+      const sending = s.send('!search --all jobs');
+      await Promise.resolve();
+      // Pre-ack the message has not reached the server, so nothing may claim
+      // the model is working on it.
+      expect(get(s.messages)).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(get(s.messages)).toHaveLength(1);
+      expect(get(s.messages)[0].showSending).toBe(true);
+
+      settle({ ok: true, status: 200, task_id: 7 });
+      await sending;
+      // The ack hands the indicator over: the mark clears as the placeholder
+      // arrives, so there is exactly one at every moment.
+      const msgs = get(s.messages);
+      expect(msgs).toHaveLength(2);
+      expect(msgs[0].showSending).toBeFalsy();
+      expect(msgs[1].role).toBe('assistant');
+      expect(msgs[1].streaming).toBe(true);
+      expect(msgs[1].taskId).toBe(7);
+    });
+
+    it('drops the placeholder when the ack lands after a room switch', async () => {
+      // The append moved behind an await, so it can now resolve into whichever
+      // transcript is on screen. `messages` is rebuilt per room, so appending
+      // unguarded would drop a stray spinner into a room that never sent it.
+      const s = await freshSession();
+      await s.init();
+      let settle: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          settle = r;
+        }),
+      );
+
+      const sending = s.send('hello');
+      await Promise.resolve();
+      await s.selectRoom(2);
+      settle({ ok: true, status: 200, task_id: 7 });
+      await sending;
+
+      expect(get(s.messages)).toHaveLength(0);
+    });
   });
 
   describe('retry', () => {

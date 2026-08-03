@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A message in web chat no longer shows two "working on it" indicators at once. The assistant's spinner was drawn the moment you pressed send, so any send that took longer than a moment sat under a second "Sending…" mark on your own message — and the assistant one was claiming the model was busy on a message that had not yet reached the server. Commands like `!search` run inside the request, so they hit it every time. The reply's spinner now waits until the message has actually landed.
+
 - The date filters on Medical history look like date fields and fit one line. On a phone they were two blank rounded boxes stacked below the type dropdown, with nothing to say they were dates — iOS draws an empty date input as nothing at all. They now sit beside the dropdown at the same height, reading "Start" and "End" until you pick a date. The two fields also hold one width as you pick dates instead of resizing to whatever each value happens to need, and a date too wide for its box is trimmed rather than wrapping the field onto a second line. The Location history filter bar levels up the same way.
 
 ## [0.38.0] - 2026-08-01
