@@ -1,3 +1,10 @@
+---
+paths:
+  - "src/istota/scheduler.py"
+  - "src/istota/scheduler_deferred.py"
+  - "src/istota/db.py"
+---
+
 # Scheduler & DB Internals
 
 ## Scheduler Functions

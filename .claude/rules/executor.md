@@ -1,3 +1,8 @@
+---
+paths:
+  - "src/istota/executor.py"
+---
+
 # Executor Internals
 
 ## `execute_task()`

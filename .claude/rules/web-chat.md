@@ -1,3 +1,11 @@
+---
+paths:
+  - "web/src/lib/stores/chat.ts"
+  - "web/src/lib/components/chat/**"
+  - "src/istota/transport/web/**"
+  - "src/istota/web_app.py"
+---
+
 # Web chat surface
 
 The in-app chat surface in the web UI. Inbound/outbound plumbing is in
