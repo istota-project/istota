@@ -26,9 +26,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Surfaces that participate in the unified room model (registry + canonical
-# message store). Email/REPL are not rooms — they fall through to a plain
-# create_task with no room registration or message storage (unchanged).
+# Surfaces that *own* rooms: they lazily register an unknown token, bind it,
+# add membership, and rename it from the surface. Email/REPL are not room
+# surfaces — a token they carry is never turned into a room.
+#
+# This is deliberately narrower than "surfaces whose turns are stored". A
+# mirror-only surface (email) still records its turn when the token it resolved
+# to *already is* a room — see `mirror_only` in `record_inbound`.
 ROOM_SURFACES = frozenset({"talk", "web"})
 
 
@@ -118,6 +122,7 @@ def record_inbound(
     priority: int = 5,
     external_id: str | None = None,
     client_msg_id: str | None = None,
+    suppress_transcript_mirror: bool = False,
 ) -> tuple[str, int | None]:
     """Resolve → echo-check → store user message → create task.
 
@@ -139,6 +144,29 @@ def record_inbound(
     #    canonical token (origin-surface case).
     room_token = db.resolve_room_token(conn, surface, surface_ref) or surface_ref
     room_surface = surface in ROOM_SURFACES and bool(room_token)
+
+    # A non-room surface whose token already *is* a room (ISSUE-136): an email
+    # threaded back into the web/Talk room it came from. Its turn belongs in that
+    # room's transcript — the assistant half has always been stored there
+    # (`scheduler._store_room_turn`, gated on room existence), so without this
+    # the room showed a bot answer with no question above it.
+    #
+    # Existence-only, never creation: a fresh email thread carries a synthetic
+    # token that is not a room and stays task-only, so mail the bot merely
+    # receives can't mint rooms in anyone's sidebar. That also keeps this off
+    # every other room side effect below — no registration, no binding, no
+    # rename, no membership, no echo ledger, no room model default.
+    # `suppress_transcript_mirror` withholds a turn still facing an
+    # untrusted-sender gate: the row would otherwise be committed in this same
+    # transaction, i.e. published to the room *before* the user is asked, and
+    # `db.cancel_task` on a decline only touches `tasks` — so declining would
+    # leave the content there permanently.
+    mirror_only = (
+        not room_surface
+        and bool(room_token)
+        and not suppress_transcript_mirror
+        and db.get_room(conn, room_token) is not None
+    )
 
     if room_surface:
         # Lazy room registration on first sight (a Talk room the bot joined, a
@@ -247,10 +275,11 @@ def record_inbound(
         priority=priority,
     )
 
-    # 4. Store the user message into the canonical store (room surfaces only),
-    #    idempotently — Talk dedups a duplicate poll to the same task id, so we
-    #    must not store a second user row for it.
-    if room_surface and task_id is not None:
+    # 4. Store the user message into the canonical store — for a room surface,
+    #    or for a mirror-only surface landing in an existing room — idempotently:
+    #    Talk dedups a duplicate poll to the same task id, so we must not store a
+    #    second user row for it.
+    if (room_surface or mirror_only) and task_id is not None:
         already = conn.execute(
             "SELECT 1 FROM messages WHERE room_token = ? AND task_id = ? "
             "AND role = 'user' LIMIT 1",
@@ -309,5 +338,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         external_id=str(msg.platform_message_id)
         if msg.platform_message_id is not None
         else None,
+        suppress_transcript_mirror=msg.suppress_transcript_mirror,
     )
     return task_id

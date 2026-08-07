@@ -3158,6 +3158,24 @@ _AUX_COLUMNS = (
     "model_used, attachments FROM tasks "
 )
 
+# Which `tasks` rows may gap-fill a room transcript (failed/cancelled answers,
+# in-flight slots, legacy turns). web/talk are room surfaces by construction.
+#
+# `email` is admitted only for a turn whose question was actually mirrored into
+# this room (ISSUE-136). Without it, an email turn that fails, is cancelled, or
+# is still running renders as a question with no answer, no error and no
+# streaming slot — the mirror image of the orphaned reply the issue fixed, since
+# the scheduler only stores an assistant row on the success path. Keying on the
+# mirrored user row rather than on `source_type` alone is what keeps a
+# confirmation-gated email out: its mirror is deliberately withheld until the
+# user approves it, and these rows render `tasks.prompt`, so a bare source-type
+# widening would publish the untrusted content the gate exists to hold back.
+_AUX_SOURCE_SCOPE = (
+    "(source_type IN ('web', 'talk') OR (source_type = 'email' AND EXISTS ("
+    "SELECT 1 FROM messages m2 WHERE m2.room_token = tasks.conversation_token "
+    "AND m2.task_id = tasks.id AND m2.role = 'user')))"
+)
+
 
 def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
     """The attachment chip labels for a history row, or None for a turn that
@@ -3329,7 +3347,7 @@ def _chat_room_messages(
                 task_rows = conn.execute(
                     _AUX_COLUMNS
                     + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND source_type IN ('web', 'talk') "
+                    "AND " + _AUX_SOURCE_SCOPE + " "
                     "AND (status IN ('pending', 'locked', 'running', 'pending_confirmation') "
                     "     OR (status IN ('failed', 'cancelled') AND created_at >= ?)) "
                     "ORDER BY created_at DESC, id DESC",
@@ -3342,7 +3360,7 @@ def _chat_room_messages(
                 task_rows = conn.execute(
                     _AUX_COLUMNS
                     + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND source_type IN ('web', 'talk') "
+                    "AND " + _AUX_SOURCE_SCOPE + " "
                     "ORDER BY created_at DESC, id DESC LIMIT ?",
                     (token, username, limit),
                 ).fetchall()
@@ -3359,7 +3377,7 @@ def _chat_room_messages(
                 task_rows = conn.execute(
                     _AUX_COLUMNS
                     + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND source_type IN ('web', 'talk') "
+                    "AND " + _AUX_SOURCE_SCOPE + " "
                     "AND status IN ('failed', 'cancelled') "
                     "AND created_at >= ? AND created_at < ? "
                     "ORDER BY created_at DESC, id DESC",
@@ -3372,7 +3390,7 @@ def _chat_room_messages(
                 task_rows = conn.execute(
                     _AUX_COLUMNS
                     + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND source_type IN ('web', 'talk') "
+                    "AND " + _AUX_SOURCE_SCOPE + " "
                     "AND status IN ('failed', 'cancelled') "
                     "AND (created_at, id) < (?, ?) "
                     "ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -3416,7 +3434,7 @@ def _chat_room_messages(
             ).fetchone() is not None
             aux_more = conn.execute(
                 "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
-                "AND source_type IN ('web', 'talk') AND status IN ('failed', 'cancelled') "
+                "AND " + _AUX_SOURCE_SCOPE + " AND status IN ('failed', 'cancelled') "
                 "AND created_at < ? LIMIT 1",
                 (token, username, page_lo_ts),
             ).fetchone() is not None
@@ -3427,7 +3445,7 @@ def _chat_room_messages(
             oldest_cursor = {"ts": page_lo_ts, "id": page_lo_id}
             has_more = conn.execute(
                 "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
-                "AND source_type IN ('web', 'talk') AND status IN ('failed', 'cancelled') "
+                "AND " + _AUX_SOURCE_SCOPE + " AND status IN ('failed', 'cancelled') "
                 "AND (created_at, id) < (?, ?) LIMIT 1",
                 (token, username, page_lo_ts, page_lo_id),
             ).fetchone() is not None

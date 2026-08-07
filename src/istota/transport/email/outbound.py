@@ -126,10 +126,17 @@ def _parse_email_output(message: str) -> dict | None:
     return None
 
 
-def _load_deferred_email_output(config: "Config", task: db.Task) -> dict | None:
+def _load_deferred_email_output(
+    config: "Config", task: db.Task, *, consume: bool = True,
+) -> dict | None:
     """Load email output from a deferred JSON file written by the email output tool.
 
     Returns parsed dict with subject/body/format keys, or None if no file exists.
+
+    ``consume=False`` peeks without deleting, for a reader that must not race the
+    send: the transcript mirror (``email_transcript_body``) runs *before*
+    delivery, and consuming the file there would leave `deliver_email_result`
+    with nothing to send.
     """
     from ...executor import get_user_temp_dir
     user_temp_dir = get_user_temp_dir(config, task.user_id)
@@ -139,10 +146,12 @@ def _load_deferred_email_output(config: "Config", task: db.Task) -> dict | None:
 
     try:
         data = json.loads(path.read_text())
-        path.unlink(missing_ok=True)
+        if consume:
+            path.unlink(missing_ok=True)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Bad deferred email output file for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
+        if consume:
+            path.unlink(missing_ok=True)
         return None
 
     if not isinstance(data, dict) or "body" not in data or "format" not in data:
@@ -158,6 +167,31 @@ def _load_deferred_email_output(config: "Config", task: db.Task) -> dict | None:
         "body": data["body"],
         "format": fmt,
     }
+
+
+def email_transcript_body(config: "Config", task: db.Task, message: str) -> str:
+    """What an email task's reply should look like in a room transcript.
+
+    An email reply is only ever *sent* when the model produced structured output
+    (`deliver_email_result` returns without sending otherwise), so a raw
+    ``task.result`` for a delivering email task is typically the
+    ``{"subject": …, "body": …, "format": …}`` envelope rather than prose.
+    Mirroring that verbatim puts a JSON blob in the room — and re-pairs it into
+    LLM history as the assistant's answer. This resolves the same structured
+    output `deliver_email_result` does and returns the body it actually mails.
+
+    Non-destructive on purpose: the mirror runs before delivery, so the deferred
+    file is peeked, never consumed. Falls back to `message` unchanged when there
+    is no structured output (a direct `email send` during execution, or the
+    legacy briefing path), which is exactly what those cases deliver.
+    """
+    parsed = (
+        _load_deferred_email_output(config, task, consume=False)
+        or _parse_email_output(message)
+    )
+    if parsed and parsed.get("body"):
+        return parsed["body"]
+    return message
 
 
 def _record_sent_email(

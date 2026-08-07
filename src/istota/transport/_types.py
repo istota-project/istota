@@ -63,6 +63,12 @@ class IncomingMessage:
     # per-room model default in record_inbound so an explicit per-message choice
     # — including an explicit "use the instance default" — always wins.
     model_prefix_used: bool = False
+    # Withhold this turn from the canonical transcript even when its token
+    # resolves to a real room. Set by the email poller for a message facing the
+    # untrusted-sender confirmation gate: publishing attacker-supplied text into
+    # the user's room before they approve it — and leaving it there when they
+    # decline — is exactly what the gate exists to prevent.
+    suppress_transcript_mirror: bool = False
     raw: dict[str, Any] = field(default_factory=dict)  # original payload
 
 

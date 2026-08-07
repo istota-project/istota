@@ -1792,10 +1792,19 @@ class TalkMessage:
     task_id: int | None      # parsed from referenceId
 
 
-# Source types whose turns the canonical `messages` store mirrors as
-# user+assistant pairs — i.e. genuine room conversations. Scheduled/cron,
-# briefing, and heartbeat posts are one-directional bot output (assistant-only,
-# no user turn) and don't count toward the unified-read completeness check.
+# Source types whose *complete* history the canonical `messages` store is
+# guaranteed to hold, and which therefore gate the caught-up dual-read.
+# Scheduled/cron, briefing, and heartbeat posts are one-directional bot output
+# (assistant-only, no user turn) and don't count toward the completeness check.
+#
+# `email` is deliberately absent even though it is now mirrored as a
+# user+assistant pair too (ISSUE-136). The store holds email turns only from
+# that change forward: an email task completed before it — or under a `thread`
+# reply-routing policy, whose email-only plan never reached `_store_room_turn` —
+# has no assistant row and never will. Counting those would make the gap probe
+# below return False for the room forever, pinning it to the legacy `tasks` path
+# until retention GCs the task. Mirroring is not the criterion; guaranteed
+# completeness is.
 _CONVERSATIONAL_SOURCE_TYPES = ("talk", "web")
 
 
@@ -3485,9 +3494,22 @@ def initialize_room_read_state(
 # to hide the synthetic prompt of a non-conversational post — and since the
 # producer never writes a user row for those, this guard is belt-and-suspenders
 # against any future code that does. Expects the messages table aliased as `m`.
+#
+# `email` joins web/talk here (ISSUE-136): an inbound email continuing a room
+# the user can already see is a conversational turn, so hiding it left the room
+# showing the bot's reply with no question above it. The one-directional bot
+# source types (scheduled/briefing/heartbeat/subtask) stay out — that is the
+# case the guard exists for.
+#
+# Two writers produce email user rows, not one: `record_inbound`'s mirror-only
+# path (live) and `_backfill_turns_for` (migration, `origin_surface` = the task's
+# source type). Keep this list in sync with the DELETE in
+# `_migrate_nonconversational_transcript_cleanup` — that migration is what
+# decides which of those rows survive, and the two disagreeing is how live turns
+# get silently swept.
 TRANSCRIPT_SURFACE_FILTER = (
     "(m.role = 'assistant' "
-    "OR (m.origin_surface IN ('web', 'talk') AND m.role = 'user'))"
+    "OR (m.origin_surface IN ('web', 'talk', 'email') AND m.role = 'user'))"
 )
 
 
@@ -4130,10 +4152,19 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
         from .skills.briefing import parse_briefing_json
 
         # Drop synthetic non-conversational user rows (restore the invariant).
+        #
+        # `email` is spared alongside the conversational surfaces (ISSUE-136):
+        # an email user row is a real inbound message continuing a real room, not
+        # a synthesized prompt, and `TRANSCRIPT_SURFACE_FILTER` now renders it.
+        # This list and that filter must stay in sync — the two `except` branches
+        # below `return` *after* this DELETE without writing the marker, so a
+        # partial run re-arms the migration, and a DB restored from a
+        # pre-migration snapshot re-runs it from scratch. Either would silently
+        # strip live email turns back to the orphaned-reply state ISSUE-136 fixed.
         conn.execute(
             "DELETE FROM messages "
             "WHERE role = 'user' "
-            "AND origin_surface NOT IN ('web', 'talk', 'scheduled')"
+            "AND origin_surface NOT IN ('web', 'talk', 'scheduled', 'email')"
         )
         # Normalize briefing assistant bodies that were stored as raw JSON.
         briefing_rows = conn.execute(

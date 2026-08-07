@@ -1977,9 +1977,24 @@ def process_one_task(
                             delivery_result = strip_briefing_preamble(result)
                     else:
                         delivery_result = result
+                    # What the *room transcript* shows. Identical to the
+                    # delivered body everywhere except email, whose result is
+                    # normally the structured `{"subject","body","format"}`
+                    # envelope the send path unwraps — mirroring that verbatim
+                    # would put a JSON blob in the room and re-pair it into LLM
+                    # history as the answer. Kept separate from
+                    # `post_talk_message` so this stays a transcript fix and
+                    # changes no delivery payload.
+                    if task.source_type == "email":
+                        from .transport.email.outbound import email_transcript_body
+                        room_body = email_transcript_body(
+                            config, task, delivery_result,
+                        )
+                    else:
+                        room_body = delivery_result
                     if plan_talk and talk_token:
                         post_talk_message = delivery_result
-                        _store_room_turn(conn, task, delivery_result)
+                        _store_room_turn(conn, task, room_body)
                     if plan_email:
                         post_email = True
                     if plan_ntfy:
@@ -1990,11 +2005,30 @@ def process_one_task(
                         # origin_surface becomes the task's real source type
                         # (e.g. "email"); renders identically under the
                         # assistant-any filter.
-                        _store_room_turn(conn, task, delivery_result)
+                        _store_room_turn(conn, task, room_body)
                     if web_foreign_dests:
                         post_web = True
                     if plan_file:
                         call_file_handler = True
+                    if (
+                        task.source_type == "email"
+                        and task.conversation_token
+                        and db.get_turn_message_id(
+                            conn, task.conversation_token, task_id, "user",
+                        ) is not None
+                    ):
+                        # An email turn continuing a real room stores its user
+                        # row at ingest (ISSUE-136), and the branches above miss
+                        # the email-only plan that a `thread` reply-routing
+                        # policy produces — leaving that question with no answer
+                        # under it. The gate is the mirrored question itself, not
+                        # the source type: storage is a record rather than a
+                        # delivery, but only for the room the exchange actually
+                        # happened in. A reply routed to a *foreign* room is an
+                        # out-of-band notice and stays a role='system' note there
+                        # (ISSUE-164) — it never becomes a bubble in a room that
+                        # holds no question. Dedups against the branches above.
+                        _store_room_turn(conn, task, room_body)
 
                 # Track scheduled job success
                 if task.scheduled_job_id:
