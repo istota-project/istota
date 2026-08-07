@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
 
+### Changed
+
+- The chat sidebar is ordered by latest activity, with the room you last heard from at the top. It used to be fixed in creation order, so a busy room sat wherever it happened to have been made and a long list had to be read to find it. A room moves the moment a message lands in it, whoever sent it and whichever surface it came from; a room nobody has spoken in yet sorts by when it was created, so a new one still appears near the top.
+
 ### Fixed
 
 - Mail from someone else is no longer read back to the assistant as something you said. Every email turn was labelled with your name — in the conversation history, in what the nightly pass distils into long-term memory, and in what search recalls later — whether it came from you or from an outside contact replying to a message the bot sent on your behalf. So the assistant re-read a stranger's words as your own instructions, contradicting the warning wrapped around the same text, and could write them into memory as things you said. A turn is now attributed to you only when the sender is one of your own addresses, and to the sender otherwise. Only a plain address is ever shown, so nothing a sender chooses to put in the name field can pose as you.

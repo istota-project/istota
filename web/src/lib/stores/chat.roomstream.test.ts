@@ -40,7 +40,7 @@ vi.mock('$lib/stores/persisted', () => ({
   saveSetting: vi.fn(),
 }));
 
-function room(id: number, unread = 0, name = `Room ${id}`): ChatRoom {
+function room(id: number, unread = 0, name = `Room ${id}`, last_activity?: string): ChatRoom {
   return {
     id,
     token: `t${id}`,
@@ -50,6 +50,7 @@ function room(id: number, unread = 0, name = `Room ${id}`): ChatRoom {
     updated_at: '',
     origin: 'web',
     unread_count: unread,
+    last_activity,
   };
 }
 
@@ -829,5 +830,110 @@ describe('chat store — live room stream', () => {
     const calls = api.getRoomEvents.mock.calls.length;
     await vi.advanceTimersByTimeAsync(10000);
     expect(api.getRoomEvents.mock.calls.length).toBe(calls);
+  });
+
+  // The sidebar renders `$rooms` in store order, so the order the store holds
+  // IS the order on screen. The server sends it activity-first; these pin the
+  // paths that have to keep it that way once the page is live.
+  describe('activity ordering', () => {
+    const older = '2026-07-01T00:00:00Z';
+    const newer = '2026-07-20T00:00:00Z';
+
+    it('adopts the order the server sent', async () => {
+      api.getChatRooms.mockResolvedValue({
+        rooms: [room(1, 0, 'Stale', older), room(2, 0, 'Fresh', newer)],
+      });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Fresh', 'Stale']);
+      s.teardown();
+    });
+
+    it('lifts a background room to the top when a message lands in it', async () => {
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValue({
+        rooms: [room(1, 0, 'Active', newer), room(2, 0, 'Quiet', older)],
+      });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Active', 'Quiet']);
+      queueEvents([row(10, 't2', { created_at: '2026-08-01T00:00:00Z' })], 10);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Quiet', 'Active']);
+      s.teardown();
+    });
+
+    it('lifts the room the user is looking at, not only background rooms', async () => {
+      // The unread badge is deliberately blind to the active room and to the
+      // user's own turns; activity is neither — a turn you just took is the
+      // strongest reason for a room to be at the top.
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValue({
+        rooms: [room(1, 0, 'Other', newer), room(2, 0, 'Open', older)],
+      });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      await s.selectRoom(2);
+      queueEvents([row(10, 't2', { role: 'user', created_at: '2026-08-01T00:00:00Z' })], 10);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Open', 'Other']);
+      s.teardown();
+    });
+
+    it('re-sorts on the 30s reconciler for frames the client missed', async () => {
+      // A sleeping tab or a dropped stream means the order can drift; the poll
+      // used to be pinned "no reorder", which would have stranded it.
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValueOnce({
+        rooms: [room(1, 0, 'Active', newer), room(2, 0, 'Quiet', older)],
+      });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      api.getChatRooms.mockResolvedValue({
+        rooms: [room(1, 0, 'Active', newer), room(2, 3, 'Quiet', '2026-08-01T00:00:00Z')],
+      });
+      await vi.advanceTimersByTimeAsync(31000);
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Quiet', 'Active']);
+      s.teardown();
+    });
+
+    it('does not let a stale poll response demote a just-active room', async () => {
+      // The response is built before it is awaited, so a frame landing in
+      // between is ahead of it. Taking the server's stamp unconditionally
+      // would drop the room back down until the next poll.
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValue({
+        rooms: [room(1, 0, 'Active', newer), room(2, 0, 'Quiet', older)],
+      });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      queueEvents([row(10, 't2', { created_at: '2026-08-01T00:00:00Z' })], 10);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Quiet', 'Active']);
+      await vi.advanceTimersByTimeAsync(31000); // the poll still reports `older`
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Quiet', 'Active']);
+      s.teardown();
+    });
+
+    it('keeps a renamed room where it was', async () => {
+      // The PATCH response carries no `last_activity`; adopting it wholesale
+      // would strip the sort key and sink the room.
+      api.getChatRooms.mockResolvedValue({
+        rooms: [room(1, 0, 'Quiet', older), room(2, 0, 'Active', newer)],
+      });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      const { last_activity: _drop, ...patched } = room(2, 0, 'Renamed', newer);
+      api.updateChatRoom.mockResolvedValue(patched);
+      await s.renameRoom(2, 'Renamed');
+      expect(get(s.rooms).map((r) => r.name)).toEqual(['Renamed', 'Quiet']);
+      s.teardown();
+    });
   });
 });

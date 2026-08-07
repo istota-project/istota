@@ -528,6 +528,9 @@ class TestChatRoomsApi:
         )
         assert resp.status_code == 200
         assert resp.json()["name"] == "ideas"
+        # Carries the sidebar's sort key, so a just-created room sorts to the
+        # top instead of below every room the user hasn't touched in weeks.
+        assert resp.json()["last_activity"].endswith("Z")
 
     async def test_rename_room(self, chat_client):
         cookies = await _login(chat_client, "alice")

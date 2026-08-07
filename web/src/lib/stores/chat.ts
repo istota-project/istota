@@ -40,6 +40,7 @@ import {
   type SendResult,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
 import {
   applyEvent as applySegmentEvent,
@@ -665,9 +666,15 @@ function createSession(): ChatSession {
   }
 
   // Re-fetch the room list and merge fresh unread counts (and any name/origin
-  // backfill) into the existing entries by id — no reorder, no drop of local
-  // state. The active room is forced to 0 so looking at it always reads as
-  // clear, even if a count lands before the mark-read round-trips.
+  // backfill) into the existing entries by id — no drop of local state. The
+  // active room is forced to 0 so looking at it always reads as clear, even if
+  // a count lands before the mark-read round-trips.
+  //
+  // The merged list IS re-sorted by activity, which is the one thing this pass
+  // used to refuse to do: the sidebar's order is a function of `last_activity`
+  // now, so freezing the order here would strand a room whose stream frames the
+  // client missed (a sleeping tab, a dropped connection) wherever it happened
+  // to be. Reconciling that is the whole reason this poll survives.
   async function refreshRooms(timeoutMs = 0) {
     let list: ChatRoom[];
     try {
@@ -694,13 +701,21 @@ function createSession(): ChatSession {
           model: fresh.model,
           effort: fresh.effort,
           unread_count: unreadFor(fresh),
+          // Whichever stamp is newer. This response was built before it was
+          // awaited, so a frame that landed in between is ahead of it — taking
+          // the server's value unconditionally would drop a room the user is
+          // watching back down the list until the next poll.
+          last_activity:
+            (fresh.last_activity ?? '') > (r.last_activity ?? '')
+              ? fresh.last_activity
+              : r.last_activity,
         };
       });
       // Append rooms that newly surfaced (e.g. a Talk room first mirrored in).
       for (const fresh of list) {
         if (!seen.has(fresh.id)) merged.push({ ...fresh, unread_count: unreadFor(fresh) });
       }
-      return merged;
+      return sortRoomsByActivity(merged);
     });
   }
 
@@ -871,6 +886,12 @@ function createSession(): ChatSession {
     }
     const token = row.room_token;
     if (!token) return;
+    // Every message row is activity in its room, whichever room that is and
+    // whoever sent it — this is the single funnel every frame passes through,
+    // so the sidebar's order stays live without a room refetch. Ahead of the
+    // `pendingSend` buffer deliberately: a send's own echo is held back to
+    // dedup the bubble, but the room it went to should rise immediately.
+    rooms.update((rs) => touchRoomActivity(rs, token, row.created_at));
     if (pendingSend && token === pendingSend.token) {
       pendingSend.rows.push(row);
       return;
@@ -948,8 +969,20 @@ function createSession(): ChatSession {
     rooms.update((rs) => {
       const idx = rs.findIndex((r) => r.id === fresh.id);
       // The snapshot deliberately omits unread counts (they ride the `message`
-      // frames), so merge rather than replace.
-      if (idx === -1) return [...rs, { ...(fresh as ChatRoom), unread_count: 0 }];
+      // frames), so merge rather than replace. It omits `last_activity` for the
+      // same reason — it changes on every message, so diffing it would turn
+      // every turn into a `room` frame — which leaves a room appearing here
+      // with no stamp. Its appearance is itself the activity, so it takes one
+      // now; the arriving message that caused it, and the 30s poll, both settle
+      // it to the server's value.
+      if (idx === -1) {
+        const added = {
+          ...(fresh as ChatRoom),
+          unread_count: 0,
+          last_activity: fresh.last_activity ?? new Date().toISOString(),
+        };
+        return sortRoomsByActivity([...rs, added]);
+      }
       const next = rs.slice();
       next[idx] = {
         ...next[idx],
@@ -1525,7 +1558,7 @@ function createSession(): ChatSession {
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
       const { rooms: list } = await getChatRooms();
       if (superseded()) return;
-      rooms.set(list);
+      rooms.set(sortRoomsByActivity(list));
       // Seed the stream cursor BEFORE the history read, not after. A row
       // committed in between is then re-delivered by the stream and dropped by
       // the `msg_id` dedup; seeding afterwards would place it below the cursor
@@ -1624,13 +1657,17 @@ function createSession(): ChatSession {
 
   async function newRoom(name: string) {
     const room = await createChatRoom(name);
-    rooms.update((r) => [...r, room]);
+    rooms.update((r) => sortRoomsByActivity([...r, room]));
     await selectRoom(room.id);
   }
 
+  // Both of these merge rather than replace: the PATCH response is the room's
+  // own record and carries no `last_activity`, so adopting it wholesale would
+  // strip the sidebar's sort key and drop a renamed room to the bottom of the
+  // list. A rename is not activity, so the stamp is kept, not bumped.
   async function renameRoom(id: number, name: string) {
     const updated = await updateChatRoom(id, { name });
-    rooms.update((r) => r.map((x) => (x.id === id ? updated : x)));
+    rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
   }
 
   async function updateRoomSettings(
@@ -1638,7 +1675,7 @@ function createSession(): ChatSession {
     patch: { name?: string; model?: string | null; effort?: string | null },
   ) {
     const updated = await updateChatRoom(id, patch);
-    rooms.update((r) => r.map((x) => (x.id === id ? updated : x)));
+    rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
   }
 
   async function promoteRoom(id: number) {
