@@ -403,6 +403,7 @@ def index_conversation(
     topic: str | None = None,
     entities: list[str] | None = None,
     valid_until: str | None = None,
+    speaker: str = "User",
 ) -> int:
     """Index a conversation (prompt + result) into memory chunks.
 
@@ -410,13 +411,18 @@ def index_conversation(
 
     `valid_until` sets an episode window on the conversation's chunks
     (ISSUE-109 #2) — pass it when the exchange is about a time-boxed episode.
+
+    `speaker` labels the prompt half. It defaults to the user because that is
+    what a prompt normally is, but an email turn may have been written by an
+    external contact — an indexed chunk is recalled straight back into a later
+    prompt, so a wrong label here is the ISSUE-226 defect with a longer half-life.
     """
     source_id = str(task_id)
 
     # Combine prompt and result into indexable text
     parts = []
     if prompt:
-        parts.append(f"User: {prompt}")
+        parts.append(f"{speaker}: {prompt}")
     if result:
         parts.append(f"Bot: {result}")
     text = "\n\n".join(parts)

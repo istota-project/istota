@@ -31,6 +31,28 @@ def _format_created_at(created_at: str | None, user_tz: ZoneInfo | None) -> str:
 
 logger = logging.getLogger("istota.context")
 
+# Source types that represent scheduled/background tasks — not real user messages
+_SCHEDULED_SOURCE_TYPES = {"scheduled", "cron", "briefing", "heartbeat"}
+
+
+def _speaker_label(msg: ConversationMessage) -> str:
+    """Who the prompt half of this turn is attributed to.
+
+    `external_sender` is checked first and unconditionally: it is the one field
+    derived from the message's own envelope rather than from the task's
+    ownership, so when it is set it is the only trustworthy answer (ISSUE-226).
+    An email from an external contact must not be rendered as the principal's
+    own turn — the `<email_content>` guard inside the body already tells the
+    model the text is third-party input, and the speaker label used to
+    contradict it.
+    """
+    if msg.external_sender:
+        return f"External sender <{msg.external_sender}>"
+    source_type = getattr(msg, "source_type", "talk") or "talk"
+    if source_type in _SCHEDULED_SOURCE_TYPES:
+        return "Scheduled"
+    return msg.user_id if msg.user_id else "User"
+
 
 def select_relevant_context(
     current_prompt: str,
@@ -193,8 +215,7 @@ def _triage_older_messages(
 
     def _format_triage_msg(i: int, msg: ConversationMessage) -> str:
         ts = msg.created_at[:16] if msg.created_at else "unknown"
-        speaker = msg.user_id if msg.user_id else "User"
-        lines = f"[{i}] ({ts}) {speaker}: {msg.prompt}\nBot: {msg.result}"
+        lines = f"[{i}] ({ts}) {_speaker_label(msg)}: {msg.prompt}\nBot: {msg.result}"
         if msg.actions_taken:
             actions_line = _format_actions_line(msg.actions_taken)
             if actions_line:
@@ -280,20 +301,10 @@ def format_context_for_prompt(
     if not messages:
         return ""
 
-    # Source types that represent scheduled/background tasks — not real user messages
-    _SCHEDULED_SOURCE_TYPES = {"scheduled", "cron", "briefing", "heartbeat"}
-
     formatted = []
     for msg in messages:
         timestamp = _format_created_at(msg.created_at, user_tz)
-        source_type = getattr(msg, "source_type", "talk") or "talk"
-        if source_type in _SCHEDULED_SOURCE_TYPES:
-            speaker = "Scheduled"
-        elif msg.user_id:
-            speaker = msg.user_id
-        else:
-            speaker = "User"
-        formatted.append(f"[{timestamp}] {speaker}: {msg.prompt}")
+        formatted.append(f"[{timestamp}] {_speaker_label(msg)}: {msg.prompt}")
         result = msg.result
         if truncation > 0 and len(result) > truncation:
             result = result[:truncation] + "...[truncated]"
@@ -329,8 +340,6 @@ def _format_actions_line(actions_json: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 _REFERENCE_ID_PATTERN = re.compile(r"^istota:task:(\d+):(\w+)$")
-
-_SCHEDULED_SOURCE_TYPES = {"scheduled", "cron", "briefing", "heartbeat"}
 
 
 def _parse_reference_id(ref_id: str | None) -> tuple[int | None, str | None]:

@@ -1947,11 +1947,20 @@ def process_one_task(
                 ):
                     try:
                         from .memory.search import index_conversation as _index_conv
-                        _index_conv(conn, task.user_id, task_id, task.prompt, result)
+                        from .memory.sleep_cycle import speaker_labels
+                        # An indexed chunk is recalled back into a later prompt,
+                        # so it must not label an external contact's mail as the
+                        # user's own words (ISSUE-226).
+                        _speaker = speaker_labels(conn, config, [task]).get(
+                            task_id, "User",
+                        )
+                        _index_conv(conn, task.user_id, task_id, task.prompt, result,
+                                    speaker=_speaker)
                         # Also index under channel namespace if in a channel
                         if task.conversation_token:
                             channel_uid = f"channel:{task.conversation_token}"
-                            _index_conv(conn, channel_uid, task_id, task.prompt, result)
+                            _index_conv(conn, channel_uid, task_id, task.prompt, result,
+                                        speaker=_speaker)
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 

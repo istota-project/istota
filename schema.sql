@@ -185,6 +185,9 @@ CREATE TABLE IF NOT EXISTS processed_emails (
 
 CREATE INDEX IF NOT EXISTS idx_processed_emails_email_id ON processed_emails(email_id);
 CREATE INDEX IF NOT EXISTS idx_processed_emails_thread_id ON processed_emails(thread_id);
+-- The conversation-history readers look the envelope sender up per task
+-- (ISSUE-226); without this the lookup is a table scan per history row.
+CREATE INDEX IF NOT EXISTS idx_processed_emails_task_id ON processed_emails(task_id);
 
 -- Briefing state (tracks last_run_at for config-based briefings)
 CREATE TABLE IF NOT EXISTS briefing_state (

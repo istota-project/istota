@@ -329,9 +329,36 @@ def tool_summary(execution_trace_json: str | None) -> tuple[int, list[str]]:
     return count, labels
 
 
+def speaker_labels(
+    conn: "db.sqlite3.Connection",
+    config: Config,
+    tasks: list,
+) -> dict[int, str]:
+    """Who wrote each task's prompt, for the tasks where it isn't the user.
+
+    The same false-provenance defect as ISSUE-226, and worse here: an emissary
+    reply is an arbitrary external contact's text, and what this prompt extracts
+    from it is written durably to `USER.md` and `knowledge_facts` as things the
+    principal said. Tasks not in the returned map are the user's own.
+    """
+    labels: dict[int, str] = {}
+    for task in tasks:
+        if task.source_type != "email":
+            continue
+        user_config = config.users.get(task.user_id or "")
+        own = list(user_config.email_addresses or []) if user_config else []
+        external = db.external_email_sender(
+            db.email_sender_for_task(conn, task.id), own,
+        )
+        if external:
+            labels[task.id] = f"External sender <{external}>"
+    return labels
+
+
 def _format_task_section(
     tasks: list,
     per_task_budget: int,
+    speakers: dict[int, str] | None = None,
 ) -> list[str]:
     """Format a group of tasks with conversation grouping and budget control.
 
@@ -364,9 +391,10 @@ def _format_task_section(
                 tools_line = (
                     f"Tools ({tool_count}): " + " | ".join(tool_labels) + "\n"
                 )
+            speaker = (speakers or {}).get(task.id, "User")
             parts.append(
                 f"--- Task {task.id} ({task.source_type}, {task.created_at or 'unknown'}) ---\n"
-                f"User: {prompt_text}\n"
+                f"{speaker}: {prompt_text}\n"
                 f"Bot: {result_text}\n"
                 f"{tools_line}"
             )
@@ -416,6 +444,7 @@ def gather_day_data(
         automated_budget = MAX_DAY_DATA_CHARS
 
     parts = []
+    speakers = speaker_labels(conn, config, tasks)
 
     if interactive:
         interactive_per_task = max(_MIN_TASK_BUDGET, interactive_budget // len(interactive))
@@ -423,7 +452,9 @@ def gather_day_data(
             "======== INTERACTIVE CONVERSATIONS ========\n"
             "(User spoke directly — primary source for fact extraction)\n"
         )
-        parts.extend(_format_task_section(interactive, interactive_per_task))
+        parts.extend(
+            _format_task_section(interactive, interactive_per_task, speakers)
+        )
 
     if automated:
         automated_per_task = max(_MIN_TASK_BUDGET, automated_budget // len(automated))
@@ -431,7 +462,7 @@ def gather_day_data(
             "\n======== AUTOMATED/SCHEDULED OUTPUT ========\n"
             "(Bot-generated — do not attribute facts to people merely mentioned here)\n"
         )
-        parts.extend(_format_task_section(automated, automated_per_task))
+        parts.extend(_format_task_section(automated, automated_per_task, speakers))
 
     combined = "\n".join(parts)
     if len(combined) > MAX_DAY_DATA_CHARS:
@@ -1819,6 +1850,7 @@ def gather_channel_data(
         return ""
 
     per_task_budget = max(_MIN_TASK_BUDGET, MAX_DAY_DATA_CHARS // len(tasks))
+    speakers = speaker_labels(conn, config, tasks)
 
     parts = []
     for task in tasks:
@@ -1826,9 +1858,10 @@ def gather_channel_data(
         result_budget = per_task_budget - prompt_budget
         prompt_text = _excerpt(task.prompt or "", prompt_budget)
         result_text = _excerpt(task.result or "", result_budget)
+        speaker = speakers.get(task.id, "User")
         parts.append(
             f"--- Task {task.id} (user: {task.user_id}, {task.source_type}, {task.created_at or 'unknown'}) ---\n"
-            f"User: {prompt_text}\n"
+            f"{speaker}: {prompt_text}\n"
             f"Bot: {result_text}\n"
         )
 
