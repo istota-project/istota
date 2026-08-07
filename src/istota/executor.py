@@ -1498,6 +1498,29 @@ def _detect_notification_reply(
     return None
 
 
+def _user_email_address_map(config: Config) -> dict[str, list[str]]:
+    """Every configured user's own email addresses, keyed by user id.
+
+    Drives the ISSUE-226 sender attribution in the history readers. A user with
+    no configured addresses maps to `[]`, which reads as "nothing is theirs" —
+    every email turn of theirs is then attributed to its envelope sender. That
+    is the safe direction, but it also means their *own* mail reads as
+    third-party, so a missing `email_addresses` is worth a log line rather than
+    silent degradation.
+    """
+    address_map: dict[str, list[str]] = {}
+    for user_id, user_config in config.users.items():
+        addresses = list(user_config.email_addresses or [])
+        if not addresses:
+            logger.debug(
+                "User %s has no configured email_addresses; their own email "
+                "turns will be attributed to the sending address",
+                user_id,
+            )
+        address_map[user_id] = addresses
+    return address_map
+
+
 def _ensure_reply_parent_in_history(
     task: db.Task,
     history: list[db.ConversationMessage],
@@ -1520,15 +1543,25 @@ def _ensure_reply_parent_in_history(
 
     history_ids = {msg.id for msg in history}
 
-    def _lookup(c: db.sqlite3.Connection) -> db.Task | None:
-        return db.get_reply_parent_task(c, task.conversation_token, task.reply_to_talk_id)
+    # `get_reply_parent_task` also matches on `talk_response_id`, which an email
+    # task carries once its confirmation prompt was posted — so this path can
+    # surface an email turn and needs the same sender attribution as the bulk
+    # readers (ISSUE-226).
+    address_map = _user_email_address_map(config)
 
-    parent_task = None
+    def _lookup(c: db.sqlite3.Connection) -> tuple[db.Task | None, str | None]:
+        parent = db.get_reply_parent_task(
+            c, task.conversation_token, task.reply_to_talk_id,
+        )
+        if parent is None:
+            return None, None
+        return parent, db.email_sender_for_task(c, parent.id)
+
     if conn is not None:
-        parent_task = _lookup(conn)
+        parent_task, parent_sender = _lookup(conn)
     else:
         with db.get_db(config.db_path) as temp_conn:
-            parent_task = _lookup(temp_conn)
+            parent_task, parent_sender = _lookup(temp_conn)
 
     if parent_task:
         parent_msg = db.ConversationMessage(
@@ -1539,6 +1572,9 @@ def _ensure_reply_parent_in_history(
             actions_taken=parent_task.actions_taken,
             source_type=parent_task.source_type,
             user_id=parent_task.user_id,
+            external_sender=db.external_email_sender(
+                parent_sender, address_map.get(parent_task.user_id or "", []),
+            ),
         )
         if parent_task.id not in history_ids:
             logger.info(
@@ -1802,11 +1838,17 @@ def _build_db_context(
     # never read a cron/subtask post back as prior user conversation.
     _exclude_types = ["scheduled", "briefing", "subtask", "heartbeat"]
 
+    # Who each turn is attributed to (ISSUE-226). Every user, not just the task's
+    # own: a shared room's history carries co-members' turns, and checking theirs
+    # against this user's addresses would mark them external for no reason.
+    own_email_addresses = _user_email_address_map(config)
+
     if conn is not None:
         history = db.get_conversation_history(
             conn, task.conversation_token, exclude_task_id=task.id,
             limit=config.conversation.lookback_count,
             exclude_source_types=_exclude_types,
+            user_email_addresses=own_email_addresses,
         )
     else:
         with db.get_db(config.db_path) as temp_conn:
@@ -1814,6 +1856,7 @@ def _build_db_context(
                 temp_conn, task.conversation_token, exclude_task_id=task.id,
                 limit=config.conversation.lookback_count,
                 exclude_source_types=_exclude_types,
+                user_email_addresses=own_email_addresses,
             )
 
     # Inject recent scheduled/briefing tasks in the same channel — these are
@@ -1829,6 +1872,7 @@ def _build_db_context(
             conn, task.conversation_token, exclude_task_id=task.id,
             limit=config.conversation.previous_tasks_count,
             exclude_source_types=_prev_exclude,
+            user_email_addresses=own_email_addresses,
         )
     else:
         with db.get_db(config.db_path) as temp_conn:
@@ -1836,6 +1880,7 @@ def _build_db_context(
                 temp_conn, task.conversation_token, exclude_task_id=task.id,
                 limit=config.conversation.previous_tasks_count,
                 exclude_source_types=_prev_exclude,
+                user_email_addresses=own_email_addresses,
             )
 
     if prev_tasks:
