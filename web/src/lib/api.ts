@@ -498,6 +498,11 @@ export interface LocationPing {
   timestamp: string;
   lat: number;
   lon: number;
+  /**
+   * Metres, WGS84 ellipsoidal height — not barometric MSL. Null where the
+   * device returned a horizontal fix without a vertical one (~5% of pings).
+   */
+  altitude: number | null;
   accuracy: number;
   place: string | null;
   speed: number | null;
@@ -920,6 +925,9 @@ export interface UserProfile {
   default_destination: string;
   routing: Record<string, string>;
   briefing_email_html: boolean;
+  // Opt-in: follow the GPS timezone on travel (ISSUE-096). Off by default —
+  // it overwrites the timezone the user chose above.
+  timezone_follow_location: boolean;
   // Read-only hint from the server: surfaces available for delivery routing.
   delivery_surfaces?: string[];
 }

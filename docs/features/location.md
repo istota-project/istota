@@ -152,6 +152,18 @@ A reverse proxy is strongly recommended since it also covers the web UI and any 
 
 The [web interface](web-interface.md) provides location pages:
 
-- **Today view**: current position, day summary, trips
-- **History**: date picker, activity filter, heatmap
+- **Today view**: current position, day summary, trips, elevation profile
+- **History**: date picker, activity filter, heatmap, elevation profile
 - **Places**: discover unknown clusters (with dismiss option), create/edit/delete places, visit statistics
+
+## Following the timezone on travel
+
+`user_profiles.timezone` drives the `User timezone:` prompt header, and through it every briefing, calendar read and scheduled prompt. The scheduler can keep it in step with where the user actually is: once the newest ping and a ping at least an hour older resolve to the same IANA zone, sit within 100 km of each other, and that zone puts the clock somewhere other than the stored one does, the profile is updated and the user is told.
+
+It is **opt-in per user** — `timezone_follow_location` on the profile, the "Update timezone when I travel" checkbox beside the timezone field in Settings, off by default. The setting being rewritten is one the user chose, so it is something they switch on and an event they are notified about, rather than an inference made quietly. It also needs the location module enabled and the `location` extra installed (`timezonefinder`, which resolves coordinates offline — no network call, and the user's position is not sent anywhere).
+
+**The distance test, not the hour, is what keeps a journey from moving the timezone.** "Has been in this zone for an hour" is true of a plane over the Midwest: a continental flight spends over two hours above a single zone, so a dwell-only rule would set the timezone to whatever is being flown over and then set it again on landing. Requiring that the two samples are also near each other asks the question actually intended — have you stayed somewhere. Open water is covered separately: it resolves to an `Etc/GMT±N` offset rather than a place, and those are rejected outright.
+
+Three further guards. A track that has gone stale (nothing within two hours) is ignored, since yesterday's position says nothing about today. A ping with no accuracy figure, or one worse than `[location] accuracy_threshold_m`, is not used — an imported watch track carries no accuracy at all, and a junk fix can land across a border. And a zone that merely *renames* the stored one (`US/Pacific` against `America/Los_Angeles`, both of which Nextcloud seeds) is not a move, so it is compared by the wall clock it produces rather than by name.
+
+The change is recorded, and the same zone is not written again for 24 hours. Detection compares where you are against what is stored and remembers nothing by itself, so without that record a user who prefers home time abroad and sets it back by hand would be overridden on the next pass, and again on the one after.

@@ -358,6 +358,10 @@ istota_experimental_features: []
 #     # Briefing email as multipart/alternative — HTML (clickable article links)
 #     # plus a plain-text fallback part. Default on; false = plain text only.
 #     briefing_email_html: false
+#     # Set this user's timezone from their GPS position once they have settled
+#     # in a new one (default off). Needs the location module; the user is
+#     # notified on every change.
+#     timezone_follow_location: true
 #     briefings:
 #       # Content is blocks-only (legacy `components:` authoring is retired).
 #       # A briefing declaring `blocks:` seeds them ONCE into the user's module

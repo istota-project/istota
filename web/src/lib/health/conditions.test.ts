@@ -94,7 +94,9 @@ describe('encounterOptionLabel', () => {
 
   it('falls back to the facility', () => {
     const e = enc({ id: 1, facility: 'Riverside Clinic' });
-    expect(encounterOptionLabel(e, isoDate, titleCase)).toBe('2026-06-02 · Visit · Riverside Clinic');
+    expect(encounterOptionLabel(e, isoDate, titleCase)).toBe(
+      '2026-06-02 · Visit · Riverside Clinic',
+    );
   });
 });
 

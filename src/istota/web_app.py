@@ -5352,6 +5352,7 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "default_destination":    {"type": "descriptor"},
     "routing":                {"type": "routing"},
     "briefing_email_html":    {"type": "bool"},
+    "timezone_follow_location": {"type": "bool"},
 }
 
 
@@ -5540,6 +5541,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "default_destination": profile.default_destination,
         "routing": profile.routing,
         "briefing_email_html": profile.briefing_email_html,
+        "timezone_follow_location": profile.timezone_follow_location,
         "delivery_surfaces": _registered_delivery_surfaces(),
     }}
 
@@ -5848,7 +5850,7 @@ def _location_query_current(db_path: str) -> dict:
     try:
         row = conn.execute(
             """
-            SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+            SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
                    lp.activity_type, lp.battery, lp.wifi,
                    p.name as place_name
             FROM location_pings lp
@@ -5863,6 +5865,7 @@ def _location_query_current(db_path: str) -> dict:
             "timestamp": row["timestamp"],
             "lat": row["lat"],
             "lon": row["lon"],
+            "altitude": row["altitude"],
             "accuracy": row["accuracy"],
             "activity_type": row["activity_type"],
             "battery": row["battery"],
@@ -5930,7 +5933,7 @@ def _location_query_pings(
 
         if since and until:
             query = """
-                SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+                SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
                        lp.activity_type, lp.speed, lp.battery,
                        p.name as place_name
                 FROM location_pings lp
@@ -5946,7 +5949,7 @@ def _location_query_pings(
         else:
             rows = conn.execute(
                 """
-                SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+                SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
                        lp.activity_type, lp.speed, lp.battery,
                        p.name as place_name
                 FROM location_pings lp
@@ -5961,6 +5964,8 @@ def _location_query_pings(
                 "timestamp": r["timestamp"],
                 "lat": r["lat"],
                 "lon": r["lon"],
+                # Metres, WGS84 ellipsoidal height. Null on a horizontal-only fix.
+                "altitude": r["altitude"],
                 "accuracy": r["accuracy"],
                 "place": r["place_name"],
                 "speed": r["speed"],

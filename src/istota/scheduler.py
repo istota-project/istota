@@ -3241,6 +3241,150 @@ def _run_db_backup(config: Config) -> None:
     _alert_backup_problems(config, results)
 
 
+def check_travel_timezone(
+    config: Config, *, now: "datetime | None" = None,
+) -> list[tuple[str, str]]:
+    """Follow each opted-in user's timezone when they travel (ISSUE-096).
+
+    `user_profiles.timezone` feeds the `User timezone:` prompt header, and
+    through it every briefing and calendar read. Crossing a border used to leave
+    it on the home zone until the user fixed it by hand.
+
+    Opt-in per user (`timezone_follow_location`, default off) and never silent:
+    this rewrites a value the user chose, so it is a setting they turn on and an
+    event they are told about, not an inference made behind their back. Returns
+    the `(user_id, new_zone)` pairs actually written.
+
+    Runs here rather than in the ingest path: the receiver is a different
+    process with no notification plumbing, and a timezone that settles within a
+    poll interval is soon enough for something measured in hours.
+    """
+    from . import user_profiles
+    from .location import resolve_for_user
+    from .location import db as location_db
+    from .location import timezone as location_timezone
+
+    changed: list[tuple[str, str]] = []
+    now = now or datetime.now(timezone.utc)
+
+    with db.get_db(config.db_path) as fw_conn:
+        for user_id in list(config.users):
+            detected = ""
+            current_tz = ""
+            try:
+                if not config.is_module_enabled(user_id, "location", conn=fw_conn):
+                    continue
+
+                profile = user_profiles.get_profile(
+                    config.db_path, user_id, conn=fw_conn,
+                )
+                if profile is None or not profile.timezone_follow_location:
+                    continue
+
+                current_tz = profile.timezone or "UTC"
+                ctx = resolve_for_user(user_id, config, conn=fw_conn)
+                if not Path(ctx.db_path).exists():
+                    continue
+
+                with location_db.connect(ctx.db_path) as loc_conn:
+                    detected = location_timezone.detect_travel_timezone(
+                        loc_conn, current_tz, now=now,
+                        accuracy_threshold_m=config.location.accuracy_threshold_m,
+                    ) or ""
+                if not detected:
+                    continue
+
+                if _travel_timezone_on_cooldown(fw_conn, user_id, detected, now):
+                    continue
+
+                user_profiles.update_profile(
+                    config.db_path, user_id, timezone=detected,
+                )
+                _record_travel_timezone(fw_conn, user_id, detected, now)
+                fw_conn.commit()
+                changed.append((user_id, detected))
+                logger.info(
+                    "travel timezone user=%s %s -> %s", user_id, current_tz, detected,
+                )
+            except Exception as e:
+                logger.warning("Travel timezone check failed for %s: %s", user_id, e)
+                continue
+
+            # Outside the try above on purpose: the write has already landed and
+            # is what makes the user's clocks right. A dead Talk room must not
+            # look like the change failed, nor stop the next user being checked.
+            try:
+                sent = send_notification(
+                    config, user_id,
+                    f"Timezone updated to {detected} — you've been in it for a "
+                    f"while (was {current_tz}). Briefings and calendar times "
+                    f"follow this. Turn this off under Settings if you'd rather "
+                    f"set it yourself.",
+                    purpose="notification",
+                )
+            except Exception as e:
+                sent = False
+                logger.warning("Travel timezone notice failed for %s: %s", user_id, e)
+            if not sent:
+                # The feature promises it is never silent, so a change the user
+                # was not told about is an operator-visible problem rather than
+                # a quiet success.
+                logger.warning(
+                    "travel timezone changed for %s but no destination accepted "
+                    "the notice", user_id,
+                )
+
+    return changed
+
+
+# The user's position moves over hours, so there is nothing to gain from
+# looking every minute — and plenty to lose, since each pass opens every user's
+# location DB.
+TRAVEL_TZ_CHECK_INTERVAL = 900  # 15 minutes
+
+# Long enough that a border commute or a manual revert cannot produce a
+# per-tick rewrite loop, short enough that a genuine second trip to the same
+# place next week still lands.
+_TRAVEL_TZ_COOLDOWN_HOURS = 24
+_TRAVEL_TZ_NAMESPACE = "location"
+_TRAVEL_TZ_KEY = "auto_timezone"
+
+
+def _travel_timezone_on_cooldown(
+    conn: "db.sqlite3.Connection", user_id: str, zone: str, now: datetime,
+) -> bool:
+    """Whether this exact zone was auto-written for this user recently.
+
+    Detection is memoryless — it compares where you are against what is stored
+    — so on its own it re-fires every tick against anything that puts the
+    stored value back: a user who prefers home time abroad and sets it manually,
+    or a commute that crosses a border with an hour on each side. The record of
+    what we last set is what makes the change an event rather than a loop.
+    """
+    row = db.kv_get(conn, user_id, _TRAVEL_TZ_NAMESPACE, _TRAVEL_TZ_KEY)
+    if not row:
+        return False
+    try:
+        stored = json.loads(row["value"])
+        if stored.get("zone") != zone:
+            return False
+        at = datetime.fromisoformat(stored["at"])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return now - at < timedelta(hours=_TRAVEL_TZ_COOLDOWN_HOURS)
+
+
+def _record_travel_timezone(
+    conn: "db.sqlite3.Connection", user_id: str, zone: str, now: datetime,
+) -> None:
+    db.kv_set(
+        conn, user_id, _TRAVEL_TZ_NAMESPACE, _TRAVEL_TZ_KEY,
+        json.dumps({"zone": zone, "at": now.isoformat()}),
+    )
+
+
 def _run_sleep_cycles(config: Config) -> None:
     """Run the nightly per-user and per-channel sleep cycles (ISSUE-144 Tier 2).
 
@@ -4314,6 +4458,14 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     # background thread (ISSUE-144 Tier 2).
     _run_sleep_cycles(config)
 
+    # Follow opted-in users' timezones on travel. Synchronous here for the same
+    # reason as the sleep cycles.
+    if config.location.enabled:
+        try:
+            check_travel_timezone(config)
+        except Exception as e:
+            logger.error("Error checking travel timezones: %s", e)
+
     # Poll for new emails
     if config.email.enabled:
         from .transport.email import poll_emails
@@ -4668,6 +4820,7 @@ def run_daemon(
     # One clock for both sleep-cycle halves — they always came due together
     # (same interval, same epoch) and now run as one off-thread unit.
     last_sleep_cycle_check = 0.0
+    last_travel_tz_check = 0.0
     last_heartbeat_check = 0.0
     last_db_health_check = 0.0
     # Seed the backup clock from the persisted last-run timestamp so it survives
@@ -4767,6 +4920,22 @@ def run_daemon(
                 overlap_expected=True,
             )
             last_sleep_cycle_check = now
+
+        # Follow each opted-in user's timezone on travel (ISSUE-096). Off the
+        # dispatch thread: it opens a per-user location.db and may send a
+        # notification, both of which can block on I/O the loop must not wait
+        # on. Its own clock rather than the briefing one — the signal it watches
+        # moves over hours, so a minute-by-minute sweep of every user's location
+        # DB would be pure churn.
+        if (
+            config.location.enabled
+            and now - last_travel_tz_check >= TRAVEL_TZ_CHECK_INTERVAL
+        ):
+            _spawn_background_check(
+                "travel-timezone", lambda: check_travel_timezone(config),
+                background_checks, overlap_expected=True,
+            )
+            last_travel_tz_check = now
 
         # Poll emails periodically
         if config.email.enabled and now - last_email_poll >= config.scheduler.email_poll_interval:

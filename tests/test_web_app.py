@@ -2358,6 +2358,50 @@ class TestProfileEndpoints:
         )
         assert resp.status_code == 400
 
+    async def test_get_profile_timezone_follow_location_defaults_off(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["profile"]["timezone_follow_location"] is False
+
+    async def test_update_profile_timezone_follow_location(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"timezone_follow_location": True},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.timezone_follow_location is True
+
+        got = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert got.json()["profile"]["timezone_follow_location"] is True
+
+    async def test_update_profile_timezone_follow_location_rejects_non_bool(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"timezone_follow_location": 3},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_update_profile_partial(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

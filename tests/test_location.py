@@ -3,6 +3,7 @@
 import io
 import json
 import sys
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1167,6 +1168,150 @@ class TestLocationCLI:
 
             output = json.loads(captured.getvalue())
             assert len(output) == 5
+
+
+def _run_cmd(fn, **args):
+    """Call a location CLI command and return its parsed JSON stdout.
+
+    Args are a ``SimpleNamespace``, not a ``MagicMock``: a Mock answers every
+    attribute with a truthy Mock, so a command reading an option the test never
+    set silently takes a fallback branch instead of failing.
+    """
+    captured = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = captured
+    try:
+        fn(SimpleNamespace(**args))
+    finally:
+        sys.stdout = old_stdout
+    return json.loads(captured.getvalue())
+
+
+class TestAltitudeSurfacing:
+    """ISSUE-218 — altitude is stored on every ping but was dropped by every reader."""
+
+    def _seed(self, tmp_path):
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            # A climb: two pings inside 2026-03-16 Pacific, one with no vertical fix.
+            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.0, -118.0,
+                altitude=335.3, accuracy=5.0, activity_type="driving",
+            )
+            location_db.insert_ping(conn, "2026-03-16T21:00:00Z", 34.1, -118.1,
+                altitude=None, accuracy=5.0, activity_type="driving",
+            )
+            conn.commit()
+        return db_path
+
+    def test_history_includes_altitude(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            output = _run_cmd(cmd_history, limit=10, date=None)
+
+        by_ts = {p["timestamp"]: p for p in output}
+        assert by_ts["2026-03-16T20:00:00Z"]["altitude"] == 335.3
+
+    def test_history_altitude_is_null_when_no_vertical_fix(self, tmp_path):
+        """~5% of real pings carry a horizontal fix only; the key must still be present."""
+        db_path = self._seed(tmp_path)
+        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            output = _run_cmd(cmd_history, limit=10, date=None)
+
+        by_ts = {p["timestamp"]: p for p in output}
+        assert by_ts["2026-03-16T21:00:00Z"]["altitude"] is None
+
+    def test_history_date_branch_includes_altitude(self, tmp_path):
+        """--date runs a second, separately-written SELECT — it must carry the column too."""
+        db_path = self._seed(tmp_path)
+        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            output = _run_cmd(
+                cmd_history, limit=0, date="2026-03-16", tz="America/Los_Angeles"
+            )
+
+        assert len(output) == 2
+        assert {p["altitude"] for p in output} == {335.3, None}
+
+    def test_current_includes_altitude(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.insert_ping(conn, "2026-03-16T22:00:00Z", 34.2, -118.2,
+                altitude=1432.6, accuracy=5.0, activity_type="driving",
+            )
+            conn.commit()
+
+        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_current
+
+            output = _run_cmd(cmd_current)
+
+        assert output["last_ping"]["altitude"] == 1432.6
+
+
+@_needs_fastapi
+class TestLocationPingsAPIAltitude:
+    """The web pings endpoint feeds the map; it dropped altitude the same way."""
+
+    def _seed(self, tmp_path):
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.0, -118.0,
+                altitude=335.3, accuracy=5.0, activity_type="driving",
+            )
+            location_db.insert_ping(conn, "2026-03-16T21:00:00Z", 34.1, -118.1,
+                altitude=None, accuracy=5.0, activity_type="driving",
+            )
+            conn.commit()
+        return db_path
+
+    def test_date_range_query_includes_altitude(self, tmp_path):
+        from istota.web_app import _location_query_pings
+
+        db_path = self._seed(tmp_path)
+        result = _location_query_pings(
+            str(db_path), "America/Los_Angeles",
+            date="2026-03-16", start=None, end=None, limit=0,
+        )
+
+        assert result["count"] == 2
+        assert [p["altitude"] for p in result["pings"]] == [335.3, None]
+
+    def test_default_query_includes_altitude(self, tmp_path):
+        """The no-date branch is a separate SELECT and needs the column too."""
+        from istota.web_app import _location_query_pings
+
+        db_path = self._seed(tmp_path)
+        result = _location_query_pings(
+            str(db_path), "America/Los_Angeles",
+            date=None, start=None, end=None, limit=10,
+        )
+
+        assert {p["altitude"] for p in result["pings"]} == {335.3, None}
+
+    def test_current_query_includes_altitude(self, tmp_path):
+        """`LocationPing.altitude` is a required field of the shared frontend type,
+        so the current-location reader has to send it too — not only the CLI twin."""
+        from istota.web_app import _location_query_current
+
+        db_path = self._seed(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.insert_ping(conn, "2026-03-16T22:00:00Z", 34.2, -118.2,
+                altitude=1432.6, accuracy=5.0, activity_type="driving",
+            )
+            conn.commit()
+
+        result = _location_query_current(str(db_path))
+
+        assert result["last_ping"]["altitude"] == 1432.6
 
 
 class TestLocationDiscoverDismissCLI:

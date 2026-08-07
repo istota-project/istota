@@ -389,6 +389,7 @@ class UserConfig:
     email_reply_routing: str = "origin+thread"  # origin+thread | origin | thread
     default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
+    timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
 
 
 @dataclass
@@ -1641,6 +1642,9 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         default_destination=user_data.get("default_destination", "talk") or "talk",
         email_reply_routing=user_data.get("email_reply_routing", "origin+thread") or "origin+thread",
         briefing_email_html=bool(user_data.get("briefing_email_html", True)),
+        timezone_follow_location=bool(
+            user_data.get("timezone_follow_location", False)
+        ),
     )
 
 
