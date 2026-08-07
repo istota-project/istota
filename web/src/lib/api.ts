@@ -498,6 +498,11 @@ export interface LocationPing {
   timestamp: string;
   lat: number;
   lon: number;
+  /**
+   * Metres, WGS84 ellipsoidal height — not barometric MSL. Null where the
+   * device returned a horizontal fix without a vertical one (~5% of pings).
+   */
+  altitude: number | null;
   accuracy: number;
   place: string | null;
   speed: number | null;

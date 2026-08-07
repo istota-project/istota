@@ -25,6 +25,7 @@
     requestNewPlace,
     discoverDirty,
   } from '$lib/stores/location';
+  import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
   import { Chip, ConfirmDialog, DateRangeFilter, Select } from '$lib/components/ui';
@@ -323,6 +324,8 @@
         {/if}
       </div>
     {/if}
+
+    <ElevationProfile {pings} />
 
     <div class="stats-bar">
       {#if pings.length > 0}

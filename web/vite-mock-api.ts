@@ -1588,6 +1588,9 @@ const mockPings = (() => {
       lat: berlinLat + Math.sin(i / 18) * 0.004 + i * 0.00012,
       lon: berlinLon + Math.cos(i / 18) * 0.004 + i * 0.00018,
       horizontal_accuracy: 15,
+      // Berlin is flat: metres of GPS wander, well under the strip's floor, so
+      // this stretch alone draws no elevation profile.
+      altitude: 38 + Math.sin(i / 5) * 4,
       activity_type: stationary ? 'stationary' : i < 35 ? 'walking' : 'in_vehicle',
       speed: stationary ? 0 : i < 35 ? 1.2 : 8.5,
       place: stationary ? 'Home' : null,
@@ -1610,6 +1613,10 @@ const mockPings = (() => {
       lat: laxLat + Math.sin(i / 6) * 0.008 + i * 0.0003,
       lon: laxLon + Math.cos(i / 6) * 0.008 + i * 0.0004,
       horizontal_accuracy: 18,
+      // A drive up into the hills and back down, so the elevation strip has
+      // something real to draw. Every fifth point has no vertical fix, which is
+      // roughly the rate iOS produces and exercises the null path.
+      altitude: i % 5 === 4 ? null : 30 + Math.sin((i / 29) * Math.PI) * 420,
       activity_type: i < 5 ? 'stationary' : i < 20 ? 'in_vehicle' : 'walking',
       speed: i < 5 ? 0 : i < 20 ? 12.5 : 1.4,
       place: null,
@@ -1644,12 +1651,16 @@ const mockDay = {
     },
   ],
 };
+// Field names follow the real `/location/current` payload — this block used to
+// invent `recorded_at` / `horizontal_accuracy`, which match no LocationPing, so
+// nothing on this path could be developed against the mock.
 const mockCurrent = {
   last_ping: {
-    recorded_at: new Date().toISOString(),
+    timestamp: new Date().toISOString(),
     lat: 52.52,
     lon: 13.405,
-    horizontal_accuracy: 12,
+    altitude: 38,
+    accuracy: 12,
   },
   current_visit: { place: 'Home', place_id: 1, started_at: `${today}T07:00:00Z` },
 };

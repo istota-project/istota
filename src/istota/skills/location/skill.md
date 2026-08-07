@@ -109,6 +109,7 @@ Aliased as `last` (`istota-skill location last`).
     "timestamp": "2026-02-20T10:30:00Z",
     "lat": 40.71,
     "lon": -73.98,
+    "altitude": 12.4,
     "accuracy": 5,
     "activity_type": "stationary",
     "place": "home"
@@ -130,12 +131,19 @@ Aliased as `last` (`istota-skill location last`).
     "timestamp": "2026-02-20T10:30:00Z",
     "lat": 40.71,
     "lon": -73.98,
+    "altitude": 12.4,
     "accuracy": 5,
     "place": "home",
     "activity_type": "stationary"
   }
 ]
 ```
+
+`altitude` is metres as the device reported them, and is `null` on the ~5% of
+pings that got a horizontal fix without a vertical one. What it is measured
+against varies by source — a phone reports one reference, an imported watch
+track another — so treat it as good for "this was a climb" and never as an
+altimeter reading.
 
 ### places
 

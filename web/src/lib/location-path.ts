@@ -213,7 +213,10 @@ export function gapKind(
 // path. Short runs (station stops, traffic lights) or widely-spread runs
 // (mislabelled-stationary while moving, e.g. on a train) stay in the path so
 // the line follows the actual track.
-const DWELL_MIN_DURATION_S = 300; // 5 min
+// Exported because the elevation strip drawn under the map has to break its
+// line wherever the map dashes its own — the two are read together, and a
+// continuous climb under a dashed track asserts data that was never sampled.
+export const DWELL_MIN_DURATION_S = 300; // 5 min
 const DWELL_MAX_SPREAD_M = 50; // tight cluster
 
 // Outlier detection on rogue GPS fixes (iOS multipath, urban canyons,

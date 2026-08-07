@@ -6,6 +6,7 @@ function ping(partial: Partial<LocationPing> & { timestamp: string }): LocationP
   return {
     lat: 33.9,
     lon: -118.4,
+    altitude: null,
     accuracy: 10,
     place: null,
     speed: null,

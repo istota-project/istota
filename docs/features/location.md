@@ -152,6 +152,6 @@ A reverse proxy is strongly recommended since it also covers the web UI and any 
 
 The [web interface](web-interface.md) provides location pages:
 
-- **Today view**: current position, day summary, trips
-- **History**: date picker, activity filter, heatmap
+- **Today view**: current position, day summary, trips, elevation profile
+- **History**: date picker, activity filter, heatmap, elevation profile
 - **Places**: discover unknown clusters (with dismiss option), create/edit/delete places, visit statistics

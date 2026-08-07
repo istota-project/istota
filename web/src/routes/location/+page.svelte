@@ -19,6 +19,7 @@
     requestNewPlace,
   } from '$lib/stores/location';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
 
@@ -188,6 +189,8 @@
         onMapClick={(lat, lon) => $requestNewPlace?.({ lat, lon })}
       />
     </div>
+
+    <ElevationProfile {pings} />
 
     <div class="stats-bar">
       {#if currentLabel}

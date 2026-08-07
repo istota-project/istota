@@ -93,7 +93,7 @@ def cmd_current(args):
 
     cursor = conn.execute(
         """
-        SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+        SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
                lp.activity_type, lp.battery, lp.wifi,
                p.name as place_name
         FROM location_pings lp
@@ -111,6 +111,9 @@ def cmd_current(args):
         "timestamp": row["timestamp"],
         "lat": row["lat"],
         "lon": row["lon"],
+        # Raw GPS altitude in metres — WGS84 ellipsoidal height, not barometric
+        # MSL. Null where iOS returned a horizontal fix without a vertical one.
+        "altitude": row["altitude"],
         "accuracy": row["accuracy"],
         "activity_type": row["activity_type"],
         "battery": row["battery"],
@@ -169,7 +172,7 @@ def cmd_history(args):
 
         limit = args.limit or 0
         query = """
-            SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+            SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
                    lp.activity_type, lp.speed, lp.battery,
                    p.name as place_name
             FROM location_pings lp
@@ -186,7 +189,7 @@ def cmd_history(args):
         limit = args.limit or 20
         cursor = conn.execute(
             """
-            SELECT lp.timestamp, lp.lat, lp.lon, lp.accuracy,
+            SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
                    lp.activity_type, lp.speed, lp.battery,
                    p.name as place_name
             FROM location_pings lp
@@ -202,6 +205,8 @@ def cmd_history(args):
             "timestamp": r["timestamp"],
             "lat": r["lat"],
             "lon": r["lon"],
+            # Metres, WGS84 ellipsoidal — see cmd_current for the caveat.
+            "altitude": r["altitude"],
             "accuracy": r["accuracy"],
             "place": r["place_name"],
             "activity_type": r["activity_type"],
