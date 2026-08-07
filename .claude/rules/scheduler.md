@@ -474,10 +474,38 @@ is left untouched (legitimately awaiting the user).
 ### Conversation & Context
 ```python
 get_conversation_history(conn, conversation_token, exclude_task_id=None,
-    limit=10, exclude_source_types=None) -> list[ConversationMessage]
+    limit=10, exclude_source_types=None,
+    user_email_addresses=None) -> list[ConversationMessage]
+get_previous_tasks(conn, conversation_token, exclude_task_id=None, limit=3,
+    exclude_source_types=None, user_email_addresses=None) -> list[ConversationMessage]
 get_reply_parent_task(conn, conversation_token, reply_to_talk_id) -> Task | None
+external_email_sender(sender_email, own_email_addresses) -> str | None   # pure
+email_sender_for_task(conn, task_id) -> str | None
 ```
-`ConversationMessage`: `id, prompt, result, created_at, actions_taken`
+`ConversationMessage`: `id, prompt, result, created_at, actions_taken, source_type, user_id, external_sender`
+
+**Email sender attribution (ISSUE-226).** `user_id` on a history row is the
+*task's* user — the istota user an email was routed **to**, never the address it
+came **from** — so labelling an email turn with it asserts the principal said
+something an external contact said. That matters most for a `thread_match`
+emissary reply, which is ungated by design. Both history readers therefore
+recover the envelope sender from `processed_emails` (a scalar subquery on
+`task_id`, backed by `idx_processed_emails_task_id`; a join would fan out on a
+non-unique key) and set `external_sender` when it is **not** one of that row's
+own user's addresses. Keyed on the address, **not** on `routing_method`: a user
+mailing their own plus-address routes as `plus_address`, so the routing method
+alone would call them a stranger. `user_email_addresses` is a per-user map, not
+one list, because a shared room's turns are not all the requesting user's.
+Omitting it fails safe — every email turn is then attributed to its sender.
+`context._speaker_label` is the single renderer (`External sender <addr>`), used
+by both `format_context_for_prompt` and the triage prompt builder. The rendered
+value is an ASCII dot-atom address or the fixed `unknown sender`, never the raw
+header: a quoted local part is a valid addr-spec carrying arbitrary spaces and
+colons straight into the prompt's speaker position. The same attribution is
+applied by `memory/sleep_cycle.speaker_labels` (nightly extraction, whose output
+is written durably to `USER.md` + `knowledge_facts`) and by the scheduler's
+`index_conversation(..., speaker=…)` call, since an indexed chunk is recalled
+back into a later prompt.
 
 ### Other Key Functions
 ```python

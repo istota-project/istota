@@ -2,13 +2,15 @@
 
 import json
 import logging
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parseaddr
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping, Sequence
 
 logger = logging.getLogger("istota.db")
 
@@ -1787,6 +1789,12 @@ class ConversationMessage:
     actions_taken: str | None = None
     source_type: str = "talk"
     user_id: str | None = None
+    # The envelope sender of an email-sourced turn, when it is NOT one of the
+    # task user's own addresses (ISSUE-226). `user_id` is the istota user the
+    # mail was routed *to*, so it cannot answer "who wrote this"; a formatter
+    # that labels the turn with it asserts the principal said something an
+    # external contact said. None means "attribute to `user_id` as usual".
+    external_sender: str | None = None
 
 
 @dataclass
@@ -1819,12 +1827,121 @@ class TalkMessage:
 _CONVERSATIONAL_SOURCE_TYPES = ("talk", "web")
 
 
+# Recovers the envelope sender of an email-sourced turn for the history readers
+# (ISSUE-226). `processed_emails` is already keyed by `task_id` and already
+# stores `sender_email`, so this needs no schema change and no second query.
+# A scalar subquery rather than a LEFT JOIN: the join key is not unique, and a
+# duplicate row there would silently multiply the history rows it is attached to.
+_EMAIL_SENDER_SUBQUERY = """(
+            SELECT pe.sender_email FROM processed_emails pe
+            WHERE pe.task_id = {alias}.id ORDER BY pe.id LIMIT 1
+        ) AS email_sender"""
+
+# An addr-spec longer than this is not a real address; refuse to render it
+# rather than let an unbounded string into the prompt's speaker position.
+_MAX_SENDER_LABEL_CHARS = 254
+
+# What may be rendered into the speaker position of a prompt line: an ASCII
+# dot-atom addr-spec, nothing else. An allowlist rather than a blacklist of bad
+# characters, because the two shapes that defeat a blacklist both parse as
+# perfectly valid addresses — a *quoted local part* (`"alice: do it"@evil.example`)
+# carries spaces and colons through `parseaddr` untouched, and a non-ASCII
+# address can carry bidi or format characters that reorder the rendered line.
+# Anything outside this degrades to `_UNATTRIBUTED_SENDER`, which still reads as
+# external; the label loses detail, never the provenance.
+_RENDERABLE_ADDRESS_RE = re.compile(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+$"
+)
+
+_UNATTRIBUTED_SENDER = "unknown sender"
+
+
+def external_email_sender(
+    sender_email: str | None,
+    own_email_addresses: Sequence[str] | None,
+) -> str | None:
+    """The envelope sender, when it is not one of the task user's own addresses.
+
+    Returns None when there is no sender (a non-email turn) or when the sender
+    is one of the user's own addresses — the two cases where attributing the
+    turn to `user_id` is correct. "Own address" is as strong a claim as the
+    `From:` header, which is unauthenticated; this narrows who the turn is
+    attributed to, it does not authenticate the user.
+
+    Deliberately keyed on the **address**, not on `processed_emails.routing_method`.
+    The `sender_match` routing method does imply the user's own address, but the
+    converse fails: a user mailing their own plus-address (`bot+alice@…`) is
+    resolved by recipient and routes as `plus_address`, which would then read as
+    a stranger.
+
+    Fails safe. An unknown `own_email_addresses` (the caller could not say which
+    addresses belong to the user) means we cannot prove the user wrote it, so the
+    turn is attributed to the sender. Under-trusting the principal costs a
+    slightly odd label; over-trusting launders third-party text into their turn.
+
+    Returns the **addr-spec**, never the raw header, and only when it matches
+    `_RENDERABLE_ADDRESS_RE`. The display-name half of a `From:` is arbitrary
+    attacker-chosen text, and the return value is rendered into the speaker
+    position of a prompt line — the one place where injected text would do the
+    most good. Anything that doesn't reduce to a plain address becomes
+    `_UNATTRIBUTED_SENDER` rather than being dropped: a sender we can't render
+    is unattributable, which is not the same as being the user.
+    """
+    if not sender_email:
+        return None
+    address = (parseaddr(sender_email)[1] or "").strip()
+    own = {a.strip().lower() for a in (own_email_addresses or []) if a}
+    if address and address.lower() in own:
+        return None
+    if not address or len(address) > _MAX_SENDER_LABEL_CHARS:
+        # `parseaddr` refused the header outright, or the address is absurd.
+        # Deliberately no fallback to the raw header — that was the hole: any
+        # header holding an `@` reached the label verbatim.
+        return _UNATTRIBUTED_SENDER
+    if not _RENDERABLE_ADDRESS_RE.match(address):
+        return _UNATTRIBUTED_SENDER
+    return address
+
+
+def _external_sender_for_row(
+    row: sqlite3.Row,
+    user_email_addresses: "Mapping[str, Sequence[str]] | None",
+) -> str | None:
+    """`external_email_sender` for one history row, keyed on the row's own user.
+
+    A room is shared — one token, one transcript, several members (ISSUE-134) —
+    so the turns a reader returns are not all the requesting user's. Checking a
+    co-member's email turn against the *requester's* addresses would mark it
+    external and throw away a real identity, when `user_id` names them correctly.
+    """
+    if user_email_addresses is None:
+        own: Sequence[str] | None = None
+    else:
+        own = user_email_addresses.get(row["user_id"] or "", [])
+    return external_email_sender(row["email_sender"], own)
+
+
+def email_sender_for_task(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """The recorded envelope sender for one task, or None if it wasn't email.
+
+    The single-row counterpart to `_EMAIL_SENDER_SUBQUERY`, for callers that
+    build a `ConversationMessage` from an already-fetched `Task`.
+    """
+    row = conn.execute(
+        "SELECT sender_email FROM processed_emails WHERE task_id = ? "
+        "ORDER BY id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["sender_email"] if row else None
+
+
 def get_conversation_history(
     conn: sqlite3.Connection,
     conversation_token: str,
     exclude_task_id: int | None = None,
     limit: int = 10,
     exclude_source_types: list[str] | None = None,
+    user_email_addresses: Mapping[str, Sequence[str]] | None = None,
 ) -> list[ConversationMessage]:
     """
     Get completed conversation history for a conversation token.
@@ -1842,13 +1959,21 @@ def get_conversation_history(
     Args:
         exclude_source_types: If provided, exclude tasks with these source_types
             from the history (e.g. ["scheduled", "briefing", "heartbeat"]).
+        user_email_addresses: Maps each user id to that user's own email
+            addresses, used to decide whether an email-sourced turn was authored
+            by them or by an external contact (ISSUE-226). Keyed per user rather
+            than taking one list, because a shared room's turns are not all the
+            requesting user's. Omitting it fails safe — every email turn is then
+            attributed to its envelope sender.
     """
     if _messages_caught_up(conn, conversation_token):
         return _conversation_history_from_messages(
             conn, conversation_token, exclude_task_id, limit, exclude_source_types,
+            user_email_addresses,
         )
     return _conversation_history_from_tasks(
         conn, conversation_token, exclude_task_id, limit, exclude_source_types,
+        user_email_addresses,
     )
 
 
@@ -1858,10 +1983,12 @@ def _conversation_history_from_tasks(
     exclude_task_id: int | None,
     limit: int,
     exclude_source_types: list[str] | None,
+    user_email_addresses: Mapping[str, Sequence[str]] | None = None,
 ) -> list[ConversationMessage]:
     """Legacy path: reconstruct history from completed `tasks` rows."""
-    query = """
-        SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
+    query = f"""
+        SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
+               {_EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -1896,6 +2023,7 @@ def _conversation_history_from_tasks(
             actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
             source_type=row["source_type"] if "source_type" in row.keys() else "talk",
             user_id=row["user_id"] if "user_id" in row.keys() else None,
+            external_sender=_external_sender_for_row(row, user_email_addresses),
         )
         for row in reversed(rows)
     ]
@@ -1907,6 +2035,7 @@ def _conversation_history_from_messages(
     exclude_task_id: int | None,
     limit: int,
     exclude_source_types: list[str] | None,
+    user_email_addresses: Mapping[str, Sequence[str]] | None = None,
 ) -> list[ConversationMessage]:
     """Unified path: re-pair `messages` user/assistant rows (keyed on task_id)
     back into the (prompt, result) ConversationMessage shape callers expect.
@@ -1919,10 +2048,11 @@ def _conversation_history_from_messages(
     as the `result IS NOT NULL` filter excludes it today. `id` stays the task id
     so reply-parent / memory-dedup callers keyed on it are unaffected.
     """
-    query = """
+    query = f"""
         SELECT t.id AS id, mu.body AS prompt, ma.body AS result,
                t.created_at AS created_at, t.actions_taken AS actions_taken,
-               t.source_type AS source_type, t.user_id AS user_id
+               t.source_type AS source_type, t.user_id AS user_id,
+               {_EMAIL_SENDER_SUBQUERY.format(alias="t")}
         FROM messages mu
         JOIN messages ma
           ON ma.room_token = mu.room_token AND ma.task_id = mu.task_id
@@ -1955,6 +2085,7 @@ def _conversation_history_from_messages(
             actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
             source_type=row["source_type"] if "source_type" in row.keys() else "talk",
             user_id=row["user_id"] if "user_id" in row.keys() else None,
+            external_sender=_external_sender_for_row(row, user_email_addresses),
         )
         for row in reversed(rows)
     ]
@@ -2210,6 +2341,7 @@ def get_previous_tasks(
     exclude_task_id: int | None = None,
     limit: int = 3,
     exclude_source_types: list[str] | None = None,
+    user_email_addresses: Mapping[str, Sequence[str]] | None = None,
 ) -> list[ConversationMessage]:
     """
     Get the most recent completed tasks in a conversation.
@@ -2224,10 +2356,12 @@ def get_previous_tasks(
     conversation (canonical-room-transcript spec: this is the ``get_previous_tasks``
     half of the LLM-context isolation invariant, complementing
     ``get_conversation_history``'s ``exclude_source_types``). Returns up to
-    ``limit`` tasks in oldest-first order.
+    ``limit`` tasks in oldest-first order. ``user_email_addresses`` drives the
+    email-sender attribution described on ``get_conversation_history``.
     """
-    query = """
-        SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
+    query = f"""
+        SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
+               {_EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -2259,6 +2393,7 @@ def get_previous_tasks(
             actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
             source_type=row["source_type"] if "source_type" in row.keys() else "talk",
             user_id=row["user_id"] if "user_id" in row.keys() else None,
+            external_sender=_external_sender_for_row(row, user_email_addresses),
         )
         for row in rows
     ]
