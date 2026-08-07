@@ -234,6 +234,7 @@ smtp_port = {{ istota_email_smtp_port }}
 poll_folder = "{{ istota_email_poll_folder }}"
 bot_email = "{{ istota_email_bot_address }}"
 imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
+confirm_sender_match = {{ istota_email_confirm_sender_match | lower }}
 {% endif %}
 
 {# Model alias registry ([models.aliases]) — tiers (fast/general/smart) and

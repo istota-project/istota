@@ -175,6 +175,76 @@ messages are re-polled rather than silently lost.
   to it and returns an empty list. The scheduler's email tick imports
   `poll_emails` from `transport.email` and calls it directly.
 
+  **Email confirmation gate.** One `needs_confirmation` decision per email,
+  resolved *before* `ingest_message` because it also sets
+  `IncomingMessage.suppress_transcript_mirror` — the mirror commits in the task's
+  transaction, so a gated turn must not publish attacker text into the room before
+  the user has answered (`db.cancel_task` on a decline touches only `tasks`). One
+  rule per routing method:
+
+  - `plus_address` / `sender_match` — gated unless `is_trusted_email_sender`,
+    called with `include_own_addresses=not config.email.confirm_sender_match`.
+    **One rule, both routes** — see below.
+  - `thread_match` — never gated, by design. The external contact holds a
+    `Message-ID` from mail we sent; that possession is the routing evidence. Noted
+    in ISSUE-226 as the one ungated path, deliberately left so.
+
+  **What `confirm_sender_match` actually switches (ISSUE-227).** It turns off the
+  *own-address branch* of the trust check — the branch that reads "the `From:`
+  names one of this user's addresses, therefore it is the user". SMTP `From:` is
+  unauthenticated, so that is a claim the sender makes about itself, and with the
+  flag on it stops counting as evidence. Everything else about the gate is
+  unchanged, which is why one keyword argument carries the whole feature.
+
+  The flag was unreachable before. `sender_match` is *defined* by the own-address
+  match, and the plain trust check returns True on its first branch for exactly
+  that set, so the gate evaluated `not True` on every reachable path and the
+  config surface advertised a control that did nothing. Excluding the branch is
+  what makes the question non-circular.
+
+  It applies to **both** sender-trust routes, not only the one ISSUE-227 names —
+  the issue named `sender_match` because that is where the dead branch was, not
+  because the exposure stops there. Routing resolves by recipient first, and the
+  plus-address is public (it is the `From:` on every mail the bot sends on the
+  user's behalf), so a spoofer who knows the address the gate is about also knows
+  how to route around a `sender_match`-only gate: `From: <user>` + `Cc:
+  bot+<user>@…` resolves as `plus_address`, where the own-address branch would
+  wave through the identical claim. Both reviewers of the fix found that bypass
+  independently; the single expression is the fix. An *external* sender's trust
+  answer is untouched by the flag — only the self-claim changes.
+
+  Default **off**: the branch was dead since it shipped, so `false` is the
+  behaviour every deployment already has, and an unanswered confirmation is
+  auto-cancelled at `confirmation_timeout_minutes` — defaulting it on would have
+  silently dropped inbound mail wherever Talk isn't watched. Ansible knob
+  `istota_email_confirm_sender_match`.
+
+  **The prompt is route-aware.** `yes trust` writes the sending address into the
+  runtime trusted list, which on a self-claim would exempt the user's own address
+  — and therefore the spoofer, since the address is all either party presents.
+  Offering it as one of three equal options steers the user into disabling the
+  control on its first message, so a self-claim gets a plain yes/no and an
+  external sender keeps the shortcut. The affordance is hidden, not the verb:
+  `handle_confirmation_reply` still matches `yes trust` on the reply text with no
+  knowledge of which prompt variant was sent, so a user who types it anyway gets
+  it, alongside `!trust` and `trusted_email_senders`. All three stay reachable as
+  deliberate acts; the point is not to nudge.
+
+  A signal the sender cannot forge (inbound DKIM/SPF/DMARC via a trusted
+  `Authentication-Results` stamp) would let the gate distinguish the user from a
+  spoofer and stop asking about legitimate mail. It needs an operator-configured
+  authserv-id to tell our own MTA's header from one the sender wrote, so it is a
+  feature rather than part of the ISSUE-227 fix.
+
+  **Three pre-existing interactions the flag makes reachable**, all noted under
+  ISSUE-227 rather than fixed there: a gated task parks its room via
+  `_CLAIM_CHANNEL_GATE_SQL` and only the Talk poller calls
+  `cancel_pending_confirmations`, so a gated reply into a *web* room freezes it
+  until the timeout; `suppress_transcript_mirror` is never undone on approval, so
+  an approved mail leaves an assistant row with no user row above it (the
+  ISSUE-136 defect, re-reached); and `get_pending_confirmation_for_user` answers
+  only the newest, so a burst of gated mail loses all but the last.
+
   **Email-reply origin routing.** A thread-matched reply (recipient replies to a
   mail we sent) routes back to the *surface the original send came from*, not
   unconditionally to Talk. At send time `routing.origin_descriptor(task)` stamps

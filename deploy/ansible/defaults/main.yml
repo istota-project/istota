@@ -262,6 +262,11 @@ istota_email_smtp_port: 587
 istota_email_poll_folder: "INBOX"
 istota_email_bot_address: ""
 istota_email_imap_timeout_seconds: 30  # socket timeout for IMAP connections
+# Hold mail whose From: names one of the user's own addresses for a yes/no in
+# Talk. SMTP From: is unauthenticated, so that is a claim, not evidence. Off by
+# default — it also holds the user's own mail, and an unanswered prompt is
+# cancelled at confirmation_timeout_minutes. See docs/features/email.md.
+istota_email_confirm_sender_match: false
 
 # Conversation context settings
 istota_conversation_enabled: true               # false = no conversation context at all

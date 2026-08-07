@@ -50,7 +50,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `smtp_password` | `""` | SMTP password (defaults to imap_password) |
 | `poll_folder` | `"INBOX"` | Folder to poll |
 | `bot_email` | `""` | Bot's email address |
-| `confirm_sender_match` | `true` | Require confirmation for sender-match routed emails |
+| `confirm_sender_match` | `false` | Require confirmation for mail whose `From:` names one of the user's own addresses (see [`confirm_sender_match`](../features/email.md#confirm_sender_match)) |
 
 ## `[conversation]`
 

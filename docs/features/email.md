@@ -17,9 +17,21 @@ Attachments are downloaded to `/Users/{user_id}/inbox/`.
 Emails from untrusted senders require explicit user confirmation before processing. This applies to:
 
 - Plus-addressed emails (`bot+user_id@domain`) from senders not in the user's trusted list
-- Sender-match routed emails when `confirm_sender_match` is enabled (default: true)
+- Emails whose `From:` names one of the user's own addresses, when `confirm_sender_match` is enabled (default: false)
 
-When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, trust the sender, or discard the message. Trusted senders bypass the gate.
+When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, discard, or — for an external sender — trust them so later mail passes. Trusted senders bypass the gate.
+
+Thread-matched emails (emissary replies) are never gated — the external contact holds a `Message-ID` from mail the bot sent on the user's behalf, and that is the routing evidence.
+
+### `confirm_sender_match`
+
+Off by default, and worth understanding before turning it on. The bot normally treats a `From:` matching one of the user's `email_addresses` as proof the user sent the mail. SMTP `From:` is unauthenticated, so it is a claim anyone who knows the address can make. This flag stops the claim counting as evidence: mail arriving with the user's own address on it is held until they approve it from Talk, a channel the sender cannot reach. The cost is that the user's own mail to the bot is held too — nothing in a plain SMTP message distinguishes the two.
+
+The flag applies to whichever route the mail takes, not only to sender-match routing. Routing is decided by the recipient first, and the plus-address is public — it is the `From:` on every message the bot sends on the user's behalf — so a sender who knows the address the gate is about also knows how to arrive as a plus-addressed message instead. The same claim gets the same answer either way. Mail from a genuinely external sender is unaffected by the flag; it is gated or not on the existing plus-address rule.
+
+Two escape hatches keep it usable. An address listed in the user's `trusted_email_senders` is exempt outright, and `!trust <address>` adds one at runtime. Both are deliberate grants rather than the header trusting itself — but an address trusted either way is then trusted for anyone who can spoof it, so a deployment that turns the flag on for the spoofing protection should not immediately trust its way back out of it. For that reason the confirmation prompt for a self-claim offers only `yes` and `no`; the `yes trust` shortcut is offered only for genuinely external senders, where trusting them costs nothing this gate protects.
+
+Two limits to know. An unanswered confirmation is auto-cancelled after `scheduler.confirmation_timeout_minutes`, so leaving the flag on with no watched Talk channel drops inbound mail rather than queuing it (an undeliverable prompt is logged as a warning). And attachments are downloaded to the user's `inbox/` before the gate runs, so declining a message holds its *processing* — the attached files have already landed and are not removed.
 
 Trusted senders are configured at two levels:
 

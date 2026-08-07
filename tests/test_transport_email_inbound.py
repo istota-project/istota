@@ -18,6 +18,7 @@ from istota.email_support import (
     get_email_config,
     normalize_subject,
 )
+from istota.transport.email import inbound as inbound_module
 from istota.transport.email.inbound import (
     _extract_user_from_recipient,
     poll_emails,
@@ -1357,14 +1358,16 @@ class TestEmailConfirmationGate:
             task = db.get_task(conn, task_ids[0])
             assert task.status == "pending"  # Not pending_confirmation
 
-    def test_sender_match_own_email_not_gated(self, make_config):
-        """Sender-match emails from user's own email_addresses are trusted (not gated)."""
+    def test_sender_match_own_email_not_gated_by_default(self, make_config):
+        """With the gate at its default (off), sender-match mail is processed directly."""
         config = make_config()
         config.email = _email_config()
         config.users = {"alice": UserConfig(
             email_addresses=["alice@test.com"],
             alerts_channel="alerts_room",
         )}
+
+        assert config.email.confirm_sender_match is False
 
         envelope = _envelope(id="23", sender="alice@test.com", subject="Hi")
         email = _email(id="23", sender="alice@test.com")
@@ -1406,9 +1409,10 @@ class TestEmailConfirmationGate:
             assert task.status == "pending"
 
     def test_sender_match_trusted_sender_not_gated(self, make_config):
-        """Trusted senders bypass confirmation even with confirm_sender_match enabled."""
+        """A trusted_email_senders pattern exempts an address even with the gate on."""
         config = make_config()
         config.email = _email_config()
+        config.email.confirm_sender_match = True
         config.users = {"alice": UserConfig(
             email_addresses=["alice@test.com"],
             trusted_email_senders=["alice@test.com"],
@@ -1460,6 +1464,324 @@ class TestEmailConfirmationGate:
             assert task.status == "pending_confirmation"
             assert task.talk_response_id is None
 
+
+class TestSenderMatchConfirmationGate:
+    """ISSUE-227 — ``confirm_sender_match`` used to be unreachable: the route is
+    *defined* by the sender being one of the user's own addresses, and the trust
+    check it consulted returned True for exactly that set. The gate now asks about
+    the own-address claim itself, and only an explicit exemption lets mail past."""
+
+    def test_own_address_is_gated_when_enabled(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+
+        envelope = _envelope(id="sm1", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm1", sender="alice@test.com")
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=99) as send,
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending_confirmation"
+            assert task.talk_response_id == 99
+
+        prompt = send.call_args.args[2]
+        assert "alice@test.com" in prompt
+        assert "sender_match" in prompt
+
+    def test_gated_turn_is_not_mirrored_to_the_room(self, make_config):
+        """The mirror commits in the task's transaction, so a gated turn must not
+        publish before the user has answered (same contract as the plus-address gate)."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm2", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm2", sender="alice@test.com")
+
+        captured = {}
+
+        real_ingest = inbound_module.ingest_message
+
+        def _spy(conn, cfg, msg):
+            captured["suppress"] = msg.suppress_transcript_mirror
+            return real_ingest(conn, cfg, msg)
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=None),
+            patch("istota.transport.email.inbound.ingest_message", side_effect=_spy),
+        ):
+            poll_emails(config)
+
+        assert captured["suppress"] is True
+
+    def test_runtime_trusted_address_bypasses_the_gate(self, make_config):
+        """The 'yes trust' escape hatch: once the address is trusted at runtime the
+        gate stops asking, so an operator who turns it on is not stuck confirming forever."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        with db.get_db(config.db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "alice@test.com")
+
+        envelope = _envelope(id="sm3", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm3", sender="alice@test.com")
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+    def test_own_address_claim_is_gated_on_the_plus_address_route_too(self, make_config):
+        """The plus-address is public — it is the From: on every mail the bot sends
+        on the user's behalf — so a spoofer who knows the address the gate is about
+        can also route around it. Same own-address claim, same answer, either route."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm4", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm4", sender="alice@test.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=None),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending_confirmation"
+            assert db.get_email_for_task(conn, task_ids[0]).routing_method == "plus_address"
+
+    def test_plus_address_self_mail_stays_ungated_with_the_gate_off(self, make_config):
+        """Default state: the own-address branch still answers for plus-address mail,
+        so a user's own plus-addressed self-mail is processed as it always was."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm4b", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm4b", sender="alice@test.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+    def test_external_plus_address_sender_keeps_the_trust_offer(self, make_config):
+        """A genuinely external sender is still offered 'yes trust' — trusting them
+        is the intended way to stop being asked, and costs nothing this gate protects."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm4c", sender="stranger@evil.com", subject="Hi")
+        email = _email(id="sm4c", sender="stranger@evil.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=7) as send,
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        prompt = send.call_args.args[2]
+        assert "yes trust" in prompt
+        assert "unknown sender" in prompt
+
+    def test_trusted_external_sender_is_unaffected_by_the_gate(self, make_config):
+        """The flag suppresses only the own-address branch, which cannot match an
+        external sender — so their trust answer is arithmetically unchanged."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            trusted_email_senders=["*@partner.com"],
+        )}
+
+        envelope = _envelope(id="sm4g", sender="bob@partner.com", subject="Hi")
+        email = _email(id="sm4g", sender="bob@partner.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+    def test_self_claim_prompt_omits_the_trust_offer(self, make_config):
+        """'yes trust' on a self-claim would exempt the user's own address from the
+        gate — for the spoofer too. It must not be offered as one of three equal options."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm4d", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm4d", sender="alice@test.com")
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=8) as send,
+        ):
+            poll_emails(config)
+
+        prompt = send.call_args.args[2]
+        assert "yes trust" not in prompt
+        assert "unverified sender" in prompt
+        assert "Reply 'yes' to process, or 'no' to discard." in prompt
+
+    def test_self_claim_is_judged_against_the_routed_user(self, make_config):
+        """An address held by two users routes to whoever the plus-address names.
+        The trust offer must follow that user, not whoever `find_user_by_email`
+        happens to return first — offering it would trust their own address."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {
+            "bob": UserConfig(email_addresses=["shared@test.com"]),
+            "alice": UserConfig(email_addresses=["shared@test.com"]),
+        }
+
+        envelope = _envelope(id="sm6", sender="shared@test.com", subject="Hi")
+        email = _email(id="sm6", sender="shared@test.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=11) as send,
+        ):
+            task_ids = poll_emails(config)
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.user_id == "alice"
+            assert task.status == "pending_confirmation"
+
+        assert "yes trust" not in send.call_args.args[2]
+
+    def test_undeliverable_prompt_warns(self, caplog, make_config):
+        """The task is parked and the email already marked processed, so a prompt
+        nobody receives is silent mail loss. It must at least be logged."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm4e", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm4e", sender="alice@test.com")
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=None),
+            caplog.at_level("WARNING", logger="istota.transport.email.inbound"),
+        ):
+            poll_emails(config)
+
+        assert [r for r in caplog.records if "could not be delivered" in r.getMessage()]
+
+    def test_delivered_prompt_does_not_warn(self, caplog, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="sm4f", sender="alice@test.com", subject="Hi")
+        email = _email(id="sm4f", sender="alice@test.com")
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_talk_confirmation", return_value=5),
+            caplog.at_level("WARNING", logger="istota.transport.email.inbound"),
+        ):
+            poll_emails(config)
+
+        assert not [r for r in caplog.records if "could not be delivered" in r.getMessage()]
+
+    def test_gate_does_not_touch_thread_match_routing(self, make_config):
+        """Emissary replies are ungated by design; the sender-match gate must not
+        start gating them just because it became live."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="alice", message_id="<orig@test.com>",
+                to_addr="external@reply.com", subject="Hello",
+                conversation_token="room1",
+            )
+
+        envelope = _envelope(id="sm5", sender="external@reply.com", subject="Re: Hello")
+        email = Email(
+            id="sm5", subject="Re: Hello", sender="external@reply.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Thanks", attachments=[],
+            message_id="<reply@reply.com>", references="<orig@test.com>",
+            to=("bot@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
 
 class TestEmailPromptBoundaries:
     """Verify that email content is wrapped in boundary markers to mitigate prompt injection."""
