@@ -61,6 +61,90 @@ class TestMembershipPrimitives:
             assert db.list_member_rooms(conn, "carol") == []
 
 
+def _stamp_room(conn, token: str, ts: str) -> None:
+    conn.execute("UPDATE rooms SET created_at = ? WHERE token = ?", (ts, token))
+
+
+def _stamp_message(conn, msg_id: int, ts: str) -> None:
+    conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (ts, msg_id))
+
+
+class TestActivityOrdering:
+    """The sidebar orders rooms by latest activity, newest first. Activity is
+    the newest row in the canonical `messages` store; a room that has never
+    been spoken in falls back to its own creation time, so a brand-new room
+    still sorts above a stale one."""
+
+    def test_ordered_by_newest_message_first(self, db_path):
+        with db.get_db(db_path) as conn:
+            for token in ("first", "second", "third"):
+                db.register_room(conn, token, "alice", origin="web", name=token)
+            # Creation order is the reverse of the activity order below, so a
+            # pass would be impossible under the old created_at ASC ordering.
+            _stamp_room(conn, "first", "2026-01-01 00:00:00")
+            _stamp_room(conn, "second", "2026-01-02 00:00:00")
+            _stamp_room(conn, "third", "2026-01-03 00:00:00")
+            for token, ts in (
+                ("first", "2026-03-01 12:00:00"),
+                ("second", "2026-02-01 12:00:00"),
+                ("third", "2026-01-15 12:00:00"),
+            ):
+                mid = db.add_message(
+                    conn, token, role="user", body="hi", origin_surface="web",
+                )
+                _stamp_message(conn, mid, ts)
+            rooms = db.list_member_rooms(conn, "alice")
+            assert [r.token for r in rooms] == ["first", "second", "third"]
+            assert rooms[0].last_activity == "2026-03-01 12:00:00"
+
+    def test_silent_room_falls_back_to_creation_time(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "talkative", "alice", origin="web", name="a")
+            db.register_room(conn, "silent", "alice", origin="web", name="b")
+            _stamp_room(conn, "talkative", "2026-01-01 00:00:00")
+            # Created after the other room's only message, so it sorts on top.
+            _stamp_room(conn, "silent", "2026-02-01 00:00:00")
+            mid = db.add_message(
+                conn, "talkative", role="user", body="hi", origin_surface="web",
+            )
+            _stamp_message(conn, mid, "2026-01-10 00:00:00")
+            rooms = db.list_member_rooms(conn, "alice")
+            assert [r.token for r in rooms] == ["silent", "talkative"]
+            assert rooms[0].last_activity == "2026-02-01 00:00:00"
+
+    def test_a_new_message_moves_a_room_to_the_top(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "quiet", "alice", origin="web", name="a")
+            db.register_room(conn, "busy", "alice", origin="web", name="b")
+            _stamp_room(conn, "quiet", "2026-01-01 00:00:00")
+            _stamp_room(conn, "busy", "2026-01-02 00:00:00")
+            assert [r.token for r in db.list_member_rooms(conn, "alice")] == [
+                "busy", "quiet",
+            ]
+            mid = db.add_message(
+                conn, "quiet", role="assistant", body="yo", origin_surface="web",
+            )
+            _stamp_message(conn, mid, "2026-01-03 00:00:00")
+            assert [r.token for r in db.list_member_rooms(conn, "alice")] == [
+                "quiet", "busy",
+            ]
+
+    def test_another_members_room_is_not_counted_as_activity(self, db_path):
+        """`messages` is global; the subquery must be token-scoped or every
+        room would inherit the whole store's newest timestamp."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "mine", "alice", origin="web", name="a")
+            db.register_room(conn, "theirs", "bob", origin="web", name="b")
+            _stamp_room(conn, "mine", "2026-01-01 00:00:00")
+            mid = db.add_message(
+                conn, "theirs", role="user", body="hi", origin_surface="web",
+            )
+            _stamp_message(conn, mid, "2026-06-01 00:00:00")
+            rooms = db.list_member_rooms(conn, "alice")
+            assert [r.token for r in rooms] == ["mine"]
+            assert rooms[0].last_activity == "2026-01-01 00:00:00"
+
+
 class TestSharedTalkRoomVisibleToAllMembers:
     def test_shared_room_second_human_sees_room(self, web_config, db_path):
         """The shared-room bug: erin registered the room first; dave's later

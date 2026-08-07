@@ -1939,6 +1939,12 @@ export interface ChatRoom {
   model?: string | null;
   /** Standing per-room effort level (low/medium/high/xhigh/max). */
   effort?: string | null;
+  /** ISO-UTC stamp of the room's newest message, falling back to the room's
+   * creation time when nobody has spoken in it. The sidebar's sort key — it is
+   * normalized the same way a message row's `created_at` is, so an arriving
+   * row's stamp can be written straight onto the room. Absent on older
+   * backends → the room keeps whatever position the server gave it. */
+  last_activity?: string;
 }
 
 export interface ChatConfig {

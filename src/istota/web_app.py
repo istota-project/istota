@@ -2742,7 +2742,11 @@ def _chat_list_rooms(username: str) -> list[dict]:
     a ``web_chat_rooms`` handle (the frontend's integer room id) and a ``web``
     binding on first listing — that handle/binding *is* the room's web presence.
     Each entry carries ``origin`` so the UI can badge Talk rooms and gate the
-    promote action."""
+    promote action, and ``last_activity`` so the sidebar can hold its
+    most-recently-active-first order without refetching the list.
+
+    The order is `list_member_rooms`' — newest activity first — and the client
+    renders it as given, so this is where the sidebar's order is decided."""
     from . import db
     with db.get_db(_config.db_path) as conn:
         db.ensure_default_web_chat_room(conn, username)
@@ -2766,6 +2770,10 @@ def _chat_list_rooms(username: str) -> list[dict]:
             # room (canonical), not the per-user web handle.
             d["model"] = r.model
             d["effort"] = r.effort
+            # The sidebar renders this list in order and re-sorts on this stamp
+            # as messages stream in, so it is normalized the same way a message
+            # row's `created_at` is — the client compares the two directly.
+            d["last_activity"] = _iso_utc(r.last_activity or r.created_at)
             # Unread badge. Seed the web read cursor on first surface so a
             # pre-existing backlog doesn't read as unread, then count messages
             # past it. Per-room try/except so one bad count can't abort the
@@ -2788,7 +2796,14 @@ def _chat_create_room(username: str, name: str) -> dict:
     from . import db
     with db.get_db(_config.db_path) as conn:
         room = db.create_web_chat_room(conn, username, name)
-    return _room_to_dict(room)
+    d = _room_to_dict(room)
+    # Nothing has been said in it yet, so its activity stamp is its birth — but
+    # it has to carry one, or the sidebar's activity sort would file the room
+    # the user just created below every room they haven't touched in weeks.
+    # Server-clocked rather than minted client-side, so it can't disagree with
+    # the stamps the room list sends.
+    d["last_activity"] = _iso_utc(room.created_at)
+    return d
 
 
 def _chat_owned_room(username: str, room_id: int):

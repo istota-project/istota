@@ -2804,6 +2804,11 @@ class Room:
     archived: bool
     model: str | None = None
     effort: str | None = None
+    # Newest row in the room's canonical transcript, falling back to the room's
+    # own creation time when it has never been spoken in. Populated only by the
+    # queries that compute it (`list_member_rooms`) — a room fetched by token
+    # carries None rather than a stale stamp.
+    last_activity: str | None = None
 
 
 @dataclass
@@ -2849,6 +2854,7 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         # Older DBs mid-migration may lack these columns; default to None.
         model=row["model"] if "model" in keys else None,
         effort=row["effort"] if "effort" in keys else None,
+        last_activity=row["last_activity"] if "last_activity" in keys else None,
     )
 
 
@@ -2972,15 +2978,29 @@ def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
 def list_member_rooms(
     conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
 ) -> list[Room]:
-    """Rooms `user_id` is a member of, oldest-first. This is the visibility query
-    for the web room list (ISSUE-134) — it replaces the single-owner
-    `list_rooms`, so a shared Talk room surfaces for every participant.
+    """Rooms `user_id` is a member of, **most recently active first**. This is
+    the visibility query for the web room list (ISSUE-134) — it replaces the
+    single-owner `list_rooms`, so a shared Talk room surfaces for every
+    participant — and it is also the order the sidebar renders in, so the room
+    someone just spoke in is at the top.
+
+    Activity is the newest row in the room's canonical transcript, taken as the
+    `created_at` of its highest `messages.id` rather than a `MAX(created_at)`:
+    the ids are the same order and `idx_messages_room (room_token, id)` turns
+    the lookup into one index seek per room instead of a scan over every
+    message the room ever carried. A room nobody has spoken in falls back to
+    its own creation time, so a brand-new room still sorts above a stale one.
+    Ties break on creation time, then token, so the order is total.
 
     A room the user has hidden (`room_dismissals` tombstone) is excluded even
     while they remain a member — the poll-time backfill re-adds membership, so
     membership alone can't keep a hidden room hidden."""
     sql = (
-        "SELECT r.* FROM rooms r "
+        "SELECT r.*, COALESCE(("
+        "  SELECT msg.created_at FROM messages msg "
+        "  WHERE msg.room_token = r.token ORDER BY msg.id DESC LIMIT 1"
+        "), r.created_at) AS last_activity "
+        "FROM rooms r "
         "JOIN room_members m ON m.room_token = r.token "
         "WHERE m.user_id = ? "
         "AND NOT EXISTS ("
@@ -2991,7 +3011,7 @@ def list_member_rooms(
     params: list = [user_id]
     if not include_archived:
         sql += " AND r.archived = 0"
-    sql += " ORDER BY r.created_at ASC, r.token ASC"
+    sql += " ORDER BY last_activity DESC, r.created_at DESC, r.token ASC"
     return [_row_to_room(r) for r in conn.execute(sql, params).fetchall()]
 
 

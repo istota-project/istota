@@ -101,3 +101,53 @@ class TestTalkRenameFlowBack:
                            user_id="alice", text="hi again", channel_name="Renamed")
         with db.get_db(db_path) as conn:
             assert db.get_room(conn, "cpz").name == "Renamed"
+
+
+class TestRoomListActivityOrder:
+    """The sidebar renders the payload in the order it arrives, so the
+    most-recently-active room has to come first — and each entry carries the
+    `last_activity` stamp the client re-sorts on as messages stream in."""
+
+    def _stamp(self, conn, table: str, key_col: str, key, ts: str) -> None:
+        conn.execute(
+            f"UPDATE {table} SET created_at = ? WHERE {key_col} = ?", (ts, key),
+        )
+
+    def test_payload_is_newest_activity_first(self, web_config, db_path):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "chatty", "alice", origin="web", name="Chatty")
+            db.register_room(conn, "stale", "alice", origin="talk", name="Stale")
+            # `chatty` is the *younger* room, so creation order alone would put
+            # it second — only its newer message can lift it to the top.
+            self._stamp(conn, "rooms", "token", "stale", "2026-01-01 00:00:00")
+            self._stamp(conn, "rooms", "token", "chatty", "2026-01-02 00:00:00")
+            mid = db.add_message(
+                conn, "stale", role="user", body="ages ago", origin_surface="talk",
+            )
+            self._stamp(conn, "messages", "id", mid, "2026-01-03 09:00:00")
+            mid = db.add_message(
+                conn, "chatty", role="user", body="just now", origin_surface="web",
+            )
+            self._stamp(conn, "messages", "id", mid, "2026-05-05 09:00:00")
+        rooms = web_app._chat_list_rooms("alice")
+        tokens = [r["token"] for r in rooms if r["token"] in ("chatty", "stale")]
+        assert tokens == ["chatty", "stale"]
+
+    def test_every_entry_carries_an_iso_last_activity(self, web_config, db_path):
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
+            self._stamp(conn, "rooms", "token", "cpz", "2026-01-01 00:00:00")
+            mid = db.add_message(
+                conn, "cpz", role="assistant", body="yo", origin_surface="talk",
+            )
+            self._stamp(conn, "messages", "id", mid, "2026-04-02 07:30:00")
+        rooms = web_app._chat_list_rooms("alice")
+        by_token = {r["token"]: r for r in rooms}
+        # Same normalization the streamed message rows get, so the client can
+        # compare a room's stamp against an arriving row's `created_at`.
+        assert by_token["cpz"]["last_activity"] == "2026-04-02T07:30:00Z"
+        # The auto-created default room has never been spoken in and still
+        # carries a stamp (its creation time), so nothing sorts as undefined.
+        assert all(r.get("last_activity") for r in rooms)

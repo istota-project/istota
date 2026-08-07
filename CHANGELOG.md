@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
 
+### Changed
+
+- The chat sidebar is ordered by latest activity, with the room you last heard from at the top. It used to be fixed in creation order, so a busy room sat wherever it happened to have been made and a long list had to be read to find it. A room moves the moment a message lands in it, whoever sent it and whichever surface it came from; a room nobody has spoken in yet sorts by when it was created, so a new one still appears near the top.
+
 ### Fixed
 
 - An email continuing a room you already have open in web chat now shows both halves of the exchange. Only the bot's reply was recorded, so the room displayed an answer with no question above it. A reply routed to a different room still arrives there as an out-of-band note rather than a chat bubble, and a fresh email thread stays out of the sidebar entirely — mail the bot merely receives never creates a room. A message still waiting on the untrusted-sender prompt is withheld until you approve it, and an email turn that fails or is cancelled now surfaces the failure instead of sitting there unanswered.
