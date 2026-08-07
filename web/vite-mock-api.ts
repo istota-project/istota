@@ -2195,6 +2195,7 @@ const handlers: MockHandler[] = [
       default_destination: 'talk',
       routing: {},
       briefing_email_html: true,
+      timezone_follow_location: false,
       purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
       delivery_surfaces: ['email', 'ntfy', 'talk'],
     };

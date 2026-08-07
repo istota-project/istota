@@ -5352,6 +5352,7 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "default_destination":    {"type": "descriptor"},
     "routing":                {"type": "routing"},
     "briefing_email_html":    {"type": "bool"},
+    "timezone_follow_location": {"type": "bool"},
 }
 
 
@@ -5540,6 +5541,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "default_destination": profile.default_destination,
         "routing": profile.routing,
         "briefing_email_html": profile.briefing_email_html,
+        "timezone_follow_location": profile.timezone_follow_location,
         "delivery_surfaces": _registered_delivery_surfaces(),
     }}
 

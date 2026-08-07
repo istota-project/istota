@@ -428,6 +428,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: follow the GPS timezone on travel (ISSUE-096). Default
+    # OFF — this rewrites a value the user chose, so it is opted into rather
+    # than inferred, and an existing row must not start following on upgrade.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "timezone_follow_location INTEGER NOT NULL DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
     # reserved `__output__` key. Add the column, then hoist `__output__` out of

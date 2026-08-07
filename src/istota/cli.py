@@ -921,6 +921,8 @@ def cmd_user_ensure(args):
         updates["default_briefings"] = args.default_briefings
     if getattr(args, "briefing_email_html", None) is not None:
         updates["briefing_email_html"] = args.briefing_email_html
+    if getattr(args, "timezone_follow_location", None) is not None:
+        updates["timezone_follow_location"] = args.timezone_follow_location
 
     profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
 
@@ -947,6 +949,8 @@ def cmd_user_ensure(args):
         print("  default_briefings: off")
     if not profile.briefing_email_html:
         print("  briefing_email_html: off")
+    if profile.timezone_follow_location:
+        print("  timezone_follow_location: on")
     if profile.routing:
         print(f"  routing: {', '.join(f'{k}={v}' for k, v in sorted(profile.routing.items()))}")
     print(f"STATE: {state}")
@@ -985,6 +989,7 @@ def cmd_user_show(args):
         "email_reply_routing": profile.email_reply_routing,
         "default_briefings": profile.default_briefings,
         "briefing_email_html": profile.briefing_email_html,
+        "timezone_follow_location": profile.timezone_follow_location,
     }, indent=2))
 
 
@@ -1675,6 +1680,16 @@ def main():
             "Send briefing email as multipart/alternative — HTML with clickable "
             "links plus a plain-text fallback (default on). Pass "
             "--no-briefing-email-html for plain text only."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--timezone-follow-location",
+        dest="timezone_follow_location", default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Set this user's timezone from their GPS position once they have "
+            "settled in a new zone (default off). Needs the location module; "
+            "the user is notified on every change."
         ),
     )
     # user show  (Phase 6: dump the DB row as JSON)

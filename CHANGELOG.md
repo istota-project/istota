@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The chat sidebar is ordered by latest activity, with the room you last heard from at the top. It used to be fixed in creation order, so a busy room sat wherever it happened to have been made and a long list had to be read to find it. A room moves the moment a message lands in it, whoever sent it and whichever surface it came from; a room nobody has spoken in yet sorts by when it was created, so a new one still appears near the top.
 
+### Added
+
+- Your timezone can now follow you when you travel. Turn on "Update timezone when I travel" in Settings and, once you have settled in a new timezone for about an hour, the timezone field is set to it and you get a message saying so — no more briefings and calendar times running on your home clock for the first days of a trip. It needs the location module, it stays off unless you turn it on, and it never changes anything without telling you. Being in the air over somewhere does not count: it waits until you have stopped moving. If you set the timezone back by hand it stays set.
+
 ### Fixed
 
 - Altitude is finally visible. It has been recorded with nearly every location ping all along, but no reader passed it on, so a flight or a drive over a pass read as a flat 2-D line. Your location history now returns it, and the track view draws an elevation profile under the map whenever the day has a real climb in it — a day spent at sea level still gets none, since the spread there is GPS noise rather than terrain. The line breaks into dashes wherever the map does, so a stretch your phone never sampled cannot read as a climb. What the number is measured against depends on the device that reported it, so treat it as good for "that was a climb" and never as an altimeter reading.

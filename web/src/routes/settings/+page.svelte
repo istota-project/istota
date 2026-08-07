@@ -12,6 +12,7 @@
     type UserProfile,
     type NextcloudTokenStatus,
   } from '$lib/api';
+  import { changedProfileFields } from '$lib/profilePatch';
   import {
     AppShell,
     ShellHeader,
@@ -231,7 +232,7 @@
     profileError = '';
     info = '';
     try {
-      const patch: Partial<UserProfile> = {
+      const edited: Partial<UserProfile> = {
         display_name: profile.display_name,
         timezone: profile.timezone,
         email_addresses: profile.email_addresses,
@@ -241,7 +242,17 @@
         disabled_modules: profile.disabled_modules,
         default_destination: profile.default_destination || 'talk',
         routing: profile.routing || {},
+        timezone_follow_location: profile.timezone_follow_location,
       };
+      // Send only what changed on this page. The server writes each key it is
+      // given, so sending the whole form makes an untouched field overwrite
+      // whatever set it since the page loaded — which for `timezone` means an
+      // open tab silently undoing a travel update and triggering another one.
+      const patch = changedProfileFields(edited, initialProfileJson);
+      if (Object.keys(patch).length === 0) {
+        info = 'No changes to save.';
+        return;
+      }
       await updateProfile(patch);
       info = 'Profile saved.';
       await refresh();
@@ -333,6 +344,14 @@
               if (profile) profile.timezone = v;
             }}
           />
+        </SettingsField>
+        <SettingsField
+          label="Update timezone when I travel"
+          checkbox
+          warning="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so."
+          hint="Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
+        >
+          <input type="checkbox" bind:checked={profile.timezone_follow_location} />
         </SettingsField>
       </SettingsCard>
 

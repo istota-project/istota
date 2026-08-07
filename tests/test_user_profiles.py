@@ -419,3 +419,82 @@ class TestBriefingEmailHtml:
         assert n == 1
         p = user_profiles.get_profile(db_path, "alice")
         assert p.briefing_email_html is False
+
+
+class TestTimezoneFollowLocation:
+    """timezone_follow_location bool round-trip + merge (ISSUE-096, default OFF).
+
+    The default is the point: this one rewrites the timezone the user chose, so
+    an existing row migrated by the ALTER must come back off, and every path
+    that fills a profile must agree.
+    """
+
+    def test_migration_adds_column(self, tmp_path):
+        from istota import db as _db
+        path = tmp_path / "fresh.db"
+        _db.init_db(path)
+        with _db.get_db(path) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
+        assert "timezone_follow_location" in cols
+
+    def test_default_off_on_fresh_row(self, db_path):
+        p = user_profiles.ensure_profile(db_path, "alice")
+        assert p.timezone_follow_location is False
+
+    def test_round_trip_on(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(
+            db_path, "alice", timezone_follow_location=True,
+        )
+        assert p.timezone_follow_location is True
+        again = user_profiles.get_profile(db_path, "alice")
+        assert again.timezone_follow_location is True
+
+    def test_stored_as_integer(self, db_path):
+        from istota import db as _db
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile(db_path, "alice", timezone_follow_location=True)
+        with _db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT timezone_follow_location FROM user_profiles "
+                "WHERE user_id=\'alice\'"
+            ).fetchone()
+        assert row[0] == 1
+
+    def test_noop_detection(self, db_path):
+        user_profiles.update_profile_with_status(
+            db_path, "alice", timezone_follow_location=True,
+        )
+        _, state = user_profiles.update_profile_with_status(
+            db_path, "alice", timezone_follow_location=True,
+        )
+        assert state == "noop"
+
+    def test_an_absent_value_does_not_switch_it_on(self, db_path):
+        """The write path used to coerce every bool column with a default of
+        True, so forwarding an optional value enabled an opt-in feature."""
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(
+            db_path, "alice", timezone_follow_location=None,
+        )
+        assert p.timezone_follow_location is False
+
+    def test_an_absent_value_leaves_an_opt_out_on(self, db_path):
+        """The same rule read the other way: the briefing pair are opt-outs and
+        must stay on."""
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(db_path, "alice", briefing_email_html=None)
+        assert p.briefing_email_html is True
+
+    def test_merge_db_owns_it(self):
+        uc = UserConfig()
+        profile = UserProfile(user_id="alice", timezone_follow_location=True)
+        user_profiles.merge_into_user_config(profile, uc)
+        assert uc.timezone_follow_location is True
+
+    def test_import_from_toml_seeds_value(self, db_path):
+        uc = UserConfig(timezone_follow_location=True)
+        n = user_profiles.import_from_user_configs(db_path, {"alice": uc})
+        assert n == 1
+        p = user_profiles.get_profile(db_path, "alice")
+        assert p.timezone_follow_location is True

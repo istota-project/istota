@@ -937,6 +937,7 @@
     {% if (user_item.value.email_reply_routing | default('')) %}--email-reply-routing "{{ user_item.value.email_reply_routing }}"{% endif %}
     {% if user_item.value.default_briefings is defined %}{{ '--default-briefings' if user_item.value.default_briefings else '--no-default-briefings' }}{% endif %}
     {% if user_item.value.briefing_email_html is defined %}{{ '--briefing-email-html' if user_item.value.briefing_email_html else '--no-briefing-email-html' }}{% endif %}
+    {% if user_item.value.timezone_follow_location is defined %}{{ '--timezone-follow-location' if user_item.value.timezone_follow_location else '--no-timezone-follow-location' }}{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
   loop: "{{ istota_users | dict2items }}"

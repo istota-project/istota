@@ -61,6 +61,9 @@ class UserProfile:
     default_briefings: bool = True
     # Deliver briefing email as multipart/alternative (HTML + plain) — default on.
     briefing_email_html: bool = True
+    # Follow the user's GPS timezone on travel (ISSUE-096). Default OFF: this
+    # rewrites a setting the user chose, so it is opted into, not inferred.
+    timezone_follow_location: bool = False
 
 
 _PROFILE_COLUMNS = (
@@ -71,6 +74,7 @@ _PROFILE_COLUMNS = (
     "disabled_modules",
     "routing", "default_destination", "email_reply_routing",
     "default_briefings", "briefing_email_html",
+    "timezone_follow_location",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
@@ -79,8 +83,16 @@ _LIST_COLUMNS = frozenset({
     "email_addresses", "disabled_skills", "trusted_email_senders",
     "quiet_email_senders", "disabled_modules",
 })
-# Columns stored as INTEGER 0/1 booleans.
-_BOOL_COLUMNS = frozenset({"default_briefings", "briefing_email_html"})
+# Columns stored as INTEGER 0/1 booleans, mapped to the default a missing
+# value means. Per-column rather than one shared default: the briefing pair are
+# opt-*outs* (absent = on) while timezone-following is an opt-*in* (absent =
+# off), and a single default would silently switch one of them on.
+_BOOL_COLUMN_DEFAULTS = {
+    "default_briefings": True,
+    "briefing_email_html": True,
+    "timezone_follow_location": False,
+}
+_BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
 
 
 def _coerce_bool(value: object, default: bool = True) -> bool:
@@ -131,6 +143,9 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         default_briefings=_coerce_bool(_row_get(row, "default_briefings"), True),
         briefing_email_html=_coerce_bool(
             _row_get(row, "briefing_email_html"), True,
+        ),
+        timezone_follow_location=_coerce_bool(
+            _row_get(row, "timezone_follow_location"), False,
         ),
     )
 
@@ -270,6 +285,9 @@ def ensure_profile(
         briefing_email_html=_coerce_bool(
             _attr(seed_from, "briefing_email_html"), True,
         ),
+        timezone_follow_location=_coerce_bool(
+            _attr(seed_from, "timezone_follow_location"), False,
+        ),
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -373,7 +391,8 @@ def update_profile_with_status(
                 same = False
                 break
         elif col in _BOOL_COLUMNS:
-            if _coerce_bool(current, True) != _coerce_bool(value, True):
+            bool_default = _BOOL_COLUMN_DEFAULTS[col]
+            if _coerce_bool(current, bool_default) != _coerce_bool(value, bool_default):
                 same = False
                 break
         elif col == "default_destination":
@@ -428,7 +447,7 @@ def update_profile(
         elif col in _DICT_COLUMNS:
             value = json.dumps(dict(value or {}))
         elif col in _BOOL_COLUMNS:
-            value = 1 if _coerce_bool(value, True) else 0
+            value = 1 if _coerce_bool(value, _BOOL_COLUMN_DEFAULTS[col]) else 0
         elif col in {"max_foreground_workers", "max_background_workers"}:
             value = int(value or 0)
         elif col == "default_destination":
@@ -491,6 +510,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         profile.email_reply_routing or "origin+thread",
         1 if profile.default_briefings else 0,
         1 if profile.briefing_email_html else 0,
+        1 if profile.timezone_follow_location else 0,
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -557,6 +577,9 @@ def import_from_user_configs(
             briefing_email_html=_coerce_bool(
                 getattr(user_config, "briefing_email_html", True), True,
             ),
+            timezone_follow_location=_coerce_bool(
+                getattr(user_config, "timezone_follow_location", False), False,
+            ),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -592,6 +615,10 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
     setattr(user_config, "default_briefings", bool(profile.default_briefings))
     setattr(user_config, "briefing_email_html", bool(profile.briefing_email_html))
+    setattr(
+        user_config, "timezone_follow_location",
+        bool(profile.timezone_follow_location),
+    )
     for attr in (
         "log_channel", "alerts_channel",
         "max_foreground_workers", "max_background_workers",

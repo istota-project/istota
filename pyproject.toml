@@ -48,6 +48,10 @@ location = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "geopy>=2.4",
+    # Offline lat/lon -> IANA zone, for following the user's timezone on travel.
+    # Offline deliberately: a timezone lookup should not depend on the network
+    # or leak the user's position to a third party.
+    "timezonefinder>=6.5",
 ]
 web = [
     "fastapi>=0.100.0",
