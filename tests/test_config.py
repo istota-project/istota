@@ -688,6 +688,70 @@ class TestTrustedEmailSenders:
         assert cfg.is_trusted_email_sender("carol", "joe@example.com") is False
 
 
+class TestTrustedEmailSendersExcludingOwnAddresses:
+    """``include_own_addresses=False`` — the caller wants trust that is evidence
+    of something beyond the (unauthenticated) ``From:`` claim itself. Used by the
+    sender-match confirmation gate, which would otherwise be circular."""
+
+    def test_own_email_not_trusted_when_excluded(self):
+        cfg = Config(users={
+            "carol": UserConfig(email_addresses=["alice@example.com"]),
+        })
+        assert cfg.is_trusted_email_sender(
+            "carol", "alice@example.com", include_own_addresses=False,
+        ) is False
+
+    def test_own_email_case_insensitive_when_excluded(self):
+        cfg = Config(users={
+            "carol": UserConfig(email_addresses=["Alice@Example.COM"]),
+        })
+        assert cfg.is_trusted_email_sender(
+            "carol", "alice@example.com", include_own_addresses=False,
+        ) is False
+
+    def test_config_pattern_still_trusted_when_own_excluded(self):
+        cfg = Config(users={
+            "carol": UserConfig(
+                email_addresses=["alice@example.com"],
+                trusted_email_senders=["alice@example.com"],
+            ),
+        })
+        assert cfg.is_trusted_email_sender(
+            "carol", "alice@example.com", include_own_addresses=False,
+        ) is True
+
+    def test_db_trust_still_honored_when_own_excluded(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+
+        cfg = Config(users={
+            "carol": UserConfig(email_addresses=["alice@example.com"]),
+        })
+
+        with db.get_db(db_path) as conn:
+            assert cfg.is_trusted_email_sender(
+                "carol", "alice@example.com", conn, include_own_addresses=False,
+            ) is False
+
+            db.add_trusted_sender(conn, "carol", "alice@example.com")
+            assert cfg.is_trusted_email_sender(
+                "carol", "alice@example.com", conn, include_own_addresses=False,
+            ) is True
+
+    def test_unknown_user_returns_false_when_own_excluded(self):
+        cfg = Config(users={})
+        assert cfg.is_trusted_email_sender(
+            "nobody", "a@b.com", include_own_addresses=False,
+        ) is False
+
+    def test_default_still_includes_own_addresses(self):
+        cfg = Config(users={
+            "carol": UserConfig(email_addresses=["alice@example.com"]),
+        })
+        assert cfg.is_trusted_email_sender("carol", "alice@example.com") is True
+
+
 class TestEmailConfig:
     def test_effective_smtp_user_fallback(self):
         ec = EmailConfig(imap_user="imap@example.com", smtp_user="")
@@ -700,6 +764,34 @@ class TestEmailConfig:
     def test_effective_smtp_user_explicit(self):
         ec = EmailConfig(imap_user="imap@example.com", smtp_user="smtp@example.com")
         assert ec.effective_smtp_user == "smtp@example.com"
+
+    def test_confirm_sender_match_defaults_off(self):
+        """Opt-in (ISSUE-227): the gate was dead code until now, so `false` is the
+        behaviour every existing deployment already has. Defaulting it on would
+        start holding every self-sent email as a side effect of a bug fix."""
+        assert EmailConfig().confirm_sender_match is False
+
+    def test_confirm_sender_match_loads_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+confirm_sender_match = true
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.confirm_sender_match is True
+
+    def test_confirm_sender_match_omitted_from_toml_defaults_off(self, tmp_path):
+        """Every deployment gets its value through load_config, not EmailConfig(),
+        so the loader's own fallback is what the default actually means."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+imap_host = "imap.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.confirm_sender_match is False
 
 
 class TestSleepCycleConfig:

@@ -53,7 +53,12 @@ class EmailConfig:
     # Polling settings
     poll_folder: str = "INBOX"
     bot_email: str = ""  # bot's email address (to skip own messages)
-    confirm_sender_match: bool = True  # require confirmation for sender-match routing (prevents From: spoofing)
+    # Require confirmation for sender-match routing — SMTP `From:` is unauthenticated,
+    # so "this came from the user's own address" is a claim, not evidence. Opt-in
+    # (ISSUE-227): the branch reading this flag was unreachable until now, so `false`
+    # is the behaviour every existing deployment already has, and turning it on holds
+    # every self-sent email for an out-of-band yes/no.
+    confirm_sender_match: bool = False
     imap_timeout_seconds: int = 30  # socket timeout for IMAP connections (0/unset → 30)
 
     @property
@@ -1135,11 +1140,20 @@ class Config:
 
     def is_trusted_email_sender(
         self, user_id: str, sender_email: str, conn: "sqlite3.Connection | None" = None,
+        *, include_own_addresses: bool = True,
     ) -> bool:
         """Check if sender is trusted for the given user.
 
         Trusted = user's own email addresses OR matches trusted_email_senders
         config patterns OR exists in runtime trusted_email_senders DB table.
+
+        ``include_own_addresses=False`` drops the first of those. A caller that
+        is *asking about* the own-address claim itself — the sender-match
+        confirmation gate, whose route is defined by that same match — would
+        otherwise get a circular True and never fire (ISSUE-227). The remaining
+        two branches still answer: both are trust the operator or the user
+        granted deliberately, rather than trust the unauthenticated ``From:``
+        header asserted for itself.
         """
         from fnmatch import fnmatch
 
@@ -1149,7 +1163,7 @@ class Config:
 
         sender_lower = sender_email.lower()
 
-        if sender_lower in [e.lower() for e in user.email_addresses]:
+        if include_own_addresses and sender_lower in [e.lower() for e in user.email_addresses]:
             return True
 
         for pattern in user.trusted_email_senders:
@@ -1764,7 +1778,7 @@ def load_config(config_path: Path | None = None) -> Config:
             smtp_password=email.get("smtp_password", ""),
             poll_folder=email.get("poll_folder", "INBOX"),
             bot_email=email.get("bot_email", ""),
-            confirm_sender_match=email.get("confirm_sender_match", True),
+            confirm_sender_match=email.get("confirm_sender_match", False),
             imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
         )
 

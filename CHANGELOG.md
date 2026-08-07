@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Your timezone can now follow you when you travel. Turn on "Update timezone when I travel" in Settings and, once you have settled in a new timezone for about an hour, the timezone field is set to it and you get a message saying so — no more briefings and calendar times running on your home clock for the first days of a trip. It needs the location module, it stays off unless you turn it on, and it never changes anything without telling you. Being in the air over somewhere does not count: it waits until you have stopped moving. If you set the timezone back by hand it stays set.
 
+### Security
+
+- The setting that holds mail arriving from your own address for approval now works. The sender line on an email is unauthenticated, so anyone who knows your address can put it there, and this setting was the one thing meant to catch that — but it could never fire, because the check it made was the very thing that had brought it there. It now holds such mail until you approve it from Talk, whichever way the message was addressed. It stays off by default, since it also holds every message you send yourself and no deployment has had this behaviour until now; if you had already turned it on believing it worked, it takes effect on this upgrade.
+
 ### Fixed
 
 - Mail from someone else is no longer read back to the assistant as something you said. Every email turn was labelled with your name — in the conversation history, in what the nightly pass distils into long-term memory, and in what search recalls later — whether it came from you or from an outside contact replying to a message the bot sent on your behalf. So the assistant re-read a stranger's words as your own instructions, contradicting the warning wrapped around the same text, and could write them into memory as things you said. A turn is now attributed to you only when the sender is one of your own addresses, and to the sender otherwise. Only a plain address is ever shown, so nothing a sender chooses to put in the name field can pose as you.

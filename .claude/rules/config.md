@@ -27,8 +27,11 @@ enabled: bool = True         bot_username: str = "istota"
 ```
 enabled: bool = False        imap_host/port/user/password    poll_folder: str = "INBOX"
 smtp_host/port/user/password                                 bot_email: str = ""
+imap_timeout_seconds: int = 30                               confirm_sender_match: bool = False
 ```
 Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fall back to imap creds
+
+`confirm_sender_match` turns off the own-address branch of `is_trusted_email_sender` for inbound mail, so a `From:` naming one of the user's addresses is held for an out-of-band Talk yes/no instead of being taken as proof the user sent it. **Opt-in** (ISSUE-227): the flag shipped defaulting to `true` but its branch was unreachable, so `false` is the behaviour every deployment has actually had — defaulting it on would have started gating every self-sent email as a side effect of the fix. Ansible `istota_email_confirm_sender_match`. See `.claude/rules/transport.md` "Email confirmation gate".
 
 ### ntfy push notifications
 
@@ -484,7 +487,7 @@ Methods:
 - `available_capabilities() -> set[str]` — backing-service capabilities currently deployed; the single map from a capability name to its config flag (`browser`→`config.browser.enabled`, `devbox`→`config.devbox.enabled`). Drives the skill capability gate: a skill declaring `requires_capability: [name]` whose capability isn't in this set is folded into the effective `disabled_skills` (dropped from selection, the on-demand menu, and shown disabled in `!skills`) via `skills._loader.effective_disabled_skills`. Both flags default off, so `browse`/`devbox` disappear automatically in the standalone install (no headless browser / no devbox container). Adding a service-backed skill = declare the capability here + in the skill frontmatter. See `.claude/rules/skills.md` "Capability gate".
 - `is_module_enabled(user_id, module) -> bool` — True unless ``module`` appears in the user's `disabled_modules`. Unknown users default to True (docker auto-seed path). Module names are validated against `istota.modules.MODULE_NAMES` (`feeds`, `money`, `location`, `health`); unknown names always return False. Reads from the `user_profiles` DB row when `db_path` is set (so web edits to `disabled_modules` take effect across web/scheduler/webhook processes without SIGHUP), falls back to the in-memory `UserConfig.disabled_modules` for init/test paths or unseeded rows. **Experimental gate**: if `module` appears in `modules.EXPERIMENTAL_MODULES` (currently empty), the method also requires the matching flag to be enabled in `config.experimental.features`; this check runs before the user-profile DB read so a disabled experimental module short-circuits without a DB hit. **Dependency-availability gate**: if `module` has an install extra declared in `modules.MODULE_DEPENDENCIES` (`money → beancount`) and `modules.module_available(module)` finds the import missing, the method returns False — also before the DB read — so a lean install (e.g. `istota[local]` without beancount) hides the module everywhere instead of half-shipping it and crashing on first use. Surfaces that need to enumerate visible modules (the `/settings/modules` web endpoint, `disabled_modules` profile-write validation in `_coerce_profile_value`) filter against the same gate.
 - `find_user_by_email(email_address) -> str | None`
-- `is_trusted_email_sender(user_id, sender_email) -> bool` — checks user's own emails + `trusted_email_senders` patterns via fnmatch
+- `is_trusted_email_sender(user_id, sender_email, conn=None, *, include_own_addresses=True) -> bool` — checks user's own emails + `trusted_email_senders` patterns via fnmatch + the runtime `trusted_email_senders` DB table (only when `conn` is passed). `include_own_addresses=False` drops the first branch, for a caller asking about the own-address claim itself: the sender-match confirmation gate (ISSUE-227), whose route *is* that match, so the default would answer circularly and the gate could never fire. See `.claude/rules/transport.md` "Email confirmation gate"
 
 ## Config Loading
 
