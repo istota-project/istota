@@ -12,7 +12,7 @@ For module-specific internals, see `.claude/rules/`:
 - `config.md` — every dataclass field + TOML mapping
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for)
-- `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, room-event stream
+- `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream
 - `web-ui.md` — web UI rationale: admin panes, iOS shell, design-language enforcement, tokens
 - `briefings.md` — block/source briefings, shared blocks, titles, HTML email
 - `health.md` — health module schema, documents store, OCR/explainer, surfaces
