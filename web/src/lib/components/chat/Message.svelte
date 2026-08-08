@@ -810,9 +810,9 @@
 	   the two differ only in whether they respond.
 
 	   Geometry is the activity chip's, because the quote sits in the same slot —
-	   a block between the author header and the prose. So: the body's width
-	   cap, and `gap-below`'s margin, its neighbour below always being a prose
-	   block. */
+	   a block between the author header and the turn's content. So: the body's
+	   width cap, and `gap-below`'s margin, the block beneath being prose on
+	   every path but an attachment-only turn, where it is the chips. */
   .reply-quote {
     display: flex;
     align-items: baseline;
@@ -838,10 +838,10 @@
 	   flush top is right, exactly as it is for a tool-first chip.
 
 	   Written as a class on the element rather than as `.meta + .reply-quote`,
-	   because the quote is rendered from a `{#snippet}` — a selector Svelte
-	   cannot prove reachable is pruned with no error, which would leave the
-	   rule silently inert. The class also states the real condition, which is
-	   `!continuation` rather than a DOM adjacency that happens to follow it. */
+	   because the condition is `!continuation` — the same variable that decides
+	   whether the header renders at all — and not a DOM adjacency that happens
+	   to follow from it. It is also the half a jsdom test can see, the sibling
+	   selector being reachable only through the cascade. */
   .reply-quote.under-meta {
     margin-top: calc(var(--space-3) / 2);
   }

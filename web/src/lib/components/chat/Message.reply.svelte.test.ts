@@ -202,15 +202,28 @@ describe('citation quote block', () => {
  * The parser is the one in `Composer.sendButton.svelte.test.ts`, trimmed to
  * what these assertions need.
  */
+const here = dirname(fileURLToPath(import.meta.url));
+const activityTraceSource = readFileSync(resolve(here, 'ActivityTrace.svelte'), 'utf8');
+const tokens = readFileSync(resolve(here, '../../styles/tokens.css'), 'utf8');
+
 const styleOpen = source.indexOf('>', source.indexOf('<style'));
 const css = source
   .slice(styleOpen + 1, source.lastIndexOf('</style>'))
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
-type Rule = { selector: string; body: string };
+type Rule = { selector: string; body: string; atRules: string[] };
 
-/** Every `selector { … }` pair, at-rule wrappers unwrapped, one entry per selector in a list. */
-function parseRules(text: string): Rule[] {
+/**
+ * Every `selector { … }` pair, one entry per selector in a list, each carrying
+ * the at-rule preludes it is nested inside.
+ *
+ * The preludes are what `decl` filters on. Flattened away, a `.body` or
+ * `.reply-quote` override written into this file's `@media (max-width: 768px)`
+ * block — which precedes every rule asserted on below — would answer in place
+ * of the base rule, and the assertions would report the breakpoint's numbers
+ * while claiming to test the resting ones.
+ */
+function parseRules(text: string, atRules: string[] = []): Rule[] {
   const out: Rule[] = [];
   let prelude = '';
   for (let i = 0; i < text.length; i++) {
@@ -226,9 +239,11 @@ function parseRules(text: string): Rule[] {
       // `@keyframes` holds percentage stops, not selectors.
       if (head.startsWith('@keyframes')) {
         /* skipped */
-      } else if (head.startsWith('@')) out.push(...parseRules(body));
+      } else if (head.startsWith('@')) out.push(...parseRules(body, [...atRules, head]));
       else if (head) {
-        for (const one of head.split(',')) if (one.trim()) out.push({ selector: one.trim(), body });
+        for (const one of head.split(',')) {
+          if (one.trim()) out.push({ selector: one.trim(), body, atRules });
+        }
       }
       i = j - 1;
       prelude = '';
@@ -238,9 +253,18 @@ function parseRules(text: string): Rule[] {
   return out;
 }
 
-/** The declared value of one longhand on one rule, or undefined if neither exists. */
+/**
+ * The declared value of one longhand on one unconditional rule, or undefined if
+ * neither the rule nor the declaration exists.
+ *
+ * The last such rule wins, the way the cascade resolves a tie. Longhands only:
+ * a `margin:` shorthand would set a top margin this reads as absent, which is
+ * why the assertions below check for the shorthand separately rather than
+ * trusting an `undefined`.
+ */
 function decl(selector: string, prop: string): string | undefined {
-  const rule = parseRules(css).find((r) => r.selector === selector);
+  const matches = parseRules(css).filter((r) => r.selector === selector && r.atRules.length === 0);
+  const rule = matches[matches.length - 1];
   return rule?.body.match(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+)`))?.[1].trim();
 }
 
@@ -261,20 +285,38 @@ describe('citation quote geometry', () => {
   });
 
   it('caps at the same width as the message body', () => {
-    // Through the token, not a fourth copy of the literal: `.body`,
-    // `.cmd-output` and ActivityTrace's open chain already read it, and a rule
-    // restating the number is invisible until you see the two side by side.
     expect(decl('.reply-quote', 'max-width')).toBe('var(--chat-body-max)');
     expect(decl('.body', 'max-width')).toBe(decl('.reply-quote', 'max-width'));
   });
 
+  it('no block in the content column restates the cap', () => {
+    // The token exists because the number was written out three times over two
+    // files, agreeing only by comment. A fourth copy — or a breakpoint block
+    // overriding one of them — is invisible until you put two turns side by
+    // side on a wide monitor, which is the same reason `contentFrame.test.ts`
+    // guards `--content-max` this way.
+    const value = tokens.match(/--chat-body-max:\s*([^;]+)/)?.[1].trim();
+    expect(value).toMatch(/^\d+px$/);
+    for (const [name, text] of [
+      ['Message.svelte', source],
+      ['ActivityTrace.svelte', activityTraceSource],
+    ] as const) {
+      expect(text, `${name} must read the token, not restate ${value}`).not.toContain(value!);
+    }
+  });
+
   it('takes the chip slot’s gap below, its neighbour being a prose block', () => {
+    // Anchored on the chip slot's own value as well as on the equality: `decl`
+    // returns undefined both for "rule absent" and "declaration absent", so a
+    // bare equality passes when the pair loses the declaration together.
+    expect(decl('.chip-slot.gap-below', 'margin-bottom')).toBe('var(--space-3)');
     expect(decl('.reply-quote', 'margin-bottom')).toBe(
       decl('.chip-slot.gap-below', 'margin-bottom'),
     );
   });
 
   it('takes the chip slot’s half gap under the author header', () => {
+    expect(decl('.meta + .chip-slot', 'margin-top')).toBe('calc(var(--space-3) / 2)');
     expect(decl('.reply-quote.under-meta', 'margin-top')).toBe(
       decl('.meta + .chip-slot', 'margin-top'),
     );
@@ -283,14 +325,16 @@ describe('citation quote geometry', () => {
   it('carries no top margin where no header precedes it', () => {
     // The chip slot's base is flush and its gap is neighbour-aware; the quote
     // follows the same rule, so a continuation row's quote sits tight the way a
-    // tool-first chip does.
+    // tool-first chip does. The shorthand is checked too — `decl` reads
+    // longhands, and a `margin:` would set a top margin it reports as absent.
     expect(decl('.reply-quote', 'margin-top')).toBeUndefined();
+    expect(decl('.reply-quote', 'margin')).toBeUndefined();
   });
 
   it('marks the header case on the element rather than by DOM adjacency', () => {
-    // `.meta + .reply-quote` would be a gamble: the quote is rendered from a
-    // `{#snippet}`, and a selector Svelte cannot prove reachable is pruned
-    // silently — leaving a passing suite over a rule that never applies.
+    // A class rather than `.meta + .reply-quote`, because the condition is
+    // `!continuation` — the same variable that decides whether the header
+    // renders at all — and not a DOM adjacency that happens to follow from it.
     const withHeader = render(Message, {
       ...base,
       message: userMsg({ replyTo: { msgId: 22, role: 'assistant', excerpt: 'earlier' } }),

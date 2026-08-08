@@ -251,9 +251,10 @@
   /* The readable width of everything in a turn's content column — the prose
 	   body, a command's output, an expanded activity chain, the citation above a
 	   reply. The row itself stays full-width so the hover highlight spans it. A
-	   token because four rules across two files have to agree on it, and each
-	   had been written out as the same literal with only a comment saying they
-	   must match. `px` for the reason `--content-max` is: it bounds the column
+	   token because the first three carried the literal separately across two
+	   files, agreeing only by a comment saying they must; the citation is the
+	   fourth and reads the token from the start. `px` for the reason
+	   `--content-max` is: it bounds the column
 	   rather than the type inside it, so it should not widen at the large
 	   text-scale setting, which is the setting picked to make lines easier to
 	   follow. */
