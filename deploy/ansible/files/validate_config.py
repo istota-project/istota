@@ -253,7 +253,7 @@ def main() -> int:
     # "paper fallback" class: native declared as primary OR fallback OR a
     # source-type override target, with no model pinned. Fail the play so it
     # surfaces at deploy time, not at the first failover.
-    kind = brain.get("kind")
+    kind = brain.get("kind") or "claude_code"  # BrainConfig.kind default
     fallback_kind = brain.get("fallback")
     override_targets = set((brain.get("source_type_overrides", {}) or {}).values())
     native_active = (

@@ -683,6 +683,30 @@ class TestAdvisorEnvTmux:
         )
         assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in env
 
+    def test_inherited_disable_var_is_popped_when_advisor_active(self, monkeypatch, tmp_path):
+        # req.env isn't guaranteed clean (a passthrough env var, or a shared
+        # dict from dataclasses.replace) — the positive branch must pop an
+        # already-present disable var, not leave it sitting alongside --advisor.
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session",
+                            lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(
+            _req(
+                tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"],
+                env={
+                    "CLAUDE_CODE_OAUTH_TOKEN": "tok",
+                    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
+                },
+            ),
+            attempt=0,
+        )
+        assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in captured
+
     def test_disable_var_set_when_advisor_but_text_only(self, monkeypatch, tmp_path):
         env = self._run_to_session_env(monkeypatch, tmp_path, advisor="claude-opus-5")
         assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"

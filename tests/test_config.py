@@ -1621,6 +1621,20 @@ class TestAnsibleValidateConfigScript:
         assert proc.returncode == 0, proc.stderr
         assert "advisor_model" not in proc.stderr
 
+    def test_advisor_model_with_no_brain_kind_is_silent(self, tmp_path):
+        # BrainConfig.kind defaults to "claude_code" — an omitted [brain]/kind
+        # key must not read as brain.get("kind") is None and trip the
+        # not-anthropic warning for a perfectly working default deployment.
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/app/istota/data/istota.db"\n'
+            'temp_dir = "/srv/app/istota/tmp"\n'
+            'advisor_model = "opus"\n'
+        )
+        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
+        assert proc.returncode == 0, proc.stderr
+        assert "advisor_model" not in proc.stderr
+
 
 class TestApplyUserResources:
     """`_apply_user_resources` overlays DB resource rows onto loaded UserConfig.

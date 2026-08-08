@@ -2,8 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from istota.config import BrainConfig, Config
 from istota.db import Task
 from istota.executor import _resolve_advisor, execute_task
@@ -120,6 +118,44 @@ class TestBrainRequestWiring:
         assert req.advisor == ""
 
 
+class TestRealBrainResolvesAdvisorAlias:
+    """The fakes above stub resolve_model_name as identity, which can't fail
+    on the spec's own design decision (Stage 2/3: the advisor resolves through
+    the real alias table, and a :effort modifier is silently stripped since the
+    CLI flag takes none). This runs the unmocked ClaudeCodeBrain end to end."""
+
+    def test_smart_high_reaches_argv_as_opus_no_effort_modifier(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        config = _make_config(tmp_path)
+        config.advisor_model = "smart:high"
+        config.brain = BrainConfig(kind="claude_code")
+        config.security.sandbox_enabled = False
+
+        captured_cmd = []
+
+        def fake_run(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            mock = MagicMock()
+            mock.stdout = "ok"
+            mock.stderr = ""
+            mock.returncode = 0
+            return mock
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.run", side_effect=fake_run),
+        ]
+        with contextmanager_chain(patches):
+            task = _task(source_type="cli", model="")
+            execute_task(task, config, [])
+
+        assert "--advisor" in captured_cmd
+        idx = captured_cmd.index("--advisor")
+        # "smart" -> OPUS = "claude-opus-4-8" (DEFAULT_ALIASES); the ":high"
+        # effort modifier is stripped — --advisor takes no effort.
+        assert captured_cmd[idx + 1] == "claude-opus-4-8"
+
+
 class TestAdvisorLogLine:
     def test_logs_once_when_advisor_resolved(self, tmp_path, caplog):
         import logging
@@ -204,5 +240,46 @@ class TestFallbackDropsAdvisor:
 
         assert fallback.received_reqs
         assert fallback.received_reqs[0].advisor == "opus"
+
+        reset_availability_breaker()
+
+    def test_dropped_config_model_pin_also_drops_the_advisor(self, tmp_path):
+        # config.model = "opus" is a non-portable pin (a provider shortcut, not
+        # a portable tier) — _resolve_fallback_model_effort can't carry it
+        # across an anthropic->anthropic fallback either, so the fallback
+        # brain runs on its own default model. The advisor was never evaluated
+        # against that model, so it must drop too, even though the fallback
+        # brain's namespace is still anthropic.
+        from istota.brain._fallback import reset_availability_breaker
+        from istota.brain._types import BrainResult
+
+        reset_availability_breaker()
+        primary = _FakeAnthropicBrain()
+        primary.execute = lambda req: BrainResult(
+            False, "usage limit", stop_reason="usage_limit"
+        )
+        fallback = _FakeAnthropicBrain()
+
+        config = _make_config(tmp_path)
+        config.model = "opus"
+        config.advisor_model = "sonnet"
+        config.brain = BrainConfig(kind="claude_code", fallback="tmux_claude")
+        config.security.sandbox_enabled = False
+
+        def fake_make_brain(bc):
+            return primary if getattr(bc, "kind", "") == "claude_code" else fallback
+
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain", side_effect=fake_make_brain),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.notifications.send_notification"),
+        ]
+        with contextmanager_chain(patches):
+            task = _task(source_type="cli", model="")
+            execute_task(task, config, [])
+
+        assert fallback.received_reqs
+        assert fallback.received_reqs[0].model == ""  # dropped_pin: fb default
+        assert fallback.received_reqs[0].advisor == ""
 
         reset_availability_breaker()

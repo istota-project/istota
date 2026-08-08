@@ -379,12 +379,15 @@ def _resolve_advisor(task, config: Config) -> str:
     """Resolve the ``advisor_model`` for a task, unresolved (alias/raw form).
 
     A per-task model pin — whatever set it: ``!model``, ``!room model``, a
-    ``[[jobs]] model``, an API caller — drops the configured advisor. Unlike
-    effort, a mismatched executor/advisor pairing is a hard CLI error, not a
-    downgrade (``--advisor <model>`` incompatible with ``--model`` refuses to
-    run at all), so a pin that predates ``advisor_model`` must not start
-    failing tasks it was already handling. Only the unpinned default path
-    gets the configured advisor.
+    ``[[jobs]] model``, an API caller — drops the configured advisor. The CLI's
+    advisor gate has two independent checks, and only one is fatal: a *main*
+    model that doesn't support the advisor tool at all exits non-zero with no
+    result (pin-dependent — this is what a stale pin risks); a capability
+    mismatch between two otherwise-advisor-capable models only warns and the
+    task still completes. Dropping on any pin sidesteps the fatal case without
+    Istota needing to track which models support the advisor tool at all —
+    that's the CLI's own catalog. Only the unpinned default path gets the
+    configured advisor.
     """
     task_model = (task.model or "").strip()
     if task_model:
@@ -557,11 +560,18 @@ def _run_fallback(config, brain_config, fallback_kind, task, req):
     fb_model, fb_effort, dropped_pin = _resolve_fallback_model_effort(
         task, config, fb_brain, req.effort
     )
-    # An advisor pairing can only be right for the brain it was resolved
+    # An advisor pairing can only be right for the model it was resolved
     # against. anthropic->native drops it (mirrors the non-portable-pin drop
-    # above — NativeBrain has no wire for it anyway); anthropic->anthropic
-    # keeps it, since the pairing risk carries over to the fallback too.
-    fb_advisor = req.advisor if fb_brain.model_namespace == "anthropic" else ""
+    # above — NativeBrain has no wire for it anyway); a dropped_pin also
+    # drops it — a non-portable config.model pin means the fallback runs on
+    # its own default model instead, and the advisor was never evaluated
+    # against that. anthropic->anthropic with the pin intact keeps it, since
+    # the same pairing carries over to the fallback too.
+    fb_advisor = (
+        req.advisor
+        if fb_brain.model_namespace == "anthropic" and dropped_pin is None
+        else ""
+    )
     fb_req = _dc.replace(req, model=fb_model, effort=fb_effort, advisor=fb_advisor)
     try:
         return _mark_if_exhausted(fb_brain.execute(fb_req)), dropped_pin

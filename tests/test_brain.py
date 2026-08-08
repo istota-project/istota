@@ -278,14 +278,14 @@ class TestAdvisorEnvExclusivity:
     seven real call sites, so a shape nothing constructs today (advisor set
     with empty allowed_tools) still proves the invariant structural."""
 
-    def _execute_capturing(self, tmp_path, *, advisor, allowed_tools):
+    def _execute_capturing(self, tmp_path, *, advisor, allowed_tools, env=None):
         from unittest.mock import patch
 
         req = BrainRequest(
             prompt="hi",
             allowed_tools=allowed_tools,
             cwd=tmp_path,
-            env={},
+            env=dict(env or {}),
             timeout_seconds=60,
             streaming=False,
             advisor=advisor,
@@ -325,3 +325,18 @@ class TestAdvisorEnvExclusivity:
             f"advisor={advisor!r} allowed_tools={allowed_tools!r}: "
             f"flag_present={flag_present} disable_present={disable_present}"
         )
+
+    def test_inherited_disable_var_is_popped_when_advisor_active(self, tmp_path):
+        # req.env isn't guaranteed clean — a passthrough env var, or a fallback
+        # request built via dataclasses.replace sharing the primary's dict,
+        # could already carry the disable var even when this request wants an
+        # advisor. The positive branch must pop it, not leave it, or the flag
+        # would be set alongside a var that silently kills it.
+        cmd, env = self._execute_capturing(
+            tmp_path,
+            advisor="claude-opus-5",
+            allowed_tools=["Bash"],
+            env={"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"},
+        )
+        assert "--advisor" in cmd
+        assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in env

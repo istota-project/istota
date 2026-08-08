@@ -908,8 +908,15 @@ class ClaudeCodeBrain:
             # so without this, any host carrying that key would turn on an
             # advisor Istota's config never asked for. advisor_active(req) is
             # the same predicate build_claude_cli_flags uses for --advisor, so
-            # exactly one of the two is ever true (advisor-model spec).
-            if not advisor_active(req):
+            # exactly one of the two is ever true (advisor-model spec) — the
+            # positive branch pops rather than leaves alone, since req.env
+            # isn't guaranteed clean: a passthrough env var or an inherited
+            # dict (e.g. a fallback req built via dataclasses.replace) could
+            # already carry the disable var even when this request wants an
+            # advisor, which would silently kill the flag despite it being set.
+            if advisor_active(req):
+                req.env.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
+            else:
                 req.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
 
             cmd = self._build_command(req)

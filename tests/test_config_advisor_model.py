@@ -26,6 +26,33 @@ class TestAdvisorModelParses:
         assert config.advisor_model == "claude-opus-4-8"
 
 
+class TestAdvisorModelNonStringWarnsNotFails:
+    def test_int_value_does_not_raise_and_is_ignored(self, tmp_path, caplog):
+        # A bare `if "advisor_model" in data: config.advisor_model = data[...]`
+        # would let `advisor_model = 5` through, and _validate_advisor_model's
+        # `.strip()` would raise AttributeError out of load_config — the
+        # daemon fails to start with a bare traceback. Warn-and-ignore instead,
+        # matching every other advisor_model trap.
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('advisor_model = 5\n')
+        with caplog.at_level(logging.WARNING):
+            config = load_config(cfg)
+        assert config.advisor_model == ""
+        assert any(
+            "advisor_model must be a string" in r.message for r in caplog.records
+        )
+
+    def test_bool_value_does_not_raise_and_is_ignored(self, tmp_path, caplog):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('advisor_model = true\n')
+        with caplog.at_level(logging.WARNING):
+            config = load_config(cfg)
+        assert config.advisor_model == ""
+        assert any(
+            "advisor_model must be a string" in r.message for r in caplog.records
+        )
+
+
 class TestAdvisorModelEffortModifierWarns:
     def test_effort_suffix_warns_but_value_kept_raw(self, tmp_path, caplog):
         # The value itself is stored raw; only executor-time resolution

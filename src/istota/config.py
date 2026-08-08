@@ -992,7 +992,7 @@ class Config:
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
     model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-4-8") rather than a floating alias so upgrades are explicit. Empty = brain default
     effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Support varies by model
-    advisor_model: str = ""  # Advisor model ID or alias (anthropic-namespace brains only); resolved through the alias table like `model`, but carries no effort. Empty = no advisor. Dropped whenever a task pins its own model (see executor._resolve_advisor)
+    advisor_model: str = ""  # Advisor model ID or alias (anthropic-namespace brains only); resolved through the alias table like `model`, but carries no effort. Empty = no advisor. Dropped whenever a task pins its own model (see executor._resolve_advisor). Must resolve to a model capable of *being* an advisor — a weak/cheap tier (e.g. haiku) fails every task the advisor runs on; Istota does not validate this (no pairing table — see the spec's "Not doing")
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
@@ -1730,7 +1730,13 @@ def load_config(config_path: Path | None = None) -> Config:
         config.effort = data["effort"]
 
     if "advisor_model" in data:
-        config.advisor_model = data["advisor_model"]
+        if isinstance(data["advisor_model"], str):
+            config.advisor_model = data["advisor_model"]
+        else:
+            logging.getLogger("istota.config").warning(
+                "advisor_model must be a string, got %s; ignoring",
+                type(data["advisor_model"]).__name__,
+            )
 
     if "max_memory_chars" in data:
         config.max_memory_chars = data["max_memory_chars"]

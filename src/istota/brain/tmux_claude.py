@@ -690,8 +690,13 @@ class TmuxClaudeBrain:
             # (passed the same unsupported set), so the two stay structurally
             # exclusive even if a future finding adds "--advisor" to that set —
             # a flag the target CLI surface silently drops must not leave both
-            # channels closed.
-            if not advisor_active(req, unsupported=_TMUX_UNSUPPORTED_FLAGS):
+            # channels closed. Pop rather than leave alone in the positive
+            # branch: env isn't guaranteed clean (req.env may already carry an
+            # inherited disable var), and both present would silently kill the
+            # flag despite it being set.
+            if advisor_active(req, unsupported=_TMUX_UNSUPPORTED_FLAGS):
+                env.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
+            else:
                 env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
             self._new_session(session, env)
             self._launch_claude(session, req, base_dir)

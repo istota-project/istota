@@ -29,7 +29,9 @@ istota_emissaries_enabled: true
 
 # Model selection. Per-task model+effort precedence: !model override (Talk) >
 # istota_model/istota_effort > role tier (resolved by the active brain) > brain
-# default. See .claude/rules/config.md, docs/configuration/native-brain.md.
+# default. See .claude/rules/config.md, docs/configuration/native-brain.md. A
+# per-task model pin (from any of the above) also suppresses istota_advisor_model
+# for that task — see the comment below.
 
 # Global default model + effort ("" = brain default). Each accepts a canonical
 # id, a shortcut (opus/sonnet/haiku), or a role tier (smart/general/fast), plus an
@@ -40,10 +42,13 @@ istota_effort: ""
 # Advisor model ("" = no advisor). Anthropic-namespace brains only
 # (claude_code / tmux_claude); the advisor tool has no wire over the native
 # brain's openai_compat endpoint. Resolves through the same alias table as
-# istota_model but carries no effort. A per-task model pin (!model, !room
-# model, a [[jobs]] model) drops the advisor for that task — the executor/
-# advisor pairing is a hard CLI error when mismatched, not a downgrade, so
-# turning this on must never break a task that was already pinned.
+# istota_model but carries no effort. Must resolve to a model capable of
+# *being* an advisor (a weak/cheap tier fails every task the advisor would
+# run on — the CLI rejects it outright, not a downgrade). A per-task model
+# pin (!model, !room model, a [[jobs]] model) drops the advisor for that
+# task: the CLI's fatal advisor-gate check is "does the *main* model support
+# the advisor tool at all," which is pin-dependent, so turning this on must
+# never break a task that was already pinned.
 istota_advisor_model: ""
 
 # Model alias registry ([models.aliases]) — one operator-visible table overlaying
