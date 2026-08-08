@@ -31,7 +31,7 @@ imap_timeout_seconds: int = 30                               confirm_sender_matc
 ```
 Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fall back to imap creds
 
-`confirm_sender_match` turns off the own-address branch of `is_trusted_email_sender` for inbound mail, so a `From:` naming one of the user's addresses is held for an out-of-band Talk yes/no instead of being taken as proof the user sent it. **Opt-in** (ISSUE-227): the flag shipped defaulting to `true` but its branch was unreachable, so `false` is the behaviour every deployment has actually had — defaulting it on would have started gating every self-sent email as a side effect of the fix. Ansible `istota_email_confirm_sender_match`. See `.claude/rules/transport.md` "Email confirmation gate".
+`confirm_sender_match` turns off the own-address branch of `is_trusted_email_sender` for inbound mail, so a `From:` naming one of the user's addresses is held for an out-of-band Talk yes/no instead of being taken as proof the user sent it. Read it as a **declaration about the inbound mail path**, not a safety switch: `false` (default) asserts something upstream already authenticated the header — normally DMARC enforcement at the receiving MTA, which rejects a forgery before it reaches `poll_folder` — and `true` says nothing does. Upstream is the better place to solve it (silent, no per-message cost, cannot be talked past by a human approving a prompt); the gate is the fallback for paths that can't, and is noisy by construction. `false` is also the behaviour every deployment has actually had, since the branch was unreachable until ISSUE-227. Ansible `istota_email_confirm_sender_match`. See `.claude/rules/transport.md` "Email confirmation gate".
 
 ### ntfy push notifications
 

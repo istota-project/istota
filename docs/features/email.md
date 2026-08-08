@@ -25,9 +25,28 @@ Thread-matched emails (emissary replies) are never gated — the external contac
 
 ### `confirm_sender_match`
 
-Off by default, and worth understanding before turning it on. The bot normally treats a `From:` matching one of the user's `email_addresses` as proof the user sent the mail. SMTP `From:` is unauthenticated, so it is a claim anyone who knows the address can make. This flag stops the claim counting as evidence: mail arriving with the user's own address on it is held until they approve it from Talk, a channel the sender cannot reach. The cost is that the user's own mail to the bot is held too — nothing in a plain SMTP message distinguishes the two.
+**This flag is a declaration about your inbound mail path, not a security feature you switch on for extra safety.** The bot treats a `From:` matching one of a user's `email_addresses` as proof that user sent the mail. SMTP `From:` is unauthenticated, so on its own that is a claim anyone who knows the address can make. The question the flag answers is *who checked it*:
 
-The flag applies to whichever route the mail takes, not only to sender-match routing. Routing is decided by the recipient first, and the plus-address is public — it is the `From:` on every message the bot sends on the user's behalf — so a sender who knows the address the gate is about also knows how to arrive as a plus-addressed message instead. The same claim gets the same answer either way. Mail from a genuinely external sender is unaffected by the flag; it is gated or not on the existing plus-address rule.
+- **`false` (default)** — "something upstream already authenticated the `From:`." Normally that means the receiving mail infrastructure enforces DMARC, so a forged message claiming your address is rejected at SMTP time and never reaches the folder the poller reads. Nothing asks you anything; mail you send the bot is processed immediately.
+- **`true`** — "nothing upstream authenticates it, so ask me." Mail arriving with a user's own address on it is held until they approve it from Talk, a channel the sender cannot reach.
+
+Solving this at the MTA is strictly better than solving it here. It is silent, it costs nothing per message, and it cannot be talked past by a tired human approving a prompt. The confirmation gate exists for deployments that cannot do it upstream — it is a fallback, and it is noisy by construction, because nothing in a plain SMTP message distinguishes you from someone claiming to be you.
+
+#### What the default assumes
+
+Leaving the flag off makes the mail path load-bearing. Worth confirming, and re-confirming when the mail setup changes:
+
+- Every domain in `email_addresses` publishes DMARC `p=reject` (or `quarantine`) with DKIM or SPF alignment. This is the *sending* domain's policy — check each domain you list, not only the main one.
+- The bot's mailbox provider actually evaluates and enforces that policy. Publishing is the sender side; enforcement is the receiver side. A self-hosted MTA with no DMARC milter enforces nothing.
+- No provider-level allowlist exempts your own address. "Always trust mail from …" rules are common, and defeat the check for precisely the address that matters.
+- `poll_folder` is the folder the surviving mail lands in. Under `p=quarantine` a forgery goes to Junk, which is as good as a rejection here — but only because that folder is not polled.
+- Nothing injects into the mailbox behind the check: internal relays, IMAP `APPEND`, webmail send-to-self.
+
+Forwarding is the case that hurts legitimate mail rather than security. A forwarder breaks SPF and some rewrite `From:`, so mail forwarded into the bot may be rejected upstream or may route differently once it arrives.
+
+#### With the flag on
+
+It applies to whichever route the mail takes, not only to sender-match routing. Routing is decided by the recipient first, and the plus-address is public — it is the `From:` on every message the bot sends on the user's behalf — so a sender who knows the address the gate is about also knows how to arrive as a plus-addressed message instead. The same claim gets the same answer either way. Mail from a genuinely external sender is unaffected by the flag; it is gated or not on the existing plus-address rule.
 
 Two escape hatches keep it usable. An address listed in the user's `trusted_email_senders` is exempt outright, and `!trust <address>` adds one at runtime. Both are deliberate grants rather than the header trusting itself — but an address trusted either way is then trusted for anyone who can spoof it, so a deployment that turns the flag on for the spoofing protection should not immediately trust its way back out of it. For that reason the confirmation prompt for a self-claim offers only `yes` and `no`; the `yes trust` shortcut is offered only for genuinely external senders, where trusting them costs nothing this gate protects.
 

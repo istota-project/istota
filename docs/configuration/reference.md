@@ -50,7 +50,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `smtp_password` | `""` | SMTP password (defaults to imap_password) |
 | `poll_folder` | `"INBOX"` | Folder to poll |
 | `bot_email` | `""` | Bot's email address |
-| `confirm_sender_match` | `false` | Require confirmation for mail whose `From:` names one of the user's own addresses (see [`confirm_sender_match`](../features/email.md#confirm_sender_match)) |
+| `confirm_sender_match` | `false` | Declares that nothing upstream authenticates `From:`, so mail claiming a user's own address is held for confirmation. Default assumes the MTA enforces DMARC — see [`confirm_sender_match`](../features/email.md#confirm_sender_match) |
 
 ## `[conversation]`
 

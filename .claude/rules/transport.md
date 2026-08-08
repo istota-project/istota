@@ -213,11 +213,22 @@ messages are re-polled rather than silently lost.
   independently; the single expression is the fix. An *external* sender's trust
   answer is untouched by the flag — only the self-claim changes.
 
-  Default **off**: the branch was dead since it shipped, so `false` is the
-  behaviour every deployment already has, and an unanswered confirmation is
-  auto-cancelled at `confirmation_timeout_minutes` — defaulting it on would have
-  silently dropped inbound mail wherever Talk isn't watched. Ansible knob
-  `istota_email_confirm_sender_match`.
+  Default **off**, and the flag is best read as a *declaration about the inbound
+  mail path* rather than a safety switch. `false` asserts that something upstream
+  already authenticated the header — normally DMARC enforcement at the receiving
+  MTA, which rejects a forged `From:` at SMTP time so it never reaches
+  `poll_folder`; `true` says nothing does, so ask. Upstream is strictly the
+  better place: silent, no per-message cost, and not defeatable by a human
+  approving a prompt out of habit. This gate is the fallback for paths that can't,
+  and it is noisy by construction because nothing in a plain SMTP message
+  separates the user from someone claiming to be them. Two supporting reasons for
+  the default: the branch was dead since it shipped, so `false` is the behaviour
+  every deployment already has; and an unanswered confirmation is auto-cancelled
+  at `confirmation_timeout_minutes`, so defaulting it on would have silently
+  dropped inbound mail wherever Talk isn't watched. Ansible knob
+  `istota_email_confirm_sender_match`. What the default *assumes* about the mail
+  path — and the follow-up that detects the assumption breaking (ISSUE-228) — is
+  in `docs/features/email.md`.
 
   **The prompt is route-aware.** `yes trust` writes the sending address into the
   runtime trusted list, which on a self-claim would exempt the user's own address

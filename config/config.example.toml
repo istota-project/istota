@@ -255,13 +255,15 @@ smtp_port = 587
 poll_folder = "INBOX"
 bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # imap_timeout_seconds = 30  # socket timeout for IMAP connections (fail fast on a dead host)
-# Hold mail whose From: names one of a user's own addresses — on any route — for
-# an out-of-band yes/no in Talk. SMTP From: is unauthenticated, so that match is
-# a claim anyone who knows the address can make. Off by default because it also
-# holds the user's own mail: nothing in a plain SMTP message tells the two apart.
-# A trusted_email_senders pattern or `!trust <address>` exempts an address; the
-# prompt itself offers no trust shortcut for a self-claim, since taking it would
-# re-open the gate for the spoofer too. See docs/features/email.md.
+# A declaration about your inbound mail path, not a safety switch to flip on.
+# SMTP From: is unauthenticated, so a From: naming a user's own address is a
+# claim until something checks it. false (default) = "something upstream already
+# did" — normally DMARC enforcement at the receiving MTA, which rejects a forgery
+# before it ever reaches poll_folder. true = "nothing upstream does, so ask me",
+# which holds every message a user sends the bot for a yes/no in Talk. Prefer
+# fixing it upstream: it is silent and costs nothing per message. Leaving this
+# off makes the mail path load-bearing — see the checklist in
+# docs/features/email.md.
 # confirm_sender_match = false
 
 [conversation]
