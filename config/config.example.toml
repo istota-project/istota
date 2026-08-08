@@ -265,6 +265,19 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # off makes the mail path load-bearing — see the checklist in
 # docs/features/email.md.
 # confirm_sender_match = false
+# The canary for the assumption above. Reads the DMARC verdict the receiving MTA
+# stamped in Authentication-Results and warns when mail routed on a user's own
+# address arrives without a pass — so the protection going away is noticed
+# instead of being silent. On by default; it is monitoring, never a gate, and it
+# changes nothing about how mail is handled. It detects misconfiguration and
+# drift, not attack: a forged top header silences it, and the MTA is the boundary
+# regardless.
+# dmarc_canary = true
+# Whether a *missing* DMARC verdict also warns. Off by default, because a mail
+# path that stamps nothing would warn on every message. Turn it on once you know
+# your MTA stamps — it is the only way "the mailbox moved to a provider that does
+# not evaluate DMARC" ever surfaces.
+# dmarc_canary_warn_on_missing = false
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

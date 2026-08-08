@@ -51,6 +51,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `poll_folder` | `"INBOX"` | Folder to poll |
 | `bot_email` | `""` | Bot's email address |
 | `confirm_sender_match` | `false` | Declares that nothing upstream authenticates `From:`, so mail claiming a user's own address is held for confirmation. Default assumes the MTA enforces DMARC — see [`confirm_sender_match`](../features/email.md#confirm_sender_match) |
+| `dmarc_canary` | `true` | Warns when mail routed on a user's own address arrives without a `dmarc=pass` from the receiving MTA. Monitoring for the assumption above; never blocks mail — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
+| `dmarc_canary_warn_on_missing` | `false` | Also warn when the mail carries no DMARC verdict at all. Off by default because a path that stamps nothing would warn on every message |
 
 ## `[conversation]`
 

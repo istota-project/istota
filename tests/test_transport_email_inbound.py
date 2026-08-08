@@ -20,6 +20,7 @@ from istota.email_support import (
 )
 from istota.transport.email import inbound as inbound_module
 from istota.transport.email.inbound import (
+    _dmarc_result,
     _extract_user_from_recipient,
     poll_emails,
 )
@@ -69,13 +70,13 @@ def _envelope(id="1", subject="Hello", sender="alice@test.com", date="Mon, 01 Ja
 
 
 def _email(id="1", subject="Hello", sender="alice@test.com", body="Hi there",
-           to=("bot@test.com",), cc=()):
+           to=("bot@test.com",), cc=(), authentication_results=None):
     return Email(
         id=id, subject=subject, sender=sender,
         date="Mon, 01 Jan 2026 10:00:00 +0000",
         body=body, attachments=[],
         message_id="<msg1@test.com>", references=None,
-        to=to, cc=cc,
+        to=to, cc=cc, authentication_results=authentication_results,
     )
 
 
@@ -2382,3 +2383,555 @@ class TestEmissaryLifecycle:
         # Reply reaches the parent's room via the origin descriptor (talk:<token>).
         assert new_task.conversation_token == "parent_room"
         assert new_task.output_target == "talk:parent_room,email"
+
+
+# =============================================================================
+# TestDmarcCanary — ISSUE-228
+# =============================================================================
+
+
+class TestDmarcResultParsing:
+    """The topmost ``Authentication-Results`` is parsed for a ``dmarc=`` methodspec.
+
+    Parsing walks the ``;``-separated methodspecs and anchors ``dmarc=`` to the
+    start of one, rather than grepping the whole header. A bare substring search
+    matches ``header.from=`` properties and text inside a ``reason="..."`` or a
+    parenthesized comment, all of which are attacker-influenced on a header we
+    otherwise trust.
+    """
+
+    def test_pass(self):
+        assert _dmarc_result("mx.test; spf=pass; dmarc=pass header.from=t.com") == "pass"
+
+    def test_fail(self):
+        assert _dmarc_result("mx.test; dmarc=fail header.from=t.com") == "fail"
+
+    def test_none_is_a_result_not_an_absence(self):
+        """``dmarc=none`` means the domain publishes no policy — the "DMARC record
+        was edited away" drift case, not a missing evaluation."""
+        assert _dmarc_result("mx.test; dmarc=none header.from=t.com") == "none"
+
+    def test_temperror(self):
+        assert _dmarc_result("mx.test; dmarc=temperror") == "temperror"
+
+    def test_case_and_whitespace_insensitive(self):
+        assert _dmarc_result("mx.test;   DMARC = PASS header.from=t.com") == "pass"
+
+    def test_no_dmarc_methodspec_is_unevaluated(self):
+        assert _dmarc_result("mx.test; spf=pass smtp.mailfrom=t.com; dkim=pass") is None
+
+    def test_absent_header_is_unevaluated(self):
+        assert _dmarc_result(None) is None
+
+    def test_empty_header_is_unevaluated(self):
+        assert _dmarc_result("") is None
+
+    def test_property_named_dmarc_does_not_match(self):
+        """``header.dmarc=pass`` is a property of another method, not a dmarc result."""
+        assert _dmarc_result("mx.test; spf=fail header.dmarc=pass") is None
+
+    def test_reason_string_containing_dmarc_is_never_read_as_a_verdict(self):
+        """A quoted reason is free text the reporting MTA may echo from the message.
+        It is not a verdict — and because the parser cannot tell an MTA that quoted
+        the word from a sender who planted it, it refuses to call the header clean
+        rather than answering the quiet "no verdict"."""
+        assert _dmarc_result('mx.test; spf=fail reason="dmarc=pass claimed"') == "malformed"
+
+    def test_parenthesized_comment_containing_dmarc_is_never_read_as_a_verdict(self):
+        assert _dmarc_result("mx.test; spf=fail (dmarc=pass per sender)") == "malformed"
+
+    def test_method_version_form_is_parsed(self):
+        """RFC 8601 §2.2 allows `method / method-version`. Reading `dmarc/1=fail`
+        as "no verdict" would make it silent under the default config — the exact
+        failure mode this canary was filed against."""
+        assert _dmarc_result("mx.test; dmarc/1=fail header.from=t.com") == "fail"
+        assert _dmarc_result("mx.test; dmarc / 1 = pass") == "pass"
+
+    def test_unregistered_result_token_is_bucketed(self):
+        """The token reaches the alert-dedup key, and where this canary matters most
+        the sender chose it. Left open it is an unbounded key axis — one alert per
+        message, which is the flood the dedup exists to stop."""
+        assert _dmarc_result("mx.test; dmarc=aaa") == "other"
+        assert _dmarc_result("mx.test; dmarc=zzzz") == "other"
+
+    def test_semicolon_inside_a_quoted_string_cannot_start_a_methodspec(self):
+        """A naive split(";") lets quoted free text be promoted to the start of a
+        methodspec, where it parses as a real result. Reporting MTAs echo the
+        envelope sender into `smtp.mailfrom=`, so that text is attacker-supplied."""
+        assert _dmarc_result('mx.test; spf=fail reason="blocked; dmarc=pass"; dmarc=fail') == "fail"
+        assert _dmarc_result('mx.test; spf=fail smtp.mailfrom="a; dmarc=pass"@evil.com') == "malformed"
+
+    def test_semicolon_inside_a_nested_comment_cannot_start_a_methodspec(self):
+        """RFC 5322 comments nest, so a non-greedy `\\([^)]*\\)` strip stops at the
+        first `)` and leaves the tail of the comment exposed."""
+        assert _dmarc_result("mx.test; spf=fail (bad sig (rsa); dmarc=pass junk); dmarc=fail") == "fail"
+        # Without the trailing genuine verdict, any-non-pass-wins can't carry the
+        # assertion, so this is the form that actually discriminates the nesting
+        # rule: depth-tracking keeps the injected pass inside the comment, while a
+        # non-nesting strip would expose it and answer "pass".
+        assert _dmarc_result("mx.test; spf=fail (bad sig (rsa); dmarc=pass junk)") != "pass"
+
+    def test_an_injected_pass_cannot_mask_a_real_fail(self):
+        """The end-to-end shape of the above, as a receiving MTA would actually
+        write it: the attacker controls only the envelope sender, which lands in the
+        SPF comment and in `smtp.mailfrom=`, while the genuine `dmarc=fail` sits at
+        the end of the same header. Any non-pass must beat a pass."""
+        header = (
+            'mx.google.com; spf=softfail (google.com: domain of "x); dmarc=pass ("@evil.com '
+            'does not designate 1.2.3.4 as permitted sender) smtp.mailfrom="x); dmarc=pass ("@evil.com; '
+            "dmarc=fail (p=REJECT) header.from=victim.com"
+        )
+        assert _dmarc_result(header) == "fail"
+
+    def test_an_unbalanced_quote_cannot_swallow_the_verdict(self):
+        """Dropping quoted text means an *unterminated* quote drops the rest of the
+        header, which can include the real verdict. Reporting "no verdict" there
+        would be silent under the default config — so the attacker's cheapest move
+        would be planting one stray quote."""
+        header = 'mx.test; spf=fail smtp.mailfrom="evil; dmarc=fail (p=REJECT) header.from=victim.com'
+        assert _dmarc_result(header) == "malformed"
+
+    def test_an_unbalanced_comment_cannot_swallow_the_verdict(self):
+        header = "mx.test; spf=fail (note: evil; dmarc=fail header.from=victim.com"
+        assert _dmarc_result(header) == "malformed"
+
+    def test_balanced_injected_quotes_cannot_hide_the_verdict(self):
+        """The cheaper attack, and the one dropping quoted text does not stop on its
+        own: a *balanced* pair straddling the genuine verdict hides it with nothing
+        left unbalanced to notice. Two stray quotes echoed into `header.d=` and
+        `smtp.mailfrom=` is the whole cost, and the answer would otherwise be "no
+        verdict" — silent by default — or a `pass` appended afterwards."""
+        hidden = (
+            'mx.example.com; dkim=fail header.d="; dmarc=fail (p=reject) '
+            'header.from=victim.com; spf=fail smtp.mailfrom="'
+        )
+        assert _dmarc_result(hidden) == "malformed"
+        assert _dmarc_result(hidden + "; dmarc=pass") == "malformed"
+
+    def test_balanced_injected_parens_cannot_hide_the_verdict(self):
+        header = (
+            "mx.example.com; dkim=fail header.d=(; dmarc=fail (p=reject) "
+            "header.from=victim.com; spf=fail smtp.mailfrom=); dmarc=pass"
+        )
+        assert _dmarc_result(header) == "malformed"
+
+    def test_an_escaped_quote_cannot_hide_the_verdict(self):
+        assert _dmarc_result('mx; spf=fail smtp.mailfrom="a\\"; dmarc=fail; x="; dmarc=pass') == "malformed"
+
+    def test_an_escaped_paren_in_a_comment_does_not_end_it(self):
+        """RFC 5322 quoted-pairs are legal inside a comment, and a local-part holding
+        a paren must be written `\\)`. Without honouring that, the comment ends early
+        and the sender's text lands at methodspec position."""
+        header = r'mx.test; spf=softfail (mx: domain of "a\); dmarc=pass ("@evil.com not permitted)'
+        assert _dmarc_result(header) != "pass"
+
+    def test_an_escaped_paren_does_not_make_a_balanced_header_look_broken(self):
+        """The other direction: `\\(` must not deepen the comment, or a conforming
+        header reports as unreadable and warns for no reason."""
+        assert _dmarc_result(r"mx.test; spf=pass (mx.test: \( escaped) ; dmarc=pass header.from=t.com") == "pass"
+
+    def test_a_real_world_pass_header_is_not_flagged(self):
+        """The read-completeness count must not fire on ordinary mail, or the canary
+        warns on every healthy message and gets ignored."""
+        assert _dmarc_result(
+            "mx.google.com; dkim=pass header.i=@t.com header.b=abc; "
+            "spf=pass smtp.mailfrom=a@t.com; dmarc=pass header.from=t.com"
+        ) == "pass"
+        assert _dmarc_result(
+            "mx.google.com;\r\n\tdkim=pass header.i=@t.com;\r\n\tdmarc=pass header.from=t.com"
+        ) == "pass"
+
+    def test_a_malformed_header_never_reports_pass(self):
+        """A pass read out of a header we could not finish reading is not a pass."""
+        assert _dmarc_result('mx.test; dmarc=pass; spf=fail smtp.mailfrom="oops') == "malformed"
+
+    def test_an_explicit_fail_outranks_the_malformed_verdict(self):
+        """A verdict actually read beats the generic "could not read it all"."""
+        assert _dmarc_result('mx.test; dmarc=fail; spf=fail smtp.mailfrom="oops') == "fail"
+
+    def test_a_later_fail_beats_an_earlier_pass(self):
+        """Order must not decide it — the parser cannot promise no sender-supplied
+        text ever reaches the start of a segment, so preferring the non-pass makes
+        an injection at worst noisy, never quiet."""
+        assert _dmarc_result("mx.test; dmarc=pass; dmarc=fail") == "fail"
+        assert _dmarc_result("mx.test; dmarc=fail; dmarc=pass") == "fail"
+
+
+class TestAuthenticationResultsIsTopmost:
+    """Only the topmost ``Authentication-Results`` is stamped by the final receiving
+    MTA. Every header below it can be forged by the sender, who simply includes it
+    in the message they send."""
+
+    def test_to_full_email_carries_the_topmost_header(self):
+        from imap_tools import MailMessage
+
+        from istota.skills.email import _msg_to_email
+
+        raw = (
+            b"Authentication-Results: mx.test; dmarc=fail header.from=test.com\r\n"
+            b"Authentication-Results: forged.example; dmarc=pass header.from=test.com\r\n"
+            b"From: alice@test.com\r\n"
+            b"Subject: Hi\r\n"
+            b"Message-ID: <m1@test.com>\r\n"
+            b"\r\n"
+            b"body\r\n"
+        )
+        email = _msg_to_email(MailMessage.from_bytes(raw))
+
+        assert email.authentication_results is not None
+        assert email.authentication_results.startswith("mx.test")
+        assert _dmarc_result(email.authentication_results) == "fail"
+
+    def test_a_forged_pass_below_a_genuine_fail_does_not_win(self):
+        """The whole point: a spoofer appending their own ``dmarc=pass`` must not
+        silence the canary that the real MTA's ``dmarc=fail`` should trip."""
+        from imap_tools import MailMessage
+
+        from istota.skills.email import _msg_to_email
+
+        raw = (
+            b"Authentication-Results: mx.test; dmarc=fail header.from=test.com\r\n"
+            b"Authentication-Results: mx.test; dmarc=pass header.from=test.com\r\n"
+            b"From: alice@test.com\r\n"
+            b"Subject: Hi\r\n"
+            b"\r\n"
+            b"body\r\n"
+        )
+        email = _msg_to_email(MailMessage.from_bytes(raw))
+
+        assert _dmarc_result(email.authentication_results) == "fail"
+
+
+class TestDmarcCanary:
+    """ISSUE-228 — with ``confirm_sender_match`` off (the default), a ``From:``
+    matching the user's own address is taken as proof that user sent the mail.
+    That is only sound because the receiving MTA rejected forgeries before the
+    poller ever saw the folder. Nothing in the code could see whether that was
+    still true. The canary reads the MTA's own stamp and says so when it isn't.
+
+    It detects misconfiguration and drift, not attack: an attacker who forges the
+    topmost header silences it. That is acceptable because the MTA is the
+    boundary, not this check.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _config(self, make_config, **email_overrides):
+        config = make_config()
+        config.email = _email_config()
+        for key, val in email_overrides.items():
+            setattr(config.email, key, val)
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        return config
+
+    def _poll(self, config, envelope, email):
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True) as alert,
+        ):
+            task_ids = poll_emails(config)
+        return task_ids, alert
+
+    def test_dmarc_pass_is_silent(self, make_config, caplog):
+        config = self._config(make_config)
+        email = _email(id="d1", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=pass header.from=test.com")
+
+        with caplog.at_level("WARNING"):
+            task_ids, alert = self._poll(config, _envelope(id="d1", sender="alice@test.com"), email)
+
+        assert len(task_ids) == 1
+        assert alert.call_count == 0
+        assert "dmarc" not in caplog.text.lower()
+
+    def test_dmarc_fail_warns_and_alerts(self, make_config, caplog):
+        config = self._config(make_config)
+        email = _email(id="d2", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=fail header.from=test.com")
+
+        with caplog.at_level("WARNING"):
+            task_ids, alert = self._poll(config, _envelope(id="d2", sender="alice@test.com"), email)
+
+        assert alert.call_count == 1
+        assert alert.call_args.kwargs["purpose"] == "alert"
+        assert "alice@test.com" in alert.call_args.args[2]
+        assert "alice@test.com" in caplog.text
+        assert "dmarc=fail" in caplog.text.lower()
+
+    def test_dmarc_none_warns(self, make_config, caplog):
+        """``dmarc=none`` is the "DMARC record was edited away" drift case — the
+        exact silent degradation this canary exists to catch."""
+        config = self._config(make_config)
+        email = _email(id="d3", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=none header.from=test.com")
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, _envelope(id="d3", sender="alice@test.com"), email)
+
+        assert alert.call_count == 1
+
+    def test_missing_header_is_silent_by_default(self, make_config, caplog):
+        """A mail path that stamps nothing would otherwise warn on every message."""
+        config = self._config(make_config)
+        email = _email(id="d4", sender="alice@test.com", authentication_results=None)
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, _envelope(id="d4", sender="alice@test.com"), email)
+
+        assert alert.call_count == 0
+        assert "dmarc" not in caplog.text.lower()
+
+    def test_missing_header_warns_when_opted_in(self, make_config, caplog):
+        """The 'mailbox moved to a provider that does not stamp' drift case is only
+        reachable for an operator who knows their MTA is supposed to stamp."""
+        config = self._config(make_config, dmarc_canary_warn_on_missing=True)
+        email = _email(id="d5", sender="alice@test.com", authentication_results=None)
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, _envelope(id="d5", sender="alice@test.com"), email)
+
+        assert alert.call_count == 1
+        assert "no dmarc result" in caplog.text.lower()
+
+    def test_header_without_a_dmarc_methodspec_follows_the_missing_rule(self, make_config, caplog):
+        """A header that authenticated SPF but never evaluated DMARC is absence of
+        evidence, not evidence of failure — same class as no header at all."""
+        config = self._config(make_config)
+        email = _email(id="d6", sender="alice@test.com",
+                       authentication_results="mx.test; spf=pass smtp.mailfrom=test.com")
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, _envelope(id="d6", sender="alice@test.com"), email)
+
+        assert alert.call_count == 0
+
+    def test_plus_address_route_with_a_self_claim_is_watched_too(self, make_config, caplog):
+        """ISSUE-227 found that scoping this to ``sender_match`` is bypassable: the
+        plus-address is public, so ``From: <user>`` + ``To: bot+<user>@…`` carries the
+        identical own-address claim on a route a sender-match-only check never sees.
+        The gate collapsed both routes; the canary that watches the gate's assumption
+        has to cover the same set or it has the same hole."""
+        config = self._config(make_config)
+        envelope = _envelope(id="d7", sender="alice@test.com")
+        email = _email(id="d7", sender="alice@test.com", to=("bot+alice@test.com",),
+                       authentication_results="mx.test; dmarc=fail header.from=test.com")
+
+        with caplog.at_level("WARNING"):
+            task_ids, alert = self._poll(config, envelope, email)
+
+        assert len(task_ids) == 1
+        assert alert.call_count == 1
+        assert "plus_address" in caplog.text
+
+    def test_external_sender_is_not_watched(self, make_config, caplog):
+        """The canary guards one assumption: that a ``From:`` naming the user's own
+        address proves the user sent it. Mail from a genuinely external sender never
+        leans on that claim — it is gated or trusted on its own terms."""
+        config = self._config(make_config)
+        config.users["alice"].trusted_email_senders = ["carol@vendor.com"]
+        envelope = _envelope(id="d8", sender="carol@vendor.com")
+        email = _email(id="d8", sender="carol@vendor.com", to=("bot+alice@test.com",),
+                       authentication_results="mx.test; dmarc=fail header.from=vendor.com")
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, envelope, email)
+
+        assert alert.call_count == 0
+
+    def test_disabled_canary_is_silent_on_an_outright_fail(self, make_config, caplog):
+        config = self._config(make_config, dmarc_canary=False)
+        email = _email(id="d9", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=fail header.from=test.com")
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, _envelope(id="d9", sender="alice@test.com"), email)
+
+        assert alert.call_count == 0
+        assert "dmarc" not in caplog.text.lower()
+
+    def test_the_canary_never_blocks_the_mail(self, make_config):
+        """It is a detector, not a gate. A failing check must not change what happens
+        to the message — that call belongs to ``confirm_sender_match``."""
+        config = self._config(make_config)
+        email = _email(id="d10", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=fail header.from=test.com")
+
+        task_ids, _ = self._poll(config, _envelope(id="d10", sender="alice@test.com"), email)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+    def test_alert_is_deduped_but_the_log_is_not(self, make_config, caplog):
+        """A persistently broken mail path must not flood the alert channel, but the
+        log has to keep a per-message record."""
+        config = self._config(make_config)
+        envelopes = [_envelope(id=f"d11-{i}", sender="alice@test.com") for i in range(3)]
+        emails = [_email(id=f"d11-{i}", sender="alice@test.com",
+                         authentication_results="mx.test; dmarc=fail header.from=test.com")
+                  for i in range(3)]
+
+        with caplog.at_level("WARNING"):
+            with (
+                patch("istota.transport.email.inbound.list_emails", return_value=envelopes),
+                patch("istota.transport.email.inbound.read_email", side_effect=emails),
+                patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+                patch("istota.notifications.send_notification", return_value=True) as alert,
+            ):
+                task_ids = poll_emails(config)
+
+        assert len(task_ids) == 3
+        assert alert.call_count == 1
+        assert caplog.text.lower().count("dmarc=fail") == 3
+
+    def test_a_different_verdict_alerts_again(self, make_config):
+        """Dedup is per verdict, so a path degrading from ``fail`` to ``none`` is not
+        swallowed by the earlier alert."""
+        config = self._config(make_config)
+        envelopes = [_envelope(id="d12-a", sender="alice@test.com"),
+                     _envelope(id="d12-b", sender="alice@test.com")]
+        emails = [_email(id="d12-a", sender="alice@test.com",
+                         authentication_results="mx.test; dmarc=fail"),
+                  _email(id="d12-b", sender="alice@test.com",
+                         authentication_results="mx.test; dmarc=none")]
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=envelopes),
+            patch("istota.transport.email.inbound.read_email", side_effect=emails),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True) as alert,
+        ):
+            poll_emails(config)
+
+        assert alert.call_count == 2
+
+    def test_a_failing_alert_does_not_break_the_poll(self, make_config):
+        """The canary is best-effort monitoring; an unreachable alert surface must
+        not cost the user their mail."""
+        config = self._config(make_config)
+        email = _email(id="d13", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=fail")
+
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id="d13", sender="alice@test.com")]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification",
+                  side_effect=RuntimeError("talk down")),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+
+    def test_an_unreadable_header_alerts_under_the_default_config(self, make_config, caplog):
+        """The end-to-end half of the parser's `malformed` rule. Checking only
+        `_dmarc_result`'s return value leaves the behaviour that matters untested —
+        that an unreadable header alerts rather than falling into the silent
+        no-verdict class, which is what would let a planted delimiter silence it."""
+        config = self._config(make_config)
+        email = _email(id="d17", sender="alice@test.com",
+                       authentication_results='mx.test; spf=fail smtp.mailfrom="oops')
+
+        with caplog.at_level("WARNING"):
+            _, alert = self._poll(config, _envelope(id="d17", sender="alice@test.com"), email)
+
+        assert alert.call_count == 1
+        assert "unreadable" in caplog.text.lower()
+
+    def test_quiet_sender_mail_still_reports_on_the_mail_path(self, make_config, caplog):
+        """A quiet sender's mail is filed with no task, by a branch that skips to the
+        next message before the gate. The canary sits above it deliberately: quieting
+        a sender says nothing about whether the mail path still authenticates From:,
+        and that branch skipping first would blind the canary for every quieted
+        self-address."""
+        config = self._config(make_config)
+        config.users["alice"].quiet_email_senders = ["alice@test.com"]
+        email = _email(id="d14", sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=fail header.from=test.com")
+
+        with caplog.at_level("WARNING"):
+            task_ids, alert = self._poll(config, _envelope(id="d14", sender="alice@test.com"), email)
+
+        assert task_ids == []
+        assert alert.call_count == 1
+        assert "dmarc=fail" in caplog.text.lower()
+
+    def test_a_failed_delivery_does_not_consume_the_dedup_window(self, make_config):
+        """The window opens on a delivered alert, not a decided one. `send_notification`
+        reports "no destination configured" by returning False rather than raising, and
+        stamping the dedup at decision time would swallow the next 24 hours of alerts
+        after a single silent failure."""
+        config = self._config(make_config)
+
+        def _poll_once(email_id, delivered):
+            with (
+                patch("istota.transport.email.inbound.list_emails",
+                      return_value=[_envelope(id=email_id, sender="alice@test.com")]),
+                patch("istota.transport.email.inbound.read_email",
+                      return_value=_email(id=email_id, sender="alice@test.com",
+                                          authentication_results="mx.test; dmarc=fail")),
+                patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+                patch("istota.notifications.send_notification", return_value=delivered) as alert,
+            ):
+                poll_emails(config)
+            return alert
+
+        assert _poll_once("d15-a", False).call_count == 1
+        # Undelivered, so the next occurrence must try again rather than be throttled.
+        assert _poll_once("d15-b", True).call_count == 1
+        # Delivered now, so this one is throttled.
+        assert _poll_once("d15-c", True).call_count == 0
+
+    def test_the_alert_is_sent_after_the_poll_transaction_closes(self, make_config):
+        """`poll_emails` holds one write transaction across the whole envelope loop, and
+        an alert can route to a surface that writes to the same DB — the web surface
+        does. Sending in-loop makes that second connection block on the poller's own
+        lock until the busy timeout, stalling the scheduler's dispatch loop."""
+        config = self._config(make_config)
+        config.users["alice"].email_addresses = ["alice@test.com", "alice2@test.com"]
+        observed = {}
+
+        def _fake_send(cfg, user_id, message, **kwargs):
+            # A second connection writing the same DB: this raises "database is
+            # locked" if the poller's transaction is still open.
+            with db.get_db(cfg.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO processed_emails (email_id, sender_email, subject) "
+                    "VALUES (?, ?, ?)",
+                    (f"canary-probe-{len(observed)}", "probe@test.com", "probe"),
+                )
+            observed[len(observed)] = True
+            return True
+
+        # Two envelopes from *different* senders, so each decides its own alert and
+        # the first iteration's writes are already pending on the poller's
+        # connection by the time the second one is decided. With a single envelope
+        # nothing has been written yet when the canary runs, so there is no lock to
+        # contend for and an in-loop send would pass.
+        envelopes = [_envelope(id="d16-a", sender="alice@test.com"),
+                     _envelope(id="d16-b", sender="alice2@test.com")]
+        emails = [_email(id="d16-a", sender="alice@test.com",
+                         authentication_results="mx.test; dmarc=fail"),
+                  _email(id="d16-b", sender="alice2@test.com",
+                         authentication_results="mx.test; dmarc=fail")]
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=envelopes),
+            patch("istota.transport.email.inbound.read_email", side_effect=emails),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", side_effect=_fake_send),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 2
+        assert len(observed) == 2

@@ -247,6 +247,85 @@ messages are re-polled rather than silently lost.
   authserv-id to tell our own MTA's header from one the sender wrote, so it is a
   feature rather than part of the ISSUE-227 fix.
 
+  **The DMARC canary (ISSUE-228)** is the monitoring for the assumption the
+  `false` default encodes, not that feature. `_check_dmarc_canary` in
+  `transport/email/inbound.py` warns — and alerts, `purpose="alert"` — when a
+  self-claim arrives without a `dmarc=pass` from the receiving MTA. Deliberately
+  a *detector*: it never blocks, holds, or reroutes, so it is orthogonal to
+  `confirm_sender_match` and safe on by default. It does not verify DKIM
+  in-process; if the MTA already rejects, re-implementing the check buys nothing.
+  An attacker who forges the top header silences it, which is acceptable because
+  the MTA is the boundary — it catches misconfiguration and drift, and should
+  never be described as a control.
+
+  Three things about it that are load-bearing and easy to break:
+
+  - **Topmost header only.** `Email.authentication_results` is filled from
+    `_header_str(msg, "authentication-results")`, which returns element 0 —
+    imap-tools builds `msg.headers` from the parsed list in wire order, and each
+    hop prepends, so element 0 is the final receiving MTA's stamp. Everything
+    below it is sender-supplied. A change that reads any other element, or joins
+    them, hands the verdict to the spoofer.
+  - **Scoped to the self-claim on both routes**, gated on `claims_to_be_user and
+    routing_method in ("plus_address", "sender_match")` — the same set the
+    confirmation gate covers, for the same ISSUE-227 reason. Watching only
+    `sender_match` reopens that bypass: the plus-address is public, so `From:
+    <user>` + `Cc: bot+<user>@…` carries the identical claim on a route a
+    sender-match-only check never sees. `claims_to_be_user` is computed once
+    above both consumers.
+  - **`dmarc=none` is a failure, not an absence.** It means the domain publishes
+    no policy — the "DMARC record was edited away" drift case, which is the whole
+    point. Only a *missing* verdict (no header, or a header reporting other
+    methods) is the silent-by-default `unevaluated` class, behind
+    `dmarc_canary_warn_on_missing`.
+
+  The parser earns its length, and every rule in it closes a way to make the
+  canary go **quiet** — the only failure that matters, since a noisy canary is
+  merely annoying. `_dmarc_result` anchors `dmarc=` to the start of a methodspec
+  (so a `header.dmarc=` property does not match), splits on `;` only at paren
+  depth zero and outside quotes, and drops comment and quoted-string contents —
+  a reporting MTA echoes the envelope sender into the SPF comment and into
+  `smtp.mailfrom=`, so a bare `split(";")` lets the sender promote their own text
+  to the start of a segment. Comment nesting is depth-tracked because RFC 5322
+  comments nest and a `\([^)]*\)` strip stops at the first `)`. Three further
+  rules, each pinned by its own test:
+
+  - **Any non-pass beats a pass**, rather than first-match-wins, so an injected
+    `dmarc=pass` cannot mask the genuine `dmarc=fail` in the same header.
+  - **A read that looks incomplete yields `malformed`**, never `pass` and never
+    `None` — the two quiet answers. Incomplete means either the header ended
+    mid-quote/mid-comment, or `_DMARC_RAW` counts more `dmarc=` tokens in the raw
+    header than the parse attributed to methodspecs. **The count is the
+    load-bearing half**, and the reason dropping quoted and commented text is not
+    sufficient alone: an *unbalanced* delimiter is noticeable, but a sender who
+    plants a **matched pair** straddling the verdict hides it with nothing
+    unbalanced left to see — two stray quotes echoed into `header.d=` and
+    `smtp.mailfrom=` — and the answer would otherwise be `None` (silent by
+    default) or a `pass` appended after. That was a must-fix in the second review
+    round; the first round's unbalanced-only rule missed it.
+  - **An unregistered result token buckets to `other`.** It reaches the dedup
+    key, and where this canary matters most the sender chose it; left open it is
+    an unbounded key axis, i.e. one alert per message.
+
+  Consequence worth knowing before "fixing" it: a header carrying a `dmarc=` in a
+  `reason="…"` or a comment reports `malformed` and warns, even though no
+  legitimate verdict is in doubt. That is the count firing, and it is the
+  intended trade — the parser cannot tell an MTA that quoted the word from a
+  sender who planted it, so it declines to call the header clean.
+
+  Alert dedup is an in-process dict keyed `(user_id, sender.lower(), verdict)`
+  with a 24h window; the WARNING log is never deduped, so the per-message record
+  survives the throttle. Not persisted on purpose — a restart re-alerting is
+  harmless and it needs no schema. The window opens only on a *delivered* alert:
+  `send_notification` reports "no destination configured" by returning False
+  rather than raising, and stamping at decision time let one silent failure
+  swallow the next 24 hours. Delivery itself (`_deliver_dmarc_alerts`) runs
+  **after** `poll_emails`' `with db.get_db(...)` block closes — an alert can route
+  to the web surface, which opens a second connection to the same DB and would
+  otherwise block on the poller's own lock until the busy timeout, stalling the
+  scheduler's dispatch loop. Ansible knobs `istota_email_dmarc_canary` /
+  `istota_email_dmarc_canary_warn_on_missing`.
+
   **Three pre-existing interactions the flag makes reachable**, all noted under
   ISSUE-227 rather than fixed there: a gated task parks its room via
   `_CLAIM_CHANNEL_GATE_SQL` and only the Talk poller calls

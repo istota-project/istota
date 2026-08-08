@@ -793,6 +793,40 @@ imap_host = "imap.example.com"
         cfg = load_config(config_file)
         assert cfg.email.confirm_sender_match is False
 
+    def test_dmarc_canary_defaults_on(self):
+        """ISSUE-228 — on by default: a deployment that never thinks to enable a
+        drift detector is exactly the one that needs it."""
+        assert EmailConfig().dmarc_canary is True
+
+    def test_dmarc_canary_warn_on_missing_defaults_off(self):
+        """Absence of a verdict is silent by default. A mail path that stamps no
+        Authentication-Results at all would otherwise warn on every message."""
+        assert EmailConfig().dmarc_canary_warn_on_missing is False
+
+    def test_dmarc_canary_omitted_from_toml_keeps_both_defaults(self, tmp_path):
+        """The loader fallback is what the default actually means in production."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+imap_host = "imap.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.dmarc_canary is True
+        assert cfg.email.dmarc_canary_warn_on_missing is False
+
+    def test_dmarc_canary_loads_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+dmarc_canary = false
+dmarc_canary_warn_on_missing = true
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.dmarc_canary is False
+        assert cfg.email.dmarc_canary_warn_on_missing is True
+
 
 class TestSleepCycleConfig:
     def test_defaults(self):

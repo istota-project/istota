@@ -44,7 +44,25 @@ Leaving the flag off makes the mail path load-bearing. Worth confirming, and re-
 
 Forwarding is the case that hurts legitimate mail rather than security. A forwarder breaks SPF and some rewrite `From:`, so mail forwarded into the bot may be rejected upstream or may route differently once it arrives.
 
-#### With the flag on
+#### The DMARC canary
+
+Every item on that checklist can stop being true later, and none of them announce it. A DMARC record gets edited. The mailbox moves to a provider that does not enforce. Someone adds an "always trust mail from …" rule for the address the check is about. A forwarding path appears that lands mail behind the filter. The protection is gone and every surface still reports normal; the first sign would otherwise be a task that ran because someone forged a header.
+
+`dmarc_canary` (on by default) is the automated version of the checklist. When mail routes on the strength of a user's own address, it reads the DMARC verdict the receiving MTA stamped in `Authentication-Results` and logs a warning — plus an alert — if that verdict is anything other than `pass`. Mail carrying no DMARC verdict at all is a separate case, silent by default; see `dmarc_canary_warn_on_missing` below. Silent when healthy. It reads the **topmost** header only: each hop prepends its own, so the top one is the final receiving MTA's, and everything below it is whatever the sender chose to include.
+
+Note that `dmarc=none` counts as a failure here, not as an absence. It means the sending domain publishes no policy — the "someone deleted the DMARC record" case — so it warns. A header the check cannot read cleanly also warns, rather than being treated as "no verdict": a sender can plant punctuation that hides the real verdict from a parser, and treating that as silence is exactly what would let them turn the check off.
+
+What it catches, and when, is worth being precise about. Removing a DMARC record, or a mail path that stops evaluating DMARC, shows up on the next ordinary message. *Weakening* a policy from `p=reject` to `p=none` does not: legitimate mail still passes, so nothing looks wrong until someone actually forges your address — at which point the forgery itself trips the canary, rather than the config change that allowed it. Checking that your published policy is still `p=reject` stays a manual item on the checklist above.
+
+Two things it is not. It is **not a gate** — nothing is blocked, held, or rerouted, and turning it on cannot cost you a message. Whether to hold unauthenticated mail is `confirm_sender_match`'s decision, and the two are independent. And it is **not a verifier**: it does not check DKIM itself, because if your MTA already rejects forgeries then re-implementing that check buys nothing, and getting it wrong is worse than not having it.
+
+It follows that an attacker who forges an `Authentication-Results: … dmarc=pass` header suppresses the warning. That is fine, and worth being explicit about: the canary is not the boundary, the MTA is. Its job is catching misconfiguration and drift, not attack. A canary that can be silenced by the thing it is not defending against is still worth having — a canary mistaken for a control is not.
+
+`dmarc_canary_warn_on_missing` (off by default) extends it to mail carrying no DMARC verdict at all. It is off because a mail path that stamps nothing would otherwise warn on every message, which trains you to ignore it. Turn it on once you know your MTA does stamp — that is the only way "the mailbox moved somewhere that does not evaluate DMARC" ever becomes visible, and that is one of the drift cases worth catching.
+
+Alerts are deduplicated per sender and verdict for 24 hours, so a persistently broken path does not flood the channel. The log warning is not deduplicated, so there is still a per-message record.
+
+#### With `confirm_sender_match` on
 
 It applies to whichever route the mail takes, not only to sender-match routing. Routing is decided by the recipient first, and the plus-address is public — it is the `From:` on every message the bot sends on the user's behalf — so a sender who knows the address the gate is about also knows how to arrive as a plus-addressed message instead. The same claim gets the same answer either way. Mail from a genuinely external sender is unaffected by the flag; it is gated or not on the existing plus-address rule.
 

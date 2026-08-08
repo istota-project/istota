@@ -78,6 +78,10 @@ class Email:
     body_html: str = ""            # html part (empty if none)
     in_reply_to: str | None = None  # RFC 5322 In-Reply-To header
     attachment_manifest: list[dict] = field(default_factory=list)  # {filename, size, content_type}
+    # Topmost RFC 8601 Authentication-Results, as stamped by the final receiving
+    # MTA. Carried for the ISSUE-228 DMARC canary; see `_msg_to_email` for why
+    # only the topmost one is meaningful.
+    authentication_results: str | None = None
 
 
 @dataclass
@@ -246,6 +250,13 @@ def _msg_to_email(msg) -> Email:
         body_html=msg.html or "",
         in_reply_to=_header_str(msg, "in-reply-to"),
         attachment_manifest=manifest,
+        # Security-relevant: take the TOPMOST Authentication-Results and no other.
+        # Each hop prepends its own, so the top one is stamped by the final
+        # receiving MTA; everything below it is whatever the sender chose to put
+        # in the message they handed over, and is therefore forgeable. imap-tools
+        # builds `msg.headers` from the parsed header list in wire order, so
+        # `_header_str` returning the first element is exactly the topmost.
+        authentication_results=_header_str(msg, "authentication-results"),
     )
 
 

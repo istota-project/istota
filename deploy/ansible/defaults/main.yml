@@ -269,6 +269,14 @@ istota_email_imap_timeout_seconds: 30  # socket timeout for IMAP connections
 # upstream fix; this one is noisy by construction. See docs/features/email.md
 # for what leaving it off assumes.
 istota_email_confirm_sender_match: false
+# Canary for the assumption the setting above encodes. Reads the DMARC verdict
+# the receiving MTA stamped and warns when mail routed on a user's own address
+# arrives without a pass, so the protection lapsing gets noticed. On by default;
+# monitoring only, it never blocks a message. Set warn_on_missing once you know
+# your MTA stamps Authentication-Results — that is what catches a move to a
+# provider that does not evaluate DMARC.
+istota_email_dmarc_canary: true
+istota_email_dmarc_canary_warn_on_missing: false
 
 # Conversation context settings
 istota_conversation_enabled: true               # false = no conversation context at all

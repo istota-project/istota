@@ -28,10 +28,13 @@ enabled: bool = True         bot_username: str = "istota"
 enabled: bool = False        imap_host/port/user/password    poll_folder: str = "INBOX"
 smtp_host/port/user/password                                 bot_email: str = ""
 imap_timeout_seconds: int = 30                               confirm_sender_match: bool = False
+dmarc_canary: bool = True                                    dmarc_canary_warn_on_missing: bool = False
 ```
 Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fall back to imap creds
 
 `confirm_sender_match` turns off the own-address branch of `is_trusted_email_sender` for inbound mail, so a `From:` naming one of the user's addresses is held for an out-of-band Talk yes/no instead of being taken as proof the user sent it. Read it as a **declaration about the inbound mail path**, not a safety switch: `false` (default) asserts something upstream already authenticated the header — normally DMARC enforcement at the receiving MTA, which rejects a forgery before it reaches `poll_folder` — and `true` says nothing does. Upstream is the better place to solve it (silent, no per-message cost, cannot be talked past by a human approving a prompt); the gate is the fallback for paths that can't, and is noisy by construction. `false` is also the behaviour every deployment has actually had, since the branch was unreachable until ISSUE-227. Ansible `istota_email_confirm_sender_match`. See `.claude/rules/transport.md` "Email confirmation gate".
+
+`dmarc_canary` (default **on**) is the monitoring for what that default assumes, not a second gate — it warns and alerts when a self-claim arrives carrying a DMARC verdict other than `pass`, and never changes what happens to the message, which is why it is safe on by default. `dmarc_canary_warn_on_missing` (default **off**) extends it to mail carrying no DMARC verdict at all; off because a path that stamps nothing would warn on every message, and the only reason to turn it on is knowing your MTA does stamp. Note `dmarc=none` is a *failure* here (the domain publishes no policy — the drift case), not the missing class. Ansible `istota_email_dmarc_canary` / `istota_email_dmarc_canary_warn_on_missing`. See `.claude/rules/transport.md` "The DMARC canary".
 
 ### ntfy push notifications
 
