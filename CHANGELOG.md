@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Istota now notices when your mail path stops authenticating who sent an email. Leaving the prompt that holds mail from your own address turned off assumes your provider rejects forged sender lines before they ever arrive — usually true, but it lapses quietly when a DNS record is edited or a mailbox moves, and nothing would have told you. Such mail is now checked against the verdict your provider stamped on it and warns when that verdict is a failure; it watches for your mail setup changing under you rather than for an attacker, who can suppress it, and it never holds or blocks a message.
+
 - The setting that holds mail arriving from your own address for approval now works. The sender line on an email is unauthenticated, so anyone who knows your address can put it there, and this setting was the one thing meant to catch that — but it could never fire, because the check it made was the very thing that had brought it there. It now holds such mail until you approve it from Talk, whichever way the message was addressed. It stays off by default, since it also holds every message you send yourself and no deployment has had this behaviour until now; if you had already turned it on believing it worked, it takes effect on this upgrade.
 
 ### Fixed

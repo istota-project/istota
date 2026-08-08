@@ -59,6 +59,19 @@ class EmailConfig:
     # is the behaviour every existing deployment already has, and turning it on holds
     # every self-sent email for an out-of-band yes/no.
     confirm_sender_match: bool = False
+    # DMARC canary (ISSUE-228). With `confirm_sender_match` off, the default,
+    # the bot treats a `From:` naming one of the user's own addresses as proof
+    # that user sent the mail — sound only because something upstream rejected
+    # forgeries first. This watches the receiving MTA's own Authentication-Results
+    # stamp and warns when that stops holding. Monitoring, not a control: an
+    # attacker who forges the topmost header silences it, and the MTA is the
+    # boundary regardless.
+    dmarc_canary: bool = True
+    # Whether *absence* of a DMARC verdict warns. Off by default because a mail
+    # path that stamps nothing would otherwise warn on every message. Turn it on
+    # when the MTA is known to stamp — that is the only way the "mailbox moved to
+    # a provider that does not evaluate DMARC" drift case is visible.
+    dmarc_canary_warn_on_missing: bool = False
     imap_timeout_seconds: int = 30  # socket timeout for IMAP connections (0/unset → 30)
 
     @property
@@ -1779,6 +1792,8 @@ def load_config(config_path: Path | None = None) -> Config:
             poll_folder=email.get("poll_folder", "INBOX"),
             bot_email=email.get("bot_email", ""),
             confirm_sender_match=email.get("confirm_sender_match", False),
+            dmarc_canary=email.get("dmarc_canary", True),
+            dmarc_canary_warn_on_missing=email.get("dmarc_canary_warn_on_missing", False),
             imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
         )
 
