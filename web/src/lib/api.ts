@@ -499,8 +499,12 @@ export interface LocationPing {
   lat: number;
   lon: number;
   /**
-   * Metres, WGS84 ellipsoidal height — not barometric MSL. Null where the
-   * device returned a horizontal fix without a vertical one (~5% of pings).
+   * Metres as the device reported them; what they are measured against varies
+   * by source and is not recorded. Null on three counts: a horizontal fix with
+   * no vertical one, a fix the device flagged as vertically invalid, and a
+   * point the client declared rather than measured (its wifi-zone feature).
+   * The last of those covers whole intervals rather than scattered samples, so
+   * do not reason about coverage from a per-ping rate.
    */
   altitude: number | null;
   accuracy: number;

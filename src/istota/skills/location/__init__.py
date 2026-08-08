@@ -111,8 +111,10 @@ def cmd_current(args):
         "timestamp": row["timestamp"],
         "lat": row["lat"],
         "lon": row["lon"],
-        # Raw GPS altitude in metres — WGS84 ellipsoidal height, not barometric
-        # MSL. Null where iOS returned a horizontal fix without a vertical one.
+        # Metres as the device reported them; what they are measured against
+        # varies by source and is not recorded. Null where the fix was
+        # horizontal only, and where the point is one the client declared
+        # rather than measured (ISSUE-229).
         "altitude": row["altitude"],
         "accuracy": row["accuracy"],
         "activity_type": row["activity_type"],
@@ -205,7 +207,8 @@ def cmd_history(args):
             "timestamp": r["timestamp"],
             "lat": r["lat"],
             "lon": r["lon"],
-            # Metres, WGS84 ellipsoidal — see cmd_current for the caveat.
+            # Metres as the device reported them — see cmd_current for the
+            # three reasons this is null.
             "altitude": r["altitude"],
             "accuracy": r["accuracy"],
             "place": r["place_name"],

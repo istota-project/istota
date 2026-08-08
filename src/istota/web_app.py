@@ -5964,7 +5964,10 @@ def _location_query_pings(
                 "timestamp": r["timestamp"],
                 "lat": r["lat"],
                 "lon": r["lon"],
-                # Metres, WGS84 ellipsoidal height. Null on a horizontal-only fix.
+                # Metres as the device reported them; the reference varies by
+                # source and is not recorded. Null on a horizontal-only fix, on
+                # one the device flagged vertically invalid, and on a point the
+                # client declared rather than measured (ISSUE-229).
                 "altitude": r["altitude"],
                 "accuracy": r["accuracy"],
                 "place": r["place_name"],

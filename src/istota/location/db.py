@@ -36,7 +36,7 @@ from istota.location.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 # Tables in FK-target-first order: places -> visits -> location_pings,
@@ -75,11 +75,13 @@ CREATE TABLE IF NOT EXISTS location_pings (
     lon REAL NOT NULL,
     altitude REAL,
     accuracy REAL,
+    vertical_accuracy REAL,
     speed REAL,
     course REAL,
     battery REAL,
     activity_type TEXT,
     wifi TEXT,
+    wifi_zone INTEGER NOT NULL DEFAULT 0,
     place_id INTEGER REFERENCES places(id),
     visit_id INTEGER REFERENCES visits(id),
     source TEXT NOT NULL DEFAULT 'overland',
@@ -185,15 +187,50 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     Overland and the Garmin importer send none; existing rows correctly
     backfill to NULL, which the partial unique index excludes.
 
+    v4 (ISSUE-229): ``location_pings.wifi_zone`` and
+    ``location_pings.vertical_accuracy``. The shell marks a *declared*
+    wifi-zone point on the wire so a coordinate the device never measured
+    stays identifiable afterwards; the server was dropping the marker, so a
+    stored row kept no trace of the substitution. ``vertical_accuracy``
+    arrives on every feature and was dropped by the same omission — it is
+    the invalid-vertical-fix signal ISSUE-218 had to work around with a rate
+    heuristic. Both default correctly for existing rows: a measured point
+    that is not so marked, and an accuracy nobody recorded.
+
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(location_pings)")}
-    if "source" not in cols:
-        conn.execute(
-            "ALTER TABLE location_pings "
-            "ADD COLUMN source TEXT NOT NULL DEFAULT 'overland'"
-        )
-    if "client_id" not in cols:
-        conn.execute("ALTER TABLE location_pings ADD COLUMN client_id TEXT")
+    missing = {"source", "client_id", "vertical_accuracy", "wifi_zone"} - cols
+    if missing:
+        # One explicit transaction around the ALTERs and the one-shot backfill
+        # they gate, because SQLite DDL is transactional and the guard above is
+        # the column's own presence. Without it the ALTER autocommits on its
+        # own while the UPDATE waits for init_db's commit at the very end — so
+        # a crash or a SQLITE_BUSY in between leaves the column added and the
+        # sweep undone, and the guard then suppresses it forever. init_db calls
+        # this straight after executescript (which commits) and a PRAGMA, so no
+        # transaction is open here.
+        conn.execute("BEGIN")
+        if "source" in missing:
+            conn.execute(
+                "ALTER TABLE location_pings "
+                "ADD COLUMN source TEXT NOT NULL DEFAULT 'overland'"
+            )
+        if "client_id" in missing:
+            conn.execute(
+                "ALTER TABLE location_pings ADD COLUMN client_id TEXT"
+            )
+        if "vertical_accuracy" in missing:
+            conn.execute(
+                "ALTER TABLE location_pings ADD COLUMN vertical_accuracy REAL"
+            )
+        if "wifi_zone" in missing:
+            conn.execute(
+                "ALTER TABLE location_pings "
+                "ADD COLUMN wifi_zone INTEGER NOT NULL DEFAULT 0"
+            )
+            # Runs after the `source` ALTER above, which it filters on.
+            _backfill_declared_points(conn)
+        conn.commit()
 
     # This index cannot live in SCHEMA_SQL: executescript runs before this
     # function, so on a pre-v3 DB it would index a column the ALTER above
@@ -207,6 +244,35 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_location_pings_client_id "
         "ON location_pings(client_id) WHERE client_id IS NOT NULL"
+    )
+
+
+def _backfill_declared_points(conn: sqlite3.Connection) -> None:
+    """Retire the -1 altitude sentinel from rows stored before the marker.
+
+    Rows written before v4 carry the fabricated value with nothing marking
+    them, so the only handle left is the declared fix's own signature —
+    which is why the ingest fix matches on ``wifi_zone`` instead and this
+    sweep runs exactly once, guarded by the column's absence.
+
+    The signature is narrow rather than a bare ``altitude = -1`` match: the
+    shell builds the declared ``CLLocation`` with a horizontal accuracy of
+    exactly 1 metre and a zeroed speed and course, and consumer GPS does not
+    report a 1 m fix. Marking the matched rows is an inference from that
+    signature, not something the row itself recorded — but a NULL altitude
+    with no stated reason is the worse of the two, and the value it replaces
+    was never a measurement either.
+    """
+    conn.execute(
+        """
+        UPDATE location_pings
+        SET altitude = NULL, wifi_zone = 1
+        WHERE source = 'overland'
+          AND altitude = -1
+          AND accuracy = 1
+          AND speed = 0
+          AND course = 0
+        """
     )
 
 
@@ -400,11 +466,13 @@ def insert_ping(
     *,
     altitude: float | None = None,
     accuracy: float | None = None,
+    vertical_accuracy: float | None = None,
     speed: float | None = None,
     course: float | None = None,
     battery: float | None = None,
     activity_type: str | None = None,
     wifi: str | None = None,
+    wifi_zone: bool = False,
     place_id: int | None = None,
     visit_id: int | None = None,
     source: str = "overland",
@@ -439,30 +507,30 @@ def insert_ping(
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO location_pings (
-                timestamp, lat, lon, altitude, accuracy, speed, course,
-                battery, activity_type, wifi, place_id, visit_id, source,
-                client_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp, lat, lon, altitude, accuracy, vertical_accuracy,
+                speed, course, battery, activity_type, wifi, wifi_zone,
+                place_id, visit_id, source, client_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                timestamp, lat, lon, altitude, accuracy, speed, course,
-                battery, activity_type, wifi, place_id, visit_id, source,
-                client_id,
+                timestamp, lat, lon, altitude, accuracy, vertical_accuracy,
+                speed, course, battery, activity_type, wifi, int(wifi_zone),
+                place_id, visit_id, source, client_id,
             ),
         )
     else:
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO location_pings (
-                timestamp, received_at, lat, lon, altitude, accuracy, speed,
-                course, battery, activity_type, wifi, place_id, visit_id,
-                source, client_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp, received_at, lat, lon, altitude, accuracy,
+                vertical_accuracy, speed, course, battery, activity_type,
+                wifi, wifi_zone, place_id, visit_id, source, client_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                timestamp, received_at, lat, lon, altitude, accuracy, speed,
-                course, battery, activity_type, wifi, place_id, visit_id,
-                source, client_id,
+                timestamp, received_at, lat, lon, altitude, accuracy,
+                vertical_accuracy, speed, course, battery, activity_type,
+                wifi, int(wifi_zone), place_id, visit_id, source, client_id,
             ),
         )
     if cur.rowcount == 0:
@@ -482,12 +550,24 @@ def update_ping_place(
     )
 
 
+_PING_COLUMNS = """
+        id, timestamp, received_at, lat, lon, altitude, accuracy,
+        vertical_accuracy, speed, course, battery, activity_type, wifi,
+        wifi_zone, place_id, visit_id, client_id
+"""
+
+
+def _ping_from_row(row: sqlite3.Row) -> LocationPing:
+    """SQLite has no boolean type, so ``wifi_zone`` arrives as 0 or 1."""
+    fields = dict(row)
+    fields["wifi_zone"] = bool(fields["wifi_zone"])
+    return LocationPing(**fields)
+
+
 def get_latest_ping(conn: sqlite3.Connection) -> LocationPing | None:
     row = conn.execute(
-        """
-        SELECT id, timestamp, received_at, lat, lon, altitude, accuracy,
-               speed, course, battery, activity_type, wifi, place_id,
-               visit_id, client_id
+        f"""
+        SELECT {_PING_COLUMNS}
         FROM location_pings
         ORDER BY timestamp DESC
         LIMIT 1
@@ -495,7 +575,7 @@ def get_latest_ping(conn: sqlite3.Connection) -> LocationPing | None:
     ).fetchone()
     if not row:
         return None
-    return LocationPing(**dict(row))
+    return _ping_from_row(row)
 
 
 def get_pings(
@@ -517,9 +597,7 @@ def get_pings(
     params.append(limit)
     rows = conn.execute(
         f"""
-        SELECT id, timestamp, received_at, lat, lon, altitude, accuracy,
-               speed, course, battery, activity_type, wifi, place_id,
-               visit_id, client_id
+        SELECT {_PING_COLUMNS}
         FROM location_pings
         {where}
         ORDER BY timestamp DESC
@@ -527,7 +605,7 @@ def get_pings(
         """,
         params,
     ).fetchall()
-    return [LocationPing(**dict(r)) for r in rows]
+    return [_ping_from_row(r) for r in rows]
 
 
 def cleanup_old_pings(

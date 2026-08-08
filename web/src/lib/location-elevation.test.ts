@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   elevationPoints,
   elevationRange,
+  elevationSummary,
   hasMeaningfulElevation,
   buildElevationPath,
   decimate,
@@ -340,5 +341,71 @@ describe('buildElevationPath', () => {
 
   it('is empty for no points, so the caller renders nothing rather than a stray dot', () => {
     expect(buildElevationPath([], 100, 40)).toEqual({ solid: '', sparse: '' });
+  });
+});
+
+describe('elevationSummary', () => {
+  it('reports the gate and the range from one pass over the pings', () => {
+    const summary = elevationSummary(CLIMB);
+
+    expect(summary.show).toBe(true);
+    expect(summary.range).toEqual({ min: 335.3, max: 1432.6 });
+    expect(summary.points).toEqual(elevationPoints(CLIMB));
+  });
+
+  it('withholds the range when the day is GPS noise, so a caller cannot show one', () => {
+    const jitter = [0, 12, -9, 21, -4, 15].map((d, i) =>
+      ping({ timestamp: `2026-07-30T0${i}:00:00Z`, altitude: 60 + d }),
+    );
+    const summary = elevationSummary(jitter);
+
+    expect(summary.show).toBe(false);
+    expect(summary.range).toBeNull();
+  });
+
+  it('handles a day with no vertical fixes at all', () => {
+    const summary = elevationSummary([
+      ping({ timestamp: '2026-07-30T04:00:00Z' }),
+      ping({ timestamp: '2026-07-30T04:01:00Z' }),
+    ]);
+
+    expect(summary.show).toBe(false);
+    expect(summary.range).toBeNull();
+    expect(summary.points).toEqual([]);
+  });
+
+  it('dashes across a nulled home interval rather than inventing a level', () => {
+    // ISSUE-229's load-bearing consequence: with the sentinel gone the home
+    // stint is simply unsampled, so the strip breaks its line there the way
+    // the map does — the alternative, carrying the last reading forward, would
+    // draw a flat line asserting a measurement nobody took.
+    const day = [
+      ping({ timestamp: '2026-07-30T04:00:00Z', altitude: 40 }),
+      ping({ timestamp: '2026-07-30T04:00:30Z', altitude: 300 }),
+      ping({ timestamp: '2026-07-30T04:01:00Z', altitude: 620 }),
+      // Home: declared points, arriving with no altitude at all.
+      ...[0, 1, 2, 3].map((i) => ping({ timestamp: `2026-07-30T0${5 + i}:00:00Z` })),
+      ping({ timestamp: '2026-07-30T12:00:00Z', altitude: 610 }),
+      ping({ timestamp: '2026-07-30T12:00:30Z', altitude: 280 }),
+      ping({ timestamp: '2026-07-30T12:01:00Z', altitude: 35 }),
+    ];
+    const { solid, sparse } = buildElevationPath(elevationSummary(day).points, 100, 40);
+
+    // One dashed connector across the gap, and the two sampled runs either
+    // side of it drawn solid.
+    expect(sparse.match(/M/g)).toHaveLength(1);
+    expect(solid.match(/M/g)).toHaveLength(2);
+  });
+
+  it('draws nothing for a day that never left the neighbourhood', () => {
+    // ISSUE-229: the home plateau used to arrive as a run of -1s, and its
+    // ~100 m spread against the real terrain passed the gate on a fabricated
+    // constant. With the sentinel nulled at ingest the day is its own modest
+    // spread and draws nothing, which is the signal the gate exists to give.
+    const neighbourhood = [0, 1, 2, 3, 4, 5].map((i) =>
+      ping({ timestamp: `2026-07-30T1${i}:00:00Z`, altitude: 100 + i * 8 }),
+    );
+
+    expect(elevationSummary(neighbourhood).show).toBe(false);
   });
 });

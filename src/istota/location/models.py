@@ -85,3 +85,10 @@ class LocationPing:
     # which mints none) needs no change. NULL for every ping that predates
     # the native client.
     client_id: str | None = None
+    # Device-reported accuracy of the vertical fix, in metres. Negative is
+    # iOS's "the altitude is invalid" signal, which the ingest acts on.
+    vertical_accuracy: float | None = None
+    # True when the point is a coordinate the client *declared* (its
+    # wifi-zone feature) rather than a fix it measured. Such a point has no
+    # altitude at all — see ISSUE-229.
+    wifi_zone: bool = False

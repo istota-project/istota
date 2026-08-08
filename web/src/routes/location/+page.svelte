@@ -10,6 +10,7 @@
     type DaySummaryStop,
   } from '$lib/api';
   import { segmentTrips, type Trip } from '$lib/location-path';
+  import { elevationSummary } from '$lib/location-elevation';
   import {
     locationPlaces,
     mapFlyTo,
@@ -29,6 +30,10 @@
   // Trips are derived from the same filtered-ping pipeline the map draws, so
   // each trip is one continuous line between stops (no separate backend call).
   let trips = $derived<Trip[]>(segmentTrips(pings));
+  // The strip lives behind "Show details", so the page needs its verdict twice
+  // over before the strip itself is mounted: for the toggle's availability and
+  // for the stats-bar figure that says the day has a profile at all.
+  let elevation = $derived(elevationSummary(pings));
   let loading = $state(true);
   let error = $state('');
   let pollInterval: ReturnType<typeof setInterval> | undefined;
@@ -111,7 +116,7 @@
   }
 
   let hasDetails = $derived(
-    (summary?.stops.length ?? 0) > 0 || trips.length > 0 || pings.length > 1,
+    (summary?.stops.length ?? 0) > 0 || trips.length > 0 || pings.length > 1 || elevation.show,
   );
 
   async function loadData() {
@@ -190,8 +195,6 @@
       />
     </div>
 
-    <ElevationProfile {pings} />
-
     <div class="stats-bar">
       {#if currentLabel}
         <span class="current">
@@ -228,6 +231,10 @@
       {#if trips.length > 0}
         <span class="stat">{trips.length} trips</span>
       {/if}
+      {#if elevation.range}
+        <span class="stat">{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
+        >
+      {/if}
       {#if hasDetails}
         <button class="stops-btn" onclick={() => (panelOpen = !panelOpen)} type="button">
           {panelOpen ? 'Hide details' : 'Show details'}
@@ -243,6 +250,7 @@
         onStopClick={handleStopClick}
         onTripClick={handleTripClick}
       />
+      <ElevationProfile summary={elevation} />
     {/if}
   {/if}
 </div>
