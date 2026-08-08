@@ -2542,15 +2542,16 @@ def _validate_advisor_model(config: "Config") -> None:
 
     1. A ``:effort`` modifier — the CLI's ``--advisor`` flag takes no effort,
        so it's silently dropped at resolution time (``resolve_model_name``).
-    2. Set under a non-anthropic ``brain.kind`` (``native``) with no anthropic
-       ``fallback`` configured — the advisor tool can never run for this task.
+    2. Set under a non-anthropic ``brain.kind`` (``native``) — the advisor tool
+       can never run for this task. The executor only ever resolves `advisor`
+       for the *primary* brain when its namespace is anthropic; a configured
+       fallback brain doesn't change that (`_run_fallback` only ever *drops* an
+       inherited advisor crossing into native, it never adds one crossing back
+       out), so this warns regardless of `fallback`.
     3. A value that resolves to no concrete model (the ``"default"`` alias:
        ``DEFAULT_ALIASES["default"] = (None, None)``) — the CLI hard-errors on
        ``--advisor default`` rather than degrading, so this is worth flagging
        before the first task hits it.
-
-    Called after ``_validate_brain_fallback`` so a misconfigured fallback has
-    already been neutralized to whatever value will actually be used.
     """
     raw = (config.advisor_model or "").strip()
     if not raw:
@@ -2568,13 +2569,12 @@ def _validate_advisor_model(config: "Config") -> None:
         )
 
     if config.brain.kind not in _ANTHROPIC_BRAIN_KINDS:
-        if config.brain.fallback not in _ANTHROPIC_BRAIN_KINDS:
-            _logger.warning(
-                "advisor_model=%r is set but brain.kind=%r has no anthropic "
-                "fallback configured; the advisor tool is Anthropic-only and "
-                "will never run for this task",
-                raw, config.brain.kind,
-            )
+        _logger.warning(
+            "advisor_model=%r is set but brain.kind=%r is not an anthropic-"
+            "namespace brain; the advisor tool is Anthropic-only and will "
+            "never run for this task",
+            raw, config.brain.kind,
+        )
 
     from .brain.claude_code import ClaudeCodeBrain
 

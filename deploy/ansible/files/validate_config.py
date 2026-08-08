@@ -281,9 +281,12 @@ def main() -> int:
     # advisor_model — shape-only (a pairing table lives in the CLI's own model
     # catalog, not here; see istota.config._validate_advisor_model, which
     # load_config below runs too). A non-string is a real misconfiguration; a
-    # native primary with no anthropic fallback can never run the advisor tool
-    # at all, but that's a WARNING, not a failed play — the operator may be
-    # mid-rollout onto native with the advisor left set from a claude_code past.
+    # non-anthropic primary can never run the advisor tool at all — the
+    # executor only ever resolves `advisor` for the primary brain when its
+    # namespace is anthropic, and a configured fallback doesn't change that
+    # (a native->anthropic fallback never picks one up) — but that's a
+    # WARNING, not a failed play — the operator may be mid-rollout onto
+    # native with the advisor left set from a claude_code past.
     advisor_model = raw.get("advisor_model", "")
     if not isinstance(advisor_model, str):
         print(
@@ -293,14 +296,13 @@ def main() -> int:
         )
         return 1
     if advisor_model.strip() and kind not in ("claude_code", "tmux_claude"):
-        if fallback_kind not in ("claude_code", "tmux_claude"):
-            print(
-                f"validate_config: advisor_model={advisor_model!r} is set but "
-                f"brain.kind={kind!r} has no anthropic fallback configured; "
-                "the advisor tool is Anthropic-only and will never run for "
-                "this task (warning only, not failing the play)",
-                file=sys.stderr,
-            )
+        print(
+            f"validate_config: advisor_model={advisor_model!r} is set but "
+            f"brain.kind={kind!r} is not an anthropic-namespace brain; "
+            "the advisor tool is Anthropic-only and will never run for "
+            "this task (warning only, not failing the play)",
+            file=sys.stderr,
+        )
 
     try:
         c = load_config(cfg_path)

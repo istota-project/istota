@@ -1580,7 +1580,7 @@ class TestAnsibleValidateConfigScript:
         assert proc.returncode == 1
         assert "advisor_model must be a string" in proc.stderr
 
-    def test_advisor_model_under_native_no_fallback_warns_not_fails(self, tmp_path):
+    def test_advisor_model_under_native_warns_not_fails(self, tmp_path):
         cfg = (
             'bot_name = "Test"\n'
             'db_path = "/srv/app/istota/data/istota.db"\n'
@@ -1591,9 +1591,12 @@ class TestAnsibleValidateConfigScript:
         )
         proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
         assert proc.returncode == 0, proc.stderr
-        assert "no anthropic fallback configured" in proc.stderr
+        assert "not an anthropic-namespace brain" in proc.stderr
 
-    def test_advisor_model_under_native_with_anthropic_fallback_is_silent(self, tmp_path):
+    def test_advisor_model_under_native_still_warns_with_anthropic_fallback(self, tmp_path):
+        # A fallback doesn't rescue the setting: the executor only ever
+        # resolves `advisor` for the primary brain when its namespace is
+        # anthropic, and a native->anthropic fallback never picks one up.
         cfg = (
             'bot_name = "Test"\n'
             'db_path = "/srv/app/istota/data/istota.db"\n'
@@ -1604,7 +1607,7 @@ class TestAnsibleValidateConfigScript:
         )
         proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
         assert proc.returncode == 0, proc.stderr
-        assert "advisor_model" not in proc.stderr
+        assert "not an anthropic-namespace brain" in proc.stderr
 
     def test_advisor_model_under_claude_code_is_silent(self, tmp_path):
         cfg = (

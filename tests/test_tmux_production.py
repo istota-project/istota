@@ -101,6 +101,17 @@ class TestFlagHelper:
         assert "--model" in flags and "--disallowedTools" in flags
         assert any("unsupported_flag" in r.message for r in caplog.records)
 
+    def test_advisor_unsupported_flag_dropped_and_warned(self, tmp_path, caplog):
+        # --advisor is gated through advisor_active(req) then _add, same as
+        # every other flag — an unsupported --advisor drops (with the same
+        # operator-facing WARNING) rather than silently vanishing pre-_add.
+        claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
+        req = _req(tmp_path, allowed_tools=["Bash"], advisor="claude-opus-5")
+        with caplog.at_level(logging.WARNING):
+            flags = build_claude_cli_flags(req, unsupported=frozenset({"--advisor"}))
+        assert "--advisor" not in flags
+        assert any("unsupported_flag" in r.message for r in caplog.records)
+
     def test_unsupported_warning_is_once_per_process(self, tmp_path, caplog):
         claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
         req = _req(tmp_path, model="claude-opus-4-8")
@@ -674,6 +685,21 @@ class TestAdvisorEnvTmux:
 
     def test_disable_var_set_when_advisor_but_text_only(self, monkeypatch, tmp_path):
         env = self._run_to_session_env(monkeypatch, tmp_path, advisor="claude-opus-5")
+        assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
+
+    def test_disable_var_set_when_advisor_flag_unsupported(self, monkeypatch, tmp_path):
+        # If a future readiness check finds the interactive TUI accepts but
+        # ignores --advisor, Stage 2 adds it to _TMUX_UNSUPPORTED_FLAGS —
+        # build_claude_cli_flags then drops the flag from argv via _add. The
+        # disable var must track that: an unsupported --advisor still means
+        # "no advisor will actually run," so the settings-file channel must
+        # close too, or a dropped-but-silent flag leaves both channels open.
+        import istota.brain.tmux_claude as mod
+
+        monkeypatch.setattr(mod, "_TMUX_UNSUPPORTED_FLAGS", frozenset({"--advisor"}))
+        env = self._run_to_session_env(
+            monkeypatch, tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"]
+        )
         assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
 
 

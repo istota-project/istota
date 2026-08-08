@@ -50,7 +50,7 @@ class TestAdvisorModelEffortModifierWarns:
         assert not any("advisor_model" in r.message for r in caplog.records)
 
 
-class TestAdvisorModelNativeNoFallbackWarns:
+class TestAdvisorModelNativeKindWarns:
     def test_native_kind_no_fallback_warns(self, tmp_path, caplog):
         cfg = tmp_path / "config.toml"
         cfg.write_text(textwrap.dedent("""
@@ -68,7 +68,13 @@ class TestAdvisorModelNativeNoFallbackWarns:
             for r in caplog.records
         )
 
-    def test_native_kind_with_anthropic_fallback_does_not_warn(self, tmp_path, caplog):
+    def test_native_kind_warns_even_with_an_anthropic_fallback(self, tmp_path, caplog):
+        # The executor only ever resolves `advisor` for the *primary* brain
+        # when its namespace is anthropic; _run_fallback only ever drops an
+        # inherited advisor crossing into native, it never adds one crossing
+        # back out on a native->anthropic fallback. So an anthropic fallback
+        # doesn't rescue the setting — it stays just as dead, and the warning
+        # still fires.
         cfg = tmp_path / "config.toml"
         cfg.write_text(textwrap.dedent("""
             advisor_model = "opus"
@@ -78,8 +84,8 @@ class TestAdvisorModelNativeNoFallbackWarns:
         """))
         with caplog.at_level(logging.WARNING):
             load_config(cfg)
-        assert not any(
-            "advisor_model" in r.message and "no anthropic fallback" in r.message
+        assert any(
+            "advisor_model" in r.message and "native" in r.message
             for r in caplog.records
         )
 
@@ -92,10 +98,7 @@ class TestAdvisorModelNativeNoFallbackWarns:
         """))
         with caplog.at_level(logging.WARNING):
             load_config(cfg)
-        assert not any(
-            "advisor_model" in r.message and "no anthropic fallback" in r.message
-            for r in caplog.records
-        )
+        assert not any("advisor_model" in r.message for r in caplog.records)
 
     def test_empty_advisor_model_never_warns(self, tmp_path, caplog):
         cfg = tmp_path / "config.toml"

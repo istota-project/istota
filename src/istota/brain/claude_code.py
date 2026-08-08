@@ -581,18 +581,34 @@ def _is_root() -> bool:
 _WARNED_UNSUPPORTED_FLAGS: set[str] = set()
 
 
-def advisor_active(req: BrainRequest) -> bool:
-    """True iff ``build_claude_cli_flags`` will emit ``--advisor`` for this
-    request: an advisor is set, and there are tools for it to have judgement
-    moments about (a text-only call has none — see ``build_claude_cli_flags``).
+def advisor_active(
+    req: BrainRequest, *, unsupported: frozenset[str] = frozenset()
+) -> bool:
+    """True iff ``--advisor`` will actually reach the model for this request:
+    an advisor is set, there are tools for it to have judgement moments about
+    (a text-only call has none — see ``build_claude_cli_flags``), and
+    ``--advisor`` itself isn't in ``unsupported`` (the tmux brain's
+    target-CLI-surface dropped-flag set — pass ``_TMUX_UNSUPPORTED_FLAGS``
+    there so a future "the interactive TUI accepts but ignores --advisor"
+    finding doesn't reopen the settings-file channel it was meant to close).
 
-    The single predicate both ``ClaudeCodeBrain`` and ``TmuxClaudeBrain`` use
-    to decide whether to also set ``CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`` in the
-    child env, so the two are structurally exclusive: either the flag fires,
-    or the settings-file channel is suppressed — never both, never neither
-    (advisor-model spec, "Env exclusivity" test).
+    ``build_claude_cli_flags`` itself calls this with the default empty
+    ``unsupported`` — it always attempts ``_add("--advisor", ...)`` like every
+    other flag and lets ``_add``'s own ``unsupported`` check drop it (with the
+    same operator-facing WARNING every other dropped flag gets). The
+    ``unsupported``-aware form is for the env-suppression decision in
+    ``ClaudeCodeBrain.execute`` / ``TmuxClaudeBrain``'s session env, which sits
+    outside flag-building and has no ``_add`` to fall back on: it must decide
+    for itself whether the flag will land, so the two stay structurally
+    exclusive — either the flag fires, or the settings-file channel is
+    suppressed, never both, never neither (advisor-model spec, "Env
+    exclusivity" test).
     """
-    return bool(req.advisor) and bool(req.allowed_tools)
+    return (
+        bool(req.advisor)
+        and bool(req.allowed_tools)
+        and "--advisor" not in unsupported
+    )
 
 
 def build_claude_cli_flags(
@@ -655,6 +671,10 @@ def build_claude_cli_flags(
         _add("--model", req.model)
     if req.effort:
         _add("--effort", req.effort)
+    # Unconditional call, like --model/--effort above: _add itself drops an
+    # unsupported flag (and warns once) rather than advisor_active silently
+    # pre-filtering it, so the operator-facing "dropped a flag" WARNING still
+    # fires for --advisor exactly like every other flag.
     if advisor_active(req):
         _add("--advisor", req.advisor)
     if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():

@@ -685,10 +685,13 @@ class TmuxClaudeBrain:
                 env["IS_SANDBOX"] = "1"
             # Same settings-file suppression as ClaudeCodeBrain (advisor-model
             # spec, Stage 1) — the RO-bound ~/.claude/settings.json reaches this
-            # pane too. advisor_active(req) is the same predicate
-            # build_claude_cli_flags uses for --advisor, so the two stay
-            # structurally exclusive.
-            if not advisor_active(req):
+            # pane too. advisor_active(req, unsupported=_TMUX_UNSUPPORTED_FLAGS)
+            # is the same predicate build_claude_cli_flags uses for --advisor
+            # (passed the same unsupported set), so the two stay structurally
+            # exclusive even if a future finding adds "--advisor" to that set —
+            # a flag the target CLI surface silently drops must not leave both
+            # channels closed.
+            if not advisor_active(req, unsupported=_TMUX_UNSUPPORTED_FLAGS):
                 env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
             self._new_session(session, env)
             self._launch_claude(session, req, base_dir)
