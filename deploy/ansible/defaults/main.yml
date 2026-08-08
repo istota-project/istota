@@ -62,7 +62,7 @@ istota_models_aliases:
       effort: "medium"
   smart:
     anthropic:
-      model: "claude-opus-4-8"
+      model: "claude-opus-5"
       effort: "high"
     openai_compat:
       model: "{{ istota_brain_native_model }}"

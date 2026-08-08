@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The `smart` model tier and the bare `opus` shortcut now resolve to Opus 5 instead of Opus 4.8. A deployment that pins its own model under `[models.aliases]` is unaffected.
+
 - The elevation profile has moved in behind "Show details", under the day's stops and trips. It was taking vertical space under the map on every visit for a reading that is supplementary. The day's elevation spread now sits in the stats bar beside the ping and stop counts, so you can see there is a profile to look at without opening the panel.
 
 - The chat sidebar is ordered by latest activity, with the room you last heard from at the top. It used to be fixed in creation order, so a busy room sat wherever it happened to have been made and a long list had to be read to find it. A room moves the moment a message lands in it, whoever sent it and whichever surface it came from; a room nobody has spoken in yet sorts by when it was created, so a new one still appears near the top.

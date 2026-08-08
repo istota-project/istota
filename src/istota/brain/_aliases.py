@@ -8,7 +8,7 @@ model names. They are semantic intents, not provider IDs: ``smart`` means "the
 best model this brain has" regardless of which brain is loaded. Every brain MUST
 resolve every canonical role to a real model in its own namespace (its
 ``DEFAULT_ALIASES`` + overrides) — a contract test enforces this. Shortcuts
-(``opus`` / ``sonnet`` / ``haiku``) and raw canonical IDs (``claude-opus-4-8``)
+(``opus`` / ``sonnet`` / ``haiku``) and raw canonical IDs (``claude-opus-5``)
 are NOT portable: they bind to one provider and are meaningless to a
 different-provider fallback brain.
 
@@ -21,7 +21,7 @@ fallback brain's own default (non-portable → the explicit pin can't cross).
 axis on every surface (``task.effort``, ``!room effort``, the ``{model,
 effort}`` alias-target shape). ``split_effort`` peels a trailing ``:<effort>``
 off any model reference so effort composes on canonical ids, tiers, and
-shortcuts alike (``opus:high``, ``smart:low``, ``claude-opus-4-8:xhigh``),
+shortcuts alike (``opus:high``, ``smart:low``, ``claude-opus-5:xhigh``),
 instead of being baked into a hand-maintained ``opus-high`` cross-product.
 """
 
@@ -46,7 +46,7 @@ def split_effort(raw: str) -> tuple[str, str | None]:
     known effort level and ``base`` is non-empty. Otherwise the whole string is
     returned as the base with no effort. Safe for every reference shape:
 
-    - no colon (``claude-opus-4-8``, ``opus``) → ``(raw, None)``
+    - no colon (``claude-opus-5``, ``opus``) → ``(raw, None)``
     - OpenRouter slug (``anthropic/claude-sonnet-4``) → the ``/`` is untouched;
       only a real ``:effort`` tail splits (``…-4:high`` → base + ``high``)
     - bare ``:high`` (empty base) or ``opus:`` (empty/unknown suffix) → ``(raw, None)``

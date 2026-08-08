@@ -8,7 +8,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 |---|---|---|
 | `bot_name` | `"Istota"` | User-facing name (chat, emails, folder names) |
 | `emissaries_enabled` | `true` | Include emissaries.md in system prompts |
-| `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-4-8"`. |
+| `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-5"`. |
 | `effort` | `""` | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` (empty = model default) |
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default |
 | `db_path` | `"data/istota.db"` | SQLite database path |
@@ -179,7 +179,7 @@ Shipped defaults (base names, no baked effort):
 | `opus` / `sonnet` / `haiku` | current-latest of each |
 | `default` | no override (brain/config default) |
 
-Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:high`, `smart:low`, `claude-opus-4-8:xhigh`) — never baked into a name. An alias override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
+Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:high`, `smart:low`, `claude-opus-5:xhigh`) — never baked into a name. An alias override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
 
 ```toml
 # Flat (namespace-agnostic, resolved by whichever brain runs the task):

@@ -566,19 +566,19 @@ class TestChatRoomsApi:
         )).json()
         resp = await chat_client.patch(
             f"/istota/api/chat/rooms/{created['id']}",
-            json={"model": "claude-opus-4-8", "effort": "high"},
+            json={"model": "claude-opus-5", "effort": "high"},
             cookies=cookies, headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["model"] == "claude-opus-4-8"
+        assert body["model"] == "claude-opus-5"
         assert body["effort"] == "high"
         # Surfaced in the room listing too.
         rooms = (await chat_client.get(
             "/istota/api/chat/rooms", cookies=cookies,
         )).json()["rooms"]
         room = next(r for r in rooms if r["id"] == created["id"])
-        assert room["model"] == "claude-opus-4-8"
+        assert room["model"] == "claude-opus-5"
         assert room["effort"] == "high"
 
     async def test_clear_room_model_default(self, chat_client):
@@ -589,7 +589,7 @@ class TestChatRoomsApi:
         )).json()
         await chat_client.patch(
             f"/istota/api/chat/rooms/{created['id']}",
-            json={"model": "claude-opus-4-8"}, cookies=cookies,
+            json={"model": "claude-opus-5"}, cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         resp = await chat_client.patch(
@@ -609,7 +609,7 @@ class TestChatRoomsApi:
         )).json()
         await chat_client.patch(
             f"/istota/api/chat/rooms/{created['id']}",
-            json={"model": "claude-opus-4-8"}, cookies=cookies,
+            json={"model": "claude-opus-5"}, cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         # A name-only edit must not clobber the model default.
@@ -617,7 +617,7 @@ class TestChatRoomsApi:
             f"/istota/api/chat/rooms/{created['id']}", json={"name": "renamed"},
             cookies=cookies, headers={"origin": "https://example.com"},
         )
-        assert resp.json()["model"] == "claude-opus-4-8"
+        assert resp.json()["model"] == "claude-opus-5"
 
     async def test_unknown_model_rejected(self, chat_client):
         cookies = await _login(chat_client, "alice")

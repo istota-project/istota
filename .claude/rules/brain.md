@@ -128,7 +128,7 @@ load. **Hard rename:** the old `[models.roles]` key is no longer read — a stal
 one present logs a one-time migration WARNING (detection only).
 
 ClaudeCodeBrain pins to versioned IDs, base names only:
-- `OPUS = "claude-opus-4-8"` (current default Opus)
+- `OPUS = "claude-opus-5"` (current default Opus)
 - `SONNET = "claude-sonnet-5"`
 - `HAIKU = "claude-haiku-4-5"`
 
@@ -349,7 +349,7 @@ same-attempt rerun already lives there). Three cooperating pieces:
   `split_effort` applied first, so `smart:low` reads portable) decides whether a
   requested model name is a portable *intent* (a canonical tier, or a custom
   alias the operator flagged `portable = true`) that re-resolves in the fallback
-  namespace, or a non-portable pin (shortcut `opus`, canonical `claude-opus-4-8`)
+  namespace, or a non-portable pin (shortcut `opus`, canonical `claude-opus-5`)
   that can't cross the boundary. The executor computes `portable_names` via
   `config_alias_portable_names(config)` (`CANONICAL_ROLES` ∪ declared-portable).
 

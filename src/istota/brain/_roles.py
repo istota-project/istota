@@ -62,7 +62,7 @@ class RoleTarget:
 
     ``model`` is a provider alias, canonical id, or endpoint slug — the brain
     resolves it through its *own* alias table (an ``anthropic`` value like
-    ``opus`` resolves to ``claude-opus-4-8``; an ``openai_compat`` slug passes
+    ``opus`` resolves to ``claude-opus-5``; an ``openai_compat`` slug passes
     through verbatim). ``effort`` is an explicit override that wins over any
     effort a ``:effort`` modifier on the target encodes.
     """
