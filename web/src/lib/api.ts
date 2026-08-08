@@ -1966,6 +1966,21 @@ export interface ChatConfig {
   client_poll_interval_ms: number;
 }
 
+/**
+ * The message a turn replies to, resolved server-side.
+ *
+ * Two shapes in one type, discriminated by `deleted`: a live parent carries its
+ * role and a display excerpt, a hard-deleted one carries only the id it named.
+ * The dead form is kept rather than dropped — the citation records that the
+ * turn had a referent, and erasing it would rewrite the conversation.
+ */
+export interface ReplyCitation {
+  msg_id: number;
+  role?: 'user' | 'assistant' | 'system';
+  excerpt?: string;
+  deleted: boolean;
+}
+
 export interface ChatHistoryMessage {
   role: 'user' | 'assistant' | 'system';
   text: string;
@@ -2000,6 +2015,8 @@ export interface ChatHistoryMessage {
   // Positional against `attachments`: the workspace path to open each chip at,
   // or null for one this user can't be served (see `chatFileUrl`).
   attachment_paths?: (string | null)[];
+  // Present only on a turn that cites a parent.
+  reply_to?: ReplyCitation;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
@@ -2029,7 +2046,22 @@ export interface ChatHistory {
  * `unreachable` send for later and fails a `rejected` one outright, and `auth`
  * is the one failure a retry can never resolve.
  */
-export type SendFailure = 'unreachable' | 'timeout' | 'auth' | 'rate_limit' | 'rejected';
+export type SendFailure =
+  | 'unreachable'
+  | 'timeout'
+  | 'auth'
+  | 'rate_limit'
+  | 'rejected'
+  // The cited parent is gone or was never in this room. Its own member because
+  // the recovery is unlike every other failure's: Retry cannot work (it would
+  // re-POST the same dead id), so the text goes back to the composer instead.
+  | 'reply_target_gone';
+
+/** Trailing options on a send. New fields belong here, not as positionals. */
+export interface SendOptions {
+  /** Canonical `messages.id` this message replies to. */
+  replyToMsgId?: number;
+}
 
 export interface SendResult {
   ok: boolean;
@@ -2273,6 +2305,9 @@ export async function sendChatMessage(
   // is what makes a retry of a send it silently accepted produce one turn
   // rather than two. Optional: omitted, the endpoint behaves as it always did.
   idempotencyKey?: string,
+  // Anything added from here on goes in the options object rather than as a
+  // further positional — six is already more than a call site can read.
+  options: SendOptions = {},
 ): Promise<SendResult> {
   const controller = new AbortController();
   let timedOut = false;
@@ -2292,6 +2327,9 @@ export async function sendChatMessage(
     attachments,
     attachment_names: attachmentNames,
     ...(idempotencyKey ? { client_msg_id: idempotencyKey } : {}),
+    // Only the id: the server reads the parent's text from the row it already
+    // holds, so nothing here can dictate what the model is told it said.
+    ...(options.replyToMsgId ? { reply_to_msg_id: options.replyToMsgId } : {}),
   });
 
   try {
@@ -2339,7 +2377,11 @@ export async function sendChatMessage(
       return {
         ok: false,
         status: resp.status,
-        failure: 'rejected',
+        // A 404 on a send that carried a citation is the server refusing the
+        // *citation*, which the room's own 404 cannot be — the client is
+        // holding that room open. Classified on the intent rather than on the
+        // error sentence, which is prose and not a contract.
+        failure: resp.status === 404 && options.replyToMsgId ? 'reply_target_gone' : 'rejected',
         error: data.error || `error ${resp.status}`,
       };
     }

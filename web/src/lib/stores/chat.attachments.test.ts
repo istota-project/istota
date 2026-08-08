@@ -136,6 +136,7 @@ describe('chat store — attachment chips', () => {
       ['note.txt'],
       undefined, // the default timeout
       expect.any(String), // the idempotency key
+      { replyToMsgId: undefined }, // the trailing options object
     );
   });
 
