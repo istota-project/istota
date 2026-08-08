@@ -83,11 +83,11 @@
     width: fit-content;
     min-width: 0;
   }
-  /* Expanded: span the row but cap at the same 900px as `.body` in Message,
-	   so the open chain aligns with the answer content width. */
+  /* Expanded: span the row but cap at the turn's content width, so the open
+	   chain aligns with the answer beside it. */
   .activity.open {
     width: 100%;
-    max-width: 900px;
+    max-width: var(--chat-body-max);
   }
 
   /* Active sweep while the turn is live (no spinning icon). */

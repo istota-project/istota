@@ -248,6 +248,17 @@
   --chat-gutter: 2.25rem;
   --chat-avatar: 2.1rem;
   --chat-avatar-gap: 0.6rem;
+  /* The readable width of everything in a turn's content column — the prose
+	   body, a command's output, an expanded activity chain, the citation above a
+	   reply. The row itself stays full-width so the hover highlight spans it. A
+	   token because the first three carried the literal separately across two
+	   files, agreeing only by a comment saying they must; the citation is the
+	   fourth and reads the token from the start. `px` for the reason
+	   `--content-max` is: it bounds the column
+	   rather than the type inside it, so it should not widen at the large
+	   text-scale setting, which is the setting picked to make lines easier to
+	   follow. */
+  --chat-body-max: 900px;
   /* Device safe-area insets — the rounded screen corners, the notch, and the
 	   home-indicator strip. Non-zero only because app.html opts into
 	   `viewport-fit=cover`; without that the browser letterboxes the page for us
