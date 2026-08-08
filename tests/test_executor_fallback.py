@@ -35,6 +35,11 @@ class _FakeBrain:
         self._resolve_map = resolve_map or {}
         # name -> (model, effort) — the fallback brain's namespace resolution.
         self._resolve_alias_map = resolve_alias_map or {}
+        # Mirrors the real brains: claude_code/tmux_claude share "anthropic",
+        # native is "openai_compat".
+        self.model_namespace = (
+            "anthropic" if kind in ("claude_code", "tmux_claude") else "openai_compat"
+        )
 
     def execute(self, req):
         self.calls += 1

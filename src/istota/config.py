@@ -992,6 +992,7 @@ class Config:
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
     model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-5") rather than a floating alias so upgrades are explicit. Empty = brain default
     effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Support varies by model
+    advisor_model: str = ""  # Advisor model ID or alias (anthropic-namespace brains only); resolved through the alias table like `model`, but carries no effort. Empty = no advisor. Dropped whenever a task pins its own model (see executor._resolve_advisor). Must resolve to a model capable of *being* an advisor — a weak/cheap tier (e.g. haiku) fails every task the advisor runs on; Istota does not validate this (no pairing table — see the spec's "Not doing")
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
@@ -1727,6 +1728,15 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "effort" in data:
         config.effort = data["effort"]
+
+    if "advisor_model" in data:
+        if isinstance(data["advisor_model"], str):
+            config.advisor_model = data["advisor_model"]
+        else:
+            logging.getLogger("istota.config").warning(
+                "advisor_model must be a string, got %s; ignoring",
+                type(data["advisor_model"]).__name__,
+            )
 
     if "max_memory_chars" in data:
         config.max_memory_chars = data["max_memory_chars"]
@@ -2522,8 +2532,65 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     _validate_brain_fallback(config)
+    _validate_advisor_model(config)
 
     return config
+
+
+# Anthropic-namespace brain kinds — the only ones the advisor tool can ever
+# reach (it's an Anthropic Messages beta tool with no wire over openai_compat).
+_ANTHROPIC_BRAIN_KINDS = frozenset({"claude_code", "tmux_claude"})
+
+
+def _validate_advisor_model(config: "Config") -> None:
+    """Warn-and-ignore checks for ``advisor_model`` — never fails load, matching
+    ``[models]``. Three independent traps, each a WARNING only:
+
+    1. A ``:effort`` modifier — the CLI's ``--advisor`` flag takes no effort,
+       so it's silently dropped at resolution time (``resolve_model_name``).
+    2. Set under a non-anthropic ``brain.kind`` (``native``) — the advisor tool
+       can never run for this task. The executor only ever resolves `advisor`
+       for the *primary* brain when its namespace is anthropic; a configured
+       fallback brain doesn't change that (`_run_fallback` only ever *drops* an
+       inherited advisor crossing into native, it never adds one crossing back
+       out), so this warns regardless of `fallback`.
+    3. A value that resolves to no concrete model (the ``"default"`` alias:
+       ``DEFAULT_ALIASES["default"] = (None, None)``) — the CLI hard-errors on
+       ``--advisor default`` rather than degrading, so this is worth flagging
+       before the first task hits it.
+    """
+    raw = (config.advisor_model or "").strip()
+    if not raw:
+        return
+    _logger = logging.getLogger("istota.config")
+
+    from .brain._aliases import split_effort
+
+    base, suffix_effort = split_effort(raw)
+    if suffix_effort:
+        _logger.warning(
+            "advisor_model=%r carries a :%s effort modifier; the --advisor CLI "
+            "flag takes no effort, so it is dropped at resolution time",
+            raw, suffix_effort,
+        )
+
+    if config.brain.kind not in _ANTHROPIC_BRAIN_KINDS:
+        _logger.warning(
+            "advisor_model=%r is set but brain.kind=%r is not an anthropic-"
+            "namespace brain; the advisor tool is Anthropic-only and will "
+            "never run for this task",
+            raw, config.brain.kind,
+        )
+
+    from .brain.claude_code import ClaudeCodeBrain
+
+    pair = ClaudeCodeBrain().resolve_alias(base)
+    if pair is not None and pair[0] is None:
+        _logger.warning(
+            "advisor_model=%r resolves to no concrete model (e.g. the "
+            '"default" alias); the CLI will reject it as an --advisor value',
+            raw,
+        )
 
 
 def _validate_brain_fallback(config: "Config") -> None:

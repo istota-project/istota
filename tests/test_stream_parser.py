@@ -196,6 +196,26 @@ class TestParseStreamLine:
         assert isinstance(event, TextEvent)
         assert event.text == "Let me check your calendar."
 
+    def test_assistant_advisor_tool_result_block_ignored_text_still_lands(self):
+        # advisor-model spec regression: an `advisor_tool_result` content block
+        # (the server-side advisor tool's output) hits no branch in the
+        # block_type if/elif chain and must not raise or swallow a sibling
+        # text block. Locks in today's tolerant dispatch so a future
+        # strict-dispatch refactor can't silently break the advisor path.
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "advisor_tool_result", "content": "consult the user"},
+                    {"type": "text", "text": "Let me check your calendar."},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, TextEvent)
+        assert event.text == "Let me check your calendar."
+
     def test_assistant_tool_use_preferred_over_text(self):
         """When both tool_use and text blocks exist, tool_use takes priority."""
         line = self._make_line({

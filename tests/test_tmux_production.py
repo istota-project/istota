@@ -101,6 +101,17 @@ class TestFlagHelper:
         assert "--model" in flags and "--disallowedTools" in flags
         assert any("unsupported_flag" in r.message for r in caplog.records)
 
+    def test_advisor_unsupported_flag_dropped_and_warned(self, tmp_path, caplog):
+        # --advisor is gated through advisor_active(req) then _add, same as
+        # every other flag — an unsupported --advisor drops (with the same
+        # operator-facing WARNING) rather than silently vanishing pre-_add.
+        claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
+        req = _req(tmp_path, allowed_tools=["Bash"], advisor="claude-opus-5")
+        with caplog.at_level(logging.WARNING):
+            flags = build_claude_cli_flags(req, unsupported=frozenset({"--advisor"}))
+        assert "--advisor" not in flags
+        assert any("unsupported_flag" in r.message for r in caplog.records)
+
     def test_unsupported_warning_is_once_per_process(self, tmp_path, caplog):
         claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
         req = _req(tmp_path, model="claude-opus-4-8")
@@ -639,6 +650,81 @@ class TestRootSandboxEnv:
         monkeypatch.setattr(brain, "_capture", lambda *a: "")
         brain._run_session(_req(tmp_path, env={"IS_SANDBOX": "custom"}), attempt=0)
         assert captured.get("IS_SANDBOX") == "custom"
+
+
+class TestAdvisorEnvTmux:
+    """Same settings-file suppression as ClaudeCodeBrain (advisor-model spec,
+    Stage 1), but the var goes into the tmux session env (`-e` on `new-session`)
+    rather than a subprocess env= — the interactive TUI runs inside the pane,
+    not as a direct child of the brain."""
+
+    def _run_to_session_env(self, monkeypatch, tmp_path, *, advisor="", allowed_tools=()):
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session",
+                            lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)  # bail after launch
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(
+            _req(tmp_path, advisor=advisor, allowed_tools=list(allowed_tools)),
+            attempt=0,
+        )
+        return captured
+
+    def test_disable_var_set_when_no_advisor(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(monkeypatch, tmp_path)
+        assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
+
+    def test_disable_var_absent_when_advisor_active(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(
+            monkeypatch, tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"]
+        )
+        assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in env
+
+    def test_inherited_disable_var_is_popped_when_advisor_active(self, monkeypatch, tmp_path):
+        # req.env isn't guaranteed clean (a passthrough env var, or a shared
+        # dict from dataclasses.replace) — the positive branch must pop an
+        # already-present disable var, not leave it sitting alongside --advisor.
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session",
+                            lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(
+            _req(
+                tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"],
+                env={
+                    "CLAUDE_CODE_OAUTH_TOKEN": "tok",
+                    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
+                },
+            ),
+            attempt=0,
+        )
+        assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in captured
+
+    def test_disable_var_set_when_advisor_but_text_only(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(monkeypatch, tmp_path, advisor="claude-opus-5")
+        assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
+
+    def test_disable_var_set_when_advisor_flag_unsupported(self, monkeypatch, tmp_path):
+        # If a future readiness check finds the interactive TUI accepts but
+        # ignores --advisor, Stage 2 adds it to _TMUX_UNSUPPORTED_FLAGS —
+        # build_claude_cli_flags then drops the flag from argv via _add. The
+        # disable var must track that: an unsupported --advisor still means
+        # "no advisor will actually run," so the settings-file channel must
+        # close too, or a dropped-but-silent flag leaves both channels open.
+        import istota.brain.tmux_claude as mod
+
+        monkeypatch.setattr(mod, "_TMUX_UNSUPPORTED_FLAGS", frozenset({"--advisor"}))
+        env = self._run_to_session_env(
+            monkeypatch, tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"]
+        )
+        assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
 
 
 class TestSessionLabel:

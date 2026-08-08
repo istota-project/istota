@@ -1568,6 +1568,73 @@ class TestAnsibleValidateConfigScript:
         proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
         assert proc.returncode == 0, proc.stderr
 
+    def test_advisor_model_non_string_fails(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/app/istota/data/istota.db"\n'
+            'temp_dir = "/srv/app/istota/tmp"\n'
+            "advisor_model = 5\n"
+            "\n[brain]\nkind = \"claude_code\"\n"
+        )
+        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
+        assert proc.returncode == 1
+        assert "advisor_model must be a string" in proc.stderr
+
+    def test_advisor_model_under_native_warns_not_fails(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/app/istota/data/istota.db"\n'
+            'temp_dir = "/srv/app/istota/tmp"\n'
+            'advisor_model = "opus"\n'
+            "\n[brain]\nkind = \"native\"\n"
+            "\n[brain.native]\nmodel = \"anthropic/claude-opus-4.8\"\n"
+        )
+        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
+        assert proc.returncode == 0, proc.stderr
+        assert "not an anthropic-namespace brain" in proc.stderr
+
+    def test_advisor_model_under_native_still_warns_with_anthropic_fallback(self, tmp_path):
+        # A fallback doesn't rescue the setting: the executor only ever
+        # resolves `advisor` for the primary brain when its namespace is
+        # anthropic, and a native->anthropic fallback never picks one up.
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/app/istota/data/istota.db"\n'
+            'temp_dir = "/srv/app/istota/tmp"\n'
+            'advisor_model = "opus"\n'
+            "\n[brain]\nkind = \"native\"\nfallback = \"claude_code\"\n"
+            "\n[brain.native]\nmodel = \"anthropic/claude-opus-4.8\"\n"
+        )
+        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
+        assert proc.returncode == 0, proc.stderr
+        assert "not an anthropic-namespace brain" in proc.stderr
+
+    def test_advisor_model_under_claude_code_is_silent(self, tmp_path):
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/app/istota/data/istota.db"\n'
+            'temp_dir = "/srv/app/istota/tmp"\n'
+            'advisor_model = "opus"\n'
+            "\n[brain]\nkind = \"claude_code\"\n"
+        )
+        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
+        assert proc.returncode == 0, proc.stderr
+        assert "advisor_model" not in proc.stderr
+
+    def test_advisor_model_with_no_brain_kind_is_silent(self, tmp_path):
+        # BrainConfig.kind defaults to "claude_code" — an omitted [brain]/kind
+        # key must not read as brain.get("kind") is None and trip the
+        # not-anthropic warning for a perfectly working default deployment.
+        cfg = (
+            'bot_name = "Test"\n'
+            'db_path = "/srv/app/istota/data/istota.db"\n'
+            'temp_dir = "/srv/app/istota/tmp"\n'
+            'advisor_model = "opus"\n'
+        )
+        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
+        assert proc.returncode == 0, proc.stderr
+        assert "advisor_model" not in proc.stderr
+
 
 class TestApplyUserResources:
     """`_apply_user_resources` overlays DB resource rows onto loaded UserConfig.

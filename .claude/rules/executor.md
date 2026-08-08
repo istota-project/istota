@@ -116,6 +116,17 @@ def build_prompt(
 | Developer | `GITHUB_API_CMD` | Path to API wrapper script (if enabled + token set) |
 | Developer | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth (if enabled + token set) |
 
+The sandbox RO-binds the host's real `~/.claude/settings.json` back into the
+tmpfs'd `~/.claude` (`build_bwrap_cmd`), and the six direct brain callers
+(`.claude/rules/brain.md` § Direct-caller availability) pass the daemon's own
+environment through unsandboxed — so any Claude Code setting that changes
+model behaviour is inherited on both paths unless something explicitly
+neutralises it. The advisor tool (`advisorModel` in settings) is the first one
+Istota takes a position on: `ClaudeCodeBrain` / `TmuxClaudeBrain` set
+`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` in the child env whenever the request
+won't itself emit `--advisor`, closing the inherited channel on every
+`BrainRequest` path at once (advisor-model spec, Stage 1).
+
 ## Brain invocation
 The executor no longer spawns `claude` directly — it composes a `BrainRequest`
 and calls `make_brain(config.brain).execute(req)`. The brain owns command
@@ -127,6 +138,16 @@ Per-task BrainRequest fields the executor populates:
 - `prompt`, `allowed_tools` (from `build_allowed_tools`), `cwd=config.temp_dir`,
   `env` (built per task), `timeout_seconds=config.scheduler.task_timeout_minutes * 60`
 - `model = (task.model or config.model)`, `effort = (task.effort or config.effort)`
+- `advisor = brain.resolve_model_name(_resolve_advisor(task, config))` when
+  `brain.model_namespace == "anthropic"`, else `""`. `_resolve_advisor` returns
+  `config.advisor_model` unless `task.model` is set (a per-task model pin drops
+  the advisor: the CLI's fatal advisor-gate check is "does the *main* model
+  support the advisor tool at all," which is pin-dependent — a genuine
+  capability mismatch between two otherwise-advisor-capable models only warns
+  and the task still completes, mirroring `_resolve_effort`'s pin-drop rule
+  one severity up). `_run_fallback` carries `advisor` across an
+  anthropic→anthropic reroute and drops it on anthropic→native (advisor-model
+  spec, Stage 3).
 - `custom_system_prompt_path = config/system-prompt.md` when `custom_system_prompt = true`
 - `streaming = event_writer is not None`
 - `on_progress = _on_brain_event`: closure that maps the widened `StreamEvent`

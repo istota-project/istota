@@ -33,6 +33,13 @@ class BrainRequest:
     model: str = ""
     effort: str = ""
 
+    # Advisor model (anthropic-namespace brains only; empty = no advisor).
+    # A canonical model ID, resolved the same way as `model`. When empty, the
+    # brain suppresses the CLI's own `advisorModel` settings-file channel
+    # (`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`) so a host's `~/.claude/settings.json`
+    # can't turn an advisor on behind this field's back. NativeBrain ignores it.
+    advisor: str = ""
+
     # Optional: override system prompt with a file's contents
     custom_system_prompt_path: Path | None = None
 

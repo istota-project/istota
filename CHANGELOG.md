@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An operator can configure an advisor model that consults on a task without paying for it on every call. The cheap default model runs as usual, and only at the strategic moments Claude Code's own advisor tool decides matter does the stronger model weigh in. A task carrying its own model pin skips the advisor, since a pinned model that doesn't support the advisor tool at all would otherwise fail the whole task. Anthropic-backed brains only.
+
 - Web chat can reply to a specific message. Hover a turn and pick Reply; the composer shows what you are answering, the sent message renders a quote above it that clicks back to the original, and the model is told which message the reply responds to instead of having to guess from an ordered history. A reply into a Nextcloud Talk-bound room lands there as a real Talk reply, and a reply sent from Talk shows as one in web chat.
 
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.

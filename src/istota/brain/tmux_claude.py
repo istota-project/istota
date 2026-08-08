@@ -53,6 +53,7 @@ from .claude_code import (
     API_RETRY_MAX_ATTEMPTS,
     ClaudeCodeBrain,
     _is_root,
+    advisor_active,
     build_claude_cli_flags,
     is_transient_api_error,
     _success_frame_stop_reason,
@@ -682,6 +683,21 @@ class TmuxClaudeBrain:
             # root container fails readiness → fallback (the 14:30 docker repro).
             if _is_root() and "IS_SANDBOX" not in env:
                 env["IS_SANDBOX"] = "1"
+            # Same settings-file suppression as ClaudeCodeBrain (advisor-model
+            # spec, Stage 1) — the RO-bound ~/.claude/settings.json reaches this
+            # pane too. advisor_active(req, unsupported=_TMUX_UNSUPPORTED_FLAGS)
+            # is the same predicate build_claude_cli_flags uses for --advisor
+            # (passed the same unsupported set), so the two stay structurally
+            # exclusive even if a future finding adds "--advisor" to that set —
+            # a flag the target CLI surface silently drops must not leave both
+            # channels closed. Pop rather than leave alone in the positive
+            # branch: env isn't guaranteed clean (req.env may already carry an
+            # inherited disable var), and both present would silently kill the
+            # flag despite it being set.
+            if advisor_active(req, unsupported=_TMUX_UNSUPPORTED_FLAGS):
+                env.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
+            else:
+                env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
             self._new_session(session, env)
             self._launch_claude(session, req, base_dir)
 

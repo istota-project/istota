@@ -10,6 +10,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `emissaries_enabled` | `true` | Include emissaries.md in system prompts |
 | `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-5"`. |
 | `effort` | `""` | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` (empty = model default) |
+| `advisor_model` | `""` | Advisor model — Anthropic-namespace brains only (`claude_code` / `tmux_claude`); resolves through the same alias table as `model` but carries no effort. Must resolve to a model capable of *being* an advisor (a weak/cheap tier fails every task it runs on). Dropped for any task carrying its own model pin (`!model`, `!room model`, a `[[jobs]] model`). |
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default |
 | `db_path` | `"data/istota.db"` | SQLite database path |
 | `rclone_remote` | `"nextcloud"` | rclone remote name |

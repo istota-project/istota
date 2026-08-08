@@ -12,6 +12,9 @@ model = "{{ istota_model }}"
 {% if istota_effort %}
 effort = "{{ istota_effort }}"
 {% endif %}
+{% if istota_advisor_model %}
+advisor_model = "{{ istota_advisor_model }}"
+{% endif %}
 {% if istota_custom_system_prompt %}
 custom_system_prompt = true
 {% endif %}

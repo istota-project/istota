@@ -274,6 +274,34 @@ class TestModelUsed:
         assert result.model_used == "claude-sonnet-4-6"
 
 
+class TestAdvisorIgnored:
+    """advisor-model spec: the advisor tool is an Anthropic Messages beta tool
+    with no wire over openai_compat. NativeBrain reads req.model/req.effort
+    only — BrainRequest.advisor is present (BrainRequest is shared across
+    brains) but never consulted, so setting it changes nothing."""
+
+    def test_advisor_set_does_not_affect_result(self, tmp_path):
+        def _run(advisor):
+            provider = MockProvider(
+                [
+                    AssistantMessage(
+                        content=[TextContent(text="ok")],
+                        usage=Usage(input_tokens=10, output_tokens=2),
+                        stop_reason="end_turn",
+                    )
+                ]
+            )
+            req = _req("hi", tmp_path)
+            req.advisor = advisor
+            return _brain(provider).execute(req)
+
+        without = _run("")
+        with_advisor = _run("claude-opus-5")
+        assert with_advisor.success == without.success
+        assert with_advisor.result_text == without.result_text
+        assert with_advisor.model_used == without.model_used
+
+
 class TestToolUse:
     def test_write_tool_then_completion(self, tmp_path):
         provider = MockProvider(
