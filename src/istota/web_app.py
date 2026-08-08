@@ -3164,7 +3164,9 @@ _SPINE_COLUMNS = (
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  m.attachment_paths AS attachment_paths, "
     "  m.reply_to_message_id AS reply_to_message_id, "
-    "  p.role AS reply_role, p.body AS reply_body "
+    # Truncated here rather than in the dict builder, matching the cross-room
+    # fragment: no read path needs more of the parent than the excerpt cap.
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
     # The cited parent, joined live rather than snapshotted: nothing in the
@@ -3649,6 +3651,21 @@ def _describe_attachment_only_message(attachments: list[str]) -> str:
     return f"(Sent without a message — see attached: {joined})"
 
 
+def _is_own_replay(conn, token: str, client_msg_id: str, username: str) -> bool:
+    """Whether this key already names a turn *this* sender created in this room.
+
+    The same test `record_inbound` applies before it replays, asked one step
+    earlier so the citation check can stand down for a retry. Scoped to the
+    sender for the same reason the replay is: a co-member's reused key resolves
+    to a task this caller is not authorized to read, and that send gives the
+    key up rather than claiming it.
+    """
+    from . import db
+
+    prior = db.find_send_by_client_msg_id(conn, token, client_msg_id)
+    return prior is not None and prior[1] == username
+
+
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
@@ -3678,6 +3695,18 @@ def _chat_create_web_task(
         recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
+        # A retry of a send we already accepted replays that turn, and the
+        # citation question does not arise for it: the parent was valid when
+        # the turn was created, and the turn exists. Checked *before* the
+        # citation, because a parent deleted in the meantime would otherwise
+        # refuse the replay — the client would then be told its message is
+        # gone, hand the text back, and the user's natural re-send (a fresh
+        # key) would create a second task for a message the server already has.
+        # `record_inbound` does the replay itself; this only decides whether to
+        # ask about the citation at all.
+        replaying = bool(client_msg_id) and _is_own_replay(
+            conn, token, client_msg_id, username,
+        )
         # Resolve the citation before anything is created. A reply body
         # routinely depends on its referent, so ingesting the message with the
         # citation quietly dropped would deliver a message the user did not
@@ -3685,7 +3714,7 @@ def _chat_create_web_task(
         # already proved membership of this room, so a mismatch is a deleted
         # parent or a client bug, and both answer the same way.
         reply_to_content: str | None = None
-        if reply_to_msg_id is not None:
+        if reply_to_msg_id is not None and not replaying:
             target = db.get_reply_target(conn, reply_to_msg_id)
             if target is None or target[0] != token:
                 return ("reply_target_gone", 0)

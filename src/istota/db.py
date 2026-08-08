@@ -3952,7 +3952,10 @@ _CROSS_ROOM_COLUMNS = (
     "  t.completed_at AS completed_at, t.model_used AS model_used, "
     "  (s.message_id IS NOT NULL) AS starred, "
     "  m.reply_to_message_id AS reply_to_message_id, "
-    "  p.role AS reply_role, p.body AS reply_body "
+    # Truncated in SQLite rather than in the dict builder: this fragment also
+    # backs the live room-event stream, which is byte-budgeted, and a reply to
+    # a long answer would otherwise carry that whole answer a second time.
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
 )
 _CROSS_ROOM_FROM = (
     "FROM messages m "

@@ -1609,22 +1609,21 @@ def _ensure_reply_parent_in_history(
             )
             return history, parent_msg
 
+    # An unresolvable parent — a `role='system'` row, a turn retention deleted,
+    # a turn that failed or is still running — falls through to the snapshot
+    # alone, which `build_prompt` already quotes into the request section
+    # unconditionally. The synthetic `(replied-to message)` context row that
+    # used to be injected here is gone with the `(In reply to: …)` fallbacks it
+    # was a sibling of: both put the same 1000 characters in the prompt a
+    # second time, once as context and once as the frame.
     if task.reply_to_content:
-        # Parent task not in DB — inject reply_to_content as synthetic context
-        synthetic_msg = db.ConversationMessage(
-            id=-1,  # Sentinel ID, won't collide with real task IDs
-            prompt="(replied-to message)",
-            result=task.reply_to_content,
-            created_at="",
-        )
         logger.info(
-            "Injecting reply_to_content as synthetic context for task %d "
-            "(parent msg canonical=%s talk=%s not resolvable)",
+            "Reply parent not resolvable for task %d "
+            "(canonical=%s talk=%s); the request-section quote stands alone",
             task.id,
             task.reply_to_message_id,
             task.reply_to_talk_id,
         )
-        return [synthetic_msg] + history, synthetic_msg
 
     return history, None
 

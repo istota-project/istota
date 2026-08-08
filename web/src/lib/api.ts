@@ -2377,10 +2377,13 @@ export async function sendChatMessage(
       return {
         ok: false,
         status: resp.status,
-        // A 404 on a send that carried a citation is the server refusing the
-        // *citation*, which the room's own 404 cannot be — the client is
-        // holding that room open. Classified on the intent rather than on the
-        // error sentence, which is prose and not a contract.
+        // A 404 on a send that carried a citation is almost always the server
+        // refusing the *citation*. The endpoint answers 404 for an unknown
+        // room too, which is reachable if another client deletes the room
+        // mid-send — the recovery is the right one either way (the text comes
+        // back rather than being stranded on a dead row), so the cost of
+        // conflating them is a wrong sentence, not lost work. Classified on
+        // the intent rather than on the error string, which is prose.
         failure: resp.status === 404 && options.replyToMsgId ? 'reply_target_gone' : 'rejected',
         error: data.error || `error ${resp.status}`,
       };

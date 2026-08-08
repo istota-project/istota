@@ -94,10 +94,24 @@
   });
   const busy = $derived($status === 'sending' || $status === 'streaming');
 
-  // The message the next send will cite, or null. Held here rather than in the
-  // composer because it is resolved against the transcript: the composer only
-  // ever names an id, and the author label and excerpt come from the row.
-  let stagedReply = $state<MessageReply | null>(null);
+  // The message the next send will cite. Held as the bare id, because that is
+  // all the composer ever names and all the draft ever stores; the author
+  // label and excerpt are looked up against the transcript below.
+  let stagedReplyId = $state<number | null>(null);
+
+  // Resolved live rather than at the moment of staging, and that is what makes
+  // a drafted citation work at all: `selectRoom` empties `messages`
+  // synchronously and only then awaits the history, so the composer's
+  // draft-restore effect always fires against an empty transcript. A one-shot
+  // resolve there returned null, cleared the chip, and the next draft flush
+  // then erased the stored id — the whole round-trip was dead while its unit
+  // tests passed, because they stub the resolver. Deriving instead means the
+  // chip fills in as the page loads, and an id no longer in the window still
+  // renders as a chip (the composer falls back to a generic label) rather than
+  // silently dropping the user's citation.
+  const stagedReply = $derived<MessageReply | null>(
+    stagedReplyId == null ? null : (citationFor(stagedReplyId) ?? { msgId: stagedReplyId }),
+  );
 
   /** Resolve a canonical id against the open transcript, capped for display. */
   function citationFor(msgId: number | null): MessageReply | null {
@@ -121,7 +135,14 @@
     const r = $sendReturned;
     if (r.n === seenReturn) return;
     seenReturn = r.n;
-    stagedReply = null;
+    // Only into the room it was typed in. Leaving a room is not gated on
+    // `busy`, so a 404 can land after a switch — and refilling then would put
+    // one room's text, and its uploaded attachments, one Enter away from being
+    // posted to another. Nothing is lost by declining: the send never acked,
+    // so the draft `submit` wrote is still stored under that room's key and
+    // comes back on the way in.
+    if (r.token !== activeRoom?.token) return;
+    stagedReplyId = null;
     returnedSend = { n: r.n, text: r.text, attachments: r.attachments };
   });
   let returnedSend = $state<{ n: number; text: string; attachments: ChatAttachment[] } | null>(
@@ -131,7 +152,7 @@
   /** Stage a reply to the message on this transcript row. */
   function stageReply(cid: number) {
     const m = $messages.find((x) => x.cid === cid);
-    stagedReply = m?.msgId ? citationFor(m.msgId) : null;
+    stagedReplyId = m?.msgId ?? null;
   }
 
   /** Follow a rendered citation back to the message it names. */
@@ -868,7 +889,7 @@
           {draftKey}
           sendSettled={settleSignal}
           replyTo={stagedReply}
-          onReplyChange={(msgId) => (stagedReply = citationFor(msgId))}
+          onReplyChange={(msgId) => (stagedReplyId = msgId)}
           restoreSend={returnedSend}
         />
       </div>

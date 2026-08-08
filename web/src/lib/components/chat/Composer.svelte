@@ -754,10 +754,13 @@
       e.preventDefault();
       return;
     }
-    // Escape reaches the chip only once the popover has declined it. The order
-    // is the whole rule: a chip that took Escape first would dismiss the
+    // Escape reaches the chip only once every open menu has declined it. The
+    // order is the whole rule: a chip that took Escape first would dismiss the
     // citation while the user was looking at the menu they meant to close.
-    if (e.key === 'Escape' && replyTo) {
+    // Both menus count — the attach menu deliberately leaves focus in the
+    // textarea, so its Escape bubbles through here on the way to the window
+    // handler that closes it.
+    if (e.key === 'Escape' && replyTo && !attachMenuOpen) {
       e.preventDefault();
       onReplyChange?.(null);
     }

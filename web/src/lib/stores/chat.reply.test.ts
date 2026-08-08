@@ -87,6 +87,13 @@ async function freshSession() {
   return mod.getChatSession();
 }
 
+// `vi.resetModules()` gives the chat module a fresh copy of every module it
+// imports, notices included — so a statically imported `currentNotice` would be
+// a different singleton from the one chat writes to.
+async function freshNotices() {
+  return await import('./notices');
+}
+
 describe('chat store — reply to a message', () => {
   beforeEach(() => {
     Object.values(api).forEach((v) => {
@@ -173,6 +180,25 @@ describe('chat store — reply to a message', () => {
     expect(returned.n).toBe(1);
   });
 
+  it('the hand-back names the room it was typed in', async () => {
+    // Leaving a room is not gated on `busy`, so a 404 can land after a switch
+    // — and the page must not refill room B's composer with room A's text.
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomMessages.mockResolvedValue(page([]));
+    api.sendChatMessage.mockResolvedValue({
+      ok: false,
+      status: 404,
+      failure: 'reply_target_gone',
+    });
+    const s = await freshSession();
+    await s.init();
+
+    await s.send('yes, do that', [], { msgId: 22 });
+    await s.selectRoom(2);
+    expect(get(s.sendReturned).token).toBe('t1');
+    expect(get(s.activeRoomId)).toBe(2);
+  });
+
   it('an ordinary send failure still leaves its failed row', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomMessages.mockResolvedValue(page([]));
@@ -242,12 +268,16 @@ describe('chat store — reply to a message', () => {
     expect(get(s.scrollTarget)?.cid).toBe(target.cid);
   });
 
-  it('jumpToMsgId returns false when the parent is unreachable', async () => {
+  it('jumpToMsgId returns false and says so when the parent is unreachable', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomMessages.mockResolvedValue(page([userTurn(2, 'q2'), asstTurn(2, 'a2')]));
     const s = await freshSession();
+    const notices = await freshNotices();
     await s.init();
+    notices.clearNotices();
 
     expect(await s.jumpToMsgId('t1', 999)).toBe(false);
+    // Silence would read as a dead button.
+    expect(get(notices.currentNotice)?.message).toContain('locate that message');
   });
 });

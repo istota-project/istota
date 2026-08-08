@@ -230,6 +230,55 @@ class TestSendWithReply:
             ).fetchall()
         assert len(rows) == 1
 
+    async def test_a_replay_is_not_refused_when_the_parent_has_since_gone(
+        self, chat_client,
+    ):
+        """The citation question does not arise for a retry: the parent was
+        valid when the turn was created, and the turn exists. Refusing here
+        would tell the client its message was lost and push the user into a
+        fresh send — a second task for a message the server already has."""
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent = _add_msg(room["token"], body="the original answer")
+
+        first = await _send(chat_client, cookies, room["id"], {
+            "text": "yes, do that", "reply_to_msg_id": parent,
+            "client_msg_id": "abc-123",
+        })
+        assert first.status_code == 200
+        # The parent is deleted between the accepted send and the retry.
+        deleted = await chat_client.delete(
+            f"/istota/api/chat/messages/{parent}", cookies=cookies, headers=ORIGIN,
+        )
+        assert deleted.status_code == 200
+
+        before = _task_count()
+        retry = await _send(chat_client, cookies, room["id"], {
+            "text": "yes, do that", "reply_to_msg_id": parent,
+            "client_msg_id": "abc-123",
+        })
+        assert retry.status_code == 200
+        assert retry.json()["task_id"] == first.json()["task_id"]
+        assert _task_count() == before
+
+    async def test_a_fresh_send_is_still_refused_when_the_parent_has_gone(
+        self, chat_client,
+    ):
+        """The replay carve-out is keyed on the key naming an existing turn —
+        a new message citing a dead parent is refused as before."""
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent = _add_msg(room["token"], body="the original answer")
+        await chat_client.delete(
+            f"/istota/api/chat/messages/{parent}", cookies=cookies, headers=ORIGIN,
+        )
+
+        resp = await _send(chat_client, cookies, room["id"], {
+            "text": "yes, do that", "reply_to_msg_id": parent,
+            "client_msg_id": "never-seen",
+        })
+        assert resp.status_code == 404
+
     async def test_plain_send_stores_no_citation(self, chat_client):
         cookies = await _login(chat_client, "alice")
         room = await _default_room(chat_client, cookies)

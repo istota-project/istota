@@ -99,31 +99,51 @@ class TestForceInclude:
         assert reply_parent is not None
         assert reply_parent.id == parent, "resolved through the Talk namespace"
 
+        # And with *both* columns set, which is what Stage 6 now produces on
+        # every Talk-origin reply: the canonical lookup has to win, or the
+        # branch order in `_ensure_reply_parent_in_history` is decorative. With
+        # only the canonical id set, above, either order gives the right answer.
+        both = db.Task(
+            id=decoy + 501, user_id="alice", prompt="yes, that one",
+            source_type="talk", conversation_token="room1", status="running",
+            reply_to_message_id=msg_id, reply_to_talk_id=msg_id,
+        )
+        _history, reply_parent = _ensure_reply_parent_in_history(
+            both, [], config, conn,
+        )
+        assert reply_parent is not None
+        assert reply_parent.id == parent, "the Talk lookup won the tie"
+
     def test_retention_deleted_parent_degrades_to_the_snapshot(
         self, tmp_path, conn,
     ):
-        from istota.executor import _ensure_reply_parent_in_history
+        """No history injection, and no exception — the request-section quote
+        is the whole citation for an unresolvable parent."""
+        from istota.executor import _ensure_reply_parent_in_history, build_prompt
 
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
         config = _config(tmp_path, db_path)
         # A message row whose task is gone (retention), which is exactly the
         # state `messages` is designed to outlive.
+        snapshot = "the vanished parent's own words"
         msg_id = db.add_message(
-            conn, "room1", role="assistant", body="an answer",
+            conn, "room1", role="assistant", body=snapshot,
             origin_surface="web", task_id=99999,
         )
 
         task = db.Task(
             id=4242, user_id="alice", prompt="follow up", source_type="web",
             conversation_token="room1", status="running",
-            reply_to_message_id=msg_id, reply_to_content="an answer",
+            reply_to_message_id=msg_id, reply_to_content=snapshot,
         )
         history, reply_parent = _ensure_reply_parent_in_history(
             task, [], config, conn,
         )
-        assert reply_parent is not None
-        assert reply_parent.result == "an answer"
-        assert history[0] is reply_parent
+        # Nothing synthetic is prepended: it would put the same snapshot in the
+        # prompt twice, once as context and once as the frame.
+        assert history == []
+        assert reply_parent is None
+        assert build_prompt(task, [], config).count(snapshot) == 1
 
     def test_talk_reply_still_resolves_through_its_own_column(
         self, tmp_path, conn,
