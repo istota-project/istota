@@ -110,7 +110,7 @@ describe('Composer autocomplete', () => {
     key(textarea, 'Enter', { metaKey: true });
     await tick();
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith('!mo', []);
+    expect(onSend).toHaveBeenCalledWith('!mo', [], null);
   });
 
   it('the send chord sends normally when the popover is closed', async () => {
@@ -118,7 +118,7 @@ describe('Composer autocomplete', () => {
     await type(textarea, 'hello there');
     key(textarea, 'Enter', { metaKey: true });
     await tick();
-    expect(onSend).toHaveBeenCalledWith('hello there', []);
+    expect(onSend).toHaveBeenCalledWith('hello there', [], null);
   });
 
   it('the send chord sends rather than accepting the highlighted row', async () => {
@@ -130,7 +130,7 @@ describe('Composer autocomplete', () => {
     key(textarea, 'Enter', { metaKey: true });
     await tick();
     expect(textarea.value).not.toBe('!models ');
-    expect(onSend).toHaveBeenCalledWith('!mo', []);
+    expect(onSend).toHaveBeenCalledWith('!mo', [], null);
   });
 
   it('clicking a row accepts it', async () => {

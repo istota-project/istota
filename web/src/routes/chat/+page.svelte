@@ -22,9 +22,10 @@
     type PointerSample,
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
+  import { REPLY_EXCERPT_CHARS, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
   import { dropDraft } from '$lib/stores/drafts';
-  import { getMe, type ChatRoom, type ChatView } from '$lib/api';
+  import { getMe, type ChatAttachment, type ChatRoom, type ChatView } from '$lib/api';
 
   const session = getChatSession();
   const {
@@ -38,6 +39,7 @@
     view,
     scrollTarget,
     sendSettled,
+    sendReturned,
   } = session;
 
   // Cross-room views: the transcript pane renders either the active room
@@ -91,6 +93,52 @@
     key: userId && $sendSettled.token ? `${userId}:room:${$sendSettled.token}` : null,
   });
   const busy = $derived($status === 'sending' || $status === 'streaming');
+
+  // The message the next send will cite, or null. Held here rather than in the
+  // composer because it is resolved against the transcript: the composer only
+  // ever names an id, and the author label and excerpt come from the row.
+  let stagedReply = $state<MessageReply | null>(null);
+
+  /** Resolve a canonical id against the open transcript, capped for display. */
+  function citationFor(msgId: number | null): MessageReply | null {
+    if (msgId == null) return null;
+    const m = $messages.find((x) => x.msgId === msgId);
+    if (!m) return null;
+    return {
+      msgId,
+      role: m.role,
+      // Capped to what the server would send back, so the chip and the
+      // reloaded quote are the same text rather than diverging for the life of
+      // the session.
+      excerpt: m.text.slice(0, REPLY_EXCERPT_CHARS),
+    };
+  }
+
+  // A send whose cited parent turned out to be gone: the store took the row
+  // off the transcript, so the text comes back here rather than being lost.
+  let seenReturn = $state(0);
+  $effect(() => {
+    const r = $sendReturned;
+    if (r.n === seenReturn) return;
+    seenReturn = r.n;
+    stagedReply = null;
+    returnedSend = { n: r.n, text: r.text, attachments: r.attachments };
+  });
+  let returnedSend = $state<{ n: number; text: string; attachments: ChatAttachment[] } | null>(
+    null,
+  );
+
+  /** Stage a reply to the message on this transcript row. */
+  function stageReply(cid: number) {
+    const m = $messages.find((x) => x.cid === cid);
+    stagedReply = m?.msgId ? citationFor(m.msgId) : null;
+  }
+
+  /** Follow a rendered citation back to the message it names. */
+  function jumpToCitedMessage(msgId: number) {
+    const token = activeRoom?.token;
+    if (token) void session.jumpToMsgId(token, msgId);
+  }
 
   // The room's standing model default as a header badge — the canonical model
   // name (e.g. `claude-opus-4-8`), not the alias, so it's unambiguous. null
@@ -735,6 +783,8 @@
               onDelete={askDeleteMessage}
               onRetry={inViewMode ? undefined : retryFailedSend}
               retryBusy={busy}
+              onReply={inViewMode ? undefined : stageReply}
+              onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               aggregate={inViewMode}
@@ -792,7 +842,7 @@
            under the composer instead of stopping short of it. -->
       <div class="composer-dock" bind:this={dockEl}>
         <Composer
-          onSend={(t, atts) => {
+          onSend={(t, atts, reply) => {
             // Sending is the end of reading back: whatever the user had scrolled
             // up to look at, the message they just wrote — and the reply to it —
             // is what they want to see. So the send re-arms the stick-to-bottom
@@ -807,7 +857,9 @@
             showJumpToLatest = false;
             // See retryFailedSend: the store settles its own failures onto the
             // message row, so this only covers a rejection that escaped it.
-            session.send(t, atts).catch(() => notifyError('Couldn’t send that message.'));
+            session
+              .send(t, atts, reply ?? undefined)
+              .catch(() => notifyError('Couldn’t send that message.'));
             tick().then(() => pinToBottom());
           }}
           onCancel={() => session.cancel()}
@@ -815,6 +867,9 @@
           placeholder="Your message…"
           {draftKey}
           sendSettled={settleSignal}
+          replyTo={stagedReply}
+          onReplyChange={(msgId) => (stagedReply = citationFor(msgId))}
+          restoreSend={returnedSend}
         />
       </div>
     {/if}

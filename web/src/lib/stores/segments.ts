@@ -108,6 +108,15 @@ export interface SendPayload {
  * The client-side spelling of the server's `reply_to`. A `deleted` parent
  * carries only its id and renders muted and inert.
  */
+/**
+ * Display cap on a citation's excerpt, matching the server's own.
+ *
+ * The staged chip is built client-side from the transcript while the rendered
+ * quote comes back from the server, so the two have to agree or a reply would
+ * show one excerpt while composing and a different one after a reload.
+ */
+export const REPLY_EXCERPT_CHARS = 200;
+
 export interface MessageReply {
   msgId: number;
   role?: 'user' | 'assistant' | 'system';

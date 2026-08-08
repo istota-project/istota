@@ -24,7 +24,9 @@
     Image,
     Camera,
     Folder,
+    Reply,
   } from 'lucide-svelte';
+  import { IconButton } from '$lib/components/ui';
   import { uploadChatAttachment, chatConfigOnce, type ChatAttachment } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
@@ -39,7 +41,8 @@
     pickedFromFile,
     type Picked,
   } from '$lib/platform/nativePicker';
-  import { readDraft, writeDraft } from '$lib/stores/drafts';
+  import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
+  import type { MessageReply } from '$lib/stores/segments';
 
   let {
     onSend,
@@ -48,8 +51,11 @@
     placeholder = 'Message Istota…',
     draftKey = null,
     sendSettled = { n: 0, key: null },
+    replyTo = null,
+    onReplyChange,
+    restoreSend = null,
   }: {
-    onSend: (text: string, attachments: ChatAttachment[]) => void;
+    onSend: (text: string, attachments: ChatAttachment[], replyTo?: MessageReply | null) => void;
     onCancel?: () => void;
     busy?: boolean;
     placeholder?: string;
@@ -78,6 +84,31 @@
      * still in flight, destroying the only copy of it.
      */
     sendSettled?: { n: number; key: string | null };
+    /**
+     * The message the next send will cite, or null.
+     *
+     * Held by the caller rather than here, because a citation is resolved
+     * against the transcript — the composer knows only the id, and the author
+     * label and excerpt come from the row. The composer reports the id it
+     * wants staged and reads back what the caller resolved.
+     */
+    replyTo?: MessageReply | null;
+    /**
+     * Stage a different citation, or clear it. Called with the id alone: the
+     * caller owns the resolution, so a restored draft (which stores only an
+     * id) and a tapped Reply come back through the same path.
+     */
+    onReplyChange?: (msgId: number | null) => void;
+    /**
+     * A send handed back to be edited and re-sent, with a counter so the same
+     * text can come back twice.
+     *
+     * The one case that refills the field — a citation the server refused,
+     * whose message never became a durable row and whose Retry could not work.
+     * Data rather than a callback, for the same reason `sendSettled` is: the
+     * composer is what acts on it.
+     */
+    restoreSend?: { n: number; text: string; attachments: ChatAttachment[] } | null;
   } = $props();
 
   let text = $state('');
@@ -162,7 +193,10 @@
     // room switch, an unmount, `pagehide` — so without this the draft the
     // whole mechanism exists to keep would be dropped by the reload itself.
     if (unsettledSends.has(activeDraftKey) && !text.trim()) return;
-    writeDraft(activeDraftKey, text);
+    // The staged citation is part of the unsent message, so it goes down with
+    // it. An empty body drops the entry outright, which is right: a citation
+    // is not itself a message.
+    writeDraft(activeDraftKey, text, replyTo?.msgId);
   }
 
   /**
@@ -182,7 +216,7 @@
     // refuses to restore a message that is still in flight — otherwise coming
     // back to the room would look exactly like having typed it again.
     const typedSince = key === activeDraftKey ? !!text.trim() : readDraft(key) !== sent;
-    if (!typedSince) writeDraft(key, '');
+    if (!typedSince) writeDraft(key, '', undefined);
   }
 
   // The count at mount, deliberately: only a *change* is an ack, and a
@@ -194,6 +228,25 @@
       if (n === seenSettle) return;
       seenSettle = n;
       settleDraft(key);
+    });
+  });
+
+  // Same mount-time seed as `seenSettle`: only a change is a hand-back, and a
+  // remounted composer must not refill itself from the count it inherits.
+  let seenRestore = untrack(() => restoreSend?.n ?? 0);
+  $effect(() => {
+    const r = restoreSend;
+    untrack(() => {
+      if (!r || r.n === seenRestore) return;
+      seenRestore = r.n;
+      // The message never became a durable row, so this is the only copy left.
+      // The draft entry the submit wrote is cleared as a side effect of the
+      // flush below, now that the field holds the text again.
+      setText(r.text);
+      attachments = r.attachments;
+      if (activeDraftKey) unsettledSends.delete(activeDraftKey);
+      flushDraft();
+      textarea?.focus();
     });
   });
 
@@ -248,6 +301,9 @@
     if (!next) {
       if (leavingRoom) {
         setText('');
+        // A citation names a message in the room being left, so it cannot
+        // survive the departure the way carried text can.
+        onReplyChange?.(null);
         // The field has been cleared of the departed room's text, so what is
         // typed from here belongs to whichever room lands next — the same case
         // as the opening keystrokes of a page load. Without the reset the
@@ -270,6 +326,10 @@
     const stored = readDraft(next);
     const restorable = unsettledSends.get(next) === stored ? '' : stored;
     setText(restorable || carried);
+    // The citation follows the text it belongs to: restored with a restored
+    // draft, cleared otherwise. Carried text is text typed before any room
+    // existed, so it can carry no citation.
+    onReplyChange?.(restorable ? (readDraftReply(next) ?? null) : null);
     // Carried text has never been written anywhere — the field is its only
     // copy until this lands.
     if (carried && !restorable) flushDraft();
@@ -566,10 +626,17 @@
 
   function submit() {
     const t = text.trim();
+    // A citation does not make an empty message sendable — it is a pointer,
+    // not content.
     if (!t && attachments.length === 0) return;
-    onSend(t, attachments);
+    onSend(t, attachments, replyTo);
     text = '';
     attachments = [];
+    // The citation belongs to the message that just left. Cleared here rather
+    // than on the ack, unlike the draft: a `!command` returns from inside the
+    // request with no task to attach one to, so letting it persist would carry
+    // it silently into the next message.
+    onReplyChange?.(null);
     // The draft is *not* dropped here. Until the backend acks, the stored
     // draft is the only copy of this text that survives a reload — the failed
     // row does not — so the drop waits for `settleDraft`.
@@ -685,6 +752,14 @@
     // open; when closed it returns false and the key does what it says.
     if (ac.onKeydown(e)) {
       e.preventDefault();
+      return;
+    }
+    // Escape reaches the chip only once the popover has declined it. The order
+    // is the whole rule: a chip that took Escape first would dismiss the
+    // citation while the user was looking at the menu they meant to close.
+    if (e.key === 'Escape' && replyTo) {
+      e.preventDefault();
+      onReplyChange?.(null);
     }
   }
 
@@ -775,6 +850,22 @@
         <Folder size={16} />
         Choose File
       </button>
+    </div>
+  {/if}
+  <!-- The staged citation, above the field, so what the next send answers is
+       visible while it is being written. -->
+  {#if replyTo}
+    <div class="reply-chip">
+      <Reply size={13} class="reply-chip-icon" />
+      <span class="reply-chip-text">{replyTo.excerpt ?? 'the selected message'}</span>
+      <IconButton
+        size="sm"
+        label="Clear reply"
+        onclick={() => onReplyChange?.(null)}
+        title="Clear reply"
+      >
+        <X size={13} />
+      </IconButton>
     </div>
   {/if}
   {#if attachments.length || uploading}
@@ -1222,6 +1313,34 @@
     flex-wrap: wrap;
     gap: var(--space-1);
     margin-bottom: var(--space-2);
+  }
+  /* The staged citation. Raised fill for the same reason the attachment chips
+	   use one — the dock behind it already paints --surface-card — with a
+	   leading rule so it reads as a quotation rather than as another chip. */
+  .reply-chip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: var(--surface-raised);
+    border-left: 2px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+  }
+  .reply-chip :global(.reply-chip-icon) {
+    flex: 0 0 auto;
+    color: var(--text-dim);
+  }
+  /* One line: the chip says which message, not what it said. */
+  .reply-chip-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* Raised fill, not --surface-card: the dock behind these now paints the pane
 	   fill (which *is* --surface-card in the dark theme), so a card-filled chip
