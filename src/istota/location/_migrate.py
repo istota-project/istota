@@ -181,6 +181,11 @@ def migrate_legacy_data(
             )
             counts["location_pings"] = cur.rowcount or 0
 
+            # The v4 sweep runs inside init_db, which happened above against
+            # an empty table — these rows arrive after it, still carrying the
+            # declared-point altitude sentinel (ISSUE-229). Sweep them here.
+            location_db._backfill_declared_points(conn)
+
             cur = conn.execute(
                 """
                 INSERT INTO location_state (id, current_place_id,

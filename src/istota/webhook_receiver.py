@@ -268,6 +268,29 @@ def _process_feature(
         course = None
 
     accuracy = props.get("horizontal_accuracy")
+    vertical_accuracy = props.get("vertical_accuracy")
+
+    # A wifi-zone point is a coordinate the client *declares* while the device
+    # is on the configured home SSID, not a fix it took — so it has no
+    # altitude, and the -1 the shell puts in that slot is its "unknown" rather
+    # than a datum. Match on the marker the client already sends, never on the
+    # value: -1 m is a legitimate altitude (Death Valley, the Salton Sea, most
+    # of the Netherlands).
+    wifi_zone = bool(props.get("wifi_zone"))
+
+    altitude = props.get("altitude")
+    if wifi_zone:
+        # Both halves go: the shell sends a vertical accuracy of 0 with the
+        # declared point, and an accuracy of zero metres beside a NULL altitude
+        # would tell a later reader the device took a perfect vertical fix.
+        altitude = None
+        vertical_accuracy = None
+    elif vertical_accuracy is not None and vertical_accuracy < 0:
+        # iOS reports a negative vertical accuracy to say the altitude beside
+        # it is invalid — the same negative-sentinel convention speed and
+        # course are scrubbed by above. The signal itself is kept, since it is
+        # the reason the altitude is gone.
+        altitude = None
 
     # Accuracy gate: only use good pings for place matching and state updates.
     # Low-accuracy pings are still stored for history so the map isn't empty.
@@ -286,13 +309,15 @@ def _process_feature(
 
     ping_id = location.db.insert_ping(
         conn, timestamp, lat, lon,
-        altitude=props.get("altitude"),
+        altitude=altitude,
         accuracy=accuracy,
+        vertical_accuracy=vertical_accuracy,
         speed=speed,
         course=course,
         battery=props.get("battery_level"),
         activity_type=activity_type,
         wifi=props.get("wifi"),
+        wifi_zone=wifi_zone,
         place_id=place_id,
         source="overland",
         client_id=props.get("client_id") or None,

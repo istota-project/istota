@@ -140,10 +140,12 @@ Aliased as `last` (`istota-skill location last`).
 ```
 
 `altitude` is metres as the device reported them, and is `null` on the ~5% of
-pings that got a horizontal fix without a vertical one. What it is measured
-against varies by source — a phone reports one reference, an imported watch
-track another — so treat it as good for "this was a climb" and never as an
-altimeter reading.
+pings that got a horizontal fix without a vertical one, on a fix the device
+flagged as vertically invalid, and on a point the client *declared* rather than
+measured (its wifi-zone feature substitutes a coordinate while the device is on
+a configured network). What it is measured against varies by source — a phone
+reports one reference, an imported watch track another — so treat it as good
+for "this was a climb" and never as an altimeter reading.
 
 ### places
 

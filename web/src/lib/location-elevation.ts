@@ -6,9 +6,9 @@
 //
 // What the number is depends on where the ping came from, and no consumer can
 // tell: iOS reports altitude relative to mean sea level, a Garmin watch reports
-// its own (often barometric) elevation, and neither vertical accuracy nor the
-// datum is stored. It is good enough to show a climb and a level-off, and is
-// not an altimeter — which is what the strip's caption says.
+// its own (often barometric) elevation, and the datum is not stored. It is good
+// enough to show a climb and a level-off, and is not an altimeter — which is
+// what the strip's caption says.
 
 import { filterAccuratePings, DWELL_MIN_DURATION_S } from './location-path';
 import type { LocationPing } from './api';
@@ -87,11 +87,14 @@ export function elevationPoints(pings: LocationPing[]): ElevationPoint[] {
 /**
  * Drop a lone sample that jumps away from both neighbours and back.
  *
- * A device with a good horizontal fix can still report a bad altitude — iOS
- * flags an invalid vertical fix by a negative `verticalAccuracy`, which nothing
- * here stores, so a 0 arrives looking like sea level. One such sample sets the
- * whole scale and flattens the real day against an edge. A genuine climb, however
- * steep, does not reverse across a single sample, which is what separates the two.
+ * A device with a good horizontal fix can still report a bad altitude. The one
+ * case the device itself declares — iOS's negative `verticalAccuracy` — is now
+ * caught at ingest (ISSUE-229), which is where it belongs; what is left here is
+ * everything nobody flagged: a bad altitude reported with a plausible accuracy,
+ * and any source that reports no vertical accuracy at all. One such sample sets
+ * the whole scale and flattens the real day against an edge. A genuine climb,
+ * however steep, does not reverse across a single sample, which is what
+ * separates the two.
  */
 function dropAltitudeSpikes(points: ElevationPoint[]): ElevationPoint[] {
   if (points.length < 3) return points;
@@ -143,6 +146,30 @@ export function hasMeaningfulElevation(points: ElevationPoint[]): boolean {
   const range = elevationRange(points);
   if (!range) return false;
   return range.max - range.min >= MIN_ELEVATION_RANGE_M;
+}
+
+/** Everything a page and the strip both need, from one pass over the pings. */
+export interface ElevationSummary {
+  points: ElevationPoint[];
+  /** Whether there is a profile here at all — the strip's own render gate. */
+  show: boolean;
+  /** Null whenever `show` is false, so nothing can print a range it should
+   *  not be showing. */
+  range: { min: number; max: number } | null;
+}
+
+/**
+ * The strip used to take raw pings and decide for itself, which was right
+ * while it was the only thing that cared. Now that it lives behind the details
+ * disclosure the page needs the same answer twice more — to know whether the
+ * toggle has anything to offer, and for the figure in the stats bar that
+ * reports the day has a profile without opening it. A day at the range view's
+ * 50,000-ping cap is not something to scan three times.
+ */
+export function elevationSummary(pings: LocationPing[]): ElevationSummary {
+  const points = elevationPoints(pings);
+  const show = hasMeaningfulElevation(points);
+  return { points, show, range: show ? elevationRange(points) : null };
 }
 
 /**

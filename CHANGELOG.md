@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The elevation profile has moved in behind "Show details", under the day's stops and trips. It was taking vertical space under the map on every visit for a reading that is supplementary. The day's elevation spread now sits in the stats bar beside the ping and stop counts, so you can see there is a profile to look at without opening the panel.
+
 - The chat sidebar is ordered by latest activity, with the room you last heard from at the top. It used to be fixed in creation order, so a busy room sat wherever it happened to have been made and a long list had to be read to find it. A room moves the moment a message lands in it, whoever sent it and whichever surface it came from; a room nobody has spoken in yet sorts by when it was created, so a new one still appears near the top.
 
 ### Added
@@ -28,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Mail from someone else is no longer read back to the assistant as something you said. Every email turn was labelled with your name — in the conversation history, in what the nightly pass distils into long-term memory, and in what search recalls later — whether it came from you or from an outside contact replying to a message the bot sent on your behalf. So the assistant re-read a stranger's words as your own instructions, contradicting the warning wrapped around the same text, and could write them into memory as things you said. A turn is now attributed to you only when the sender is one of your own addresses, and to the sender otherwise. Only a plain address is ever shown, so nothing a sender chooses to put in the name field can pose as you.
+
+- The elevation profile no longer bottoms out for every hour you spend at home. The phone tracker declares a fixed coordinate while you are on your home network rather than taking a real fix, and the placeholder altitude it sent alongside was stored as though someone had measured it — so a day spent partly at home drew as a square wave with the real terrain squeezed into the top of the box, and a day where nothing happened drew a strip that should not have been there at all. Those points now carry no altitude, so the profile skips them the way the map skips a stretch your phone never sampled, and history already recorded is cleaned up on upgrade.
 
 - Altitude is finally visible. It has been recorded with nearly every location ping all along, but no reader passed it on, so a flight or a drive over a pass read as a flat 2-D line. Your location history now returns it, and the track view draws an elevation profile under the map whenever the day has a real climb in it — a day spent at sea level still gets none, since the spread there is GPS noise rather than terrain. The line breaks into dashes wherever the map does, so a stretch your phone never sampled cannot read as a climb. What the number is measured against depends on the device that reported it, so treat it as good for "that was a climb" and never as an altimeter reading.
 

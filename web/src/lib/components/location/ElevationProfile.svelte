@@ -1,32 +1,23 @@
 <script lang="ts">
-  import type { LocationPing } from '$lib/api';
-  import {
-    buildElevationPath,
-    decimate,
-    elevationPoints,
-    elevationRange,
-    hasMeaningfulElevation,
-  } from '$lib/location-elevation';
+  import { buildElevationPath, decimate, type ElevationSummary } from '$lib/location-elevation';
 
   interface Props {
-    pings: LocationPing[];
+    /** Computed by the page, which needs the same answer for its disclosure
+     *  toggle and its stats bar — see `elevationSummary`. */
+    summary: ElevationSummary;
   }
 
-  let { pings }: Props = $props();
+  let { summary }: Props = $props();
 
   // The path is drawn in a fixed box and stretched to the strip's real width by
   // `preserveAspectRatio="none"`, so nothing here has to measure the DOM.
   const BOX_W = 100;
   const BOX_H = 40;
 
-  // One pass over the pings: `points` feeds the gate, the readout and the path
-  // alike. A day at the range view's cap is tens of thousands of pings, and
-  // recomputing this per derived value cost a full scan each time.
-  let points = $derived(elevationPoints(pings));
-  let show = $derived(hasMeaningfulElevation(points));
-  let range = $derived(show ? elevationRange(points) : null);
+  let show = $derived(summary.show);
+  let range = $derived(summary.range);
   let path = $derived(
-    show ? buildElevationPath(decimate(points), BOX_W, BOX_H) : { solid: '', sparse: '' },
+    show ? buildElevationPath(decimate(summary.points), BOX_W, BOX_H) : { solid: '', sparse: '' },
   );
 
   function metres(n: number): string {

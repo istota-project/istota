@@ -662,6 +662,29 @@ class TestMigrate:
             ).fetchone()
         assert orphan_row["visit_id"] is None
 
+    def test_sweeps_declared_altitude_sentinels_after_the_copy(self, tmp_path):
+        """The v4 sweep runs inside init_db against an empty table, so rows
+        copied in afterwards would otherwise keep the -1 (ISSUE-229)."""
+        framework_db = tmp_path / "istota.db"
+        fw = _make_framework_db(framework_db)
+        _seed_user_data(fw, "alice", place_id=1, visit_id=1)
+        fw.execute(
+            "INSERT INTO location_pings (user_id, timestamp, lat, lon, "
+            "altitude, accuracy, speed, course) VALUES "
+            "('alice', '2026-05-01T15:00:00Z', 52.0, 13.0, -1, 1, 0, 0)"
+        )
+        fw.commit()
+        fw.close()
+        ctx = _ctx("alice", tmp_path)
+        migrate_legacy_data(framework_db, ctx)
+        with location_db.connect(ctx.db_path) as conn:
+            row = conn.execute(
+                "SELECT altitude, wifi_zone FROM location_pings "
+                "WHERE timestamp = '2026-05-01T15:00:00Z'"
+            ).fetchone()
+        assert row["altitude"] is None
+        assert row["wifi_zone"] == 1
+
     def test_nulls_orphan_place_id(self, tmp_path):
         framework_db = tmp_path / "istota.db"
         fw = _make_framework_db(framework_db)

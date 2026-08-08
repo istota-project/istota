@@ -16,6 +16,7 @@
     type DismissedCluster,
   } from '$lib/api';
   import { segmentTrips, type Trip } from '$lib/location-path';
+  import { elevationSummary } from '$lib/location-elevation';
   import {
     locationPlaces,
     mapFlyTo,
@@ -112,6 +113,13 @@
   // Only meaningful for a single day; multi-day spans aren't itemised.
   let trips = $derived<Trip[]>(isSingleDay ? segmentTrips(pings) : []);
 
+  // The strip lives behind "Show details", so the page needs its verdict twice
+  // over before the strip itself is mounted: for the toggle's availability and
+  // for the stats-bar figure that says the range has a profile at all. Unlike
+  // trips this is meaningful over a multi-day span — a range holding one
+  // flight has an elevation profile and no stops to itemise.
+  let elevation = $derived(elevationSummary(pings));
+
   function yesterday(): string {
     const d = new Date();
     d.setDate(d.getDate() - 1);
@@ -198,7 +206,10 @@
         ]);
         pings = p.pings;
         summary = s;
-        panelOpen = s.stops.length > 0 || trips.length > 0;
+        // `elevation.show` belongs here as much as in the toggle's own
+        // condition below: a day that is one long flight has a profile and no
+        // stops to itemise, and that is the day the strip exists for.
+        panelOpen = s.stops.length > 0 || trips.length > 0 || elevation.show;
       } else {
         const p = await getLocationPings({ start: startStr, end: endStr, limit: '50000' });
         pings = p.pings;
@@ -325,8 +336,6 @@
       </div>
     {/if}
 
-    <ElevationProfile {pings} />
-
     <div class="stats-bar">
       {#if pings.length > 0}
         <span class="stat">{pings.length} pings</span>
@@ -345,21 +354,28 @@
       {#if isSingleDay && trips.length > 0}
         <span class="stat">{trips.length} trips</span>
       {/if}
-      {#if (summary && summary.stops.length > 0) || trips.length > 0}
+      {#if elevation.range}
+        <span class="stat">{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
+        >
+      {/if}
+      {#if (summary && summary.stops.length > 0) || trips.length > 0 || elevation.show}
         <button class="stops-btn" onclick={() => (panelOpen = !panelOpen)} type="button">
           {panelOpen ? 'Hide details' : 'Show details'}
         </button>
       {/if}
     </div>
 
-    {#if panelOpen && isSingleDay}
-      <StopsPanel
-        {pings}
-        {trips}
-        {summary}
-        onStopClick={handleStopClick}
-        onTripClick={handleTripClick}
-      />
+    {#if panelOpen}
+      {#if isSingleDay}
+        <StopsPanel
+          {pings}
+          {trips}
+          {summary}
+          onStopClick={handleStopClick}
+          onTripClick={handleTripClick}
+        />
+      {/if}
+      <ElevationProfile summary={elevation} />
     {/if}
   {/if}
 </div>
