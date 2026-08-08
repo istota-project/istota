@@ -24,7 +24,7 @@ class TestOpenAICompatResolution:
 
     def test_alias_not_translated_to_anthropic(self):
         b = _brain("openai_compat")
-        # "opus" must NOT become "claude-opus-4-8" for a non-Anthropic endpoint.
+        # "opus" must NOT become "claude-opus-5" for a non-Anthropic endpoint.
         assert b.resolve_model_name("opus") == "opus"
 
     def test_explicit_id_passes_through(self):

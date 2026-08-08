@@ -179,7 +179,7 @@ class Brain(Protocol):
         """Resolve a ``!model <alias>`` name to ``(model_id, effort)`` or None.
 
         Accepts an optional orthogonal ``:effort`` modifier on any reference
-        (``opus:high``, ``smart:low``, ``claude-opus-4-8:xhigh``): the base name
+        (``opus:high``, ``smart:low``, ``claude-opus-5:xhigh``): the base name
         resolves through the brain's alias table (tiers + shortcuts + canonical
         passthrough) and the modifier's effort wins over the entry's own default
         effort. Returns None for an unknown name.

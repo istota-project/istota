@@ -990,7 +990,7 @@ class Config:
     namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
-    model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-4-8") rather than a floating alias so upgrades are explicit. Empty = brain default
+    model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-5") rather than a floating alias so upgrades are explicit. Empty = brain default
     effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Support varies by model
     advisor_model: str = ""  # Advisor model ID or alias (anthropic-namespace brains only); resolved through the alias table like `model`, but carries no effort. Empty = no advisor. Dropped whenever a task pins its own model (see executor._resolve_advisor). Must resolve to a model capable of *being* an advisor — a weak/cheap tier (e.g. haiku) fails every task the advisor runs on; Istota does not validate this (no pairing table — see the spec's "Not doing")
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)

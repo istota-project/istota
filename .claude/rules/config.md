@@ -443,7 +443,7 @@ populate).
 ```
 db_path: Path = Path("data/istota.db")
 bot_name: str = "Istota"            emissaries_enabled: bool = True
-model: str = ""                     # Claude model override; pin to a version like "claude-opus-4-8" so updates don't silently switch us. Empty = CLI default
+model: str = ""                     # Claude model override; pin to a version like "claude-opus-5" so updates don't silently switch us. Empty = CLI default
 effort: str = ""                    # Effort level: low/medium/high/xhigh/max (Opus 4.8 + Opus 4.7 + Opus 4.6 + Sonnet 4.6). Empty = model default
 advisor_model: str = ""             # Advisor model (anthropic-namespace brains only); resolves through the alias table like `model`, no effort. Empty = no advisor. Dropped for a task carrying a model pin (executor._resolve_advisor)
 custom_system_prompt: bool = False  # Use config/system-prompt.md instead of CC default

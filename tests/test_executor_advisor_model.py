@@ -127,6 +127,8 @@ class TestRealBrainResolvesAdvisorAlias:
     def test_smart_high_reaches_argv_as_opus_no_effort_modifier(self, tmp_path):
         from unittest.mock import MagicMock
 
+        from istota.brain.claude_code import OPUS
+
         config = _make_config(tmp_path)
         config.advisor_model = "smart:high"
         config.brain = BrainConfig(kind="claude_code")
@@ -151,9 +153,11 @@ class TestRealBrainResolvesAdvisorAlias:
 
         assert "--advisor" in captured_cmd
         idx = captured_cmd.index("--advisor")
-        # "smart" -> OPUS = "claude-opus-4-8" (DEFAULT_ALIASES); the ":high"
-        # effort modifier is stripped — --advisor takes no effort.
-        assert captured_cmd[idx + 1] == "claude-opus-4-8"
+        # "smart" -> OPUS (DEFAULT_ALIASES); the ":high" effort modifier is
+        # stripped — --advisor takes no effort. Imports the live constant
+        # rather than pinning a version string, so a future OPUS bump doesn't
+        # break this test the way it broke on the OPUS 4.8 -> 5 bump.
+        assert captured_cmd[idx + 1] == OPUS
 
 
 class TestAdvisorLogLine:

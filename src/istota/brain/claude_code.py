@@ -691,7 +691,7 @@ def build_claude_cli_flags(
 # Brain.resolve_alias / Brain.resolve_model_name.
 #
 # Versioning: bare aliases like ``opus`` always resolve to a *specific*
-# version constant (``OPUS = "claude-opus-4-8"``) so a model release can't
+# version constant (``OPUS = "claude-opus-5"``) so a model release can't
 # silently re-route us. A model release bumps the constant in one place and
 # ripples through every alias + role that points at it. Prior versions are NOT
 # enumerated as aliases — an operator who needs one types the canonical id with
@@ -699,7 +699,7 @@ def build_claude_cli_flags(
 # the canonical passthrough below.
 # ---------------------------------------------------------------------------
 
-OPUS: str = "claude-opus-4-8"
+OPUS: str = "claude-opus-5"
 SONNET: str = "claude-sonnet-5"
 HAIKU: str = "claude-haiku-4-5"
 
@@ -746,9 +746,9 @@ def _resolve_target_with_effort(target: str) -> tuple[str, str | None]:
     """Translate an override RHS through ``DEFAULT_ALIASES`` to ``(model_id, effort)``.
 
     Splits an optional ``:effort`` modifier first, then resolves the base name.
-    Operator wrote e.g. ``smart = "opus:high"`` → ``("claude-opus-4-8", "high")``
+    Operator wrote e.g. ``smart = "opus:high"`` → ``("claude-opus-5", "high")``
     (the modifier's effort wins over the alias's default). A bare shortcut
-    ``smart = "opus"`` → ``("claude-opus-4-8", None)``. An unknown / canonical
+    ``smart = "opus"`` → ``("claude-opus-5", None)``. An unknown / canonical
     base passes through unchanged (raw ids like ``claude-opus-4-7`` work as
     targets), carrying only the modifier effort.
     """
@@ -786,7 +786,7 @@ class ClaudeCodeBrain:
         id passthrough (``claude-*``) > None (unknown). Effort precedence: the
         ``:effort`` suffix wins over the entry's own default effort. A role
         override's target is itself resolved through this brain's alias table
-        (``smart = "opus"`` → ``claude-opus-4-8``), and an explicit
+        (``smart = "opus"`` → ``claude-opus-5``), and an explicit
         ``RoleTarget.effort`` wins over the target's alias-derived effort.
         """
         if not alias:

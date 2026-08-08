@@ -87,7 +87,7 @@ class TestSharedDefaultBlockResolves:
         cli = ClaudeCodeBrain()
         native = NativeBrain(NativeBrainConfig(model="native-floor"))
         # claude_code resolves the anthropic slugs to canonical ids.
-        assert cli.resolve_model_name("smart") == "claude-opus-4-8"
+        assert cli.resolve_model_name("smart") == "claude-opus-5"
         assert cli.resolve_alias("smart")[1] == "high"
         # native resolves its own openai_compat slugs verbatim.
         assert native.resolve_model_name("smart") == "anthropic/claude-opus-4.8"

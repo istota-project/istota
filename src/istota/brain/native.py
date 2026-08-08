@@ -472,7 +472,7 @@ class NativeBrain:
     #
     # The only provider is ``openai_compat``, which can point at any endpoint
     # (Anthropic, OpenRouter, a local qwen, …). Anthropic aliases must NOT be
-    # translated — sending "claude-opus-4-8" to a qwen endpoint would fail — so
+    # translated — sending "claude-opus-5" to a qwen endpoint would fail — so
     # explicit ids pass through and only operator [models.aliases] overrides
     # resolve.
 

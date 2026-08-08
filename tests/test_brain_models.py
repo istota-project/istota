@@ -83,7 +83,7 @@ class TestBrainResolveModelName:
     def test_effort_modifier_stripped_from_model_name(self, brain):
         # ``:effort`` never leaks into the resolved model id.
         assert brain.resolve_model_name("opus:high") == OPUS
-        assert brain.resolve_model_name("claude-opus-4-8:xhigh") == OPUS
+        assert brain.resolve_model_name(f"{OPUS}:xhigh") == OPUS
 
     def test_canonical_id_passes_through(self, brain):
         assert brain.resolve_model_name(OPUS) == OPUS
@@ -119,7 +119,7 @@ class TestBrainResolveAlias:
         assert brain.resolve_alias("smart:low") == (OPUS, "low")
 
     def test_canonical_id_plus_effort(self, brain):
-        assert brain.resolve_alias("claude-opus-4-8:xhigh") == (OPUS, "xhigh")
+        assert brain.resolve_alias(f"{OPUS}:xhigh") == (OPUS, "xhigh")
         # A prior-version canonical id still works via passthrough + modifier
         # (this covers the retired ``opus-47-high`` need).
         assert brain.resolve_alias("claude-opus-4-7:high") == ("claude-opus-4-7", "high")
