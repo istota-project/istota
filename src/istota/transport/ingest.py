@@ -262,6 +262,22 @@ def record_inbound(
                 )
                 client_msg_id = None
 
+    # 2c. Record a surface-native reply parent canonically too, so the web
+    #     transcript renders a Talk-origin reply as a reply rather than as an
+    #     ordinary message. Resolved here because this is where the conn and
+    #     the canonical room token are: `IncomingMessage` stays surface-native,
+    #     which is the reason the two parameters are separate in the first
+    #     place. An unmirrored parent leaves it None and the citation stays
+    #     Talk-only, exactly as before.
+    if (
+        reply_to_canonical_id is None
+        and reply_to_message_id is not None
+        and room_surface
+    ):
+        reply_to_canonical_id = db.find_message_by_external_id(
+            conn, room_token, surface, str(reply_to_message_id),
+        )
+
     # 3. Create the task.
     task_id = db.create_task(
         conn,

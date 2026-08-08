@@ -3847,10 +3847,17 @@ async def _pull_talk_read_state(username: str) -> None:
 
 async def _post_as_user(
     access: str, talk_ref: str, text: str, message_id: int, username: str,
+    reply_to_talk_id: int | None = None,
 ) -> int | None:
     """One post-as-user attempt against the bound Talk room, with a single
     forced-refresh retry on 401 (clock skew / early revocation on a
-    supposedly-live token). Returns the posted Talk message id, or None."""
+    supposedly-live token). Returns the posted Talk message id, or None.
+
+    `reply_to_talk_id` makes the mirrored turn a real Talk reply. It is None
+    whenever the cited parent was never mirrored into Talk — a web-only turn,
+    or one predating the mirror — and the post then degrades to a plain one
+    rather than being withheld: the message still belongs in the room.
+    """
     from . import web_tokens
     from .talk import TalkClient
     from .transport import WEBMIRROR_REF_PREFIX
@@ -3860,7 +3867,8 @@ async def _post_as_user(
         client = TalkClient(_config, bearer_token=access, timeout=5)
         try:
             resp = await client.send_message(
-                talk_ref, text, reference_id=reference_id,
+                talk_ref, text, reply_to=reply_to_talk_id,
+                reference_id=reference_id,
             )
             posted = resp.get("ocs", {}).get("data", {}).get("id")
             return int(posted) if posted else None
@@ -3892,6 +3900,7 @@ async def _post_as_user(
 
 async def _mirror_web_turn_as_user(
     username: str, room_token: str, text: str, task_id: int,
+    reply_to_msg_id: int | None = None,
 ) -> None:
     """Post a just-ingested web user turn into the room's bound Talk
     conversation *as the user*, at send time — so the message appears in Talk
@@ -3910,29 +3919,40 @@ async def _mirror_web_turn_as_user(
     if not _config or not web_tokens.feature_enabled(_config):
         return
 
-    def _lookup() -> tuple[str | None, int | None]:
+    def _lookup() -> tuple[str | None, int | None, int | None]:
         with db.get_db(_config.db_path) as conn:
             bindings = db.list_room_bindings(conn, room_token)
             talk_ref = next(
                 (b.surface_ref for b in bindings if b.surface == "talk"), None,
             )
             if talk_ref is None:
-                return None, None
+                return None, None, None
             # A retry carrying the same `client_msg_id` resolves to the turn
             # the first attempt created, and that attempt already mirrored it.
             # The stamp is the record of that, so it is also the guard: without
             # it a client-side timeout would put the message in Talk twice.
             if db.user_turn_has_external_id(conn, task_id, "talk"):
-                return None, None
+                return None, None, None
             row = conn.execute(
                 "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
                 "AND role = 'user' LIMIT 1",
                 (room_token, task_id),
             ).fetchone()
-            return talk_ref, (int(row["id"]) if row else None)
+            # The cited parent's own Talk id, when it has one. A parent that
+            # never reached Talk (web-only, or predating the mirror) leaves
+            # this None and the post degrades to a plain one.
+            parent_talk_id = None
+            if reply_to_msg_id is not None:
+                raw = db.get_message_external_id(conn, reply_to_msg_id, "talk")
+                if raw is not None:
+                    try:
+                        parent_talk_id = int(raw)
+                    except ValueError:
+                        parent_talk_id = None
+            return talk_ref, (int(row["id"]) if row else None), parent_talk_id
 
     try:
-        talk_ref, message_id = await asyncio.to_thread(_lookup)
+        talk_ref, message_id, parent_talk_id = await asyncio.to_thread(_lookup)
         if not talk_ref or message_id is None:
             return  # web-only room (or turn not stored) — nothing to mirror
 
@@ -3948,6 +3968,7 @@ async def _mirror_web_turn_as_user(
 
         posted_id = await _post_as_user(
             access, talk_ref, text, message_id, username,
+            reply_to_talk_id=parent_talk_id,
         )
         if posted_id is None:
             return
@@ -4607,7 +4628,9 @@ async def chat_send_message(
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
     # best-effort). When it succeeds the scheduler suppresses its completion-
     # time attributed repost; when it doesn't, the repost covers the mirror.
-    await _mirror_web_turn_as_user(username, room.token, text, task_id)
+    await _mirror_web_turn_as_user(
+        username, room.token, text, task_id, reply_to_msg_id,
+    )
     return {
         "task_id": task_id,
         "status": "pending",

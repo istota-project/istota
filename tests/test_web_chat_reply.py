@@ -6,7 +6,7 @@ into, derives the parent snapshot itself, and stores the id on both the task and
 the user's `messages` row.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -296,6 +296,153 @@ class TestCanonicalParentLookup:
 def _task_count():
     with db.get_db(_db_path()) as conn:
         return conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+
+
+class TestTalkInbound:
+    """A Talk-origin reply sets the Talk-native column; the canonical one has
+    to be filled too or the web transcript renders it as an ordinary message."""
+
+    def _config(self):
+        import istota.web_app as mod
+        return mod._config
+
+    def _ingest_talk_reply(self, token, *, reply_to_talk_id, parent_talk_id=None):
+        from istota.transport import record_inbound
+
+        with db.get_db(_db_path()) as conn:
+            db.add_room_binding(conn, token, "talk", token)
+            parent = db.add_message(
+                conn, token, role="assistant", body="the earlier answer",
+                origin_surface="talk",
+                external_ids=(
+                    {"talk": str(parent_talk_id)} if parent_talk_id else None
+                ),
+            )
+            _room, task_id = record_inbound(
+                conn, self._config(), surface="talk", surface_ref=token,
+                user_id="alice", text="yes, that one", source_type="talk",
+                platform_message_id=555,
+                reply_to_message_id=reply_to_talk_id,
+                reply_to_content="the earlier answer",
+                external_id="555",
+            )
+            task = db.get_task(conn, task_id)
+            row = conn.execute(
+                "SELECT reply_to_message_id FROM messages "
+                "WHERE room_token = ? AND task_id = ? AND role = 'user'",
+                (token, task_id),
+            ).fetchone()
+        return parent, task, row
+
+    async def test_resolves_the_talk_parent_to_its_canonical_id(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent, task, row = self._ingest_talk_reply(
+            room["token"], reply_to_talk_id=9001, parent_talk_id=9001,
+        )
+        assert task.reply_to_talk_id == 9001  # the native column is untouched
+        assert task.reply_to_message_id == parent
+        assert row["reply_to_message_id"] == parent
+
+    async def test_an_unmirrored_talk_parent_leaves_the_canonical_column_null(
+        self, chat_client,
+    ):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        _parent, task, row = self._ingest_talk_reply(
+            room["token"], reply_to_talk_id=9001, parent_talk_id=None,
+        )
+        assert task.reply_to_talk_id == 9001
+        assert task.reply_to_message_id is None
+        assert row["reply_to_message_id"] is None
+
+    async def test_a_talk_parent_in_another_room_does_not_resolve(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        other = await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "other"},
+            cookies=cookies, headers=ORIGIN,
+        )
+        other_token = other.json()["token"]
+        with db.get_db(_db_path()) as conn:
+            db.add_message(
+                conn, other_token, role="assistant", body="elsewhere",
+                origin_surface="talk", external_ids={"talk": "9001"},
+            )
+        _parent, task, _row = self._ingest_talk_reply(
+            room["token"], reply_to_talk_id=9001, parent_talk_id=None,
+        )
+        # Talk ids are per-conversation, so the lookup must be room-scoped.
+        assert task.reply_to_message_id is None
+
+
+class TestTalkMirror:
+    """A web reply into a Talk-bound room should land in Talk as a real Talk
+    reply — but only when the parent was itself mirrored there."""
+
+    def _bind_talk(self, token):
+        with db.get_db(_db_path()) as conn:
+            db.add_room_binding(conn, token, "talk", "talkroom1")
+
+    async def test_mirrors_a_reply_with_the_parents_talk_id(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        self._bind_talk(room["token"])
+        parent = _add_msg(room["token"], body="the earlier answer")
+        with db.get_db(_db_path()) as conn:
+            db.set_message_external_id(conn, parent, "talk", "9001")
+
+        sent = await _post_reply_as_user(chat_client, cookies, room, parent)
+        assert sent["reply_to"] == 9001
+
+    async def test_degrades_to_a_plain_post_when_the_parent_never_reached_talk(
+        self, chat_client,
+    ):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        self._bind_talk(room["token"])
+        parent = _add_msg(room["token"], body="web-only answer")
+
+        sent = await _post_reply_as_user(chat_client, cookies, room, parent)
+        assert sent["reply_to"] is None
+
+    async def test_a_plain_send_carries_no_reply(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        self._bind_talk(room["token"])
+
+        sent = await _post_reply_as_user(chat_client, cookies, room, None)
+        assert sent["reply_to"] is None
+
+
+async def _post_reply_as_user(client, cookies, room, parent_msg_id):
+    """Send (optionally citing `parent_msg_id`) with the post-as-user mirror
+    armed, and return the arguments it handed to Talk."""
+    import istota.web_app as mod
+
+    captured: dict = {}
+
+    class _FakeTalkClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def send_message(self, token, text, reply_to=None, reference_id=None):
+            captured["reply_to"] = reply_to
+            return {"ocs": {"data": {"id": 4242}}}
+
+        async def aclose(self):
+            pass
+
+    body = {"text": "about that"}
+    if parent_msg_id is not None:
+        body["reply_to_msg_id"] = parent_msg_id
+    with patch.object(mod, "_config", mod._config), \
+            patch("istota.web_tokens.feature_enabled", return_value=True), \
+            patch("istota.web_tokens.get_access_token", return_value="tok"), \
+            patch("istota.talk.TalkClient", _FakeTalkClient):
+        resp = await _send(client, cookies, room["id"], body)
+    assert resp.status_code == 200
+    return captured
 
 
 class TestReadPaths:

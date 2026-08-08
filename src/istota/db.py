@@ -3564,6 +3564,59 @@ def room_max_talk_synced_message_id(
     return 0
 
 
+def get_message_external_id(
+    conn: sqlite3.Connection, message_id: int, surface: str,
+) -> str | None:
+    """Where a message exists on `surface`, or None.
+
+    The value-returning sibling of `message_has_external_id`, which only
+    answers yes/no over a whole room. Used to mirror a web reply into Talk as a
+    real Talk reply: the parent's Talk id is what `replyTo` takes, so a bool
+    would say the citation is mirrorable without saying what to send.
+    """
+    row = conn.execute(
+        "SELECT external_ids FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if row is None or not row["external_ids"]:
+        return None
+    try:
+        ext = json.loads(row["external_ids"])
+    except (TypeError, ValueError):
+        return None
+    value = ext.get(surface) if isinstance(ext, dict) else None
+    return str(value) if value is not None else None
+
+
+def find_message_by_external_id(
+    conn: sqlite3.Connection, room_token: str, surface: str, external_id: str,
+) -> int | None:
+    """The canonical id of the room's message carrying `external_id` on
+    `surface`, or None.
+
+    What lets a Talk-native reply parent be recorded canonically too. Scoped to
+    the room because a Talk message id is per-conversation, so an unscoped
+    lookup would match an unrelated turn elsewhere.
+
+    `external_ids` is a JSON blob, so this is an unindexed scan of the room's
+    stamped rows — the same shape `message_has_external_id` and
+    `room_max_talk_synced_message_id` already use. Bounded by the room, and run
+    once per inbound reply rather than per message.
+    """
+    rows = conn.execute(
+        "SELECT id, external_ids FROM messages "
+        "WHERE room_token = ? AND external_ids IS NOT NULL ORDER BY id DESC",
+        (room_token,),
+    ).fetchall()
+    for r in rows:
+        try:
+            ext = json.loads(r["external_ids"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ext, dict) and str(ext.get(surface)) == str(external_id):
+            return int(r["id"])
+    return None
+
+
 def message_has_external_id(
     conn: sqlite3.Connection,
     room_token: str,
