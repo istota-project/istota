@@ -926,7 +926,7 @@ def _format_skill_detail(meta, name, disabled, is_admin):
 async def cmd_check(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
     user_id, conversation_token = ctx.user_id, ctx.conversation_token
-    from .executor import build_bwrap_cmd, build_clean_env
+    from .executor import build_bwrap_cmd, build_model_cli_env
 
     lines = ["**Health Check**", ""]
 
@@ -1000,13 +1000,7 @@ async def cmd_check(ctx: CommandContext):
             "--output-format", "text",
         ]
 
-        env = build_clean_env(config)
-        # Inherit API key from current environment if not already in env
-        if not env.get("ANTHROPIC_API_KEY"):
-            import os
-            val = os.environ.get("ANTHROPIC_API_KEY")
-            if val:
-                env["ANTHROPIC_API_KEY"] = val
+        env = build_model_cli_env(config)
 
         # Wrap in sandbox if enabled
         if config.security.sandbox_enabled:

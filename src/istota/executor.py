@@ -824,6 +824,26 @@ def build_clean_env(config: Config) -> dict[str, str]:
     return env
 
 
+def build_model_cli_env(config: Config) -> dict[str, str]:
+    """Build the env for a daemon-side `claude` spawn that is not a task.
+
+    The context-triage completion and the healthcheck execution test both
+    shell out to `claude` outside `BrainRequest`, so neither gets the
+    per-task env `execute_task()` assembles. They still need exactly what
+    `build_clean_env` allowlists plus the CLI's own credential: the OAuth
+    token comes through `build_clean_env`, and `ANTHROPIC_API_KEY` is
+    inherited here so an API-key deployment authenticates too. Everything
+    else in the daemon environment — the master Fernet key, the Nextcloud
+    app password, every configured service token — stays out.
+    """
+    env = build_clean_env(config)
+    if not env.get("ANTHROPIC_API_KEY"):
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
+    return env
+
+
 def build_stripped_env() -> dict[str, str]:
     """Build os.environ minus credential vars. For heartbeat/cron commands.
 

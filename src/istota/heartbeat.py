@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -627,7 +626,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     Config fields:
         execution_test: Whether to run Claude CLI invocation test (default: True)
     """
-    from .executor import build_bwrap_cmd, build_clean_env
+    from .executor import build_bwrap_cmd, build_model_cli_env
 
     failures = []
 
@@ -676,11 +675,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
                 "--output-format", "text",
             ]
 
-            env = build_clean_env(config)
-            if not env.get("ANTHROPIC_API_KEY"):
-                val = os.environ.get("ANTHROPIC_API_KEY")
-                if val:
-                    env["ANTHROPIC_API_KEY"] = val
+            env = build_model_cli_env(config)
 
             if config.security.sandbox_enabled:
                 fake_task = db.Task(
