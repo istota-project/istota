@@ -3162,9 +3162,15 @@ _SPINE_COLUMNS = (
     "  t.started_at AS started_at, t.completed_at AS completed_at, "
     "  t.model_used AS model_used, (s.message_id IS NOT NULL) AS starred, "
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
-    "  m.attachment_paths AS attachment_paths "
+    "  m.attachment_paths AS attachment_paths, "
+    "  m.reply_to_message_id AS reply_to_message_id, "
+    "  p.role AS reply_role, p.body AS reply_body "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
+    # The cited parent, joined live rather than snapshotted: nothing in the
+    # stack edits `messages.body`, so the join can't drift. A primary-key
+    # lookup, and a NULL result against a non-NULL id is the deleted case.
+    "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
 # Columns the aux (`tasks`) gap-fill query selects.
 _AUX_COLUMNS = (
@@ -3190,6 +3196,31 @@ _AUX_SOURCE_SCOPE = (
     "SELECT 1 FROM messages m2 WHERE m2.room_token = tasks.conversation_token "
     "AND m2.task_id = tasks.id AND m2.role = 'user')))"
 )
+
+
+def _row_reply_to(row) -> dict | None:
+    """The rendered citation for a history row, or None when it isn't a reply.
+
+    Two shapes, and the client distinguishes them on `deleted`: a live parent
+    carries its role and a display excerpt, a hard-deleted one carries only the
+    id it used to name. The excerpt cap is a *display* bound, distinct from the
+    1000-char prompt snapshot on the task — without it every reply in a page
+    would carry a whole assistant answer to render as two lines.
+    """
+    keys = row.keys()
+    if "reply_to_message_id" not in keys:
+        return None
+    parent_id = row["reply_to_message_id"]
+    if parent_id is None:
+        return None
+    if row["reply_role"] is None:
+        return {"msg_id": parent_id, "deleted": True}
+    return {
+        "msg_id": parent_id,
+        "role": row["reply_role"],
+        "excerpt": (row["reply_body"] or "")[:_REPLY_EXCERPT_CHARS],
+        "deleted": False,
+    }
 
 
 def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
@@ -3478,9 +3509,12 @@ def _chat_room_messages(
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
             }
             d.update(_row_attachment_fields(r, username))
-            messages.append(d)
         else:  # assistant — a stored assistant row is by definition a completed turn
-            messages.append(_assistant_message_dict(r, r["body"], r["status"] or "completed"))
+            d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+        cited = _row_reply_to(r)
+        if cited is not None:
+            d["reply_to"] = cited
+        messages.append(d)
         if tid is not None:
             seen.add((r["role"], tid))
 
@@ -4286,6 +4320,9 @@ def _cross_room_message_dict(r, username: str) -> dict:
             "role": r["role"], "text": text, "notif_id": r["msg_id"],
             "created_at": r["created_at"], **base,
         }
+    cited = _row_reply_to(r)
+    if cited is not None:
+        d["reply_to"] = cited
     d["created_at"] = _iso_utc(d.get("created_at"))
     return d
 

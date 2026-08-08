@@ -3897,7 +3897,9 @@ _CROSS_ROOM_COLUMNS = (
     "  t.status AS status, t.actions_taken AS actions_taken, "
     "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
     "  t.completed_at AS completed_at, t.model_used AS model_used, "
-    "  (s.message_id IS NOT NULL) AS starred "
+    "  (s.message_id IS NOT NULL) AS starred, "
+    "  m.reply_to_message_id AS reply_to_message_id, "
+    "  p.role AS reply_role, p.body AS reply_body "
 )
 _CROSS_ROOM_FROM = (
     "FROM messages m "
@@ -3907,6 +3909,10 @@ _CROSS_ROOM_FROM = (
     "LEFT JOIN message_stars s ON s.message_id = m.id "
     "  AND s.user_id = :user "
     "LEFT JOIN tasks t ON t.id = m.task_id "
+    # The cited parent (primary-key lookup). A NULL result against a non-NULL
+    # `reply_to_message_id` is the deleted-parent case, which the client
+    # renders muted rather than dropping.
+    "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
 # System rows (alerts / logs / web-routed notifications) render in the
 # aggregate views and stream too — count_unread_messages counts them, so

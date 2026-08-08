@@ -296,3 +296,95 @@ class TestCanonicalParentLookup:
 def _task_count():
     with db.get_db(_db_path()) as conn:
         return conn.execute("SELECT COUNT(*) AS c FROM tasks").fetchone()["c"]
+
+
+class TestReadPaths:
+    """`reply_to` must be emitted by every producer or a reply renders as a
+    reply in one view and as an ordinary message in another."""
+
+    async def _reply_send(self, client, cookies, room, parent_body="the answer"):
+        parent = _add_msg(room["token"], role="assistant", body=parent_body)
+        resp = await _send(client, cookies, room["id"], {
+            "text": "about that", "reply_to_msg_id": parent,
+        })
+        return parent, resp.json()["task_id"]
+
+    async def test_room_history_carries_the_citation(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent, task_id = await self._reply_send(chat_client, cookies, room)
+
+        resp = await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )
+        row = next(
+            m for m in resp.json()["messages"]
+            if m["role"] == "user" and m.get("task_id") == task_id
+        )
+        assert row["reply_to"] == {
+            "msg_id": parent, "role": "assistant",
+            "excerpt": "the answer", "deleted": False,
+        }
+
+    async def test_aggregate_view_carries_the_citation(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent, task_id = await self._reply_send(chat_client, cookies, room)
+
+        resp = await chat_client.get(
+            "/istota/api/chat/messages?view=all", cookies=cookies,
+        )
+        row = next(
+            m for m in resp.json()["messages"]
+            if m["role"] == "user" and m.get("task_id") == task_id
+        )
+        assert row["reply_to"]["msg_id"] == parent
+        assert row["reply_to"]["excerpt"] == "the answer"
+
+    async def test_excerpt_is_capped_for_display(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent, task_id = await self._reply_send(
+            chat_client, cookies, room, parent_body="y" * 500,
+        )
+
+        resp = await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )
+        row = next(
+            m for m in resp.json()["messages"]
+            if m["role"] == "user" and m.get("task_id") == task_id
+        )
+        assert row["reply_to"]["excerpt"] == "y" * 200
+
+    async def test_deleted_parent_renders_as_deleted(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent, task_id = await self._reply_send(chat_client, cookies, room)
+        deleted = await chat_client.delete(
+            f"/istota/api/chat/messages/{parent}", cookies=cookies, headers=ORIGIN,
+        )
+        assert deleted.status_code == 200
+
+        resp = await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )
+        row = next(
+            m for m in resp.json()["messages"]
+            if m["role"] == "user" and m.get("task_id") == task_id
+        )
+        # The citation survives the parent — erasing it would rewrite the
+        # conversation rather than record what happened to it.
+        assert row["reply_to"] == {"msg_id": parent, "deleted": True}
+
+    async def test_plain_message_has_no_reply_to_key(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        await _send(chat_client, cookies, room["id"], {"text": "hello"})
+
+        resp = await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )
+        rows = [m for m in resp.json()["messages"] if m["role"] == "user"]
+        assert rows
+        assert all("reply_to" not in m for m in rows)
