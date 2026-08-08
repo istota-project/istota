@@ -375,6 +375,23 @@ def _resolve_effort(task, config: Config) -> str:
     return task_effort or config.effort
 
 
+def _resolve_advisor(task, config: Config) -> str:
+    """Resolve the ``advisor_model`` for a task, unresolved (alias/raw form).
+
+    A per-task model pin — whatever set it: ``!model``, ``!room model``, a
+    ``[[jobs]] model``, an API caller — drops the configured advisor. Unlike
+    effort, a mismatched executor/advisor pairing is a hard CLI error, not a
+    downgrade (``--advisor <model>`` incompatible with ``--model`` refuses to
+    run at all), so a pin that predates ``advisor_model`` must not start
+    failing tasks it was already handling. Only the unpinned default path
+    gets the configured advisor.
+    """
+    task_model = (task.model or "").strip()
+    if task_model:
+        return ""
+    return (config.advisor_model or "").strip()
+
+
 def _persist_task_usage(config: Config, conn, task_id: int, usage) -> None:
     """Record native-brain token/cost telemetry to ``task_logs`` + an INFO log.
 
@@ -540,7 +557,12 @@ def _run_fallback(config, brain_config, fallback_kind, task, req):
     fb_model, fb_effort, dropped_pin = _resolve_fallback_model_effort(
         task, config, fb_brain, req.effort
     )
-    fb_req = _dc.replace(req, model=fb_model, effort=fb_effort)
+    # An advisor pairing can only be right for the brain it was resolved
+    # against. anthropic->native drops it (mirrors the non-portable-pin drop
+    # above — NativeBrain has no wire for it anyway); anthropic->anthropic
+    # keeps it, since the pairing risk carries over to the fallback too.
+    fb_advisor = req.advisor if fb_brain.model_namespace == "anthropic" else ""
+    fb_req = _dc.replace(req, model=fb_model, effort=fb_effort, advisor=fb_advisor)
     try:
         return _mark_if_exhausted(fb_brain.execute(fb_req)), dropped_pin
     except Exception as e:  # noqa: BLE001 — brains shouldn't raise, but be safe
@@ -3663,6 +3685,13 @@ def execute_task(
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
             model=brain.resolve_model_name((task.model or "").strip() or config.model),
             effort=_resolve_effort(task, config),
+            # Anthropic-namespace brains only — the advisor tool has no wire
+            # over NativeBrain's openai_compat endpoint.
+            advisor=(
+                brain.resolve_model_name(_resolve_advisor(task, config))
+                if brain.model_namespace == "anthropic"
+                else ""
+            ),
             custom_system_prompt_path=sp_path,
             streaming=use_streaming,
             on_progress=_on_event if use_streaming else None,
@@ -3686,6 +3715,10 @@ def execute_task(
             # on_pid/!stop correlation.
             session_label=f"istota-{task.id}-{task.attempt_count}",
         )
+        if req.advisor:
+            logger.info(
+                "task %d: model=%s advisor=%s", task.id, req.model, req.advisor,
+            )
 
         # Availability failover (brain-fallback spec). Generalizes the old
         # tmux→claude_code in-attempt fallback: when the primary brain is

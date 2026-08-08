@@ -138,6 +138,13 @@ Per-task BrainRequest fields the executor populates:
 - `prompt`, `allowed_tools` (from `build_allowed_tools`), `cwd=config.temp_dir`,
   `env` (built per task), `timeout_seconds=config.scheduler.task_timeout_minutes * 60`
 - `model = (task.model or config.model)`, `effort = (task.effort or config.effort)`
+- `advisor = brain.resolve_model_name(_resolve_advisor(task, config))` when
+  `brain.model_namespace == "anthropic"`, else `""`. `_resolve_advisor` returns
+  `config.advisor_model` unless `task.model` is set (a per-task model pin drops
+  the advisor — a mismatched executor/advisor pairing is a hard CLI error, not
+  a downgrade, mirroring `_resolve_effort`'s pin-drop rule one severity up).
+  `_run_fallback` carries `advisor` across an anthropic→anthropic reroute and
+  drops it on anthropic→native (advisor-model spec, Stage 3).
 - `custom_system_prompt_path = config/system-prompt.md` when `custom_system_prompt = true`
 - `streaming = event_writer is not None`
 - `on_progress = _on_brain_event`: closure that maps the widened `StreamEvent`

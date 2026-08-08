@@ -141,6 +141,15 @@ Convention: bare alias names (`opus`, `sonnet`, `haiku`) always resolve to the
 through every consumer + alias automatically — a model release is one constant
 edit, no effort variants to enumerate.
 
+`Config.advisor_model` (top-level TOML `advisor_model`, `[brain.advisor_model]`
+does NOT exist — it lives beside `model`/`effort`, not under `[brain]`) resolves
+through this same table via `resolve_model_name`, which drops any `:effort`
+modifier — the CLI's `--advisor` flag takes no effort. Only meaningful for the
+anthropic namespace (`claude_code` / `tmux_claude`); `NativeBrain` ignores it
+entirely, since the advisor is an Anthropic Messages beta tool with no wire
+over `openai_compat`. See `.claude/rules/executor.md` § Brain invocation for
+how the executor resolves and drops it per task.
+
 Adding a new brain: implement the four Brain methods (`execute`,
 `resolve_alias`, `resolve_model_name`, `list_aliases`, `validate_alias_override`),
 set a `model_namespace` class attribute (the key operators use in

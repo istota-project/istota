@@ -20,6 +20,8 @@ from tests.test_executor_streaming import (
 
 
 class _FakeBrain:
+    model_namespace = "anthropic"
+
     def __init__(self, result):
         self.result = result
 

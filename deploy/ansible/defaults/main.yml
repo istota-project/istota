@@ -37,6 +37,15 @@ istota_emissaries_enabled: true
 istota_model: ""
 istota_effort: ""
 
+# Advisor model ("" = no advisor). Anthropic-namespace brains only
+# (claude_code / tmux_claude); the advisor tool has no wire over the native
+# brain's openai_compat endpoint. Resolves through the same alias table as
+# istota_model but carries no effort. A per-task model pin (!model, !room
+# model, a [[jobs]] model) drops the advisor for that task — the executor/
+# advisor pairing is a hard CLI error when mismatched, not a downgrade, so
+# turning this on must never break a task that was already pinned.
+istota_advisor_model: ""
+
 # Model alias registry ([models.aliases]) — one operator-visible table overlaying
 # the code-shipped defaults (tiers fast/general/smart + shortcuts opus/sonnet/haiku).
 # Aliases are per model namespace so one definition works on every brain:

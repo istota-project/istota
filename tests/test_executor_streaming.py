@@ -1648,6 +1648,8 @@ class TestTmuxFallback:
         from istota.brain._types import BrainResult
 
         class _FakeBrain:
+            model_namespace = "anthropic"
+
             def __init__(self):
                 self.kind = kind
                 self.calls = 0
