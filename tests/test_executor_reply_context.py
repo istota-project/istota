@@ -196,6 +196,26 @@ class TestQuoteFrame:
         )
         assert "Replying to:" not in self._prompt_for(tmp_path, task)
 
+    def test_the_snapshot_is_quoted_once_on_an_empty_history(self, tmp_path, conn):
+        """The frame supersedes the old `(In reply to: …)` context fallback.
+
+        That fallback fired only when history was empty — the case the frame now
+        covers unconditionally — so keeping both put the same 1000 characters in
+        the prompt twice.
+        """
+        from istota.executor import _build_talk_api_context, build_prompt
+
+        config = _config(tmp_path, tmp_path / "istota.db")
+        task = db.Task(
+            id=1, user_id="alice", prompt="yes", source_type="talk",
+            conversation_token="room1", status="running",
+            reply_to_talk_id=77, reply_to_content="Shall I proceed?",
+        )
+        context, _ = _build_talk_api_context(task, config, conn)
+        assert context is None
+        prompt = build_prompt(task, [], config, conversation_context=context)
+        assert prompt.count("Shall I proceed?") == 1
+
     def test_talk_reply_also_gets_the_frame(self, tmp_path):
         """The frame is keyed on the snapshot, not on the surface — a Talk
         reply's `(In reply to: …)` fallback only appeared when history was

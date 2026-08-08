@@ -1745,9 +1745,9 @@ def _build_talk_api_context(
 
     if not raw_messages:
         logger.info("No messages from Talk API for token %s", task.conversation_token)
-        # Fall through to reply-to fallback
-        if task.reply_to_talk_id and task.reply_to_content:
-            return f"(In reply to: {task.reply_to_content})", set()
+        # No reply-to fallback here any more: `build_prompt` renders the
+        # citation into the request section unconditionally, so emitting it as
+        # the whole conversation context would quote the same snapshot twice.
         return None, set()
 
     # Collect task IDs from referenceIds for batch metadata lookup
@@ -1774,8 +1774,6 @@ def _build_talk_api_context(
 
     if not talk_messages:
         logger.info("No relevant Talk messages after filtering for task %d", task.id)
-        if task.reply_to_talk_id and task.reply_to_content:
-            return f"(In reply to: {task.reply_to_content})", set()
         return None, set()
 
     # Cap at lookback_count, then apply recency window
@@ -1956,11 +1954,9 @@ def _build_db_context(
         else:
             logger.info("No relevant context selected from %d messages", len(history))
     else:
-        if task.reply_to_talk_id and task.reply_to_content:
-            logger.info("Using inline reply context for task %d (no history)", task.id)
-            return f"(In reply to: {task.reply_to_content})", set()
-        else:
-            logger.info("No conversation history found for token %s", task.conversation_token)
+        # The citation is no longer stood up as the whole context here — the
+        # request section carries it either way. See `_build_talk_api_context`.
+        logger.info("No conversation history found for token %s", task.conversation_token)
 
     return None, set()
 
