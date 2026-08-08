@@ -107,6 +107,7 @@ class TestBrainRequestDefaults:
         )
         assert req.model == ""
         assert req.effort == ""
+        assert req.advisor == ""
         assert req.streaming is True
         assert req.on_progress is None
         assert req.cancel_check is None
@@ -156,6 +157,59 @@ class TestBuildCommandDisallowedTools:
         assert "--allowedTools" not in cmd
         assert "--disallowedTools" not in cmd
         assert "--dangerously-skip-permissions" not in cmd
+
+
+class TestAdvisorFlag:
+    """`--advisor` is gated on both `req.advisor` and `req.allowed_tools` being
+    non-empty, mirroring the other model flags (advisor-model spec, Stage 2)."""
+
+    def _req(self, tmp_path, *, advisor="", allowed_tools=("Bash",)):
+        return BrainRequest(
+            prompt="hi",
+            allowed_tools=list(allowed_tools),
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+            advisor=advisor,
+        )
+
+    def test_emitted_when_advisor_and_tools_present(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"])
+        )
+        assert "--advisor" in flags
+        idx = flags.index("--advisor")
+        assert flags[idx + 1] == "claude-opus-5"
+
+    def test_omitted_when_advisor_empty(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, advisor="", allowed_tools=["Bash"])
+        )
+        assert "--advisor" not in flags
+
+    def test_omitted_when_text_only(self, tmp_path):
+        # A text-only call has no judgement moments to escalate — the advisor
+        # is cost with no mechanism to pay off, so it's dropped even when set.
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        flags = build_claude_cli_flags(
+            self._req(tmp_path, advisor="claude-opus-5", allowed_tools=[])
+        )
+        assert "--advisor" not in flags
+
+    def test_placed_after_effort(self, tmp_path):
+        from istota.brain.claude_code import build_claude_cli_flags
+
+        req = BrainRequest(
+            prompt="hi", allowed_tools=["Bash"], cwd=tmp_path, env={},
+            timeout_seconds=60, effort="high", advisor="claude-opus-5",
+        )
+        flags = build_claude_cli_flags(req)
+        assert flags.index("--effort") < flags.index("--advisor")
 
 
 class TestRootSkipPermissionsEnv:
@@ -213,3 +267,61 @@ class TestRootSkipPermissionsEnv:
             tmp_path, root=True, allowed_tools=["Bash"], env={"IS_SANDBOX": "custom"}
         )
         assert env.get("IS_SANDBOX") == "custom"
+
+
+class TestAdvisorEnvExclusivity:
+    """Exactly one of {`--advisor` in argv, `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`
+    in the child env} holds for every request that reaches ClaudeCodeBrain.
+    Both would mean a silently dead flag; neither would mean the host's
+    `~/.claude/settings.json` `advisorModel` is back in charge (advisor-model
+    spec, Tests section). Parametrized over constructed shapes, not just the
+    seven real call sites, so a shape nothing constructs today (advisor set
+    with empty allowed_tools) still proves the invariant structural."""
+
+    def _execute_capturing(self, tmp_path, *, advisor, allowed_tools):
+        from unittest.mock import patch
+
+        req = BrainRequest(
+            prompt="hi",
+            allowed_tools=allowed_tools,
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=60,
+            streaming=False,
+            advisor=advisor,
+        )
+        captured_env = {}
+        captured_cmd = []
+
+        def fake_run(cmd, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            captured_cmd.extend(cmd)
+            return typing.cast(
+                typing.Any,
+                type("R", (), {"stdout": "ok", "stderr": "", "returncode": 0})(),
+            )
+
+        with patch("istota.brain.claude_code.subprocess.run", side_effect=fake_run):
+            ClaudeCodeBrain().execute(req)
+        return captured_cmd, captured_env
+
+    @pytest.mark.parametrize(
+        "advisor,allowed_tools",
+        [
+            ("", ["Bash"]),           # no advisor configured, tool-bearing
+            ("", []),                 # no advisor configured, text-only
+            ("claude-opus-5", ["Bash"]),  # advisor + tools: the flag fires
+            ("claude-opus-5", []),    # advisor set, but text-only — the shape
+                                       # nothing constructs today, per the spec.
+        ],
+    )
+    def test_exactly_one_of_flag_or_disable_var(self, tmp_path, advisor, allowed_tools):
+        cmd, env = self._execute_capturing(
+            tmp_path, advisor=advisor, allowed_tools=allowed_tools
+        )
+        flag_present = "--advisor" in cmd
+        disable_present = env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
+        assert flag_present != disable_present, (
+            f"advisor={advisor!r} allowed_tools={allowed_tools!r}: "
+            f"flag_present={flag_present} disable_present={disable_present}"
+        )

@@ -116,6 +116,17 @@ def build_prompt(
 | Developer | `GITHUB_API_CMD` | Path to API wrapper script (if enabled + token set) |
 | Developer | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth (if enabled + token set) |
 
+The sandbox RO-binds the host's real `~/.claude/settings.json` back into the
+tmpfs'd `~/.claude` (`build_bwrap_cmd`), and the six direct brain callers
+(`.claude/rules/brain.md` § Direct-caller availability) pass the daemon's own
+environment through unsandboxed — so any Claude Code setting that changes
+model behaviour is inherited on both paths unless something explicitly
+neutralises it. The advisor tool (`advisorModel` in settings) is the first one
+Istota takes a position on: `ClaudeCodeBrain` / `TmuxClaudeBrain` set
+`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` in the child env whenever the request
+won't itself emit `--advisor`, closing the inherited channel on every
+`BrainRequest` path at once (advisor-model spec, Stage 1).
+
 ## Brain invocation
 The executor no longer spawns `claude` directly — it composes a `BrainRequest`
 and calls `make_brain(config.brain).execute(req)`. The brain owns command

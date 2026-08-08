@@ -581,6 +581,20 @@ def _is_root() -> bool:
 _WARNED_UNSUPPORTED_FLAGS: set[str] = set()
 
 
+def advisor_active(req: BrainRequest) -> bool:
+    """True iff ``build_claude_cli_flags`` will emit ``--advisor`` for this
+    request: an advisor is set, and there are tools for it to have judgement
+    moments about (a text-only call has none — see ``build_claude_cli_flags``).
+
+    The single predicate both ``ClaudeCodeBrain`` and ``TmuxClaudeBrain`` use
+    to decide whether to also set ``CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`` in the
+    child env, so the two are structurally exclusive: either the flag fires,
+    or the settings-file channel is suppressed — never both, never neither
+    (advisor-model spec, "Env exclusivity" test).
+    """
+    return bool(req.advisor) and bool(req.allowed_tools)
+
+
 def build_claude_cli_flags(
     req: BrainRequest, *, unsupported: frozenset[str] = frozenset()
 ) -> list[str]:
@@ -641,6 +655,8 @@ def build_claude_cli_flags(
         _add("--model", req.model)
     if req.effort:
         _add("--effort", req.effort)
+    if advisor_active(req):
+        _add("--advisor", req.advisor)
     if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():
         _add("--system-prompt-file", str(req.custom_system_prompt_path))
     return flags
@@ -865,6 +881,16 @@ class ClaudeCodeBrain:
             # leave it unset. Mirrors the tmux brain's root handling.
             if req.allowed_tools and _is_root() and "IS_SANDBOX" not in req.env:
                 req.env["IS_SANDBOX"] = "1"
+
+            # Close the settings-file advisor channel whenever this request
+            # won't emit --advisor itself: a host's ~/.claude/settings.json
+            # advisorModel is honored in -p mode (RO-bound into the sandbox),
+            # so without this, any host carrying that key would turn on an
+            # advisor Istota's config never asked for. advisor_active(req) is
+            # the same predicate build_claude_cli_flags uses for --advisor, so
+            # exactly one of the two is ever true (advisor-model spec).
+            if not advisor_active(req):
+                req.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
 
             cmd = self._build_command(req)
             if req.sandbox_wrap is not None:

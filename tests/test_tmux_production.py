@@ -641,6 +641,42 @@ class TestRootSandboxEnv:
         assert captured.get("IS_SANDBOX") == "custom"
 
 
+class TestAdvisorEnvTmux:
+    """Same settings-file suppression as ClaudeCodeBrain (advisor-model spec,
+    Stage 1), but the var goes into the tmux session env (`-e` on `new-session`)
+    rather than a subprocess env= — the interactive TUI runs inside the pane,
+    not as a direct child of the brain."""
+
+    def _run_to_session_env(self, monkeypatch, tmp_path, *, advisor="", allowed_tools=()):
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session",
+                            lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)  # bail after launch
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(
+            _req(tmp_path, advisor=advisor, allowed_tools=list(allowed_tools)),
+            attempt=0,
+        )
+        return captured
+
+    def test_disable_var_set_when_no_advisor(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(monkeypatch, tmp_path)
+        assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
+
+    def test_disable_var_absent_when_advisor_active(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(
+            monkeypatch, tmp_path, advisor="claude-opus-5", allowed_tools=["Bash"]
+        )
+        assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in env
+
+    def test_disable_var_set_when_advisor_but_text_only(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(monkeypatch, tmp_path, advisor="claude-opus-5")
+        assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
+
+
 class TestSessionLabel:
     def test_label_with_retry_suffix(self, monkeypatch, tmp_path):
         # On a retry attempt the session name gets an -rN suffix to stay unique.

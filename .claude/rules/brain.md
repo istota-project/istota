@@ -160,6 +160,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `timeout_seconds: int` | `config.scheduler.task_timeout_minutes * 60` |
 | `model: str` | `task.model` or `config.model`; brain default if empty |
 | `effort: str` | `task.effort` or `config.effort`; brain default if empty |
+| `advisor: str` | Anthropic-namespace brains only; `""` = no advisor. Set only by the executor, only when `config.advisor_model` is configured and the task carries no model pin (advisor-model spec). `ClaudeCodeBrain` / `TmuxClaudeBrain` emit `--advisor <value>` when both this and `allowed_tools` are non-empty, and otherwise set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` in the child env so a host's `~/.claude/settings.json` `advisorModel` can't run one Istota didn't ask for. `NativeBrain` ignores it. |
 | `custom_system_prompt_path: Path \| None` | Override system prompt (claude_code-specific knob) |
 | `streaming: bool` | True when `on_progress` callback is supplied |
 | `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `TextDeltaEvent` (per-token incremental answer text — NativeBrain per provider `TextDelta`, ClaudeCodeBrain via the CLI's `--include-partial-messages` `text_delta` frames) \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only) \| `ThinkingEvent` (whole reasoning block) \| `ThinkingDeltaEvent` (incremental reasoning — NativeBrain `reasoning` deltas, ClaudeCodeBrain `thinking_delta` partials). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`): `TextDeltaEvent` → coalesced `text_delta` on stream surfaces (web/repl), dropped on push surfaces; `ThinkingDeltaEvent`/`ThinkingEvent` → coalesced `thinking`, stream surfaces only. A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). Both brains stay surface-agnostic — they emit both per-token deltas *and* whole-block `TextEvent`/`ThinkingEvent`s; the executor dedupes deltas-vs-whole-block per surface (stream: keep deltas, drop the redundant whole block; push: drop deltas, forward intermediate `TextEvent`s as `progress_text`, drop thinking). NativeBrain additionally suppresses the **final** turn's `TextEvent` (its text becomes the result); if the final turn carries no text the held block is released as progress instead, since it is no longer the answer. |
@@ -408,6 +409,16 @@ degraded. The breaker cooldown gates the next scheduled run, so neither
 re-attempts every cycle while the primary stays down; a bounded "still down"
 heartbeat re-alerts once per cooldown window (org-monthly limit) until an admin
 raises it, then the next probe succeeds and closes the breaker.
+
+These six sites (plus the executor) are also the seven `BrainRequest`
+construction sites the advisor-model spec enumerates. All six build their env
+from `dict(os.environ)` and run unsandboxed, so — unlike the executor, whose
+sandbox only RO-binds the host's `~/.claude/settings.json` — they read the
+daemon user's **real** settings file directly. Any Claude Code setting that
+changes model behaviour (`advisorModel` is the first one Istota has taken a
+position on) is inherited here too unless a brain neutralises it structurally;
+see `.claude/rules/executor.md` § Environment Variable Mapping and "Model
+identity" below.
 
 ### Fallback-compatibility posture registry (ISSUE-181, Problem 3)
 

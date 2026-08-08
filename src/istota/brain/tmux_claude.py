@@ -53,6 +53,7 @@ from .claude_code import (
     API_RETRY_MAX_ATTEMPTS,
     ClaudeCodeBrain,
     _is_root,
+    advisor_active,
     build_claude_cli_flags,
     is_transient_api_error,
     _success_frame_stop_reason,
@@ -682,6 +683,13 @@ class TmuxClaudeBrain:
             # root container fails readiness → fallback (the 14:30 docker repro).
             if _is_root() and "IS_SANDBOX" not in env:
                 env["IS_SANDBOX"] = "1"
+            # Same settings-file suppression as ClaudeCodeBrain (advisor-model
+            # spec, Stage 1) — the RO-bound ~/.claude/settings.json reaches this
+            # pane too. advisor_active(req) is the same predicate
+            # build_claude_cli_flags uses for --advisor, so the two stay
+            # structurally exclusive.
+            if not advisor_active(req):
+                env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
             self._new_session(session, env)
             self._launch_claude(session, req, base_dir)
 
