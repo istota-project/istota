@@ -1,6 +1,7 @@
 """Tests for Talk API-based conversation context pipeline."""
 
 import json
+import os
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -284,6 +285,31 @@ class TestSelectRelevantTalkContext:
         # Last 2 are guaranteed recent
         assert result[3].message_id == 8
         assert result[4].message_id == 9
+
+    def test_cli_triage_does_not_inherit_daemon_credentials(self):
+        """ISSUE-232 — same explicit-env guarantee on the Talk triage path."""
+        config = _make_config(skip_selection_threshold=3, always_include_recent=2)
+        messages = [
+            TalkMessage(i, "alice", "Alice", False, f"msg {i}", 100 + i, None, "user", None)
+            for i in range(10)
+        ]
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"relevant_ids": []})
+
+        with patch.dict(
+            os.environ,
+            {"PATH": "/usr/bin", "ISTOTA_SECRET_KEY": "k" * 64, "NC_PASS": "pw"},
+            clear=True,
+        ):
+            with patch("istota.context.subprocess.run", return_value=mock_result) as mock_run:
+                select_relevant_talk_context("hello", messages, config)
+
+        env = mock_run.call_args.kwargs.get("env")
+        assert env is not None
+        assert "ISTOTA_SECRET_KEY" not in env
+        assert "NC_PASS" not in env
 
     def test_triage_error_fails_open(self):
         """A triage hiccup includes all older messages rather than dropping them."""

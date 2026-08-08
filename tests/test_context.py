@@ -1,6 +1,7 @@
 """Tests for conversation context selection module."""
 
 import json
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -114,6 +115,27 @@ class TestSelectRelevantContext:
         assert len(calls) == 1
         # triaged 0, 2 + guaranteed last 2
         assert result == [history[0], history[2], history[3], history[4]]
+
+    @patch("istota.context.subprocess.run")
+    def test_cli_triage_does_not_inherit_daemon_credentials(self, mock_run):
+        """ISSUE-232 — the CLI triage path spawns `claude` with an explicit
+        env, so the daemon's credentials never reach a subprocess driven by
+        user-influenced conversation history."""
+        config = _make_config(skip_selection_threshold=2, always_include_recent=2)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"relevant_ids": []}', stderr="",
+        )
+        with patch.dict(
+            os.environ,
+            {"PATH": "/usr/bin", "ISTOTA_SECRET_KEY": "k" * 64, "NC_PASS": "pw"},
+            clear=True,
+        ):
+            select_relevant_context("test", _history(5), config)
+
+        env = mock_run.call_args.kwargs.get("env")
+        assert env is not None
+        assert "ISTOTA_SECRET_KEY" not in env
+        assert "NC_PASS" not in env
 
     @patch("istota.context.subprocess.run")
     def test_completer_returning_none_fails_open(self, mock_run):

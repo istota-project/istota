@@ -132,20 +132,33 @@ def select_relevant_context(
     return selected
 
 
-def _claude_cli_triage(prompt: str, model: str, timeout: float) -> str | None:
+def _claude_cli_triage(
+    prompt: str, model: str, timeout: float, config: Config
+) -> str | None:
     """Default triage inference: a one-shot `claude -p -` completion.
 
     Returns the raw model output, or None on nonzero exit / timeout / missing
     CLI / any subprocess error. JSON parsing and validation stay in
     ``_parse_relevant_ids`` so they apply uniformly across inference backends.
+
+    The child gets ``build_model_cli_env``, not the daemon's own environment
+    (ISSUE-232). This runs on a prompt assembled from conversation history,
+    so it is the one `claude` spawn driven by user-influenced input; it needs
+    the CLI's auth credential and nothing else. Imported inside the function
+    because ``executor`` imports this module at import time, and inside the
+    ``try`` so an import failure fails open like every other triage error
+    instead of propagating into prompt assembly.
     """
     try:
+        from .executor import build_model_cli_env
+
         result = subprocess.run(
             ["claude", "-p", "-", "--model", model],
             input=prompt,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=build_model_cli_env(config),
         )
         if result.returncode != 0:
             logger.warning(
@@ -264,7 +277,7 @@ Rules:
             config.conversation.selection_model
         )
         raw = _claude_cli_triage(
-            selection_prompt, model, config.conversation.selection_timeout
+            selection_prompt, model, config.conversation.selection_timeout, config
         )
 
     ids = _parse_relevant_ids(raw, len(older_history))
@@ -537,7 +550,7 @@ Rules:
             config.conversation.selection_model
         )
         raw = _claude_cli_triage(
-            selection_prompt, model, config.conversation.selection_timeout
+            selection_prompt, model, config.conversation.selection_timeout, config
         )
 
     ids = _parse_relevant_ids(raw, len(older))

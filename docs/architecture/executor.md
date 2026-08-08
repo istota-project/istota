@@ -122,6 +122,7 @@ Malformed results are reclassified as failures and retried.
 |---|---|
 | `build_clean_env()` | Minimal env for Claude subprocess |
 | `build_stripped_env()` | `os.environ` minus anything containing `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, `APP_PASSWORD`, `NC_PASS`, or `PRIVATE_KEY` in its name. Substring match — no preserve list (`ISTOTA_SECRET_KEY` is stripped). For heartbeat/cron commands. |
+| `build_model_cli_env()` | `build_clean_env()` plus an inherited `ANTHROPIC_API_KEY`. Used by the daemon-side `claude` spawns that send a prompt without going through a `BrainRequest`: conversation-context triage and the `!check` / self-check execution test. `build_clean_env()` already carries `CLAUDE_CODE_OAUTH_TOKEN`, so both auth shapes reach the CLI while the rest of the daemon environment does not. |
 | `build_allowed_tools()` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]`. The CLI brains no longer pass this as an `--allowedTools` allowlist (they run `--dangerously-skip-permissions`); the list survives as NativeBrain's in-process tool filter and the non-empty/empty signal for tool-bearing vs text-only tasks. `WebSearch` runs server-side (titles + URLs only), so page reads are steered to the `browse` skill. |
 | `_split_credential_env()` | Separates credential vars for proxy routing using a manifest-derived `credential_set` |
 | `derive_credential_set()` | Sensitive env-var names across all skill manifests (replaces `_PROXY_CREDENTIAL_VARS`) |

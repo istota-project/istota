@@ -1185,11 +1185,19 @@ class TestCheckSelf:
         mock_result.stdout = "healthcheck-ok\n"
 
         with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
-             patch("istota.heartbeat.subprocess.run", return_value=mock_result), \
-             patch("istota.heartbeat.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+             patch("istota.heartbeat.subprocess.run", return_value=mock_result) as mock_run, \
+             patch("istota.executor.os.environ", {
+                 "ANTHROPIC_API_KEY": "test-key",
+                 "ISTOTA_SECRET_KEY": "k" * 64,
+             }):
             result = _check_self(check, config, "alice")
 
         assert result.healthy
+        # The execution test spawns `claude`, so it gets the CLI's own
+        # credential and nothing else from the daemon environment.
+        env = mock_run.call_args.kwargs["env"]
+        assert env["ANTHROPIC_API_KEY"] == "test-key"
+        assert "ISTOTA_SECRET_KEY" not in env
 
     def test_execution_test_fail(self, db_path):
         check = self._make_check(execution_test=True)
@@ -1200,7 +1208,7 @@ class TestCheckSelf:
 
         with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
              patch("istota.heartbeat.subprocess.run", return_value=mock_result), \
-             patch("istota.heartbeat.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+             patch("istota.executor.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
             result = _check_self(check, config, "alice")
 
         assert not result.healthy
@@ -1212,7 +1220,7 @@ class TestCheckSelf:
 
         with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
              patch("istota.heartbeat.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 30)), \
-             patch("istota.heartbeat.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+             patch("istota.executor.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
             result = _check_self(check, config, "alice")
 
         assert not result.healthy
@@ -1238,7 +1246,7 @@ class TestCheckSelf:
 
         with patch("istota.heartbeat.shutil.which", return_value="/usr/bin/claude"), \
              patch("istota.heartbeat.subprocess.run", return_value=mock_result), \
-             patch("istota.heartbeat.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+             patch("istota.executor.os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
             result = _check_self(check, config, "alice")
 
         assert result.healthy

@@ -21,6 +21,7 @@ from istota.executor import (
     _split_credential_env,
     build_allowed_tools,
     build_clean_env,
+    build_model_cli_env,
     build_stripped_env,
     derive_authorized_skills,
     derive_credential_set,
@@ -633,3 +634,115 @@ class TestPhase1MasterKeyEgress:
         }, clear=True):
             env = build_stripped_env()
         assert "ISTOTA_SECRET_KEY" not in env
+
+
+class TestBuildModelCliEnv:
+    """`build_model_cli_env` is the env every daemon-side `claude` spawn
+    uses: the clean allowlist plus the CLI's own auth credential."""
+
+    def test_is_clean_env_plus_api_key(self):
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "ANTHROPIC_API_KEY": "sk-ant-parent",
+            "ISTOTA_SECRET_KEY": "k" * 64,
+            "NC_PASS": "nextcloud-app-password",
+        }, clear=True):
+            env = build_model_cli_env(Config())
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-parent"
+        assert env["HOME"] == "/home/test"
+        assert "ISTOTA_SECRET_KEY" not in env
+        assert "NC_PASS" not in env
+
+    def test_omits_api_key_when_parent_has_none(self):
+        with patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
+            env = build_model_cli_env(Config())
+        assert "ANTHROPIC_API_KEY" not in env
+
+    def test_does_not_override_a_key_already_on_the_clean_env(self):
+        """The inheritance is a fallback, not an override.
+
+        Stubbing `build_clean_env` is the only way to make the two sources
+        differ: its passthrough loop reads `os.environ` too, so through the
+        public API both values are the same string by construction and the
+        guard cannot be observed.
+        """
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "sk-ant-parent",
+        }, clear=True):
+            with patch(
+                "istota.executor.build_clean_env",
+                return_value={"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-ant-resolved"},
+            ):
+                env = build_model_cli_env(Config())
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-resolved"
+
+    def test_passthrough_listed_key_survives(self):
+        config = Config(security=SecurityConfig(
+            passthrough_env_vars=["ANTHROPIC_API_KEY"],
+        ))
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "sk-ant-parent",
+        }, clear=True):
+            env = build_model_cli_env(config)
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-parent"
+
+
+class TestClaudeCliTriageEnv:
+    """ISSUE-232 — the context-triage `claude -p` spawn was the one `claude`
+    subprocess in the tree with no `env=` kwarg, so it inherited the daemon's
+    whole environment (master key, Nextcloud app password, every token) on a
+    prompt built from user-influenced conversation history."""
+
+    def _triage_env(self, parent_env: dict[str, str]) -> dict[str, str]:
+        """Run `_claude_cli_triage` under `parent_env`, return the child env."""
+        from istota import context
+
+        with patch.dict(os.environ, parent_env, clear=True):
+            with patch("istota.context.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout='{"relevant_ids": []}',
+                )
+                context._claude_cli_triage("prompt", "some-model", 30.0, Config())
+        assert mock_run.call_count == 1
+        env = mock_run.call_args.kwargs.get("env")
+        assert env is not None, "triage spawned `claude` without an explicit env"
+        return env
+
+    def test_master_key_not_inherited(self):
+        env = self._triage_env({
+            "PATH": "/usr/bin",
+            "ISTOTA_SECRET_KEY": "k" * 64,
+        })
+        assert "ISTOTA_SECRET_KEY" not in env
+
+    def test_service_credentials_not_inherited(self):
+        env = self._triage_env({
+            "PATH": "/usr/bin",
+            "NC_PASS": "nextcloud-app-password",
+            "SMTP_PASSWORD": "smtp-secret",
+            "IMAP_PASSWORD": "imap-secret",
+            "MONARCH_SESSION_ID": "sid-abc",
+        })
+        for key in ("NC_PASS", "SMTP_PASSWORD", "IMAP_PASSWORD", "MONARCH_SESSION_ID"):
+            assert key not in env
+
+    def test_cli_auth_still_reaches_the_child(self):
+        """The triage spawn is a `claude` invocation — stripping the model
+        credential along with everything else would leave it permanently
+        unauthenticated, and triage fails open, so the breakage would be
+        silent. Both auth shapes have to survive."""
+        env = self._triage_env({
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "sk-ant-parent",
+            "CLAUDE_CODE_OAUTH_TOKEN": "oauth-parent",
+        })
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-parent"
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-parent"
+
+    def test_child_keeps_what_it_needs_to_run(self):
+        env = self._triage_env({"PATH": "/usr/bin", "HOME": "/home/test"})
+        assert "/usr/bin" in env["PATH"]
+        assert env["HOME"] == "/home/test"
