@@ -236,6 +236,35 @@ class TestQuoteFrame:
         prompt = build_prompt(task, [], config, conversation_context=context)
         assert prompt.count("Shall I proceed?") == 1
 
+    def test_the_snapshot_is_quoted_once_when_talk_history_lacks_the_parent(
+        self, tmp_path, conn,
+    ):
+        """The commoner Talk case, and the last of the five double-quotes:
+        Talk returned messages but not the cited parent, which is what happens
+        for a reply to anything more than a few turns back."""
+        from istota.executor import _build_talk_api_context, build_prompt
+
+        db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+        config = _config(tmp_path, db_path)
+        snapshot = "the parent Talk did not return"
+        db.upsert_talk_messages(conn, "room1", [
+            {
+                "id": mid, "actorId": "alice", "actorDisplayName": "Alice",
+                "actorType": "users", "message": text,
+                "messageType": "comment", "timestamp": mid,
+            }
+            for mid, text in ((10, "an unrelated turn"), (11, "another one"))
+        ])
+
+        task = db.Task(
+            id=1, user_id="alice", prompt="yes", source_type="talk",
+            conversation_token="room1", status="running",
+            reply_to_talk_id=77, reply_to_content=snapshot,
+        )
+        context, _ = _build_talk_api_context(task, config, conn)
+        prompt = build_prompt(task, [], config, conversation_context=context)
+        assert prompt.count(snapshot) == 1
+
     def test_talk_reply_also_gets_the_frame(self, tmp_path):
         """The frame is keyed on the snapshot, not on the surface — a Talk
         reply's `(In reply to: …)` fallback only appeared when history was

@@ -3166,6 +3166,7 @@ _SPINE_COLUMNS = (
     "  m.reply_to_message_id AS reply_to_message_id, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
+    # The literal must track `_REPLY_EXCERPT_CHARS` below.
     "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "

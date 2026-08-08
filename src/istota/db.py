@@ -3955,6 +3955,8 @@ _CROSS_ROOM_COLUMNS = (
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.
+    # The literal must track `web_app._REPLY_EXCERPT_CHARS`, which the dict
+    # builder still slices at — shorten this and that slice quietly no-ops.
     "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
 )
 _CROSS_ROOM_FROM = (

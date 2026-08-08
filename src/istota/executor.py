@@ -1788,20 +1788,13 @@ def _build_talk_api_context(
             if tm.message_id == task.reply_to_talk_id:
                 reply_parent_talk_msg = tm
                 break
-        if reply_parent_talk_msg is None and task.reply_to_content:
-            # Synthesize a TalkMessage from reply_to_content as fallback
-            reply_parent_talk_msg = db.TalkMessage(
-                message_id=task.reply_to_talk_id,
-                actor_id="unknown",
-                actor_display_name="User",
-                is_bot=False,
-                content=task.reply_to_content,
-                timestamp=0,
-                actions_taken=None,
-                message_role="user",
-                task_id=None,
-            )
-            talk_messages = [reply_parent_talk_msg] + talk_messages
+        # No synthetic stand-in when the parent isn't in the fetched window.
+        # `build_prompt` quotes the snapshot into the request section
+        # unconditionally, so synthesizing a context message from the same
+        # string puts it in the prompt twice — and this is the *common* Talk
+        # case, since a reply to anything more than a few turns back falls
+        # outside the window. The last of the five fallbacks that did this;
+        # the other four are gone for the same reason.
 
     # Select relevant messages (triage routed through the task's brain)
     relevant = select_relevant_talk_context(
