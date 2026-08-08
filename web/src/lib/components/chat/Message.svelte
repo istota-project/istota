@@ -292,6 +292,7 @@
     {#if citedClickable}
       <button
         class="reply-quote"
+        class:under-meta={!continuation}
         onclick={(e) => {
           onJumpToMessage?.(cited.msgId);
           if (e.detail > 0) e.currentTarget.blur();
@@ -303,7 +304,7 @@
         <span class="reply-quote-text">{cited.excerpt ?? ''}</span>
       </button>
     {:else}
-      <div class="reply-quote" class:deleted={citedDeleted}>
+      <div class="reply-quote" class:under-meta={!continuation} class:deleted={citedDeleted}>
         {#if citedDeleted}
           <span class="reply-quote-text">Original message deleted</span>
         {:else}
@@ -806,13 +807,19 @@
   /* The citation, above the body it belongs to. A quiet card with a leading
 	   rule, so it reads as something quoted rather than as part of the message.
 	   One rule set for both the clickable <button> and the inert <div>, since
-	   the two differ only in whether they respond. */
+	   the two differ only in whether they respond.
+
+	   Geometry is the activity chip's, because the quote sits in the same slot —
+	   a block between the author header and the prose. So: the body's width
+	   cap, and `gap-below`'s margin, its neighbour below always being a prose
+	   block. */
   .reply-quote {
     display: flex;
     align-items: baseline;
     gap: var(--space-2);
     width: 100%;
-    margin-bottom: var(--space-1);
+    max-width: var(--chat-body-max);
+    margin-bottom: var(--space-3);
     padding: var(--space-1) var(--space-2);
     background: var(--surface-card);
     border: none;
@@ -824,6 +831,19 @@
     line-height: 1.4;
     text-align: left;
     cursor: pointer;
+  }
+  /* Under the author header, the same half gap `.meta + .chip-slot` takes:
+	   flush reads cramped against the header, a full paragraph gap reads
+	   detached. On a continuation row there is no header and the base rule's
+	   flush top is right, exactly as it is for a tool-first chip.
+
+	   Written as a class on the element rather than as `.meta + .reply-quote`,
+	   because the quote is rendered from a `{#snippet}` — a selector Svelte
+	   cannot prove reachable is pruned with no error, which would leave the
+	   rule silently inert. The class also states the real condition, which is
+	   `!continuation` rather than a DOM adjacency that happens to follow it. */
+  .reply-quote.under-meta {
+    margin-top: calc(var(--space-3) / 2);
   }
   .reply-quote:is(div) {
     cursor: default;
@@ -976,9 +996,7 @@
     line-height: 1.5;
     color: var(--text-primary);
     word-break: break-word;
-    /* Cap readable content width so long lines / wide blocks stay legible;
-		   the row itself stays full-width so the hover highlight spans it. */
-    max-width: 900px;
+    max-width: var(--chat-body-max);
   }
   /* On the inner span, not the wrapper: the wrapper also holds the copy
 	   button, and under `pre-wrap` the markup whitespace around that button
@@ -1057,7 +1075,7 @@
     top: 0.3rem;
   }
   .cmd-output {
-    max-width: 900px;
+    max-width: var(--chat-body-max);
     font-size: var(--text-sm);
     line-height: 1.5;
     color: var(--text-secondary);

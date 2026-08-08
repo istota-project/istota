@@ -191,3 +191,122 @@ describe('citation quote block', () => {
     expect(container.querySelector('.reply-quote')).toBeNull();
   });
 });
+
+/**
+ * The quote occupies the same slot in a turn as an activity chip does — a block
+ * between the author header and the prose — so it takes the chip's spacing and
+ * the body's width rather than a second set of numbers. Read from the source,
+ * since jsdom applies no CSS: the rule set is the artefact under test, and a
+ * computed-style assertion here would pass whatever the file said.
+ *
+ * The parser is the one in `Composer.sendButton.svelte.test.ts`, trimmed to
+ * what these assertions need.
+ */
+const styleOpen = source.indexOf('>', source.indexOf('<style'));
+const css = source
+  .slice(styleOpen + 1, source.lastIndexOf('</style>'))
+  .replace(/\/\*[\s\S]*?\*\//g, '');
+
+type Rule = { selector: string; body: string };
+
+/** Every `selector { … }` pair, at-rule wrappers unwrapped, one entry per selector in a list. */
+function parseRules(text: string): Rule[] {
+  const out: Rule[] = [];
+  let prelude = '';
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') {
+      let depth = 1;
+      let j = i + 1;
+      for (; j < text.length && depth > 0; j++) {
+        if (text[j] === '{') depth++;
+        else if (text[j] === '}') depth--;
+      }
+      const body = text.slice(i + 1, j - 1);
+      const head = prelude.trim();
+      // `@keyframes` holds percentage stops, not selectors.
+      if (head.startsWith('@keyframes')) {
+        /* skipped */
+      } else if (head.startsWith('@')) out.push(...parseRules(body));
+      else if (head) {
+        for (const one of head.split(',')) if (one.trim()) out.push({ selector: one.trim(), body });
+      }
+      i = j - 1;
+      prelude = '';
+    } else if (text[i] === '}') prelude = '';
+    else prelude += text[i];
+  }
+  return out;
+}
+
+/** The declared value of one longhand on one rule, or undefined if neither exists. */
+function decl(selector: string, prop: string): string | undefined {
+  const rule = parseRules(css).find((r) => r.selector === selector);
+  return rule?.body.match(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+)`))?.[1].trim();
+}
+
+describe('citation quote geometry', () => {
+  it('parses the rules it is about to assert on', () => {
+    // A hand-rolled parser fails by finding nothing and reporting nothing
+    // wrong. Pin that it sees every selector the assertions below name.
+    const seen = parseRules(css).map((r) => r.selector);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        '.reply-quote',
+        '.reply-quote.under-meta',
+        '.body',
+        '.chip-slot.gap-below',
+        '.meta + .chip-slot',
+      ]),
+    );
+  });
+
+  it('caps at the same width as the message body', () => {
+    // Through the token, not a fourth copy of the literal: `.body`,
+    // `.cmd-output` and ActivityTrace's open chain already read it, and a rule
+    // restating the number is invisible until you see the two side by side.
+    expect(decl('.reply-quote', 'max-width')).toBe('var(--chat-body-max)');
+    expect(decl('.body', 'max-width')).toBe(decl('.reply-quote', 'max-width'));
+  });
+
+  it('takes the chip slot’s gap below, its neighbour being a prose block', () => {
+    expect(decl('.reply-quote', 'margin-bottom')).toBe(
+      decl('.chip-slot.gap-below', 'margin-bottom'),
+    );
+  });
+
+  it('takes the chip slot’s half gap under the author header', () => {
+    expect(decl('.reply-quote.under-meta', 'margin-top')).toBe(
+      decl('.meta + .chip-slot', 'margin-top'),
+    );
+  });
+
+  it('carries no top margin where no header precedes it', () => {
+    // The chip slot's base is flush and its gap is neighbour-aware; the quote
+    // follows the same rule, so a continuation row's quote sits tight the way a
+    // tool-first chip does.
+    expect(decl('.reply-quote', 'margin-top')).toBeUndefined();
+  });
+
+  it('marks the header case on the element rather than by DOM adjacency', () => {
+    // `.meta + .reply-quote` would be a gamble: the quote is rendered from a
+    // `{#snippet}`, and a selector Svelte cannot prove reachable is pruned
+    // silently — leaving a passing suite over a rule that never applies.
+    const withHeader = render(Message, {
+      ...base,
+      message: userMsg({ replyTo: { msgId: 22, role: 'assistant', excerpt: 'earlier' } }),
+    });
+    expect(
+      withHeader.container.querySelector('.reply-quote')?.classList.contains('under-meta'),
+    ).toBe(true);
+    cleanup();
+
+    const continued = render(Message, {
+      ...base,
+      message: userMsg({ replyTo: { msgId: 22, role: 'assistant', excerpt: 'earlier' } }),
+      continuation: true,
+    });
+    expect(
+      continued.container.querySelector('.reply-quote')?.classList.contains('under-meta'),
+    ).toBe(false);
+  });
+});
