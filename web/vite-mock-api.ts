@@ -150,6 +150,8 @@ interface MockChatTask {
   attachments?: string[];
   /** Positional workspace paths for those chips (null = not linkable). */
   attachmentPaths?: (string | null)[];
+  /** Canonical msg_id this turn's question replies to, if it cites one. */
+  replyToMsgId?: number;
 }
 
 /** Stored upload path → the workspace path `/chat/files` would take, or null
@@ -509,6 +511,26 @@ function mockRoomFor(token: string): MockChatRoom | undefined {
   return mockChatRooms.find((r) => r.token === token);
 }
 
+// The cited parent, in the payload shape the backend's LEFT JOIN produces: a
+// live parent carries its role and a display excerpt, a deleted one carries
+// only the id it used to name.
+function mockReplyTo(msgId: number): Record<string, unknown> {
+  if (mockDeletedMsgIds.has(msgId)) return { msg_id: msgId, deleted: true };
+  const taskId = Math.floor(msgId / 10);
+  const t = mockChatTasks.get(taskId);
+  if (!t) return { msg_id: msgId, deleted: true };
+  const isUser = msgId % 10 === 1;
+  const body = isUser
+    ? t.prompt
+    : ((mockTaskEvents(t).find((e) => e.kind === 'result')?.payload as any)?.text ?? '');
+  return {
+    msg_id: msgId,
+    role: isUser ? 'user' : 'assistant',
+    excerpt: String(body).slice(0, 200),
+    deleted: false,
+  };
+}
+
 // A finished task's (user, assistant) message pair, in the history payload
 // shape — shared by the per-room endpoint and the aggregate views.
 function mockFinishedTurn(t: MockChatTask): { user: any; assistant: any } {
@@ -554,6 +576,7 @@ function mockFinishedTurn(t: MockChatTask): { user: any; assistant: any } {
       starred: mockStars.has(mockUserMsgId(t)),
       ...(t.attachments?.length ? { attachments: t.attachments } : {}),
       ...(t.attachmentPaths?.length ? { attachment_paths: t.attachmentPaths } : {}),
+      ...(t.replyToMsgId ? { reply_to: mockReplyTo(t.replyToMsgId) } : {}),
     },
     assistant: {
       role: 'assistant',
@@ -885,6 +908,26 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       if (inline !== null) return { task_id: null, inline_result: inline };
       // !model <alias> <prompt> falls through to a real task (override carried).
     }
+    // A cited parent must live in the room being posted into; an unknown id
+    // and a foreign one answer alike, so neither becomes an oracle for the
+    // other. Mirrors the server's refusal rather than dropping the citation.
+    const replyToMsgId =
+      typeof body?.reply_to_msg_id === 'number' && body.reply_to_msg_id > 0
+        ? body.reply_to_msg_id
+        : undefined;
+    if (replyToMsgId !== undefined) {
+      const parentTask = mockChatTasks.get(Math.floor(replyToMsgId / 10));
+      if (
+        !parentTask ||
+        parentTask.roomToken !== room.token ||
+        mockDeletedMsgIds.has(replyToMsgId)
+      ) {
+        return {
+          __status: 404,
+          error: 'the message you replied to is no longer available',
+        };
+      }
+    }
     const id = ++mockChatTaskSeq;
     // Type a message containing "multiround" to stream the multi-step shape
     // (chip → intermediate prose → chip → final) live, not just in history.
@@ -897,6 +940,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       variant,
       attachments: attachmentNames,
       attachmentPaths: attachmentPaths.some(Boolean) ? attachmentPaths : undefined,
+      replyToMsgId,
     });
     return {
       task_id: id,

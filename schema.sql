@@ -48,7 +48,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     talk_message_id INTEGER,        -- Talk API ID of the user's incoming message
     talk_response_id INTEGER,       -- Talk API ID of bot's response message
     reply_to_talk_id INTEGER,       -- Talk API ID of the message being replied to
-    reply_to_content TEXT,          -- Fallback text of replied-to message (when parent task not in DB)
+    reply_to_content TEXT,          -- Snapshot of the replied-to message (capped at 1000 chars)
+
+    -- Canonical `messages.id` of the message being replied to — a DIFFERENT
+    -- namespace from reply_to_talk_id above, and deliberately not folded into
+    -- it: in a Talk-bound room both are small integers, so a canonical id
+    -- stored there would resolve to whichever Talk turn happens to share the
+    -- number, with no signal at any layer that it went wrong.
+    reply_to_message_id INTEGER,
 
     -- Execution control
     cancel_requested INTEGER DEFAULT 0,  -- Flag to signal task cancellation
@@ -746,6 +753,14 @@ CREATE TABLE IF NOT EXISTS messages (
     -- coerced to NULL on the way in — it is a valid unique key, and would
     -- collapse a room's whole history onto its first send.
     client_msg_id TEXT,
+    -- The message this one replies to, as a canonical id in this same table.
+    -- Deliberately no foreign key: keeping a dangling id is what lets a reply
+    -- to a hard-deleted message render "Original message deleted" instead of
+    -- silently becoming an ordinary message. Duplicated off
+    -- `tasks.reply_to_message_id` for the same reason `attachments` is —
+    -- retention GCs the task row while the transcript must keep rendering the
+    -- turn as a reply.
+    reply_to_message_id INTEGER,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

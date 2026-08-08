@@ -368,6 +368,7 @@ describe('chat store — send lifecycle', () => {
         [att.name],
         undefined,
         expect.any(String),
+        { replyToMsgId: undefined },
       );
     });
 

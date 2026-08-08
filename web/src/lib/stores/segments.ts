@@ -94,6 +94,40 @@ export interface SendPayload {
    * only for a body the server did not rewrite.
    */
   idempotencyKey?: string;
+  /**
+   * Canonical id of the cited parent, so a retry re-POSTs the same citation.
+   * `retrySend` re-POSTs from `sendPayload` alone, so leaving it out here is
+   * how a retry silently turns a reply into an ordinary message.
+   */
+  replyToMsgId?: number;
+}
+
+/**
+ * Display cap on a citation's excerpt, matching the server's own.
+ *
+ * The staged chip is built client-side from the transcript while the rendered
+ * quote comes back from the server, so the two have to agree or a reply would
+ * show one excerpt while composing and a different one after a reload.
+ */
+export const REPLY_EXCERPT_CHARS = 200;
+
+/**
+ * The parent a turn replies to, as the transcript renders it.
+ *
+ * The client-side spelling of the server's `reply_to`. A `deleted` parent
+ * carries only its id and renders muted and inert.
+ */
+export interface MessageReply {
+  msgId: number;
+  role?: 'user' | 'assistant' | 'system';
+  excerpt?: string;
+  /**
+   * Absent counts as live, so the composer can stage a citation without
+   * asserting anything about a state only the server knows. Reply is only ever
+   * offered on a durable row that is on screen, so there is no staged-citation
+   * case where this would be true.
+   */
+  deleted?: boolean;
 }
 
 export interface ChatMessage {
@@ -136,6 +170,8 @@ export interface ChatMessage {
   // System rows only: when a !search command produced structured results, the
   // row renders result cards from this instead of its markdown `text`.
   searchResults?: SearchResultsData;
+  // The message this turn replies to, rendered as a quote above the body.
+  replyTo?: MessageReply;
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

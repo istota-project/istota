@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, Star, Trash2 } from 'lucide-svelte';
+  import { Copy, Star, Trash2, Reply } from 'lucide-svelte';
   import { chatFileUrl } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
@@ -19,6 +19,8 @@
     onReject,
     onToggleStar,
     onDelete,
+    onReply,
+    onJumpToMessage,
     onRetry,
     retryBusy = false,
     onRoomClick,
@@ -41,6 +43,13 @@
     // Delete a durable message. The handler owns the confirmation — this
     // component only offers the affordance. Absent → no delete affordance.
     onDelete?: (cid: number) => void;
+    // Stage a reply citing this message. The handler owns the composer chip —
+    // this component only offers the affordance. Absent → no reply affordance,
+    // which is also how the aggregate panes stay read-only.
+    onReply?: (cid: number) => void;
+    // Follow this turn's own citation back to the message it names. Absent →
+    // the quote block renders but doesn't click through.
+    onJumpToMessage?: (msgId: number) => void;
     // Re-send a message whose send failed. Absent → the failure is reported
     // without an offer to retry it (read-only surfaces, aggregate views).
     onRetry?: (cid: number) => void;
@@ -157,6 +166,20 @@
   // do to a whole turn. Same condition as the bar's, so they can't disagree
   // about whether the turn is starrable.
   const showRowStar = $derived(starrable);
+  // Reply needs a durable id to cite — the same rule star and delete follow,
+  // which correctly withholds it from optimistic rows and in-flight
+  // placeholders — and somewhere to stage into. The aggregate panes have no
+  // composer, so a staged reply there would have nowhere to go.
+  const showReply = $derived(typeof message.msgId === 'number' && !!onReply && !aggregate);
+  // The parent this turn cites. `deleted` is truthy-tested, never compared to
+  // false: a citation staged in the composer carries no flag at all, and
+  // treating absence as deleted would render every fresh reply muted.
+  const cited = $derived(message.replyTo);
+  const citedDeleted = $derived(!!cited?.deleted);
+  const citedLabel = $derived(
+    cited?.role === 'user' ? userName : cited?.role === 'assistant' ? botName : '',
+  );
+  const citedClickable = $derived(!!cited && !citedDeleted && !!onJumpToMessage);
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // A send that failed reports on the message that failed, not on an assistant
   // placeholder standing in for a reply that was never attempted.
@@ -173,7 +196,9 @@
   // entirely from a failed send: all three act on a durable turn, and this one
   // never became one — star and delete have no `msgId` to work with, and a lone
   // copy button would compete with the Retry that is the actual next move.
-  const hasRowActions = $derived((showCopy || showRowStar || showDelete) && !sendFailed);
+  const hasRowActions = $derived(
+    (showCopy || showRowStar || showReply || showDelete) && !sendFailed,
+  );
 </script>
 
 <!-- Turn-level actions, left-aligned under the message body. In the flow
@@ -222,6 +247,24 @@
         <Star size={15} fill={message.starred ? 'currentColor' : 'none'} />
       </button>
     {/if}
+    {#if showReply}
+      <!-- After star, before delete. The row reads left to right in ascending
+           consequence: reply stages a new message, which is more than a
+           private mark and less than a destructive removal — and keeping
+           delete last leaves it terminal. -->
+      <button
+        class="turn-action"
+        onclick={(e) => {
+          onReply?.(message.cid);
+          if (e.detail > 0) e.currentTarget.blur();
+        }}
+        aria-label="Reply to message"
+        title="Reply"
+        type="button"
+      >
+        <Reply size={15} />
+      </button>
+    {/if}
     {#if showDelete}
       <button
         class="turn-action danger"
@@ -237,6 +280,39 @@
       </button>
     {/if}
   </div>
+{/snippet}
+
+<!-- The citation, above the body it belongs to. Rendered from the durable
+     store, so it survives a reload, a room switch and the retention sweep that
+     deletes the task. A live parent clicks through; a deleted one says so and
+     stays inert — the deletion is a fact about the conversation, and dropping
+     the citation would rewrite it. -->
+{#snippet replyQuote()}
+  {#if cited}
+    {#if citedClickable}
+      <button
+        class="reply-quote"
+        onclick={(e) => {
+          onJumpToMessage?.(cited.msgId);
+          if (e.detail > 0) e.currentTarget.blur();
+        }}
+        title="Go to the message this replies to"
+        type="button"
+      >
+        {#if citedLabel}<span class="reply-quote-author">{citedLabel}</span>{/if}
+        <span class="reply-quote-text">{cited.excerpt ?? ''}</span>
+      </button>
+    {:else}
+      <div class="reply-quote" class:deleted={citedDeleted}>
+        {#if citedDeleted}
+          <span class="reply-quote-text">Original message deleted</span>
+        {:else}
+          {#if citedLabel}<span class="reply-quote-author">{citedLabel}</span>{/if}
+          <span class="reply-quote-text">{cited.excerpt ?? ''}</span>
+        {/if}
+      </div>
+    {/if}
+  {/if}
 {/snippet}
 
 {#snippet starButton()}
@@ -348,6 +424,8 @@
           {/if}
         </div>
       {/if}
+
+      {@render replyQuote()}
 
       {#if isUser}
         {#if message.text}
@@ -723,6 +801,52 @@
       height: 44px;
       transform: translate(-50%, -50%);
     }
+  }
+
+  /* The citation, above the body it belongs to. A quiet card with a leading
+	   rule, so it reads as something quoted rather than as part of the message.
+	   One rule set for both the clickable <button> and the inert <div>, since
+	   the two differ only in whether they respond. */
+  .reply-quote {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    width: 100%;
+    margin-bottom: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: var(--surface-card);
+    border: none;
+    border-left: 2px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font: inherit;
+    font-size: var(--text-xs);
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+  }
+  .reply-quote:is(div) {
+    cursor: default;
+  }
+  button.reply-quote:hover {
+    border-left-color: var(--link);
+    color: var(--text-secondary);
+  }
+  .reply-quote.deleted {
+    font-style: italic;
+    color: var(--text-dim);
+  }
+  .reply-quote-author {
+    flex: 0 0 auto;
+    color: var(--text-dim);
+  }
+  /* One line: the quote points at a message, it does not reproduce it. */
+  .reply-quote-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the

@@ -42,6 +42,9 @@ class Task:
     talk_response_id: int | None = None
     reply_to_talk_id: int | None = None
     reply_to_content: str | None = None
+    #: Canonical `messages.id` of the cited parent. A *different namespace*
+    #: from `reply_to_talk_id` — never assign one to the other.
+    reply_to_message_id: int | None = None
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -234,6 +237,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("talk_response_id", "INTEGER"),
         ("reply_to_talk_id", "INTEGER"),
         ("reply_to_content", "TEXT"),
+        # Canonical `messages.id` — a different namespace from
+        # `reply_to_talk_id`; see the schema.sql comment.
+        ("reply_to_message_id", "INTEGER"),
         ("cancel_requested", "INTEGER DEFAULT 0"),
         ("worker_pid", "INTEGER"),
         ("last_heartbeat", "TEXT"),
@@ -649,6 +655,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+        # The citation, so the transcript can render a reply as a reply after
+        # retention has deleted the task row that also carries it.
+        try:
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN reply_to_message_id INTEGER"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id)")
         # A retry of a send the client gave up on but the server accepted must
         # resolve to the first turn rather than a second one. Partial, so the
@@ -895,6 +909,7 @@ def create_task(
     talk_message_id: int | None = None,
     reply_to_talk_id: int | None = None,
     reply_to_content: str | None = None,
+    reply_to_message_id: int | None = None,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -928,10 +943,11 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
+            reply_to_message_id,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -949,6 +965,7 @@ def create_task(
             talk_message_id,
             reply_to_talk_id,
             reply_to_content,
+            reply_to_message_id,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -978,7 +995,8 @@ _TASK_COLUMNS = (
     "result, actions_taken, execution_trace, error, confirmation_prompt, "
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
-    "reply_to_content, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "reply_to_content, reply_to_message_id, "
+    "heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "talk_delivery_token, skill, skill_args"
 )
@@ -1018,6 +1036,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         talk_response_id=row["talk_response_id"],
         reply_to_talk_id=row["reply_to_talk_id"],
         reply_to_content=row["reply_to_content"],
+        reply_to_message_id=row["reply_to_message_id"],
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -2986,6 +3005,9 @@ class Message:
     #: Workspace paths for those files, positional against `attachments`, for
     #: linking a chip at `/chat/files`. A None entry isn't servable.
     attachment_paths: list[str | None] | None = None
+    #: Canonical id of the message this one replies to, or None. May dangle —
+    #: the parent can be hard-deleted, and the citation outlives it.
+    reply_to_message_id: int | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -3022,6 +3044,9 @@ def _row_to_message(row: sqlite3.Row) -> Message:
     return Message(
         attachments=json.loads(raw_att) if raw_att else None,
         attachment_paths=json.loads(raw_paths) if raw_paths else None,
+        reply_to_message_id=(
+            row["reply_to_message_id"] if "reply_to_message_id" in keys else None
+        ),
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -3308,13 +3333,18 @@ def add_message(
     attachments: list[str] | None = None,
     attachment_paths: list[str | None] | None = None,
     client_msg_id: str | None = None,
+    reply_to_message_id: int | None = None,
 ) -> int:
-    """Append a message to a room's canonical transcript. Returns the new id."""
+    """Append a message to a room's canonical transcript. Returns the new id.
+
+    `reply_to_message_id` is a canonical id in this same table — the message
+    being replied to. Never a Talk id (see `tasks.reply_to_talk_id`).
+    """
     row = conn.execute(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
-        " attachments, attachment_paths, client_msg_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " attachments, attachment_paths, client_msg_id, reply_to_message_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -3329,6 +3359,7 @@ def add_message(
             # collapse a room's entire history onto whichever send stored it
             # first. Same rule as `location_pings.client_id`.
             client_msg_id or None,
+            reply_to_message_id,
         ),
     ).fetchone()
     return int(row["id"])
@@ -3531,6 +3562,59 @@ def room_max_talk_synced_message_id(
         if isinstance(ext, dict) and "talk" in ext:
             return int(r["id"])
     return 0
+
+
+def get_message_external_id(
+    conn: sqlite3.Connection, message_id: int, surface: str,
+) -> str | None:
+    """Where a message exists on `surface`, or None.
+
+    The value-returning sibling of `message_has_external_id`, which only
+    answers yes/no over a whole room. Used to mirror a web reply into Talk as a
+    real Talk reply: the parent's Talk id is what `replyTo` takes, so a bool
+    would say the citation is mirrorable without saying what to send.
+    """
+    row = conn.execute(
+        "SELECT external_ids FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if row is None or not row["external_ids"]:
+        return None
+    try:
+        ext = json.loads(row["external_ids"])
+    except (TypeError, ValueError):
+        return None
+    value = ext.get(surface) if isinstance(ext, dict) else None
+    return str(value) if value is not None else None
+
+
+def find_message_by_external_id(
+    conn: sqlite3.Connection, room_token: str, surface: str, external_id: str,
+) -> int | None:
+    """The canonical id of the room's message carrying `external_id` on
+    `surface`, or None.
+
+    What lets a Talk-native reply parent be recorded canonically too. Scoped to
+    the room because a Talk message id is per-conversation, so an unscoped
+    lookup would match an unrelated turn elsewhere.
+
+    `external_ids` is a JSON blob, so this is an unindexed scan of the room's
+    stamped rows — the same shape `message_has_external_id` and
+    `room_max_talk_synced_message_id` already use. Bounded by the room, and run
+    once per inbound reply rather than per message.
+    """
+    rows = conn.execute(
+        "SELECT id, external_ids FROM messages "
+        "WHERE room_token = ? AND external_ids IS NOT NULL ORDER BY id DESC",
+        (room_token,),
+    ).fetchall()
+    for r in rows:
+        try:
+            ext = json.loads(r["external_ids"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ext, dict) and str(ext.get(surface)) == str(external_id):
+            return int(r["id"])
+    return None
 
 
 def message_has_external_id(
@@ -3815,6 +3899,24 @@ def get_message_room(conn: sqlite3.Connection, message_id: int) -> str | None:
     return row["room_token"] if row else None
 
 
+def get_reply_target(
+    conn: sqlite3.Connection, message_id: int,
+) -> tuple[str, str] | None:
+    """``(room_token, body)`` for a message a client wants to cite, or None.
+
+    One read serving both halves of the send-side validation: the room the
+    parent lives in (which must equal the room being posted into) and the body
+    the server snapshots into `tasks.reply_to_content`. The snapshot is derived
+    here rather than accepted from the client — it becomes text the model reads
+    as an authoritative record of what it previously said, and there is no
+    reason to trust a caller for a row we hold.
+    """
+    row = conn.execute(
+        "SELECT room_token, body FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    return (row["room_token"], row["body"]) if row else None
+
+
 def get_starred_message_ids(
     conn: sqlite3.Connection, user_id: str, message_ids: list[int],
 ) -> set[int]:
@@ -3848,7 +3950,14 @@ _CROSS_ROOM_COLUMNS = (
     "  t.status AS status, t.actions_taken AS actions_taken, "
     "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
     "  t.completed_at AS completed_at, t.model_used AS model_used, "
-    "  (s.message_id IS NOT NULL) AS starred "
+    "  (s.message_id IS NOT NULL) AS starred, "
+    "  m.reply_to_message_id AS reply_to_message_id, "
+    # Truncated in SQLite rather than in the dict builder: this fragment also
+    # backs the live room-event stream, which is byte-budgeted, and a reply to
+    # a long answer would otherwise carry that whole answer a second time.
+    # The literal must track `web_app._REPLY_EXCERPT_CHARS`, which the dict
+    # builder still slices at — shorten this and that slice quietly no-ops.
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
 )
 _CROSS_ROOM_FROM = (
     "FROM messages m "
@@ -3858,6 +3967,10 @@ _CROSS_ROOM_FROM = (
     "LEFT JOIN message_stars s ON s.message_id = m.id "
     "  AND s.user_id = :user "
     "LEFT JOIN tasks t ON t.id = m.task_id "
+    # The cited parent (primary-key lookup). A NULL result against a non-NULL
+    # `reply_to_message_id` is the deleted-parent case, which the client
+    # renders muted rather than dropping.
+    "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
 # System rows (alerts / logs / web-routed notifications) render in the
 # aggregate views and stream too — count_unread_messages counts them, so
@@ -4825,6 +4938,41 @@ def get_reply_parent_task(
     if not row:
         return None
     return _row_to_task(row)
+
+
+def get_reply_parent_task_by_message_id(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    reply_to_message_id: int,
+) -> Task | None:
+    """The completed task behind a cited canonical message, or None.
+
+    The canonical-namespace sibling of `get_reply_parent_task`, resolving
+    `messages.id` → `messages.task_id` → `tasks`. Deliberately a separate
+    lookup: the Talk-native one matches on `talk_message_id`/`talk_response_id`,
+    and in a Talk-bound room those ids collide numerically with canonical ones,
+    so routing a canonical citation through it would silently surface an
+    unrelated turn.
+
+    Returns None for the three cases that correctly fall through to the stored
+    snapshot alone: a `role='system'` row (no task), a turn whose task retention
+    deleted, and a turn that failed, was cancelled, or is still running.
+    """
+    row = conn.execute(
+        f"""
+        SELECT {_TASK_COLUMNS}
+        FROM tasks
+        WHERE id = (
+            SELECT task_id FROM messages
+            WHERE id = ? AND room_token = ?
+        )
+        AND conversation_token = ?
+        AND status = 'completed'
+        AND result IS NOT NULL
+        """,
+        (reply_to_message_id, conversation_token, conversation_token),
+    ).fetchone()
+    return _row_to_task(row) if row else None
 
 
 def save_task_selected_skills(

@@ -3162,9 +3162,18 @@ _SPINE_COLUMNS = (
     "  t.started_at AS started_at, t.completed_at AS completed_at, "
     "  t.model_used AS model_used, (s.message_id IS NOT NULL) AS starred, "
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
-    "  m.attachment_paths AS attachment_paths "
+    "  m.attachment_paths AS attachment_paths, "
+    "  m.reply_to_message_id AS reply_to_message_id, "
+    # Truncated here rather than in the dict builder, matching the cross-room
+    # fragment: no read path needs more of the parent than the excerpt cap.
+    # The literal must track `_REPLY_EXCERPT_CHARS` below.
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
+    # The cited parent, joined live rather than snapshotted: nothing in the
+    # stack edits `messages.body`, so the join can't drift. A primary-key
+    # lookup, and a NULL result against a non-NULL id is the deleted case.
+    "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
 # Columns the aux (`tasks`) gap-fill query selects.
 _AUX_COLUMNS = (
@@ -3190,6 +3199,31 @@ _AUX_SOURCE_SCOPE = (
     "SELECT 1 FROM messages m2 WHERE m2.room_token = tasks.conversation_token "
     "AND m2.task_id = tasks.id AND m2.role = 'user')))"
 )
+
+
+def _row_reply_to(row) -> dict | None:
+    """The rendered citation for a history row, or None when it isn't a reply.
+
+    Two shapes, and the client distinguishes them on `deleted`: a live parent
+    carries its role and a display excerpt, a hard-deleted one carries only the
+    id it used to name. The excerpt cap is a *display* bound, distinct from the
+    1000-char prompt snapshot on the task — without it every reply in a page
+    would carry a whole assistant answer to render as two lines.
+    """
+    keys = row.keys()
+    if "reply_to_message_id" not in keys:
+        return None
+    parent_id = row["reply_to_message_id"]
+    if parent_id is None:
+        return None
+    if row["reply_role"] is None:
+        return {"msg_id": parent_id, "deleted": True}
+    return {
+        "msg_id": parent_id,
+        "role": row["reply_role"],
+        "excerpt": (row["reply_body"] or "")[:_REPLY_EXCERPT_CHARS],
+        "deleted": False,
+    }
 
 
 def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
@@ -3478,9 +3512,12 @@ def _chat_room_messages(
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
             }
             d.update(_row_attachment_fields(r, username))
-            messages.append(d)
         else:  # assistant — a stored assistant row is by definition a completed turn
-            messages.append(_assistant_message_dict(r, r["body"], r["status"] or "completed"))
+            d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+        cited = _row_reply_to(r)
+        if cited is not None:
+            d["reply_to"] = cited
+        messages.append(d)
         if tid is not None:
             seen.add((r["role"], tid))
 
@@ -3615,6 +3652,21 @@ def _describe_attachment_only_message(attachments: list[str]) -> str:
     return f"(Sent without a message — see attached: {joined})"
 
 
+def _is_own_replay(conn, token: str, client_msg_id: str, username: str) -> bool:
+    """Whether this key already names a turn *this* sender created in this room.
+
+    The same test `record_inbound` applies before it replays, asked one step
+    earlier so the citation check can stand down for a retry. Scoped to the
+    sender for the same reason the replay is: a co-member's reused key resolves
+    to a task this caller is not authorized to read, and that send gives the
+    key up rather than claiming it.
+    """
+    from . import db
+
+    prior = db.find_send_by_client_msg_id(conn, token, client_msg_id)
+    return prior is not None and prior[1] == username
+
+
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
@@ -3623,9 +3675,15 @@ def _chat_create_web_task(
     apply_room_default: bool = True,
     attachment_names: list[str] | None = None,
     client_msg_id: str | None = None,
+    reply_to_msg_id: int | None = None,
 ) -> tuple[str, int]:
-    """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
-    ``("rate_limited", window_seconds)``."""
+    """Rate-limited web-task creation. Returns ``("ok", task_id)``,
+    ``("rate_limited", window_seconds)`` or ``("reply_target_gone", 0)``.
+
+    A cited parent is resolved here, inside the same transaction as the create:
+    it must be a message in *this* room, and its body — never a client-supplied
+    quote — is what gets snapshotted onto the task.
+    """
     from . import db
     from .transport import record_inbound
     chat = _config.web.chat
@@ -3638,6 +3696,30 @@ def _chat_create_web_task(
         recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
+        # A retry of a send we already accepted replays that turn, and the
+        # citation question does not arise for it: the parent was valid when
+        # the turn was created, and the turn exists. Checked *before* the
+        # citation, because a parent deleted in the meantime would otherwise
+        # refuse the replay — the client would then be told its message is
+        # gone, hand the text back, and the user's natural re-send (a fresh
+        # key) would create a second task for a message the server already has.
+        # `record_inbound` does the replay itself; this only decides whether to
+        # ask about the citation at all.
+        replaying = bool(client_msg_id) and _is_own_replay(
+            conn, token, client_msg_id, username,
+        )
+        # Resolve the citation before anything is created. A reply body
+        # routinely depends on its referent, so ingesting the message with the
+        # citation quietly dropped would deliver a message the user did not
+        # write — a visible refusal is the better failure. The caller has
+        # already proved membership of this room, so a mismatch is a deleted
+        # parent or a client bug, and both answer the same way.
+        reply_to_content: str | None = None
+        if reply_to_msg_id is not None and not replaying:
+            target = db.get_reply_target(conn, reply_to_msg_id)
+            if target is None or target[0] != token:
+                return ("reply_target_gone", 0)
+            reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
         # Route through the shared inbound helper so the web user turn lands in
         # the canonical `messages` store (and the room is registered) exactly
         # like Talk — instead of living only in tasks.prompt.
@@ -3652,6 +3734,8 @@ def _chat_create_web_task(
             apply_room_default=apply_room_default,
             attachment_names=attachment_names or None,
             client_msg_id=client_msg_id,
+            reply_to_canonical_id=reply_to_msg_id,
+            reply_to_content=reply_to_content,
         )
     return ("ok", task_id)
 
@@ -3793,10 +3877,17 @@ async def _pull_talk_read_state(username: str) -> None:
 
 async def _post_as_user(
     access: str, talk_ref: str, text: str, message_id: int, username: str,
+    reply_to_talk_id: int | None = None,
 ) -> int | None:
     """One post-as-user attempt against the bound Talk room, with a single
     forced-refresh retry on 401 (clock skew / early revocation on a
-    supposedly-live token). Returns the posted Talk message id, or None."""
+    supposedly-live token). Returns the posted Talk message id, or None.
+
+    `reply_to_talk_id` makes the mirrored turn a real Talk reply. It is None
+    whenever the cited parent was never mirrored into Talk — a web-only turn,
+    or one predating the mirror — and the post then degrades to a plain one
+    rather than being withheld: the message still belongs in the room.
+    """
     from . import web_tokens
     from .talk import TalkClient
     from .transport import WEBMIRROR_REF_PREFIX
@@ -3806,7 +3897,8 @@ async def _post_as_user(
         client = TalkClient(_config, bearer_token=access, timeout=5)
         try:
             resp = await client.send_message(
-                talk_ref, text, reference_id=reference_id,
+                talk_ref, text, reply_to=reply_to_talk_id,
+                reference_id=reference_id,
             )
             posted = resp.get("ocs", {}).get("data", {}).get("id")
             return int(posted) if posted else None
@@ -3838,6 +3930,7 @@ async def _post_as_user(
 
 async def _mirror_web_turn_as_user(
     username: str, room_token: str, text: str, task_id: int,
+    reply_to_msg_id: int | None = None,
 ) -> None:
     """Post a just-ingested web user turn into the room's bound Talk
     conversation *as the user*, at send time — so the message appears in Talk
@@ -3856,29 +3949,40 @@ async def _mirror_web_turn_as_user(
     if not _config or not web_tokens.feature_enabled(_config):
         return
 
-    def _lookup() -> tuple[str | None, int | None]:
+    def _lookup() -> tuple[str | None, int | None, int | None]:
         with db.get_db(_config.db_path) as conn:
             bindings = db.list_room_bindings(conn, room_token)
             talk_ref = next(
                 (b.surface_ref for b in bindings if b.surface == "talk"), None,
             )
             if talk_ref is None:
-                return None, None
+                return None, None, None
             # A retry carrying the same `client_msg_id` resolves to the turn
             # the first attempt created, and that attempt already mirrored it.
             # The stamp is the record of that, so it is also the guard: without
             # it a client-side timeout would put the message in Talk twice.
             if db.user_turn_has_external_id(conn, task_id, "talk"):
-                return None, None
+                return None, None, None
             row = conn.execute(
                 "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
                 "AND role = 'user' LIMIT 1",
                 (room_token, task_id),
             ).fetchone()
-            return talk_ref, (int(row["id"]) if row else None)
+            # The cited parent's own Talk id, when it has one. A parent that
+            # never reached Talk (web-only, or predating the mirror) leaves
+            # this None and the post degrades to a plain one.
+            parent_talk_id = None
+            if reply_to_msg_id is not None:
+                raw = db.get_message_external_id(conn, reply_to_msg_id, "talk")
+                if raw is not None:
+                    try:
+                        parent_talk_id = int(raw)
+                    except ValueError:
+                        parent_talk_id = None
+            return talk_ref, (int(row["id"]) if row else None), parent_talk_id
 
     try:
-        talk_ref, message_id = await asyncio.to_thread(_lookup)
+        talk_ref, message_id, parent_talk_id = await asyncio.to_thread(_lookup)
         if not talk_ref or message_id is None:
             return  # web-only room (or turn not stored) — nothing to mirror
 
@@ -3894,6 +3998,7 @@ async def _mirror_web_turn_as_user(
 
         posted_id = await _post_as_user(
             access, talk_ref, text, message_id, username,
+            reply_to_talk_id=parent_talk_id,
         )
         if posted_id is None:
             return
@@ -4266,6 +4371,9 @@ def _cross_room_message_dict(r, username: str) -> dict:
             "role": r["role"], "text": text, "notif_id": r["msg_id"],
             "created_at": r["created_at"], **base,
         }
+    cited = _row_reply_to(r)
+    if cited is not None:
+        d["reply_to"] = cited
     d["created_at"] = _iso_utc(d.get("created_at"))
     return d
 
@@ -4458,6 +4566,19 @@ async def chat_send_message(
         and 0 < len(raw_client_id) <= _MAX_CLIENT_MSG_ID_CHARS
         else None
     )
+    # The canonical `messages.id` this send replies to. Only the id is accepted
+    # — the parent's text is read server-side from the row we already hold, so a
+    # client cannot dictate what the model is told it previously said. Anything
+    # that is not a positive integer is treated as absent (`bool` is an `int`
+    # subclass, hence the explicit exclusion).
+    raw_reply_to = data.get("reply_to_msg_id")
+    reply_to_msg_id = (
+        raw_reply_to
+        if isinstance(raw_reply_to, int)
+        and not isinstance(raw_reply_to, bool)
+        and raw_reply_to > 0
+        else None
+    )
 
     # An attachment-only send is a real message — a voice memo recorded in the
     # composer is the whole message, with nothing typed alongside it. The
@@ -4517,7 +4638,7 @@ async def chat_send_message(
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
         model_override, effort_override, not model_prefix_used,
-        attachment_names, client_msg_id,
+        attachment_names, client_msg_id, reply_to_msg_id,
     )
     if outcome == "rate_limited":
         return JSONResponse(
@@ -4525,11 +4646,21 @@ async def chat_send_message(
             status_code=429,
             headers={"Retry-After": str(value)},
         )
+    if outcome == "reply_target_gone":
+        # 404 for both "unknown id" and "a message in another room",
+        # indistinguishable — the rule the star and delete endpoints already
+        # set, so no endpoint becomes an id oracle for the others.
+        return JSONResponse(
+            {"error": "the message you replied to is no longer available"},
+            status_code=404,
+        )
     task_id = value
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
     # best-effort). When it succeeds the scheduler suppresses its completion-
     # time attributed repost; when it doesn't, the repost covers the mirror.
-    await _mirror_web_turn_as_user(username, room.token, text, task_id)
+    await _mirror_web_turn_as_user(
+        username, room.token, text, task_id, reply_to_msg_id,
+    )
     return {
         "task_id": task_id,
         "status": "pending",
@@ -4618,6 +4749,13 @@ _MAX_ATTACHMENT_NAME_CHARS = 200
 # than validated. Long enough for any sane identity scheme, short enough that
 # it cannot be used as storage.
 _MAX_CLIENT_MSG_ID_CHARS = 64
+# Prompt snapshot of a cited parent, stored on `tasks.reply_to_content`. Same
+# cap Talk has always used (`transport/talk/inbound.py`). Distinct from the
+# display excerpt below: this one is read by the model.
+_REPLY_SNAPSHOT_CHARS = 1000
+# Display excerpt on a rendered citation. Without it every reply in a page
+# carries a full assistant answer to render as two lines.
+_REPLY_EXCERPT_CHARS = 200
 
 
 def _attachment_stem(filename: str, limit: int = 48) -> str:

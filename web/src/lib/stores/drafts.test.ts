@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   readDraft,
+  readDraftReply,
   writeDraft,
   dropDraft,
   DRAFT_TTL_MS,
@@ -305,5 +306,54 @@ describe('drafts — size bounds', () => {
     const big = 'x'.repeat(MAX_DRAFT_CHARS - 1);
     for (let i = 0; i < 10; i++) writeDraft(`room:${i}`, big + i);
     expect(readDraft('room:9')).toBe(big + '9');
+  });
+
+  describe('staged reply', () => {
+    it('round-trips a citation beside the text', () => {
+      writeDraft('room:3', 'about that', 4711);
+      expect(readDraft('room:3')).toBe('about that');
+      expect(readDraftReply('room:3')).toBe(4711);
+    });
+
+    it('a map written before replyTo existed reads back unchanged', () => {
+      // The whole back-compat story: an absent optional field is simply
+      // absent, so no storage migration is needed.
+      localStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({ 'room:3': { text: 'older draft', at: Date.now() } }),
+      );
+      expect(readDraft('room:3')).toBe('older draft');
+      expect(readDraftReply('room:3')).toBeUndefined();
+    });
+
+    it('staging a reply onto already-stored text is written, not no-opped', () => {
+      writeDraft('room:3', 'about that');
+      writeDraft('room:3', 'about that', 4711);
+      expect(readDraftReply('room:3')).toBe(4711);
+    });
+
+    it('clearing the citation is written too', () => {
+      writeDraft('room:3', 'about that', 4711);
+      writeDraft('room:3', 'about that');
+      expect(readDraftReply('room:3')).toBeUndefined();
+    });
+
+    it('emptying the text drops the citation with it', () => {
+      writeDraft('room:3', 'about that', 4711);
+      writeDraft('room:3', '', 4711);
+      expect(readDraft('room:3')).toBe('');
+      expect(readDraftReply('room:3')).toBeUndefined();
+    });
+
+    it('a malformed citation is dropped without losing the text', () => {
+      localStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          'room:3': { text: 'keep me', at: Date.now(), replyTo: 'nonsense' },
+        }),
+      );
+      expect(readDraft('room:3')).toBe('keep me');
+      expect(readDraftReply('room:3')).toBeUndefined();
+    });
   });
 });

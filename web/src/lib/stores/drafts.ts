@@ -83,7 +83,10 @@ export const MAX_DRAFT_CHARS = 64 * 1024;
  */
 export const MAX_DRAFTS_CHARS = 256 * 1024;
 
-type Draft = { text: string; at: number };
+// `replyTo` is a staged citation, and it is optional in the stored shape as
+// well as in the type: a map written before it existed reads back unchanged,
+// so there is no storage migration.
+type Draft = { text: string; at: number; replyTo?: number };
 type DraftMap = Record<string, Draft>;
 
 /**
@@ -136,7 +139,18 @@ function readAll(now = Date.now()): DraftMap {
     // not only hygiene — accepted because an entry that size could not have
     // been stored under the bug this replaces, and because the alternative is
     // carrying it forward as the thing that breaks every write.
-    out[key] = { text: clampDraftText(draft.text), at: draft.at as number };
+    // A malformed citation is dropped rather than failing the entry: the text
+    // is the thing worth keeping, and a reply chip is recoverable by tapping
+    // Reply again.
+    const replyTo =
+      typeof draft.replyTo === 'number' && Number.isFinite(draft.replyTo) && draft.replyTo > 0
+        ? draft.replyTo
+        : undefined;
+    out[key] = {
+      text: clampDraftText(draft.text),
+      at: draft.at as number,
+      ...(replyTo ? { replyTo } : {}),
+    };
   }
   return out;
 }
@@ -180,6 +194,16 @@ export function readDraft(key: string): string {
 }
 
 /**
+ * The citation staged alongside a stored draft, or undefined.
+ *
+ * Separate from `readDraft` rather than widening its return: every existing
+ * caller wants the text, and a staged reply is only meaningful to the composer.
+ */
+export function readDraftReply(key: string): number | undefined {
+  return readAll()[key]?.replyTo;
+}
+
+/**
  * Remove one entry outright.
  *
  * Same effect as writing a blank, and named separately because the intent
@@ -217,7 +241,7 @@ export function dropDraft(key: string): void {
  * which would restore an already-sent message into the field as unsent text,
  * and leave its draft behind for good.
  */
-export function writeDraft(key: string, text: string): string {
+export function writeDraft(key: string, text: string, replyTo?: number): string {
   const now = Date.now();
   const map = readAll(now);
   if (text.trim() === '') {
@@ -225,14 +249,18 @@ export function writeDraft(key: string, text: string): string {
       delete map[key];
       saveSetting(DRAFT_STORAGE_KEY, prune(map, now));
     }
+    // A staged reply with nothing typed is not persisted, which is right: a
+    // citation is not itself a message, and an empty send is refused anyway.
     return '';
   }
   // Compared after clamping, and against an already-clamped stored value, so
   // typing on past the cap settles into the no-op instead of rewriting the map
   // on every debounce for text that cannot change what is stored.
   const clamped = clampDraftText(text);
-  if (map[key]?.text === clamped) return clamped;
-  map[key] = { text: clamped, at: now };
+  // The citation is part of the comparison, or staging a reply onto text
+  // already stored would hit the no-op and never be written down.
+  if (map[key]?.text === clamped && map[key]?.replyTo === replyTo) return clamped;
+  map[key] = { text: clamped, at: now, ...(replyTo ? { replyTo } : {}) };
   saveSetting(DRAFT_STORAGE_KEY, prune(map, now, key));
   return clamped;
 }

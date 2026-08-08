@@ -431,7 +431,7 @@ describe('Composer send control', () => {
     const { container, textarea } = mount({ onSend });
     await type(textarea, '  hi there  ');
     await fireEvent.click(btn(container, 'Send')!);
-    expect(onSend).toHaveBeenCalledWith('hi there', []);
+    expect(onSend).toHaveBeenCalledWith('hi there', [], null);
     expect(textarea.value).toBe('');
   });
 
@@ -472,7 +472,7 @@ describe('Composer send control', () => {
     const { textarea } = mount({ onSend });
     await type(textarea, 'hi');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).toHaveBeenCalledWith('hi', []);
+    expect(onSend).toHaveBeenCalledWith('hi', [], null);
   });
 
   it('sends on Ctrl+Enter', async () => {
@@ -480,7 +480,7 @@ describe('Composer send control', () => {
     const { textarea } = mount({ onSend });
     await type(textarea, 'hi');
     await fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
-    expect(onSend).toHaveBeenCalledWith('hi', []);
+    expect(onSend).toHaveBeenCalledWith('hi', [], null);
   });
 
   it('drops the keyboard after a send on a touch device', async () => {
@@ -706,9 +706,11 @@ describe('Composer voice message', () => {
     await fireEvent.click(btn(container, 'Send')!);
     // The upload's whole answer is handed on, `workspace_path` included, so the
     // chip can link at the file endpoint without a second round trip.
-    expect(onSend).toHaveBeenCalledWith('', [
-      { path: 'inbox/voice.webm', name: 'voice.webm', size: 12 },
-    ]);
+    expect(onSend).toHaveBeenCalledWith(
+      '',
+      [{ path: 'inbox/voice.webm', name: 'voice.webm', size: 12 }],
+      null,
+    );
   });
 
   it('discarding a recording uploads nothing', async () => {
@@ -952,7 +954,7 @@ describe('Composer drafts', () => {
     const { textarea } = mount({ onSend, busy: false, onCancel: () => {} });
     await type(textarea, 'go');
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-    expect(onSend).toHaveBeenCalledWith('go', []);
+    expect(onSend).toHaveBeenCalledWith('go', [], null);
   });
 
   it('holds the draft through the send and drops it on the ack', async () => {

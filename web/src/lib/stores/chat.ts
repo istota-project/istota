@@ -49,12 +49,13 @@ import {
   type ToolEntry,
   type SearchResultsData,
   type SearchResultItem,
+  type MessageReply,
 } from '$lib/stores/segments';
 
 // The message / segment model lives in the pure reducer module so it can be
 // unit-tested without a DOM; re-export here so existing `$lib/stores/chat`
 // importers keep working.
-export type { ChatMessage, Segment, ToolEntry, SearchResultsData, SearchResultItem };
+export type { ChatMessage, Segment, ToolEntry, SearchResultsData, SearchResultItem, MessageReply };
 
 /** Build an assistant message's `segments` from a finished task's history
  * payload. Tool entries render as neutral "done" chips (history carries no
@@ -185,6 +186,20 @@ const STREAM_KINDS = [
   'done',
 ];
 
+/**
+ * A send handed back to the composer, with the room it was typed in.
+ *
+ * Only `reply_target_gone` produces one — see `returnSend`. The attachments
+ * travel because they are already uploaded: re-picking them would orphan the
+ * first copies server-side and cost the user the work twice.
+ */
+export interface SendReturn {
+  n: number;
+  token: string | null;
+  text: string;
+  attachments: ChatAttachment[];
+}
+
 export interface ChatSession {
   rooms: Writable<ChatRoom[]>;
   activeRoomId: Writable<number | null>;
@@ -218,6 +233,10 @@ export interface ChatSession {
   // and signal the transcript to scroll. `scrollTarget` is the signal the route
   // watches to perform the DOM scroll + transient highlight.
   jumpToTask: (roomToken: string, taskId: number) => Promise<boolean>;
+  // The same jump keyed on a canonical `messages.id` — what a rendered
+  // citation clicks through to. A sibling of `jumpToTask` rather than a
+  // parameter on it: only the resolution step differs.
+  jumpToMsgId: (roomToken: string, msgId: number) => Promise<boolean>;
   scrollToCid: (cid: number) => void;
   scrollTarget: Writable<{ cid: number; nonce: number } | null>;
   newRoom: (name: string) => Promise<void>;
@@ -240,7 +259,11 @@ export interface ChatSession {
   // counter would let whichever acked first settle the other's draft — the
   // cross-turn leak Stage 3 removed from `pendingSend`, reintroduced here.
   sendSettled: Writable<{ n: number; token: string | null }>;
-  send: (text: string, attachments?: ChatAttachment[]) => Promise<void>;
+  // A send whose cited parent turned out to be gone: the text and attachments
+  // go back to the composer, since Retry cannot resolve that failure. Same
+  // counter-plus-room shape as `sendSettled`, and for the same reason.
+  sendReturned: Writable<SendReturn>;
+  send: (text: string, attachments?: ChatAttachment[], replyTo?: MessageReply) => Promise<void>;
   // Re-POST a failed send from its own row (ISSUE-200). Reuses the row rather
   // than appending a new one, so the canonical echo folds into it. No-op for a
   // row that didn't fail, or one whose failure a retry can't resolve.
@@ -360,6 +383,12 @@ function createSession(): ChatSession {
   // forcing a reload each time would be constant churn on a flaky network.
   const ROOM_STREAM_STALE_MS = 60000;
   const sendSettled = writable<{ n: number; token: string | null }>({ n: 0, token: null });
+  const sendReturned = writable<SendReturn>({
+    n: 0,
+    token: null,
+    text: '',
+    attachments: [],
+  });
 
   // ---- Client-only rows -----------------------------------------------------
   //
@@ -1314,6 +1343,19 @@ function createSession(): ChatSession {
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
       attachmentPaths: m.attachment_paths?.length ? m.attachment_paths : undefined,
+      // The single place the server's citation becomes a row field, which is
+      // what makes history, the aggregate panes and the live stream agree —
+      // all three build their rows through here.
+      replyTo: m.reply_to
+        ? m.reply_to.deleted
+          ? { msgId: m.reply_to.msg_id, deleted: true }
+          : {
+              msgId: m.reply_to.msg_id,
+              role: m.reply_to.role,
+              excerpt: m.reply_to.excerpt,
+              deleted: false,
+            }
+        : undefined,
     };
   }
 
@@ -1772,11 +1814,15 @@ function createSession(): ChatSession {
 
   const JUMP_MAX_PAGES = 5;
 
-  // Select the target room (if needed), locate the task's turn — paging older
-  // history up to a bound when it's outside the loaded window — then scroll to
-  // it. Returns false (and sets a transient error) on any miss rather than
-  // throwing, so a stale/foreign link degrades gracefully.
-  async function jumpToTask(roomToken: string, taskId: number): Promise<boolean> {
+  function findCidByMsgId(msgId: number): number | null {
+    return get(messages).find((m) => m.msgId === msgId)?.cid ?? null;
+  }
+
+  // Select the target room (if needed), locate the row `resolve` names — paging
+  // older history up to a bound when it's outside the loaded window — then
+  // scroll to it. Returns false (and sets a transient error) on any miss rather
+  // than throwing, so a stale/foreign link degrades gracefully.
+  async function jumpToRow(roomToken: string, resolve: () => number | null): Promise<boolean> {
     try {
       const room = get(rooms).find((r) => r.token === roomToken);
       if (!room) {
@@ -1790,12 +1836,12 @@ function createSession(): ChatSession {
           return false;
         }
       }
-      let cid = findCidByTask(taskId);
+      let cid = resolve();
       let pages = 0;
       while (cid == null && get(hasMore) && !get(loadingOlder) && pages < JUMP_MAX_PAGES) {
         await loadOlder();
         pages += 1;
-        cid = findCidByTask(taskId);
+        cid = resolve();
       }
       if (cid == null) {
         notifyError("Couldn't locate that message.");
@@ -1809,7 +1855,17 @@ function createSession(): ChatSession {
     }
   }
 
-  async function send(text: string, attachments: ChatAttachment[] = []) {
+  function jumpToTask(roomToken: string, taskId: number): Promise<boolean> {
+    return jumpToRow(roomToken, () => findCidByTask(taskId));
+  }
+
+  /** The jump a rendered citation performs: same routine, keyed on the
+   * canonical `messages.id` rather than on a task. */
+  function jumpToMsgId(roomToken: string, msgId: number): Promise<boolean> {
+    return jumpToRow(roomToken, () => findCidByMsgId(msgId));
+  }
+
+  async function send(text: string, attachments: ChatAttachment[] = [], replyTo?: MessageReply) {
     const roomId = get(activeRoomId);
     const trimmed = text.trim();
     if (!roomId || (!trimmed && attachments.length === 0)) return;
@@ -1835,13 +1891,22 @@ function createSession(): ChatSession {
         // turn comes back from history.
         attachmentPaths: attachments.map((x) => x.workspace_path ?? null),
         createdAt: new Date().toISOString(),
+        // Rendered optimistically from what the composer staged, so the quote
+        // is on the bubble the moment it appears; the echo replaces it with
+        // the server's own resolution.
+        replyTo,
         sendState: 'sending',
         // Stashed now rather than reconstructed on failure: the row keeps
         // display names and workspace paths, and a retry needs the host paths.
-        sendPayload: { text: trimmed, attachments, idempotencyKey },
+        sendPayload: {
+          text: trimmed,
+          attachments,
+          idempotencyKey,
+          replyToMsgId: replyTo?.msgId,
+        },
       },
     ]);
-    await runTurn(roomId, userCid, trimmed, attachments, idempotencyKey);
+    await runTurn(roomId, userCid, trimmed, attachments, idempotencyKey, replyTo?.msgId);
   }
 
   /**
@@ -1887,7 +1952,14 @@ function createSession(): ChatSession {
     // point of it. A send the server accepted and then failed to report (a
     // client timeout, a dropped socket) is recognised and answered with the
     // first task, so no second task and no second bubble exist to reconcile.
-    await runTurn(roomId, cid, payload.text, payload.attachments, payload.idempotencyKey);
+    await runTurn(
+      roomId,
+      cid,
+      payload.text,
+      payload.attachments,
+      payload.idempotencyKey,
+      payload.replyToMsgId,
+    );
   }
 
   /**
@@ -1906,6 +1978,7 @@ function createSession(): ChatSession {
     trimmed: string,
     attachments: ChatAttachment[],
     idempotencyKey?: string,
+    replyToMsgId?: number,
   ) {
     const phCid = nextCid();
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1959,7 +2032,7 @@ function createSession(): ChatSession {
         pendingSend = mine;
       }
 
-      await sendTurn(roomId, trimmed, attachments, userCid, phCid, idempotencyKey);
+      await sendTurn(roomId, trimmed, attachments, userCid, phCid, idempotencyKey, replyToMsgId);
     } catch {
       // `sendChatMessage` classifies rather than throwing, so this is the
       // unforeseen case. It still must not escape: an un-reset 'sending' left
@@ -2016,6 +2089,30 @@ function createSession(): ChatSession {
     // composer, hiding Stop, and putting the next send into the backend's
     // per-channel gate. The row updates above no-op on their own (the failed
     // row left with its room).
+    if (get(activeRoomId) === roomId) status.set('idle');
+  }
+
+  /**
+   * Take the message back off the transcript and hand it to the composer.
+   *
+   * Only for `reply_target_gone`. Everything else leaves its failed row on
+   * screen, because the row is the recovery path there; here it cannot be, so
+   * leaving it would strand an un-retryable bubble in the transcript.
+   */
+  function returnSend(
+    userCid: number,
+    phCid: number,
+    roomId: number,
+    text: string,
+    attachments: ChatAttachment[],
+  ) {
+    messages.update((arr) => arr.filter((m) => m.cid !== userCid && m.cid !== phCid));
+    const token = get(rooms).find((r) => r.id === roomId)?.token ?? null;
+    // The room travels with the counter for the same reason it does on
+    // `sendSettled`: two sends can be open at once, and the composer must not
+    // repopulate a room the text was not typed in.
+    sendReturned.update((s) => ({ n: s.n + 1, token, text, attachments }));
+    notifyWarning('That message is no longer available to reply to.');
     if (get(activeRoomId) === roomId) status.set('idle');
   }
 
@@ -2080,6 +2177,7 @@ function createSession(): ChatSession {
     userCid: number,
     phCid: number,
     idempotencyKey?: string,
+    replyToMsgId?: number,
   ) {
     const res = await sendChatMessage(
       roomId,
@@ -2088,8 +2186,20 @@ function createSession(): ChatSession {
       attachments.map((x) => x.name),
       undefined,
       idempotencyKey,
+      { replyToMsgId },
     );
     if (!res.ok) {
+      // The one failure whose recovery is not Retry: the server rejected the
+      // *citation*, so re-POSTing the same dead parent id fails identically.
+      // The row is removed and the text handed back to the composer instead,
+      // which contradicts the ISSUE-200 rule that a failed send never
+      // repopulates the box — narrowly, and it earns it: this is a synchronous
+      // pre-flight refusal, no time has passed in which anything else could
+      // have been typed, and the alternative is a permanently un-retryable row.
+      if (res.failure === 'reply_target_gone') {
+        returnSend(userCid, phCid, roomId, trimmed, attachments);
+        return;
+      }
       const { reason, retryable } = sendFailureReason(res);
       // A `!command` runs inside the request rather than becoming a task, so
       // it returns before the endpoint ever consults the idempotency key — and
@@ -2271,12 +2381,14 @@ function createSession(): ChatSession {
     renameRoom,
     updateRoomSettings,
     jumpToTask,
+    jumpToMsgId,
     scrollToCid,
     scrollTarget,
     promoteRoom,
     archiveRoom,
     deleteRoom,
     sendSettled,
+    sendReturned,
     send,
     retrySend,
     cancel,

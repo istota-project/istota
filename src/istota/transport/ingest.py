@@ -112,7 +112,13 @@ def record_inbound(
     attachments: list[str] | None = None,
     attachment_names: list[str] | None = None,
     platform_message_id: int | None = None,
+    # The parent's id *on this surface* — for Talk, a Talk message id. Routes
+    # to `tasks.reply_to_talk_id`. NOT the column of the same name; see
+    # `reply_to_canonical_id` below, and keep the two apart.
     reply_to_message_id: int | None = None,
+    # The parent's id in the canonical `messages` store. Routes to
+    # `tasks.reply_to_message_id` and onto the stored user row.
+    reply_to_canonical_id: int | None = None,
     reply_to_content: str | None = None,
     delivery_token: str | None = None,
     output_target: str | None = None,
@@ -256,6 +262,22 @@ def record_inbound(
                 )
                 client_msg_id = None
 
+    # 2c. Record a surface-native reply parent canonically too, so the web
+    #     transcript renders a Talk-origin reply as a reply rather than as an
+    #     ordinary message. Resolved here because this is where the conn and
+    #     the canonical room token are: `IncomingMessage` stays surface-native,
+    #     which is the reason the two parameters are separate in the first
+    #     place. An unmirrored parent leaves it None and the citation stays
+    #     Talk-only, exactly as before.
+    if (
+        reply_to_canonical_id is None
+        and reply_to_message_id is not None
+        and room_surface
+    ):
+        reply_to_canonical_id = db.find_message_by_external_id(
+            conn, room_token, surface, str(reply_to_message_id),
+        )
+
     # 3. Create the task.
     task_id = db.create_task(
         conn,
@@ -266,7 +288,11 @@ def record_inbound(
         is_group_chat=is_group_chat,
         attachments=attachments or None,
         talk_message_id=platform_message_id,
+        # Surface-native id → the Talk column; canonical id → its own. The two
+        # parameters are different namespaces for the same conceptual thing and
+        # must not be merged.
         reply_to_talk_id=reply_to_message_id,
+        reply_to_message_id=reply_to_canonical_id,
         reply_to_content=reply_to_content,
         output_target=output_target,
         talk_delivery_token=delivery_token,
@@ -303,6 +329,7 @@ def record_inbound(
                     config, user_id, attachments,
                 ),
                 client_msg_id=client_msg_id,
+                reply_to_message_id=reply_to_canonical_id,
             )
 
     return room_token, task_id
