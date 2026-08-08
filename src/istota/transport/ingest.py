@@ -112,7 +112,13 @@ def record_inbound(
     attachments: list[str] | None = None,
     attachment_names: list[str] | None = None,
     platform_message_id: int | None = None,
+    # The parent's id *on this surface* — for Talk, a Talk message id. Routes
+    # to `tasks.reply_to_talk_id`. NOT the column of the same name; see
+    # `reply_to_canonical_id` below, and keep the two apart.
     reply_to_message_id: int | None = None,
+    # The parent's id in the canonical `messages` store. Routes to
+    # `tasks.reply_to_message_id` and onto the stored user row.
+    reply_to_canonical_id: int | None = None,
     reply_to_content: str | None = None,
     delivery_token: str | None = None,
     output_target: str | None = None,
@@ -266,7 +272,11 @@ def record_inbound(
         is_group_chat=is_group_chat,
         attachments=attachments or None,
         talk_message_id=platform_message_id,
+        # Surface-native id → the Talk column; canonical id → its own. The two
+        # parameters are different namespaces for the same conceptual thing and
+        # must not be merged.
         reply_to_talk_id=reply_to_message_id,
+        reply_to_message_id=reply_to_canonical_id,
         reply_to_content=reply_to_content,
         output_target=output_target,
         talk_delivery_token=delivery_token,
@@ -303,6 +313,7 @@ def record_inbound(
                     config, user_id, attachments,
                 ),
                 client_msg_id=client_msg_id,
+                reply_to_message_id=reply_to_canonical_id,
             )
 
     return room_token, task_id

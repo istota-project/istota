@@ -1530,15 +1530,27 @@ def _ensure_reply_parent_in_history(
     """
     Ensure the replied-to message's task is included in conversation history.
 
-    If the user replied to a specific Talk message, look up the task associated
-    with that message and prepend it to history if not already present.
+    If the user replied to a specific message, look up the task associated with
+    it and prepend that whole turn to history if not already present — which is
+    what saves a long parent from being reduced to the 1000-char snapshot.
     Falls back to injecting reply_to_content as a synthetic message if the
     parent task isn't found in the DB.
+
+    The parent is addressed in one of two namespaces, resolved by two distinct
+    lookups: `reply_to_message_id` is a canonical `messages.id` (web) and
+    `reply_to_talk_id` is a Talk message id. They are never interchangeable —
+    in a Talk-bound room both are small integers, so crossing them resolves to
+    an unrelated turn with no signal that it went wrong. The canonical id is
+    tried first: a task carrying both is one whose canonical citation was
+    derived from the Talk one (Stage 6), where the canonical lookup is the
+    more precise of the two.
 
     Returns (updated_history, reply_parent_msg) where reply_parent_msg is the
     message that must survive triage (or None if not applicable).
     """
-    if not task.reply_to_talk_id or not task.conversation_token:
+    if not task.conversation_token:
+        return history, None
+    if not task.reply_to_message_id and not task.reply_to_talk_id:
         return history, None
 
     history_ids = {msg.id for msg in history}
@@ -1550,9 +1562,15 @@ def _ensure_reply_parent_in_history(
     address_map = _user_email_address_map(config)
 
     def _lookup(c: db.sqlite3.Connection) -> tuple[db.Task | None, str | None]:
-        parent = db.get_reply_parent_task(
-            c, task.conversation_token, task.reply_to_talk_id,
-        )
+        parent = None
+        if task.reply_to_message_id:
+            parent = db.get_reply_parent_task_by_message_id(
+                c, task.conversation_token, task.reply_to_message_id,
+            )
+        if parent is None and task.reply_to_talk_id:
+            parent = db.get_reply_parent_task(
+                c, task.conversation_token, task.reply_to_talk_id,
+            )
         if parent is None:
             return None, None
         return parent, db.email_sender_for_task(c, parent.id)
@@ -1600,8 +1618,10 @@ def _ensure_reply_parent_in_history(
             created_at="",
         )
         logger.info(
-            "Injecting reply_to_content as synthetic context for task %d (parent talk msg %d not in DB)",
+            "Injecting reply_to_content as synthetic context for task %d "
+            "(parent msg canonical=%s talk=%s not resolvable)",
             task.id,
+            task.reply_to_message_id,
             task.reply_to_talk_id,
         )
         return [synthetic_msg] + history, synthetic_msg
@@ -2512,6 +2532,21 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 9. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now".
 10. Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper."""
 
+    # The citation frame. Unconditional whenever a snapshot exists, because the
+    # user's message is a response *to* that text and routinely depends on it
+    # ("yes, do that"). It lives in the request section rather than in
+    # `## Conversation context`, which is an ordered record — "this specific
+    # one" is not a record entry. Independent of triage, unlike the parent turn
+    # `_ensure_reply_parent_in_history` force-includes: the two overlap by at
+    # most the snapshot's 1000 characters, which is the price of the frame
+    # always being there.
+    reply_quote_section = ""
+    if task.reply_to_content:
+        quoted = "\n".join(
+            f"> {line}" for line in task.reply_to_content.splitlines() or [""]
+        )
+        reply_quote_section = f"> Replying to:\n{quoted}\n\n"
+
     group_chat_line = ""
     if task.is_group_chat:
         group_chat_line = f"\nThis is a group conversation. You were @mentioned by '{task.user_id}'. Other participants' messages are visible in conversation context below."
@@ -2549,7 +2584,7 @@ You have access to:
 {context_section}
 {confirmation_section}## User's request
 
-{task.prompt}{attachments_text}
+{reply_quote_section}{task.prompt}{attachments_text}
 {channel_section}"""
 
     if skills_changelog:

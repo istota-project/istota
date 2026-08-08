@@ -3623,9 +3623,15 @@ def _chat_create_web_task(
     apply_room_default: bool = True,
     attachment_names: list[str] | None = None,
     client_msg_id: str | None = None,
+    reply_to_msg_id: int | None = None,
 ) -> tuple[str, int]:
-    """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
-    ``("rate_limited", window_seconds)``."""
+    """Rate-limited web-task creation. Returns ``("ok", task_id)``,
+    ``("rate_limited", window_seconds)`` or ``("reply_target_gone", 0)``.
+
+    A cited parent is resolved here, inside the same transaction as the create:
+    it must be a message in *this* room, and its body — never a client-supplied
+    quote — is what gets snapshotted onto the task.
+    """
     from . import db
     from .transport import record_inbound
     chat = _config.web.chat
@@ -3638,6 +3644,18 @@ def _chat_create_web_task(
         recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
+        # Resolve the citation before anything is created. A reply body
+        # routinely depends on its referent, so ingesting the message with the
+        # citation quietly dropped would deliver a message the user did not
+        # write — a visible refusal is the better failure. The caller has
+        # already proved membership of this room, so a mismatch is a deleted
+        # parent or a client bug, and both answer the same way.
+        reply_to_content: str | None = None
+        if reply_to_msg_id is not None:
+            target = db.get_reply_target(conn, reply_to_msg_id)
+            if target is None or target[0] != token:
+                return ("reply_target_gone", 0)
+            reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
         # Route through the shared inbound helper so the web user turn lands in
         # the canonical `messages` store (and the room is registered) exactly
         # like Talk — instead of living only in tasks.prompt.
@@ -3652,6 +3670,8 @@ def _chat_create_web_task(
             apply_room_default=apply_room_default,
             attachment_names=attachment_names or None,
             client_msg_id=client_msg_id,
+            reply_to_canonical_id=reply_to_msg_id,
+            reply_to_content=reply_to_content,
         )
     return ("ok", task_id)
 
@@ -4458,6 +4478,19 @@ async def chat_send_message(
         and 0 < len(raw_client_id) <= _MAX_CLIENT_MSG_ID_CHARS
         else None
     )
+    # The canonical `messages.id` this send replies to. Only the id is accepted
+    # — the parent's text is read server-side from the row we already hold, so a
+    # client cannot dictate what the model is told it previously said. Anything
+    # that is not a positive integer is treated as absent (`bool` is an `int`
+    # subclass, hence the explicit exclusion).
+    raw_reply_to = data.get("reply_to_msg_id")
+    reply_to_msg_id = (
+        raw_reply_to
+        if isinstance(raw_reply_to, int)
+        and not isinstance(raw_reply_to, bool)
+        and raw_reply_to > 0
+        else None
+    )
 
     # An attachment-only send is a real message — a voice memo recorded in the
     # composer is the whole message, with nothing typed alongside it. The
@@ -4517,13 +4550,21 @@ async def chat_send_message(
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
         model_override, effort_override, not model_prefix_used,
-        attachment_names, client_msg_id,
+        attachment_names, client_msg_id, reply_to_msg_id,
     )
     if outcome == "rate_limited":
         return JSONResponse(
             {"error": "rate limit exceeded"},
             status_code=429,
             headers={"Retry-After": str(value)},
+        )
+    if outcome == "reply_target_gone":
+        # 404 for both "unknown id" and "a message in another room",
+        # indistinguishable — the rule the star and delete endpoints already
+        # set, so no endpoint becomes an id oracle for the others.
+        return JSONResponse(
+            {"error": "the message you replied to is no longer available"},
+            status_code=404,
         )
     task_id = value
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
@@ -4618,6 +4659,13 @@ _MAX_ATTACHMENT_NAME_CHARS = 200
 # than validated. Long enough for any sane identity scheme, short enough that
 # it cannot be used as storage.
 _MAX_CLIENT_MSG_ID_CHARS = 64
+# Prompt snapshot of a cited parent, stored on `tasks.reply_to_content`. Same
+# cap Talk has always used (`transport/talk/inbound.py`). Distinct from the
+# display excerpt below: this one is read by the model.
+_REPLY_SNAPSHOT_CHARS = 1000
+# Display excerpt on a rendered citation. Without it every reply in a page
+# carries a full assistant answer to render as two lines.
+_REPLY_EXCERPT_CHARS = 200
 
 
 def _attachment_stem(filename: str, limit: int = 48) -> str:
