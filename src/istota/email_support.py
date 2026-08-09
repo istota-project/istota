@@ -17,7 +17,11 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .config import Config
-from .skills.email import EmailConfig, delete_emails_before
+from .skills.email import (
+    _MAX_DELETES_PER_SWEEP,
+    EmailConfig,
+    delete_emails_before,
+)
 
 logger = logging.getLogger("istota.email_support")
 
@@ -124,6 +128,7 @@ def cleanup_old_emails(config: Config, days: int) -> int:
             cutoff,
             folder=config.email.poll_folder,
             config=get_email_config(config),
+            max_deletes=_MAX_DELETES_PER_SWEEP,
         )
     except Exception as e:
         logger.error("Error deleting expired emails from IMAP: %s", e)
