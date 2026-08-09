@@ -4077,6 +4077,171 @@ class TestExecuteCommandTask:
         assert success is True
         assert "key=[]" in result
 
+    def test_deferred_dir_in_env(self, db_path, tmp_path):
+        """ISSUE-233: the command path omitted ``ISTOTA_DEFERRED_DIR`` while
+        both sibling paths export it. A CRON ``command:`` job calling a skill
+        CLI therefore skipped every deferred write — including the email
+        skill's ``sent_emails`` record, which has no direct-write fallback and
+        reports success regardless."""
+        from istota.executor import get_user_temp_dir
+
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            user_id="alice",
+            command="echo deferred=[$ISTOTA_DEFERRED_DIR]",
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        expected = get_user_temp_dir(config, "alice")
+        assert f"deferred=[{expected}]" in result
+
+    def test_deferred_dir_exists_on_disk(self, db_path, tmp_path):
+        """The exported directory must already exist — a command writing a
+        deferred op straight into it should not have to mkdir first. Asserted
+        from inside the subprocess, against the exported value."""
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            user_id="alice",
+            command='test -d "$ISTOTA_DEFERRED_DIR" && echo isdir',
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "isdir" in result
+
+    def test_deferred_file_written_by_command_is_drained(self, db_path, tmp_path):
+        """End-to-end: a command task writing to ``$ISTOTA_DEFERRED_DIR`` lands
+        a file where ``_drain_deferred_ops`` looks for it."""
+        from istota.executor import get_user_temp_dir
+
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            id=7,
+            user_id="alice",
+            command=(
+                'printf %s \'[{"prompt":"child"}]\' '
+                '> "$ISTOTA_DEFERRED_DIR/task_${ISTOTA_TASK_ID}_subtasks.json"'
+            ),
+        )
+        success, _ = _execute_command_task(task, config)
+        assert success is True
+        written = get_user_temp_dir(config, "alice") / "task_7_subtasks.json"
+        assert json.loads(written.read_text()) == [{"prompt": "child"}]
+
+    def test_deferred_op_from_a_failing_command_is_discarded(self, db_path, tmp_path):
+        """Joining the deferred rail makes a command row's writes conditional on
+        the command exiting 0. A skill CLI called from a CRON row used to write
+        directly and keep the write regardless; now a later statement failing
+        discards it, the same way it does for the skill and brain paths. Pinned
+        because it is the behaviour change ISSUE-233's fix carries with it."""
+        from istota.executor import get_user_temp_dir
+        from istota.scheduler_deferred import _purge_deferred_files_for_retry
+
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            id=8,
+            user_id="alice",
+            command=(
+                'printf %s \'[{"prompt":"child"}]\' '
+                '> "$ISTOTA_DEFERRED_DIR/task_${ISTOTA_TASK_ID}_subtasks.json"; '
+                "exit 1"
+            ),
+        )
+        success, _ = _execute_command_task(task, config)
+        assert success is False
+
+        user_temp_dir = get_user_temp_dir(config, "alice")
+        written = user_temp_dir / "task_8_subtasks.json"
+        assert written.exists(), "the command still wrote it"
+        # The retry branch of process_one_task clears the slate; the op never
+        # reaches _drain_deferred_ops, which only runs on success.
+        _purge_deferred_files_for_retry(task, user_temp_dir)
+        assert not written.exists()
+
+
+class TestDeferredDirContract:
+    """ISSUE-233: all three task paths must export the same deferred dir, so a
+    skill CLI behaves identically whichever path invoked it."""
+
+    def _config(self, db_path, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        temp = tmp_path / "temp"
+        temp.mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud_mount_path=mount,
+            temp_dir=temp,
+            admin_users={"alice"},
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig()},
+        )
+
+    def _task(self, **kwargs):
+        defaults = dict(
+            id=5,
+            status="running",
+            source_type="scheduled",
+            user_id="alice",
+            prompt="",
+        )
+        defaults.update(kwargs)
+        return db.Task(**defaults)
+
+    def _captured_env(self, monkeypatch, target):
+        """Run ``target`` with the subprocess runner stubbed, return its env."""
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured.update(kwargs.get("env") or {})
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("istota.scheduler._run_capture", fake_run)
+        target()
+        return captured
+
+    def test_command_and_skill_paths_agree(self, db_path, tmp_path, monkeypatch):
+        from istota.executor import get_user_temp_dir
+
+        config = self._config(db_path, tmp_path)
+        expected = str(get_user_temp_dir(config, "alice"))
+
+        cmd_env = self._captured_env(
+            monkeypatch,
+            lambda: _execute_command_task(self._task(command="true"), config),
+        )
+        skill_env = self._captured_env(
+            monkeypatch,
+            lambda: _execute_skill_task(
+                self._task(skill="kv", skill_args='["namespaces"]'), config,
+            ),
+        )
+
+        assert cmd_env["ISTOTA_DEFERRED_DIR"] == expected
+        assert skill_env["ISTOTA_DEFERRED_DIR"] == expected
+
+    @patch("istota.executor.subprocess.run")
+    def test_brain_path_agrees(self, mock_run, db_path, tmp_path):
+        """The LLM path is the reference implementation the other two must match."""
+        from istota.executor import execute_task, get_user_temp_dir
+
+        config = self._config(db_path, tmp_path)
+        config.bundled_skills_dir = tmp_path / "_empty_bundled"
+        get_user_temp_dir(config, "alice").mkdir(parents=True, exist_ok=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="test", user_id="alice", source_type="talk",
+            )
+            execute_task(db.get_task(conn, task_id), config, [], conn=conn)
+
+        env = mock_run.call_args[1]["env"]
+        assert env["ISTOTA_DEFERRED_DIR"] == str(get_user_temp_dir(config, "alice"))
+
 
 # ---------------------------------------------------------------------------
 # Phase 1.3: TestExecuteSkillTask
