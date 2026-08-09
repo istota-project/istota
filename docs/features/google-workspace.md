@@ -65,13 +65,13 @@ Each user connects their own Google account from **Settings → Google Workspace
 2. The **Google Workspace** card lists one row per service with an access level: no access, read-only, or read and write. Services outside the instance ceiling are fixed at "No access" and say so
 3. User picks their levels and saves, then clicks **Connect**
 4. Google's consent screen asks for exactly the scopes that selection resolves to. The user may still deselect individual boxes there
-5. After granting access they land back in the app, and the card lists what Google actually granted
+5. After granting access they land back in the app, and each service's row reports what Google actually granted beside the level being asked for
 
 OAuth tokens are stored per-user in the database and auto-refreshed on each task execution. Users can disconnect at any time from the same card.
 
 ### What the card shows
 
-The card reads the granted scopes back out of the stored token, so it reports what the user consented to rather than what was asked for. Three states are worth knowing:
+The card reads the granted scopes back out of the stored token, so it reports what the user consented to rather than what was asked for. Each service's row carries the whole account of that service — the level to ask for next time, what Google currently holds, and whether that grant is partial — rather than splitting it across a picker and a separate grant list; the connection state itself is a status pill beside the card title, as on every other service card. Three states are worth knowing:
 
 - **Partial** on a granted service — the consent screen's boxes were not all ticked.
 - **"Your grant is narrower than what this instance now asks for"** — the selection or the ceiling changed after the grant was made. Some commands will fail until the user reconnects. This is the state behind most "the bot can't see my calendar" reports.

@@ -1,6 +1,6 @@
 # Testing
 
-Istota uses TDD with pytest and pytest-asyncio. The test suite has ~10,750 tests across ~280 files.
+Istota uses TDD with pytest and pytest-asyncio. The Python suite has ~11,000 tests across ~345 files; the frontend has its own vitest suite under `web/`.
 
 ## Running tests
 
@@ -17,6 +17,23 @@ Two marker sets are deselected by default (also via `addopts`):
 
 - `@pytest.mark.integration` — needs a live Nextcloud instance.
 - `@pytest.mark.live` — native-brain tests that hit a real LLM API, so they need a key and cost money.
+
+## The frontend suite
+
+`web/` is checked independently of Python — a change touching only one half need
+only run that half:
+
+```bash
+npm --prefix web run lint:design   # design-language lint (raw colours, tokens)
+npm --prefix web run check         # svelte-check
+npm --prefix web run test          # vitest run
+npm --prefix web run format:check  # prettier
+```
+
+Needs `npm ci` in `web/` first. There is no wrapper script over the two halves —
+`.claude/verify.sh` was tried and removed, because scoping and runner fallback
+inside a wrapper hid which runner produced a failure. Run the commands directly;
+the full set is listed in `AGENTS.md`.
 
 ## Test patterns
 
@@ -58,5 +75,5 @@ For new features:
 3. Run tests to confirm they fail
 4. Implement the feature
 5. Run tests and iterate until all pass
-6. Run linters/type checkers if configured
+6. Run `ruff check --output-format concise src tests`, plus the `web/` checks above if the change touched the frontend
 7. Commit

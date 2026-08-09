@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tasks failed outright on installs that use a custom system prompt. Narrowing what the sandbox can read also took away the prompt file itself, so the model exited immediately with "System prompt file not found". That one file is now made available directly; the configuration file sitting next to it still is not.
 
+- Every task spent two seconds doing nothing before it finished. The two helper services a task runs behind checked whether they had been asked to stop only once a second, and shutting one down waited out that check rather than interrupting it. They are now woken directly, so a reply arrives about two seconds sooner and a busy scheduler gets that time back per task.
+
 ### Changed
 
 - Listing a key-value namespace previews long values instead of printing them whole. Asking what keys exist used to dump every value in full, which for a large stored collection crowded out the rest of what Istota was working on. Each value is now shortened with its real size reported alongside, and the whole values are still one flag or one `get` away. The operator command still prints values in full; it gains the same two flags as options.
@@ -56,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The setting that stops a task from escaping its sandbox into a nested one has been switched on for the first time. It has been in the code since the sandbox work, but it was being asked for in a way bubblewrap rejects, so the check that decides whether the system supports it always came back "no" and the protection was never actually applied. Nothing else was relying on it — what it guards is the last resort behind the databases being absent — but it is now in force, and the check no longer reports a missing feature when it simply could not run.
 
 - The skill command that indexes a file so it can be found by search was reading whatever path it was handed, using the bot's own filesystem access rather than the task's. Since anything indexed can be read back out through search, that was a way to reach files a task is not meant to see, the configuration file among them. It is now limited to your own workspace, the channel a task is running in, and the task's own scratch directory.
+
+- The dev-container copy commands could reach any user's files, not only the caller's. They run with the bot's own filesystem access and accepted any path under the shared Nextcloud mount root, which holds everyone's workspace — so a task could copy another person's documents into its container and read them there. They are now held to the same limits as the search-index command: your own workspace, the channel the task is running in, and the task's own scratch directory. A refused copy also no longer leaves an empty directory behind where it was headed.
 
 - The helper that decides which older messages of a conversation are still worth including now runs with only the credential it needs to reach the model. It was being started with the whole of Istota's own environment — the key your stored secrets are encrypted with, your Nextcloud password, every connected-service token — on a prompt assembled from conversation history. No known path read them back out, but that limit rested on the command-line tool's own defaults rather than on anything Istota enforced.
 

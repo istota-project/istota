@@ -75,12 +75,17 @@ regex. The comment heading above a block becomes the label a hit reports under.
 
 ```bash
 scripts/check-private-data.sh              # staged content (what the hook runs)
-scripts/check-private-data.sh --all        # every tracked file, ~10s
+scripts/check-private-data.sh --all        # every tracked file, ~2s
 scripts/check-private-data.sh path/to/file # named files as they are on disk
 ```
 
 Staged mode reads the **index**, not the worktree: a leak that was staged and
 then edited out on disk is still what the commit would carry.
+
+A run is one batched `grep -l` over every target at once, and only the files it
+names pay for the per-pattern loop that attributes a hit to a line and a label.
+A path containing a newline can't go through the batch — `grep -l` reports
+matches by name — so those are scanned one at a time rather than skipped.
 
 ## False positives
 
@@ -110,6 +115,10 @@ plus both ways of not matching (the exemption marker, the placeholder
 heuristic). A scanner whose regex quietly stops matching reports a clean tree,
 which is indistinguishable from having nothing to find — so the patterns are
 tested rather than trusted.
+
+Three further tests pin the batching, which fails the same silent way: a file
+that never reaches the batch is never attributed. They cover a leak among sixty
+clean files, several leaks in one batch, and a path the batch cannot take.
 
 ## If something already leaked
 
