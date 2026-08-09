@@ -1757,6 +1757,7 @@ interface ServiceSchema {
   fields: { key: string; label: string; type: string }[];
   used_by?: string[];
   oauth?: boolean;
+  custom_ui?: boolean;
 }
 
 const _CONNECTED_SCHEMAS: ServiceSchema[] = [
@@ -1774,9 +1775,143 @@ const _CONNECTED_SCHEMAS: ServiceSchema[] = [
     label: 'Google Workspace',
     used_by: ['google_workspace'],
     oauth: true,
+    // Bespoke card (GoogleWorkspaceCard): granted scopes + a per-service
+    // read-only/full picker bounded by the operator's ceiling.
+    custom_ui: true,
     fields: [],
   },
 ];
+
+// --- Google Workspace scope picker (ISSUE-240) ---
+//
+// Mirrors istota/google_scopes.py. The instance ceiling below is deliberately
+// mixed — Drive full, Gmail/Calendar read-only, Sheets/Docs/Chat absent — so
+// the dev card exercises all three states the real one has to keep apart.
+
+const GOOGLE_SERVICES = [
+  { service: 'drive', label: 'Drive', max_level: 'full' },
+  { service: 'gmail', label: 'Gmail', max_level: 'readonly' },
+  { service: 'calendar', label: 'Calendar', max_level: 'readonly' },
+  { service: 'sheets', label: 'Sheets', max_level: 'off' },
+  { service: 'docs', label: 'Docs', max_level: 'off' },
+  { service: 'chat', label: 'Chat', max_level: 'off' },
+] as const;
+
+const GOOGLE_SCOPES: Record<string, { readonly: string[]; full: string[] }> = {
+  drive: {
+    readonly: ['https://www.googleapis.com/auth/drive.readonly'],
+    full: ['https://www.googleapis.com/auth/drive'],
+  },
+  gmail: {
+    readonly: ['https://www.googleapis.com/auth/gmail.readonly'],
+    full: ['https://www.googleapis.com/auth/gmail.modify'],
+  },
+  calendar: {
+    readonly: ['https://www.googleapis.com/auth/calendar.readonly'],
+    full: ['https://www.googleapis.com/auth/calendar'],
+  },
+  sheets: {
+    readonly: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    full: ['https://www.googleapis.com/auth/spreadsheets'],
+  },
+  docs: {
+    readonly: ['https://www.googleapis.com/auth/documents.readonly'],
+    full: ['https://www.googleapis.com/auth/documents'],
+  },
+  chat: {
+    readonly: [
+      'https://www.googleapis.com/auth/chat.spaces.readonly',
+      'https://www.googleapis.com/auth/chat.messages.readonly',
+    ],
+    full: [
+      'https://www.googleapis.com/auth/chat.spaces',
+      'https://www.googleapis.com/auth/chat.messages',
+    ],
+  },
+};
+
+const LEVEL_RANK: Record<string, number> = { off: 0, readonly: 1, full: 2 };
+
+// The user's stored selection ({} = unset = the whole ceiling), and the scopes
+// Google "granted" — seeded narrower than the ceiling so the reconnect-needed
+// banner is reachable without touching anything.
+const mockGoogle: { selection: Record<string, string>; granted: string[] | null } = {
+  selection: {},
+  granted: ['https://www.googleapis.com/auth/drive.readonly'],
+};
+
+function googleDefaultSelection(): Record<string, string> {
+  return Object.fromEntries(GOOGLE_SERVICES.map((s) => [s.service, s.max_level]));
+}
+
+function googleResolveScopes(selection: Record<string, string>): string[] {
+  const unset = Object.keys(selection).length === 0;
+  const out: string[] = [];
+  for (const svc of GOOGLE_SERVICES) {
+    if (svc.max_level === 'off') continue;
+    let want = unset ? svc.max_level : (selection[svc.service] ?? 'off');
+    if (LEVEL_RANK[want] > LEVEL_RANK[svc.max_level]) want = svc.max_level;
+    if (want !== 'readonly' && want !== 'full') continue;
+    out.push(...GOOGLE_SCOPES[svc.service][want]);
+  }
+  return out;
+}
+
+function googleLevels(scopes: string[]): Record<string, string> {
+  const levels: Record<string, string> = {};
+  for (const svc of GOOGLE_SERVICES) {
+    const map = GOOGLE_SCOPES[svc.service];
+    if (map.full.some((s) => scopes.includes(s))) levels[svc.service] = 'full';
+    else if (map.readonly.some((s) => scopes.includes(s))) levels[svc.service] = 'readonly';
+  }
+  return levels;
+}
+
+function googleMissing(requested: string[], granted: string[]): string[] {
+  const levels = googleLevels(granted);
+  return requested.filter((scope) => {
+    if (granted.includes(scope)) return false;
+    for (const svc of GOOGLE_SERVICES) {
+      const map = GOOGLE_SCOPES[svc.service];
+      if (map.readonly.includes(scope))
+        return LEVEL_RANK[levels[svc.service] ?? 'off'] < LEVEL_RANK.readonly;
+      if (map.full.includes(scope))
+        return LEVEL_RANK[levels[svc.service] ?? 'off'] < LEVEL_RANK.full;
+    }
+    return true;
+  });
+}
+
+function mockGoogleStatus() {
+  const selection = mockGoogle.selection;
+  const granted = mockGoogle.granted;
+  const requested = googleResolveScopes(selection);
+  const levels = granted ? googleLevels(granted) : {};
+  const known = new Set(Object.values(GOOGLE_SCOPES).flatMap((m) => [...m.readonly, ...m.full]));
+  return {
+    enabled: true,
+    connected: granted !== null,
+    offered: GOOGLE_SERVICES.map((s) => ({ ...s })),
+    granted: GOOGLE_SERVICES.filter((s) => levels[s.service]).map((s) => {
+      const level = levels[s.service] as 'readonly' | 'full';
+      const wanted = GOOGLE_SCOPES[s.service][level];
+      const held = wanted.filter((x) => (granted ?? []).includes(x));
+      return {
+        service: s.service,
+        label: s.label,
+        level,
+        scopes: held,
+        complete: held.length === wanted.length,
+      };
+    }),
+    unrecognized_scopes: (granted ?? []).filter((s) => !known.has(s)),
+    selection: Object.keys(selection).length ? selection : googleDefaultSelection(),
+    selection_set: Object.keys(selection).length > 0,
+    requested_scopes: requested,
+    missing_scopes: granted ? googleMissing(requested, granted) : [],
+    extra_scopes: granted ? googleMissing(granted, requested) : [],
+  };
+}
 
 const _MODULE_SCHEMAS: Record<string, ServiceSchema[]> = {
   feeds: [
@@ -1814,7 +1949,9 @@ function buildServiceCard(s: ServiceSchema) {
   const stored = mockSecrets[s.service] || {};
   const configured_keys = Object.keys(stored).filter((k) => stored[k]);
   if (s.oauth) {
-    const connected = configured_keys.length > 0;
+    // OAuth state comes from the token store, not from `secrets` — the real
+    // backend reads google_oauth_tokens for exactly this reason.
+    const connected = s.service === 'google_workspace' && mockGoogle.granted !== null;
     return {
       ...s,
       status: connected ? 'configured' : 'missing',
@@ -2133,6 +2270,36 @@ const handlers: MockHandler[] = [
     if (url === '/istota/api/settings/nextcloud-token' && method === 'DELETE') {
       user.nextcloud_token = { connected: false, expires_at: null };
       return { ok: true };
+    }
+    if (url === '/istota/api/google/status' && method === 'GET') {
+      return mockGoogleStatus();
+    }
+    if (url === '/istota/api/google/scopes' && method === 'PUT') {
+      const raw = (body as { selection?: Record<string, string> })?.selection;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return { error: 'selection must be an object' };
+      }
+      // Same normalization the server does: unknown services and levels are
+      // dropped rather than rejected, and an explicit "off" is kept.
+      const known = new Set<string>(GOOGLE_SERVICES.map((s) => s.service));
+      mockGoogle.selection = Object.fromEntries(
+        Object.entries(raw).filter(
+          ([k, v]) => known.has(k) && typeof v === 'string' && v in LEVEL_RANK,
+        ),
+      );
+      const requested = googleResolveScopes(mockGoogle.selection);
+      return {
+        ok: true,
+        selection: mockGoogle.selection,
+        requested_scopes: requested,
+        reconnect_required:
+          mockGoogle.granted !== null && googleMissing(requested, mockGoogle.granted).length > 0,
+      };
+    }
+    if (url === '/istota/api/google/disconnect' && method === 'DELETE') {
+      const was = mockGoogle.granted !== null;
+      mockGoogle.granted = null;
+      return { ok: true, was_connected: was };
     }
     const moduleSvcMatch = url.match(/^\/istota\/api\/settings\/module-services\/([^/?]+)$/);
     if (moduleSvcMatch && method === 'GET') {

@@ -26,6 +26,7 @@
   import {
     ServiceCard,
     GarminCard,
+    GoogleWorkspaceCard,
     HeaderSave,
     SettingsLayout,
     SettingsCard,
@@ -38,7 +39,6 @@
   let loading = $state(true);
   let error = $state('');
   let info = $state('');
-  let oauthBusy = $state(false);
   // null = operator hasn't enabled encrypted token storage → no card.
   let ncToken: NextcloudTokenStatus | null = $state(null);
   let ncTokenBusy = $state(false);
@@ -191,27 +191,6 @@
       error = (e as Error).message || 'Disconnect failed';
     } finally {
       ncTokenBusy = false;
-    }
-  }
-
-  function connectGoogle() {
-    oauthBusy = true;
-    // Full-page nav — the OAuth callback redirects back to /istota/.
-    window.location.href = `${base}/google/connect`;
-  }
-
-  async function disconnectGoogle() {
-    oauthBusy = true;
-    try {
-      await fetch(`${base}/api/google/disconnect`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      await reloadServices();
-    } catch (e) {
-      error = (e as Error).message || 'Disconnect failed';
-    } finally {
-      oauthBusy = false;
     }
   }
 
@@ -536,14 +515,10 @@
     {#each activeServices as svc (svc.service)}
       {#if svc.custom_ui && svc.service === 'garmin'}
         <GarminCard />
+      {:else if svc.custom_ui && svc.service === 'google_workspace'}
+        <GoogleWorkspaceCard onChanged={reloadServices} />
       {:else}
-        <ServiceCard
-          service={svc}
-          onChanged={reloadServices}
-          onConnect={connectGoogle}
-          onDisconnect={disconnectGoogle}
-          {oauthBusy}
-        />
+        <ServiceCard service={svc} onChanged={reloadServices} />
       {/if}
     {/each}
   </SettingsLayout>
@@ -554,8 +529,7 @@
 	   web/src/lib/styles/settings.css (imported by app.css). Only page-specific
 	   layout (module toggles, connected-service rows) stays here. */
 
-  /* Mirrors ServiceCard's Connect/Disconnect row so the Nextcloud card and
-	   the OAuth service cards below it line up. */
+  /* The Nextcloud card's Disconnect row. */
   .oauth-actions {
     display: flex;
     gap: var(--space-2);

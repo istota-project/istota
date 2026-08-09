@@ -708,8 +708,9 @@ export interface ServiceCard {
   configured_keys: string[];
   last_updated: string | null;
   used_by?: string[];
-  oauth?: boolean;
-  custom_ui?: boolean; // render a bespoke card (garmin) instead of fields
+  oauth?: boolean; // auth is an OAuth redirect rather than writable fields
+  // Render a bespoke card (garmin, google_workspace) instead of fields.
+  custom_ui?: boolean;
   connected?: boolean; // google_workspace OAuth state
   enabled?: boolean; // google_workspace module flag
 }
@@ -720,6 +721,72 @@ export interface ServicesResponse {
 
 export async function getSettingsServices(): Promise<ServicesResponse> {
   return apiFetch<ServicesResponse>('/settings/services');
+}
+
+// --- Google Workspace (ISSUE-240) ---
+//
+// The instance scope list is a ceiling, not a request: it names what the
+// operator's Google Cloud project has enabled. `offered` therefore names every
+// service, with `max_level: 'off'` for the ones this instance does not offer —
+// which the card has to render differently from "you did not grant it".
+
+export type GoogleScopeLevel = 'off' | 'readonly' | 'full';
+
+export interface GoogleOfferedService {
+  service: string;
+  label: string;
+  max_level: GoogleScopeLevel;
+}
+
+export interface GoogleGrantedService {
+  service: string;
+  label: string;
+  level: Exclude<GoogleScopeLevel, 'off'>;
+  scopes: string[];
+  /** False when the grant holds only part of what that level needs — Google's
+   *  consent screen lets a user deselect individual boxes. */
+  complete: boolean;
+}
+
+export interface GoogleStatus {
+  enabled: boolean;
+  connected: boolean;
+  offered: GoogleOfferedService[];
+  granted: GoogleGrantedService[];
+  unrecognized_scopes: string[];
+  selection: Record<string, GoogleScopeLevel>;
+  /** False when the user never chose — `selection` is then the whole ceiling. */
+  selection_set: boolean;
+  requested_scopes: string[];
+  /** Requested but not granted: reconnect to apply. */
+  missing_scopes: string[];
+  /** Granted but no longer requested: the grant outlived a narrowing. */
+  extra_scopes: string[];
+}
+
+export interface GoogleScopesSaveResponse {
+  ok: boolean;
+  selection: Record<string, GoogleScopeLevel>;
+  requested_scopes: string[];
+  reconnect_required: boolean;
+}
+
+export async function getGoogleStatus(): Promise<GoogleStatus> {
+  return apiFetch<GoogleStatus>('/google/status');
+}
+
+export async function saveGoogleScopes(
+  selection: Record<string, GoogleScopeLevel>,
+): Promise<GoogleScopesSaveResponse> {
+  return apiFetch<GoogleScopesSaveResponse>('/google/scopes', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selection }),
+  });
+}
+
+export async function disconnectGoogle(): Promise<void> {
+  await apiFetch('/google/disconnect', { method: 'DELETE' });
 }
 
 // --- modules + per-module services ---
