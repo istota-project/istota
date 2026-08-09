@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-08-09
+
 ### Added
 
 - You now choose which parts of your Google account the bot gets. Settings → Google Workspace lists Drive, Gmail, Calendar, Sheets, Docs and Chat, each set to no access, read-only, or read and write, and the connect flow asks Google for exactly that. The operator's scope list becomes the maximum any user may pick rather than what everyone is asked for, so a service outside it is shown as not offered instead of failing later at Google.
@@ -1477,7 +1479,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.38.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.39.0...main
+[0.39.0]: https://gitlab.com/cynium/istota/-/releases/v0.39.0
 [0.38.0]: https://gitlab.com/cynium/istota/-/releases/v0.38.0
 [0.37.0]: https://gitlab.com/cynium/istota/-/releases/v0.37.0
 [0.36.0]: https://gitlab.com/cynium/istota/-/releases/v0.36.0
