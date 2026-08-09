@@ -33,7 +33,9 @@ When `sandbox_enabled = true` (default), each Claude Code invocation runs inside
 - Their temp directory (read-write)
 - Extra resource paths
 
-**Hidden from everyone, admin included**: every SQLite database the daemon owns. The framework DB directory and the per-user module-DB root (`module_data_dir`, holding each user's `health.db` / `money.db` / `location.db` / `feeds.db`) are covered by an empty tmpfs, applied as the last mount operations so no earlier bind can expose them. Local DB backups and the browser profile live under the same directory and go with them.
+**Hidden from everyone, admin included**: every SQLite database the daemon owns. The framework DB directory and the per-user module-DB root (`module_data_dir`, holding each user's `health.db` / `money.db` / `location.db` / `feeds.db`) are covered by an empty tmpfs, applied as the last mount operations so no earlier bind shows through. Local DB backups and the browser profile live under the same directory and go with them.
+
+A mask hides rather than revokes: `kernel.unprivileged_userns_clone` is on (bwrap needs it), so a sandboxed process can enter a nested user namespace and unmount a tmpfs to reveal whatever was bound underneath. `--disable-userns` is passed where bwrap supports it (0.8+), and in the shipped default nothing is bound underneath, so there is nothing to reveal. Both of those are reasons to keep `sandbox_ro_paths` narrow rather than to rely on the mask to make a broad entry safe.
 
 **Also hidden from non-admin**: other users' directories, `/etc/istota/`, user config files.
 
