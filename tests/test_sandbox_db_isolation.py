@@ -199,6 +199,104 @@ class TestRoPathsCannotReExpose:
         assert str(data.resolve()) in masked
 
 
+class TestMasksAreReadOnly:
+    """A writable mask lets a probe leave a zero-byte database behind.
+
+    `sqlite3 {db_dir}/istota.db "select …"` on a writable tmpfs *creates* the
+    file and then reports `no such table`, which reads as a missing schema or a
+    corrupt database rather than as "the file is not in this namespace". The
+    stray file also outlives the probe for the rest of the task. Remounting each
+    mask read-only turns both into one honest `unable to open database file`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _supported(self):
+        """The probe shells out to a real bwrap, which the dev host has not."""
+        with patch("istota.executor._bwrap_supports_remount_ro", return_value=True):
+            yield
+
+    def _remount_ro_paths(self, argv):
+        return [
+            argv[i + 1] for i in range(len(argv) - 1)
+            if argv[i] == "--remount-ro"
+        ]
+
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_every_db_mask_is_remounted_read_only(
+        self, iso_config, iso_task, is_admin,
+    ):
+        argv = _bwrap(iso_config, iso_task, is_admin)
+        db_dir = str(iso_config.db_path.parent.resolve())
+        assert db_dir in self._remount_ro_paths(argv)
+
+    def test_relocated_module_root_is_remounted_read_only(
+        self, iso_config, iso_task, tmp_path,
+    ):
+        """The second mask gets the same treatment as the first."""
+        relocated = tmp_path / "elsewhere" / "modules"
+        (relocated / "bob").mkdir(parents=True)
+        iso_config.module_data_dir = relocated
+        argv = _bwrap(iso_config, iso_task, True)
+        assert str(relocated.resolve()) in self._remount_ro_paths(argv)
+
+    def test_symlinked_name_is_remounted_too(self, iso_config, iso_task, tmp_path):
+        """Both names a mask answers to have to be read-only, not just one."""
+        real = tmp_path / "realstore"
+        real.mkdir()
+        (tmp_path / "link").symlink_to(real, target_is_directory=True)
+        (real / "data").mkdir()
+        iso_config.db_path = tmp_path / "link" / "data" / "istota.db"
+        iso_config.module_data_dir = tmp_path / "link" / "data" / "modules"
+
+        argv = _bwrap(iso_config, iso_task, True)
+        remounted = self._remount_ro_paths(argv)
+        assert str(tmp_path / "link" / "data") in remounted
+        assert str((real / "data").resolve()) in remounted
+
+    def test_remount_follows_the_tmpfs_it_applies_to(self, iso_config, iso_task):
+        """`--remount-ro` acts on whatever is mounted at that path *now*."""
+        argv = _bwrap(iso_config, iso_task, True)
+        db_dir = str(iso_config.db_path.parent.resolve())
+        tmpfs_at = [
+            i for i in range(len(argv) - 1)
+            if argv[i] == "--tmpfs" and argv[i + 1] == db_dir
+        ]
+        remount_at = [
+            i for i in range(len(argv) - 1)
+            if argv[i] == "--remount-ro" and argv[i + 1] == db_dir
+        ]
+        assert tmpfs_at and remount_at
+        assert min(remount_at) > min(tmpfs_at)
+
+    def test_only_the_db_masks_are_remounted(self, iso_config, iso_task):
+        """/tmp, ~/.claude and the rest stay writable — tasks need them."""
+        argv = _bwrap(iso_config, iso_task, True)
+        allowed = {
+            str(iso_config.db_path.parent),
+            str(iso_config.db_path.parent.resolve()),
+            str(iso_config.module_db_root()),
+            str(iso_config.module_db_root().resolve()),
+        }
+        assert set(self._remount_ro_paths(argv)) <= allowed
+
+    def test_a_refused_mask_is_not_remounted(self, iso_config, iso_task, tmp_path):
+        """No tmpfs was mounted there, so remounting would hit the real dir."""
+        workspace = iso_config.nextcloud_mount_path
+        iso_config.db_path = workspace / "istota.db"
+        iso_config.module_data_dir = tmp_path / "modules"
+        (tmp_path / "modules").mkdir(parents=True, exist_ok=True)
+        argv = _bwrap(iso_config, iso_task, True)
+        assert str(workspace.resolve()) not in self._remount_ro_paths(argv)
+
+    def test_omitted_when_bwrap_does_not_support_it(self, iso_config, iso_task):
+        """An unknown flag makes bwrap exit non-zero — that fails every task."""
+        with patch("istota.executor._bwrap_supports_remount_ro", return_value=False):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert "--remount-ro" not in argv
+        # The mask itself must survive the missing flag.
+        assert str(iso_config.db_path.parent.resolve()) in _tmpfs_paths(argv)
+
+
 class TestMaskDoesNotShadowNeededPaths:
     """A mask above the workspace would be an outage, not a hardening."""
 

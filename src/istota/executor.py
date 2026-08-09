@@ -766,7 +766,33 @@ def _bwrap_available() -> bool:
     return _bwrap_checked
 
 
-_userns_checked: bool | None = None
+_bwrap_flag_support: dict[str, bool] = {}
+
+
+def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
+    """Whether this bwrap accepts *flag*, probed once per process.
+
+    Probed rather than assumed: passing an unsupported flag makes bwrap exit
+    non-zero *before* it runs anything, which would fail every task on an older
+    host. ``probe_args`` is the shortest argv that exercises the flag.
+    """
+    cached = _bwrap_flag_support.get(flag)
+    if cached is not None:
+        return cached
+    if not _bwrap_available():
+        _bwrap_flag_support[flag] = False
+        return False
+
+    try:
+        result = subprocess.run(
+            ["bwrap", *probe_args, "--", "true"],
+            capture_output=True, timeout=5,
+        )
+        supported = result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        supported = False
+    _bwrap_flag_support[flag] = supported
+    return supported
 
 
 def _bwrap_supports_disable_userns() -> bool:
@@ -784,27 +810,41 @@ def _bwrap_supports_disable_userns() -> bool:
     Probed rather than assumed: passing an unsupported flag makes bwrap exit
     non-zero, which would fail every task on an older host.
     """
-    global _userns_checked
-    if _userns_checked is not None:
-        return _userns_checked
-    if not _bwrap_available():
-        _userns_checked = False
-        return False
-
-    try:
-        result = subprocess.run(
-            ["bwrap", "--ro-bind", "/", "/", "--disable-userns", "--", "true"],
-            capture_output=True, timeout=5,
-        )
-        _userns_checked = result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
-        _userns_checked = False
-    if not _userns_checked:
+    already_probed = "--disable-userns" in _bwrap_flag_support
+    supported = _bwrap_supports(
+        "--disable-userns", ["--ro-bind", "/", "/", "--disable-userns"],
+    )
+    if not supported and not already_probed:
         logger.info(
             "bwrap does not support --disable-userns; sandbox masks can be "
             "lifted from a nested user namespace. Keep sandbox_ro_paths narrow."
         )
-    return _userns_checked
+    return supported
+
+
+def _bwrap_supports_remount_ro() -> bool:
+    """Whether this bwrap accepts ``--remount-ro`` (added in 0.2).
+
+    The database masks are read-only so that a probe against a path that is no
+    longer in the namespace fails at open time instead of quietly creating a
+    zero-byte file on the mask's tmpfs — which then answers `no such table` and
+    reads as a corrupt database rather than as a boundary, and litters the
+    directory for the rest of the task.
+
+    Old enough that every supported host has it, but probed all the same: the
+    cost of being wrong is every task failing, against a cosmetic gain.
+    """
+    already_probed = "--remount-ro" in _bwrap_flag_support
+    supported = _bwrap_supports(
+        "--remount-ro",
+        ["--ro-bind", "/", "/", "--tmpfs", "/tmp", "--remount-ro", "/tmp"],
+    )
+    if not supported and not already_probed:
+        logger.info(
+            "bwrap does not support --remount-ro; the database masks stay "
+            "writable and a stray file written there will look like a database."
+        )
+    return supported
 
 
 def build_clean_env(config: Config) -> dict[str, str]:
@@ -1526,6 +1566,10 @@ def build_bwrap_cmd(
     # feeds DB, the local DB backups and the browser profile. An empty tmpfs
     # over the directories shadows whatever earlier binds put there, because
     # bwrap applies operations in argv order and these are last. Keep them last.
+    # `--remount-ro` on each mask is part of the same operation — see `_mask_dir`
+    # for why an empty *writable* tmpfs makes the dead end look like a corrupt
+    # database — and is the one thing that may follow a mask, since it can only
+    # take permissions away.
     #
     # It is a mask, not a revocation: with `kernel.unprivileged_userns_clone`
     # on (bwrap needs it) a process can `unshare -Urm` and umount a tmpfs to
@@ -1539,6 +1583,7 @@ def build_bwrap_cmd(
     # runs from), turning a security measure into an outage; the standalone
     # layout puts db_path beside the workspace, so this is reachable by
     # configuration rather than only by mistake.
+    _remount_masks_ro = _bwrap_supports_remount_ro()
     _mask_protected: list[Path] = [user_temp_dir.resolve(), istota_src, venv_path]
     if workspace_resolved is not None:
         _mask_protected.append(workspace_resolved)
@@ -1546,7 +1591,8 @@ def build_bwrap_cmd(
         _mask_protected.append(mount)
 
     def _mask_dir(target: Path) -> None:
-        """Cover ``target`` with an empty tmpfs, at every name it answers to.
+        """Cover ``target`` with an empty, read-only tmpfs, at every name it
+        answers to.
 
         Both the resolved path and the path as written: `_ro_bind` uses the
         *unresolved* string as its sandbox destination, so under a symlinked
@@ -1554,6 +1600,15 @@ def build_bwrap_cmd(
         while a resolved-only mask lands at `/realstore/app/...` — a path not
         in the namespace at all, leaving the databases readable at the name the
         model would actually use.
+
+        Read-only because a writable mask makes the dead end lie. `sqlite3
+        {db_dir}/istota.db "select …"` on a writable tmpfs *creates* the file
+        and then reports `no such table` — which reads as a missing schema or a
+        corrupt database, sends the model hunting, and leaves a zero-byte
+        `istota.db` sitting in the directory for the rest of the task. On a
+        read-only mask the same command fails at open, which is the truth: the
+        file is not in this namespace. It also means nothing a task writes
+        under a database directory can survive to be mistaken for a database.
         """
         candidates: list[Path] = []
         for candidate in (target, target.resolve()):
@@ -1573,6 +1628,11 @@ def build_bwrap_cmd(
                 )
                 continue
             args.extend(["--tmpfs", str(candidate)])
+            if _remount_masks_ro:
+                # After the tmpfs, never before: --remount-ro acts on whatever
+                # is mounted at that path at the time bwrap reaches it, and
+                # before the tmpfs that is the host directory.
+                args.extend(["--remount-ro", str(candidate)])
 
     if config.db_path:
         db_dir = Path(config.db_path).parent

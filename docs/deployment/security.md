@@ -35,6 +35,8 @@ When `sandbox_enabled = true` (default), each Claude Code invocation runs inside
 
 **Hidden from everyone, admin included**: every SQLite database the daemon owns. The framework DB directory and the per-user module-DB root (`module_data_dir`, holding each user's `health.db` / `money.db` / `location.db` / `feeds.db`) are covered by an empty tmpfs, applied as the last mount operations so no earlier bind shows through. Local DB backups and the browser profile live under the same directory and go with them.
 
+Each mask is then remounted read-only (`--remount-ro`, where bwrap supports it — 0.2+). A writable mask makes the dead end lie: `sqlite3 {db_dir}/istota.db "select …"` creates the file on the tmpfs and answers `no such table`, which reads as a missing schema rather than as "this file is not in the namespace", and leaves a zero-byte `istota.db` behind for the rest of the task. Read-only, the same command fails at open. Nothing a task writes under a database directory can survive to be mistaken for a database.
+
 A mask hides rather than revokes: `kernel.unprivileged_userns_clone` is on (bwrap needs it), so a sandboxed process can enter a nested user namespace and unmount a tmpfs to reveal whatever was bound underneath. `--disable-userns` is passed where bwrap supports it (0.8+), and in the shipped default nothing is bound underneath, so there is nothing to reveal. Both of those are reasons to keep `sandbox_ro_paths` narrow rather than to rely on the mask to make a broad entry safe.
 
 **Also hidden from non-admin**: other users' directories, `/etc/istota/`, user config files.
