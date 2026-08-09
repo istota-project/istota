@@ -2,7 +2,7 @@
 
 ## Config file locations
 
-`ISTOTA_CONFIG_PATH`, when set, wins outright — it is how a subprocess resolves the same config the daemon loaded rather than searching afresh. Otherwise config is loaded from the first file found in this search order:
+`ISTOTA_CONFIG_PATH` wins over the search order below — it is how a subprocess resolves the same config the daemon loaded rather than searching afresh. It does not beat an explicit `-c PATH`, and a path that does not exist is ignored rather than fatal, falling through to the search. Config is otherwise loaded from the first file found in this order:
 
 1. `config/config.toml` (relative to working directory)
 2. `~/src/config/config.toml`

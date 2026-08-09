@@ -4,7 +4,7 @@ The Ansible role at `deploy/ansible/` is the canonical provisioning tool. It han
 
 ## Prerequisites
 
-- Debian 12+ or Ubuntu target host (the installer warns below Debian 12)
+- Debian 13+ or Ubuntu target host (the role's own support target; the standalone `deploy/install.sh` path only warns below Debian 12)
 - Nextcloud instance with app password
 - Ansible 2.14+ with `community.general` and `ansible.posix` collections
 

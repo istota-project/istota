@@ -79,7 +79,7 @@ uv run istota resource list -u USER                   # List resources
 uv run istota run [--once] [--briefings]              # Process tasks
 uv run istota serve                                   # Scheduler + web UI in one process
 uv run istota repl                                    # Interactive REPL
-uv run istota chat                                    # Send a message to a room
+uv run istota chat backfill-history                   # Web chat room maintenance
 uv run istota email list|poll|test                    # Email commands
 uv run istota user ensure|list|show|lookup|remove     # User management
 uv run istota briefing ensure|list|remove             # Per-user briefings

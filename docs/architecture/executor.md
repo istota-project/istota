@@ -38,13 +38,15 @@ claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow \
   --output-format stream-json --verbose --include-partial-messages
 ```
 
+(The three streaming flags are appended only when the executor asked for streaming.)
+
 with optional `--model`, `--effort`, and `--system-prompt-file` flags. `--system-prompt-file` names `config/system-prompt.md`, which the CLI opens itself, from inside the sandbox — so `build_bwrap_cmd` binds that one file read-only. It is the only config-directory file the sandbox sees; everything else in there (emissaries, persona, guidelines, skill bodies) reaches the model as prompt text the daemon read, and `config.toml` stays out. Tool-bearing tasks run with `--dangerously-skip-permissions` and no `--allowedTools` allowlist — the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. See [brain](brain.md) for the full implementation.
 
 ## Environment variables
 
 The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with PATH, HOME, USER, LOGNAME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`), plus `CLAUDE_CODE_OAUTH_TOKEN`, and `ISTOTA_ADMINS_FILE` / `ISTOTA_CONFIG_PATH` where those are set — the last so a subprocess resolves the same config the daemon loaded rather than searching afresh.
 
-The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_USER_TZ`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`, plus `ISTOTA_SANDBOXED` when bwrap is in effect), a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
+The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`, plus `ISTOTA_SANDBOXED` when bwrap is in effect), a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
 
 Database paths (`ISTOTA_DB_PATH`, `HEALTH_DB_PATH`, `LOCATION_DB_PATH`) go into the skill proxy's environment instead and never reach the subprocess.
 

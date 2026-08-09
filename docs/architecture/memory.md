@@ -74,8 +74,8 @@ Two filters apply before indexing:
 9. Writes and indexes the learned playbooks (Part B) under `source_type="playbook"`.
 10. Advances `sleep_cycle_state.last_processed_task_id`.
 11. Calls `cleanup_old_memory_files()` (file pruning by date in filename).
-12. Calls `cleanup_old_chunks()` (chunk pruning, see [Retention](#retention)).
-13. Calls `cleanup_old_playbooks()` — age measured from last *use*, not creation, and passed the open connection so the pruned playbook's chunks go with it.
+12. Calls `cleanup_old_playbooks()` — age measured from last *use*, not creation, and passed the open connection so the pruned playbook's chunks go with it.
+13. Calls `cleanup_old_chunks()` (chunk pruning, see [Retention](#retention)).
 14. Prunes `knowledge_facts_audit` on its own retention knob, independent of `memory_retention_days`.
 15. If `curate_user_memory` is on, calls `curate_user_memory()`.
 

@@ -36,11 +36,12 @@ while not shutdown_requested:
     discover_and_organize_shared_files()  # every shared_file_check_interval (120s)
     poll_all_tasks_files()      # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
-    check_heartbeats()          # every heartbeat_check_interval (60s)
+    write_status()              # every 60s
     check_db_health()           # off-thread; every db_health_check_interval (24h)
     _run_db_backup()            # off-thread; every db_backup_interval (24h)
     _maybe_alert_backup_stale() # every tick
-    _emit_scheduler_stats()     # every tick
+    _emit_scheduler_stats()     # every scheduler_stats_interval (60s; 0 disables)
+    check_heartbeats()          # every heartbeat_check_interval (60s) — last gated check
     sleep(poll_interval)        # 2s, sub-ticking pool.dispatch() every dispatch_interval
 ```
 
