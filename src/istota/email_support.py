@@ -14,10 +14,10 @@ is email's equivalent of ``istota.talk.TalkClient``.
 import hashlib
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from .config import Config
-from .skills.email import EmailConfig, delete_email, list_emails
+from .skills.email import EmailConfig, delete_emails_before
 
 logger = logging.getLogger("istota.email_support")
 
@@ -96,6 +96,14 @@ def cleanup_old_emails(config: Config, days: int) -> int:
     """
     Delete emails older than the specified number of days from the IMAP inbox.
 
+    Drives the sweep from the server side (ISSUE-230): one IMAP ``BEFORE``
+    search for the expired set, then a bulk delete. The previous
+    implementation paginated the *newest* 100 envelopes and deleted whichever
+    of those had aged out — the wrong end of the mailbox for a retention pass.
+    Above roughly ``100 / days`` messages a day nothing in that window is ever
+    older than the cutoff, so the sweep silently deleted nothing while
+    reporting a clean run.
+
     Args:
         config: Application config with email settings
         days: Delete emails older than this many days
@@ -106,30 +114,17 @@ def cleanup_old_emails(config: Config, days: int) -> int:
     if not config.email.enabled or days <= 0:
         return 0
 
-    email_config = get_email_config(config)
+    # UTC, not local: IMAP `BEFORE` is evaluated against the mail server's
+    # calendar date, so a daemon east of the server would otherwise compute a
+    # cutoff a day late and delete a day early.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
 
     try:
-        envelopes = list_emails(
+        return delete_emails_before(
+            cutoff,
             folder=config.email.poll_folder,
-            limit=100,
-            config=email_config,
+            config=get_email_config(config),
         )
     except Exception as e:
-        logger.error("Error listing emails for cleanup: %s", e)
+        logger.error("Error deleting expired emails from IMAP: %s", e)
         return 0
-
-    cutoff = datetime.now().timestamp() - (days * 24 * 3600)
-    deleted_count = 0
-
-    for envelope in envelopes:
-        try:
-            from email.utils import parsedate_to_datetime
-            email_time = parsedate_to_datetime(envelope.date).timestamp()
-            if email_time < cutoff:
-                if delete_email(envelope.id, folder=config.email.poll_folder, config=email_config):
-                    deleted_count += 1
-        except Exception:
-            # If we can't parse the date, skip this email
-            continue
-
-    return deleted_count

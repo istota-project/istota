@@ -3167,7 +3167,7 @@ def execute_task(
 
     # Write prompt to temp file for debugging
     prompt_file = user_temp_dir / f"task_{task.id}_prompt.txt"
-    prompt_file.write_text(prompt)
+    prompt_file.write_text(prompt, encoding="utf-8")
 
     # Result file path
     result_file = user_temp_dir / f"task_{task.id}_result.txt"

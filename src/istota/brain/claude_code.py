@@ -1042,7 +1042,7 @@ class ClaudeCodeBrain:
                 )
             return BrainResult(success=True, result_text=output)
         if result.returncode == 0 and req.result_file and req.result_file.exists():
-            file_text = req.result_file.read_text().strip()
+            file_text = req.result_file.read_text(encoding="utf-8").strip()
             reclassified = _success_frame_stop_reason(file_text)
             if reclassified:
                 return BrainResult(
@@ -1338,7 +1338,7 @@ class ClaudeCodeBrain:
             )
 
         if req.result_file and req.result_file.exists():
-            output = req.result_file.read_text()
+            output = req.result_file.read_text(encoding="utf-8")
             if process.returncode == 0:
                 reclassified = _success_frame_stop_reason(output)
                 if reclassified:

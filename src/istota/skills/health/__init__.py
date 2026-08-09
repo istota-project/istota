@@ -115,11 +115,11 @@ def _defer_op(op: dict) -> bool:
     ops: list[dict] = []
     if path.exists():
         try:
-            ops = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            ops = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             ops = []
     ops.append(op)
-    path.write_text(json.dumps(ops))
+    path.write_text(json.dumps(ops), encoding="utf-8")
     return True
 
 

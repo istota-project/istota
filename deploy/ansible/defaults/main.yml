@@ -231,6 +231,7 @@ istota_scheduler_worker_heartbeat_seconds: 60        # Running worker pings live
 istota_scheduler_worker_stuck_minutes: 10            # Reclaim a heartbeating worker's task after this much heartbeat silence (higher = fewer false-dead reclaims)
 istota_scheduler_task_retention_days: 7             # Delete old completed tasks
 istota_scheduler_email_retention_days: 7            # Delete old emails from IMAP (0 to disable)
+istota_scheduler_processed_email_retention_days: 90 # Prune the processed_emails dedup ledger (0 to disable; floored at email_retention_days + 1)
 istota_scheduler_worker_idle_timeout: 10           # Cumulative-idle seconds a worker lingers (re-checking) before exiting
 istota_scheduler_worker_idle_poll_interval: 0.5    # Idle re-check cadence (0 or >= worker_idle_timeout = legacy single wait)
 istota_scheduler_max_foreground_workers: 5         # Instance-level foreground (interactive) worker cap

@@ -894,7 +894,7 @@ def cmd_import_garmin_tracks(args):
         }))
         sys.exit(1)
     path = Path(deferred) / f"task_{task_id}_garmin_import.json"
-    path.write_text(json.dumps({"days_back": days_back}))
+    path.write_text(json.dumps({"days_back": days_back}), encoding="utf-8")
     print(json.dumps({
         "status": "ok",
         "queued": True,

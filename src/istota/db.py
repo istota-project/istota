@@ -5297,6 +5297,53 @@ def recover_orphaned_tasks(
     return recovered
 
 
+def cleanup_old_processed_emails(
+    conn: sqlite3.Connection, retention_days: int,
+) -> int:
+    """Prune the ``processed_emails`` dedup ledger (ISSUE-231).
+
+    One row is written per *polled message*, not per task — bot self-mail,
+    unroutable mail and quiet-sender mail all get one and produce nothing else
+    — so an internet-facing address grows the table forever. Nothing else
+    deletes from it: ``cleanup_old_tasks`` touches only tasks and their logs.
+
+    Keyed on ``processed_at``, not on whether the row's ``task`` still exists.
+    The FK is unenforced (``PRAGMA foreign_keys`` is never set) and tasks are
+    pruned at a far shorter window, so after a week most rows hold a dangling
+    ``task_id``. Dedup is not the only job left, though — see below.
+
+    **A row still referenced by the canonical transcript is never pruned.**
+    ``_EMAIL_SENDER_SUBQUERY`` (`:1855`) recovers an email turn's envelope
+    sender from here, by ``task_id``, and ``messages`` is *not* age-pruned —
+    the transcript deliberately outlives the ``tasks`` row it came from. Delete
+    the ledger row and ``external_sender`` goes NULL, so ``_speaker_label``
+    falls back to the task's ``user_id`` and an external contact's mail is
+    rendered into the prompt as the principal's own words. That is exactly the
+    misattribution ISSUE-226 exists to prevent, and the sleep cycle writes it
+    durably to ``USER.md`` and the knowledge graph. The exclusion costs almost
+    nothing against the growth this prune is for: the rows that actually pile
+    up are the ones that produced no task at all (bot self-mail, ``discarded``,
+    quiet senders), and those have no transcript row to protect them.
+
+    ``retention_days <= 0`` disables the prune.
+    """
+    if retention_days <= 0:
+        return 0
+
+    cursor = conn.execute(
+        """
+        DELETE FROM processed_emails
+        WHERE processed_at < datetime('now', '-' || ? || ' days')
+        AND (
+            task_id IS NULL
+            OR NOT EXISTS (SELECT 1 FROM messages WHERE messages.task_id = processed_emails.task_id)
+        )
+        """,
+        (retention_days,),
+    )
+    return cursor.rowcount
+
+
 def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
     """
     Delete old completed/failed/cancelled tasks and their logs.

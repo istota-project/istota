@@ -195,6 +195,11 @@ CREATE INDEX IF NOT EXISTS idx_processed_emails_thread_id ON processed_emails(th
 -- The conversation-history readers look the envelope sender up per task
 -- (ISSUE-226); without this the lookup is a table scan per history row.
 CREATE INDEX IF NOT EXISTS idx_processed_emails_task_id ON processed_emails(task_id);
+-- The retention prune (ISSUE-231) selects by age on every cleanup tick, on a
+-- table that has been growing one row per polled message since the deployment
+-- was stood up. Without this the steady-state no-op prune is a full scan a
+-- minute, under a write transaction on the DB the dispatch loop shares.
+CREATE INDEX IF NOT EXISTS idx_processed_emails_processed_at ON processed_emails(processed_at);
 
 -- Briefing state (tracks last_run_at for config-based briefings)
 CREATE TABLE IF NOT EXISTS briefing_state (
@@ -777,6 +782,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg
 -- rows for the same turn with differing surfaces both slip past.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ext
     ON messages (room_token, role, task_id)
+    WHERE task_id IS NOT NULL;
+-- idx_messages_ext leads on room_token, so it can't serve a lookup by task_id
+-- alone. `cleanup_old_processed_emails` needs exactly that: "does the
+-- transcript still reference this task?", per candidate row.
+CREATE INDEX IF NOT EXISTS idx_messages_task_id
+    ON messages (task_id)
     WHERE task_id IS NOT NULL;
 
 -- Per-surface read cursors (an unread badge in web isn't cleared by reading

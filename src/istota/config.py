@@ -180,6 +180,7 @@ class SchedulerConfig:
     worker_stuck_minutes: int = 10  # reclaim a heartbeating worker's task after this much heartbeat silence (higher = fewer false-dead reclaims of a slow-but-alive worker, slower genuine-crash recovery)
     task_retention_days: int = 7  # delete completed/failed/cancelled tasks older than this
     email_retention_days: int = 7  # delete emails older than N days from IMAP, 0 to disable
+    processed_email_retention_days: int = 90  # prune the processed_emails dedup ledger after N days, 0 to disable. Never applied below email_retention_days — a row is what stops a message still in the mailbox from being re-ingested
     temp_file_retention_days: int = 7  # delete temp files older than N days, 0 to disable
     worker_idle_timeout: int = 10    # cumulative-idle seconds a worker lingers (re-checking) before exiting
     worker_idle_poll_interval: float = 0.5  # idle re-check cadence (0 or >= worker_idle_timeout = legacy single coarse wait + recheck)
@@ -1860,6 +1861,7 @@ def load_config(config_path: Path | None = None) -> Config:
             worker_stuck_minutes=sched.get("worker_stuck_minutes", 10),
             task_retention_days=sched.get("task_retention_days", 7),
             email_retention_days=sched.get("email_retention_days", 7),
+            processed_email_retention_days=sched.get("processed_email_retention_days", 90),
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
             worker_idle_timeout=sched.get("worker_idle_timeout", 10),
             worker_idle_poll_interval=sched.get("worker_idle_poll_interval", 0.5),

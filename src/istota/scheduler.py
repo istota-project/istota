@@ -39,6 +39,19 @@ _AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "heartbeat", "subt
 # How long a per-message deletion stays in the ledger the room stream tails.
 _MESSAGE_DELETION_RETENTION_DAYS = 30
 
+# Keys already warned about, for _warn_once. A misconfiguration noticed inside
+# a per-tick check is a static fact about the config, so logging it on every
+# tick would be ~1440 identical lines a day.
+_warned_keys: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Log ``message`` at WARNING the first time ``key`` is seen this process."""
+    if key in _warned_keys:
+        return
+    _warned_keys.add(key)
+    logger.warning("%s", message)
+
 from . import db
 from .brain import make_brain
 from .consumers import (
@@ -53,7 +66,7 @@ from .skills.briefing import (
     parse_briefing_json,
     strip_briefing_preamble,
 )
-from .config import Config, load_config
+from .config import Config, SchedulerConfig, load_config
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
     detect_malformed_result,
@@ -1655,6 +1668,30 @@ def process_one_task(
                 channel_name = task.conversation_token
         log_channel_prefix = _log_channel_source_label(task, channel_name)
 
+    # A re-attempt starts with a clean slate (ISSUE-074). The retry branch
+    # below purges when *it* requeues, but three other paths requeue the same
+    # task.id with attempt_count + 1 and no purge — the periodic reclaim
+    # (db.fail_stuck_locked_running_tasks), startup orphan recovery
+    # (db.recover_orphaned_tasks), and claim_task's own inline copy of the
+    # stuck-running release, which has no scheduler-side hook at all. Purging
+    # here instead covers all of them at once, and has to run *before*
+    # execution so it clears the previous attempt's files rather than this
+    # attempt's. attempt_count == 0 is left alone — a first run has no prior
+    # attempt to clean up after.
+    #
+    # A confirmation re-run is exempt whatever the count says. It is not a
+    # re-attempt: _drain_deferred_ops is skipped when a task asks for
+    # confirmation, so ops written before the question sit on disk *by design*
+    # until the user answers, and db.confirm_task requeues without resetting
+    # attempt_count — so a task that failed once earlier arrives here carrying
+    # a charged attempt and would have its held writes discarded. The narrower
+    # stale-email_output cleanup just below is what that path needs instead.
+    if task.attempt_count > 0 and task.confirmation_prompt is None:
+        from .executor import get_user_temp_dir
+        _purge_deferred_files_for_retry(
+            task, get_user_temp_dir(config, task.user_id),
+        )
+
     # Clean up stale deferred email output from a previous execution (e.g.
     # confirmation flow: first run writes a draft via `email output`, re-run
     # sends via `email send` — the stale file would cause a double-send).
@@ -2147,7 +2184,9 @@ def process_one_task(
                 # ISSUE-074: clear any deferred-op files this attempt accumulated
                 # so the next attempt starts with a clean slate. Producers append
                 # to these files, so without this, eventual success would replay
-                # the failed attempt's ops alongside the successful one's.
+                # the failed attempt's ops alongside the successful one's. The
+                # claim-time backstop above would catch this too; purging at the
+                # requeue keeps the disk clean for a task that never comes back.
                 from .executor import get_user_temp_dir
                 _purge_deferred_files_for_retry(
                     task, get_user_temp_dir(config, task.user_id),
@@ -3675,6 +3714,54 @@ def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
         )
 
 
+def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
+    """How long a ``processed_emails`` row is kept, in days. 0 = never prune.
+
+    The configured window, floored by the mail's own lifetime. The two are
+    coupled: the row is the only thing stopping a message that is still
+    physically in ``poll_folder`` from being re-ingested as a fresh task, and
+    ``email_id`` is a bare IMAP UID with no ``UIDVALIDITY`` and no folder
+    qualifier, so a re-ingest is indistinguishable from new mail. Pruning
+    inside the mail's own lifetime would trade unbounded growth for duplicate
+    tasks and duplicate replies to strangers — a worse failure.
+
+    ``email_retention_days = 0`` means mail is *never* deleted from IMAP, so
+    the message's lifetime is unbounded and the row's has to be too: the prune
+    is disabled outright rather than left unfloored.
+
+    The floor is ``email_retention_days + 1``, not equal to it. The IMAP sweep
+    searches ``BEFORE <date>``, which is date-granular and evaluated in the
+    mail server's zone, while ``processed_at`` is an exact UTC timestamp — so a
+    message on the boundary outlives an exactly-equal window by up to a day.
+
+    A floor only, never a cap: an operator who wants the ledger kept far longer
+    than the mailbox gets exactly that.
+    """
+    configured = sched.processed_email_retention_days
+    if configured <= 0:
+        return 0
+    if sched.email_retention_days <= 0:
+        _warn_once(
+            "processed_email_retention_floor_disabled",
+            "processed_email_retention_days is set but email_retention_days is 0, "
+            "so mail is never deleted from IMAP and a pruned dedup row could let "
+            "an old message be re-ingested as a new task; skipping the prune",
+        )
+        return 0
+
+    floor = sched.email_retention_days + 1
+    if floor > configured:
+        _warn_once(
+            "processed_email_retention_floored",
+            "processed_email_retention_days (%d) is below email_retention_days "
+            "(%d); using %d so a message still in the mailbox can't lose its "
+            "dedup row and be re-ingested as a new task"
+            % (configured, sched.email_retention_days, floor),
+        )
+        return floor
+    return configured
+
+
 def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
@@ -3765,6 +3852,15 @@ def run_cleanup_checks(config: Config) -> None:
         deleted_count = db.cleanup_old_tasks(conn, sched.task_retention_days)
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
+
+        # 4a. Prune the processed-email dedup ledger (ISSUE-231). One row per
+        # polled message, including the ones that produce nothing, and until
+        # now nothing ever deleted from it.
+        email_rows = db.cleanup_old_processed_emails(
+            conn, _effective_processed_email_retention(sched),
+        )
+        if email_rows > 0:
+            logger.info(f"Pruned {email_rows} processed-email row(s)")
 
         # 4b. Age out the per-message deletion ledger. It exists only to tell a
         # live client what vanished; one further behind than this reloaded from

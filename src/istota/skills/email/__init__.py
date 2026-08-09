@@ -752,6 +752,70 @@ def delete_email(
         return False
 
 
+def delete_emails_before(
+    before: _date,
+    folder: str = "INBOX",
+    config: EmailConfig | None = None,
+    batch_size: int = 200,
+) -> int:
+    """Delete every message in ``folder`` whose IMAP internal date precedes
+    ``before``. Returns the number of UIDs handed to the server.
+
+    The retention primitive (ISSUE-230). The search runs server-side, so the
+    work is proportional to what has actually expired rather than to a fixed
+    window at the newest end of the mailbox — which is what a paginated
+    ``list_emails`` sweep gives you, and it looks at exactly the wrong end.
+
+    Two deliberate differences from the per-message ``delete_email``: one
+    connection for the whole sweep instead of one per message, and the IMAP
+    **internal date** (arrival) as the age, not the sender-supplied ``Date:``
+    header. ``BEFORE`` is date-granular *and evaluated in the mail server's
+    zone*, so a message is kept for up to an extra day rather than deleted
+    early — which is the direction to err, and why the DB-side ledger prune
+    floors its own window one day above this one.
+
+    Like the old paginated sweep it replaces, this deletes **everything** past
+    the cutoff, not only mail the bot processed. On the first run after the
+    ISSUE-230 fix that is a backlog the broken sweep never touched, so the
+    candidate count is logged before anything is removed.
+
+    A failure part-way through returns the count deleted so far rather than
+    unwinding it — the caller logs the number, and reporting zero after
+    removing hundreds is worse than reporting a partial. The next sweep
+    re-finds the remainder (IMAP ``SEARCH`` does not exclude ``\\Deleted``), so
+    a run that trips the socket timeout on a large backlog converges over
+    several ticks instead of failing permanently.
+    """
+    if config is None:
+        raise ValueError("config is required")
+
+    _require_imap_tools()
+    deleted = 0
+    with _get_mailbox(config) as mailbox:
+        mailbox.login(config.imap_user, config.imap_password)
+        mailbox.folder.set(folder)
+
+        uids = list(mailbox.uids(AND(date_lt=before)))
+        if uids:
+            logger.info(
+                "IMAP retention: %d message(s) in %s predate %s; deleting",
+                len(uids), folder, before.isoformat(),
+            )
+        for start in range(0, len(uids), batch_size):
+            batch = uids[start:start + batch_size]
+            try:
+                mailbox.delete(batch)
+            except Exception as e:
+                logger.error(
+                    "IMAP retention stopped after %d of %d message(s): %s",
+                    deleted, len(uids), e,
+                )
+                return deleted
+            deleted += len(batch)
+
+    return deleted
+
+
 def _config_from_env() -> EmailConfig:
     """Build EmailConfig from environment variables."""
     smtp_host = os.environ.get("SMTP_HOST", "")
@@ -1253,7 +1317,7 @@ def cmd_output(args):
 
     out_path = Path(deferred_dir) / f"task_{task_id}_email_output.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(data, ensure_ascii=False))
+    out_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     return {"status": "ok", "file": str(out_path)}
 
@@ -1351,12 +1415,12 @@ def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> N
     existing = []
     if path.exists():
         try:
-            existing = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             existing = []
     existing.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(existing, ensure_ascii=False))
+    path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
 
 
 def _read_body(args) -> str:

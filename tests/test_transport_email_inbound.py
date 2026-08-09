@@ -248,6 +248,10 @@ class TestPollEmails:
 
 
 class TestCleanupOldEmails:
+    """Smoke coverage of the shared helper. The retention behaviour itself
+    (server-side ``BEFORE`` sweep, the ``processed_emails`` prune, and the
+    coupling between the two windows) lives in ``test_email_retention.py``."""
+
     def test_disabled_returns_zero(self, make_config):
         config = make_config()
         config.email = AppEmailConfig(enabled=False)
@@ -262,30 +266,26 @@ class TestCleanupOldEmails:
         result = cleanup_old_emails(config, days=0)
         assert result == 0
 
-    def test_deletes_old_emails(self, make_config):
+    def test_deletes_expired_emails(self, make_config):
         config = make_config()
         config.email = _email_config()
 
-        # An old email (date well in the past)
-        old_envelope = _envelope(
-            id="old1",
-            date="Mon, 01 Jan 2020 10:00:00 +0000",
-        )
-
-        with (
-            patch("istota.email_support.list_emails", return_value=[old_envelope]),
-            patch("istota.email_support.delete_email", return_value=True) as mock_delete,
-        ):
+        with patch(
+            "istota.email_support.delete_emails_before", return_value=1,
+        ) as mock_delete:
             result = cleanup_old_emails(config, days=7)
 
         assert result == 1
         mock_delete.assert_called_once()
 
-    def test_handles_list_error(self, make_config):
+    def test_handles_imap_error(self, make_config):
         config = make_config()
         config.email = _email_config()
 
-        with patch("istota.email_support.list_emails", side_effect=Exception("IMAP error")):
+        with patch(
+            "istota.email_support.delete_emails_before",
+            side_effect=Exception("IMAP error"),
+        ):
             result = cleanup_old_emails(config, days=7)
 
         assert result == 0
