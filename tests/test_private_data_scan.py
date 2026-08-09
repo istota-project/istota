@@ -112,6 +112,57 @@ class TestCleanTree:
         assert run_scan(target).returncode == 0
 
 
+class TestBatchedScan:
+    """The scan finds candidates with one grep across all targets at once.
+
+    That batching is what keeps the whole-tree scan under a second, and it adds
+    a failure mode the per-file scan did not have: a file that never makes it
+    into the batch is never attributed, and the scan reports clean. These pin
+    the batch against a leak that is not the only file, not the first file, and
+    not reachable by a naive split of the file list.
+    """
+
+    def test_leak_among_many_clean_files_is_found(self, tmp_path):
+        clean = [write(tmp_path, "nothing here\n", f"clean_{i}.txt") for i in range(60)]
+        leak = write(tmp_path, "ssn: 123-45-6789\n", "leak.txt")  # private-data-ok
+        result = run_scan(*clean[:30], leak, *clean[30:])
+        assert result.returncode == 1, result.stdout
+        assert "leak.txt:1" in result.stdout
+
+    def test_every_leak_in_a_batch_is_reported(self, tmp_path):
+        targets = []
+        for i in range(20):
+            targets.append(write(tmp_path, "nothing here\n", f"clean_{i}.txt"))
+        for i in range(3):
+            targets.append(
+                write(tmp_path, f"filler\nssn: 123-45-678{i}\n", f"leak_{i}.txt")
+            )  # private-data-ok
+        result = run_scan(*targets)
+        assert result.returncode == 1
+        for i in range(3):
+            assert f"leak_{i}.txt:2" in result.stdout, result.stdout
+        assert "3 location(s)" in result.stdout
+
+    def test_leak_survives_a_filename_with_a_newline(self, tmp_path):
+        """`grep -l` reports by name, so these cannot ride the batch."""
+        odd = tmp_path / "two\nlines.txt"
+        odd.write_text("ssn: 123-45-6789\n")  # private-data-ok
+        clean = write(tmp_path, "nothing here\n")
+        result = run_scan(clean, odd)
+        assert result.returncode == 1, result.stdout
+        assert "lines.txt:1" in result.stdout
+
+    def test_unreadable_file_is_skipped_not_counted(self, tmp_path):
+        target = write(tmp_path, "ssn: 123-45-6789\n")  # private-data-ok
+        target.chmod(0o000)
+        try:
+            result = run_scan(target)
+        finally:
+            target.chmod(0o644)
+        assert result.returncode == 0, result.stdout
+        assert "0 file(s)" in result.stdout
+
+
 class TestPatternClasses:
     """One positive control per class of private data the patterns claim to catch."""
 
