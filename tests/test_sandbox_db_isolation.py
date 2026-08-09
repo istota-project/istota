@@ -11,6 +11,8 @@ DB, because ``module_data_dir`` defaults under ``istota_home`` and
 ``sandbox_ro_paths`` defaulted to the ``/srv/app`` that contains it.
 """
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -199,6 +201,172 @@ class TestRoPathsCannotReExpose:
         assert str(data.resolve()) in masked
 
 
+class TestMasksAreReadOnly:
+    """A writable mask lets a probe leave a zero-byte database behind.
+
+    `sqlite3 {db_dir}/istota.db "select …"` on a writable tmpfs *creates* the
+    file and then reports `no such table`, which reads as a missing schema or a
+    corrupt database rather than as "the file is not in this namespace". The
+    stray file also outlives the probe for the rest of the task. Remounting each
+    mask read-only turns both into one honest `unable to open database file`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _supported(self):
+        """The probe shells out to a real bwrap, which the dev host has not."""
+        with patch("istota.executor._bwrap_supports_remount_ro", return_value=True):
+            yield
+
+    def _remount_ro_paths(self, argv):
+        return [
+            argv[i + 1] for i in range(len(argv) - 1)
+            if argv[i] == "--remount-ro"
+        ]
+
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_every_db_mask_is_remounted_read_only(
+        self, iso_config, iso_task, is_admin,
+    ):
+        argv = _bwrap(iso_config, iso_task, is_admin)
+        db_dir = str(iso_config.db_path.parent.resolve())
+        assert db_dir in self._remount_ro_paths(argv)
+
+    def test_relocated_module_root_is_remounted_read_only(
+        self, iso_config, iso_task, tmp_path,
+    ):
+        """The second mask gets the same treatment as the first."""
+        relocated = tmp_path / "elsewhere" / "modules"
+        (relocated / "bob").mkdir(parents=True)
+        iso_config.module_data_dir = relocated
+        argv = _bwrap(iso_config, iso_task, True)
+        assert str(relocated.resolve()) in self._remount_ro_paths(argv)
+
+    def test_symlinked_name_is_remounted_too(self, iso_config, iso_task, tmp_path):
+        """Both names a mask answers to have to be read-only, not just one."""
+        real = tmp_path / "realstore"
+        real.mkdir()
+        (tmp_path / "link").symlink_to(real, target_is_directory=True)
+        (real / "data").mkdir()
+        iso_config.db_path = tmp_path / "link" / "data" / "istota.db"
+        iso_config.module_data_dir = tmp_path / "link" / "data" / "modules"
+
+        argv = _bwrap(iso_config, iso_task, True)
+        remounted = self._remount_ro_paths(argv)
+        assert str(tmp_path / "link" / "data") in remounted
+        assert str((real / "data").resolve()) in remounted
+
+    def test_remount_follows_the_tmpfs_it_applies_to(self, iso_config, iso_task):
+        """`--remount-ro` acts on whatever is mounted at that path *now*."""
+        argv = _bwrap(iso_config, iso_task, True)
+        db_dir = str(iso_config.db_path.parent.resolve())
+        tmpfs_at = [
+            i for i in range(len(argv) - 1)
+            if argv[i] == "--tmpfs" and argv[i + 1] == db_dir
+        ]
+        remount_at = [
+            i for i in range(len(argv) - 1)
+            if argv[i] == "--remount-ro" and argv[i + 1] == db_dir
+        ]
+        assert tmpfs_at and remount_at
+        assert min(remount_at) > min(tmpfs_at)
+
+    @pytest.mark.parametrize("relocated_modules", [False, True])
+    def test_every_remount_has_a_tmpfs_before_it(
+        self, iso_config, iso_task, tmp_path, relocated_modules,
+    ):
+        """The pairing rule, over the whole argv rather than one path.
+
+        A `--remount-ro` on a path that is not a mount point is fatal — bwrap
+        exits with "Can't remount readonly … Unable to find … in mount table"
+        before running anything, so getting this wrong fails every task rather
+        than weakening one directory.
+        """
+        if relocated_modules:
+            relocated = tmp_path / "elsewhere" / "modules"
+            (relocated / "bob").mkdir(parents=True)
+            iso_config.module_data_dir = relocated
+        argv = _bwrap(iso_config, iso_task, True)
+
+        remounts = [i for i, tok in enumerate(argv) if tok == "--remount-ro"]
+        assert remounts, "nothing to check — the masks lost their remount"
+        for i in remounts:
+            path = argv[i + 1]
+            assert any(
+                argv[j] == "--tmpfs" and argv[j + 1] == path
+                for j in range(i)
+            ), f"--remount-ro {path} has no --tmpfs at that path before it"
+
+    def test_only_the_db_masks_are_remounted(self, iso_config, iso_task):
+        """/tmp, ~/.claude and the rest stay writable — tasks need them."""
+        argv = _bwrap(iso_config, iso_task, True)
+        allowed = {
+            str(iso_config.db_path.parent),
+            str(iso_config.db_path.parent.resolve()),
+            str(iso_config.module_db_root()),
+            str(iso_config.module_db_root().resolve()),
+        }
+        assert set(self._remount_ro_paths(argv)) <= allowed
+
+    def test_a_refused_mask_is_not_remounted(self, iso_config, iso_task, tmp_path):
+        """No tmpfs was mounted there, so remounting would hit the real dir."""
+        workspace = iso_config.nextcloud_mount_path
+        iso_config.db_path = workspace / "istota.db"
+        iso_config.module_data_dir = tmp_path / "modules"
+        (tmp_path / "modules").mkdir(parents=True, exist_ok=True)
+        argv = _bwrap(iso_config, iso_task, True)
+        assert str(workspace.resolve()) not in self._remount_ro_paths(argv)
+
+    def test_omitted_when_bwrap_does_not_support_it(self, iso_config, iso_task):
+        """An unknown flag makes bwrap exit non-zero — that fails every task."""
+        with patch("istota.executor._bwrap_supports_remount_ro", return_value=False):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert "--remount-ro" not in argv
+        # The mask itself must survive the missing flag.
+        assert str(iso_config.db_path.parent.resolve()) in _tmpfs_paths(argv)
+
+    def test_no_mask_is_nested_inside_another(self, iso_config, iso_task):
+        """Read-only turns a nested mask from redundant into fatal.
+
+        bwrap has to `mkdir` the second mountpoint on the first mask's tmpfs
+        and gets EROFS: "Can't mkdir …: Read-only file system", exit 1, before
+        the task runs. The default layout puts the module root under the DB
+        directory, so this is the shipped configuration and not a corner.
+        """
+        argv = _bwrap(iso_config, iso_task, True)
+        masked = [Path(p) for p in _tmpfs_paths(argv)]
+        db_masks = [
+            p for p in masked
+            if p.is_relative_to(iso_config.db_path.parent.resolve())
+        ]
+        for i, inner in enumerate(db_masks):
+            for outer in db_masks[:i]:
+                assert not inner.is_relative_to(outer), (
+                    f"{inner} is masked inside {outer}; bwrap cannot mkdir it"
+                )
+
+    def test_module_root_masked_when_its_parent_mask_was_refused(
+        self, iso_config, iso_task, tmp_path,
+    ):
+        """A cover that was never mounted covers nothing.
+
+        The old caller-side "already under db_dir?" test skipped the module
+        root whenever it was nested, including when the db_dir mask had been
+        refused for shadowing a path the task needs — so the module DBs stayed
+        visible for want of a cover that was never mounted.
+        """
+        # db_dir is the temp root, which holds the task's own temp dir.
+        iso_config.db_path = iso_config.temp_dir / "istota.db"
+        iso_config.module_data_dir = iso_config.temp_dir / "modules"
+        (iso_config.temp_dir / "modules").mkdir(parents=True, exist_ok=True)
+
+        argv = _bwrap(iso_config, iso_task, True)
+        masked = _tmpfs_paths(argv)
+        assert str(iso_config.temp_dir.resolve()) not in masked, (
+            "masking the temp root would hide the task's own scratch dir"
+        )
+        assert str((iso_config.temp_dir / "modules").resolve()) in masked
+
+
 class TestMaskDoesNotShadowNeededPaths:
     """A mask above the workspace would be an outage, not a hardening."""
 
@@ -271,6 +439,129 @@ class TestDisableUserns:
         with patch("istota.executor._bwrap_supports_disable_userns", return_value=False):
             argv = _bwrap(iso_config, iso_task, True)
         assert "--disable-userns" not in argv
+
+    def test_unshare_user_travels_with_it(self, iso_config, iso_task):
+        """bwrap: "--disable-userns requires --unshare-user", exit 1.
+
+        Without the companion flag bwrap refuses the argv outright, so the two
+        ship together or not at all. Verified against bubblewrap 0.11.0.
+        """
+        with patch("istota.executor._bwrap_supports_disable_userns", return_value=True):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert "--unshare-user" in argv
+        assert argv.index("--unshare-user") < argv.index("--disable-userns")
+
+    def test_unshare_user_omitted_with_it(self, iso_config, iso_task):
+        """It is only there to satisfy the other flag; alone it buys nothing."""
+        with patch("istota.executor._bwrap_supports_disable_userns", return_value=False):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert "--unshare-user" not in argv
+
+    def test_probe_argv_carries_the_companion_flag(self):
+        """The gap that kept this flag out of every sandbox it ever built.
+
+        The probe used to run `bwrap --ro-bind / / --disable-userns -- true`,
+        which bwrap rejects for the same reason the real argv would have been
+        rejected — so the answer was "unsupported" on every host, and nobody
+        noticed because the failure mode was silence.
+        """
+        from istota import executor
+
+        recorded = {}
+
+        def fake_run(cmd, **kwargs):
+            recorded["cmd"] = cmd
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        with patch.dict(executor._bwrap_flag_support, {}, clear=True), \
+                patch("istota.executor._bwrap_available", return_value=True), \
+                patch("istota.executor.subprocess.run", fake_run):
+            assert executor._bwrap_supports_disable_userns() is True
+
+        cmd = recorded["cmd"]
+        assert "--unshare-user" in cmd
+        assert cmd.index("--unshare-user") < cmd.index("--disable-userns")
+
+
+class TestBwrapFlagProbe:
+    """The probe is the only gate on whether a hardening flag is applied."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        from istota import executor
+
+        with patch.dict(executor._bwrap_flag_support, {}, clear=True):
+            yield
+
+    def _probe(self, **run_kwargs):
+        from istota import executor
+
+        with patch("istota.executor._bwrap_available", return_value=True), \
+                patch("istota.executor.subprocess.run", **run_kwargs) as run:
+            return executor._bwrap_supports("--flag", ["--flag"]), run
+
+    def test_exit_zero_is_supported(self):
+        supported, run = self._probe(
+            return_value=SimpleNamespace(returncode=0, stderr=b""),
+        )
+        assert supported is True
+        assert run.call_count == 1
+
+    def test_non_zero_exit_is_unsupported(self, caplog):
+        with caplog.at_level("INFO"):
+            supported, _ = self._probe(
+                return_value=SimpleNamespace(
+                    returncode=1, stderr=b"bwrap: Unknown option --flag",
+                ),
+            )
+        assert supported is False
+        assert any(
+            "Unknown option --flag" in r.getMessage() for r in caplog.records
+        ), "the reason bwrap gave must be logged"
+
+    def test_a_probe_that_cannot_run_warns(self, caplog):
+        """Distinct from a rejection: hardening was lost for an unrelated
+        reason, and the answer is cached for the process either way."""
+        with caplog.at_level("WARNING"):
+            supported, _ = self._probe(side_effect=OSError("no bwrap"))
+        assert supported is False
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_timeout_is_unsupported(self):
+        import subprocess as _sp
+
+        supported, _ = self._probe(side_effect=_sp.TimeoutExpired("bwrap", 5))
+        assert supported is False
+
+    def test_answer_is_cached(self):
+        from istota import executor
+
+        with patch("istota.executor._bwrap_available", return_value=True), \
+                patch(
+                    "istota.executor.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0, stderr=b""),
+                ) as run:
+            assert executor._bwrap_supports("--flag", ["--flag"]) is True
+            assert executor._bwrap_supports("--flag", ["--flag"]) is True
+        assert run.call_count == 1
+
+    def test_no_probe_without_bwrap(self):
+        from istota import executor
+
+        with patch("istota.executor._bwrap_available", return_value=False), \
+                patch("istota.executor.subprocess.run") as run:
+            assert executor._bwrap_supports("--flag", ["--flag"]) is False
+        run.assert_not_called()
+
+    def test_no_advice_logged_where_there_is_no_sandbox(self, caplog):
+        """"masks can be lifted" is nonsense on a host that mounts none."""
+        from istota import executor
+
+        with caplog.at_level("INFO"), \
+                patch("istota.executor._bwrap_available", return_value=False):
+            assert executor._bwrap_supports_disable_userns() is False
+            assert executor._bwrap_supports_remount_ro() is False
+        assert not any("sandbox_ro_paths" in r.message for r in caplog.records)
 
 
 class TestMasksComeLast:

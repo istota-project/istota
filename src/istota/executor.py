@@ -766,7 +766,54 @@ def _bwrap_available() -> bool:
     return _bwrap_checked
 
 
-_userns_checked: bool | None = None
+_bwrap_flag_support: dict[str, bool] = {}
+_bwrap_probe_lock = threading.Lock()
+
+
+def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
+    """Whether this bwrap accepts *flag*, probed once per process.
+
+    Probed rather than assumed: passing an unsupported flag makes bwrap exit
+    non-zero *before* it runs anything, which would fail every task on an older
+    host. ``probe_args`` is the whole argv the flag needs, companion flags
+    included — bwrap rejects `--disable-userns` without `--unshare-user`, and a
+    probe missing one reports "unsupported" on a host that supports it fine.
+
+    A probe that could not run is logged loudly and a rejection quietly: the
+    first is an unexplained loss of hardening, the second is an old bwrap saying
+    what it is. Either way the answer is cached, so a failure to probe silently
+    turns the flag off for the process — the reason the result is not trusted
+    for anything but hardening. Locked because scheduler workers build their
+    first sandbox concurrently, and an unlocked probe is N subprocesses and N
+    log lines for one question.
+    """
+    with _bwrap_probe_lock:
+        cached = _bwrap_flag_support.get(flag)
+        if cached is not None:
+            return cached
+        if not _bwrap_available():
+            _bwrap_flag_support[flag] = False
+            return False
+
+        supported = False
+        try:
+            result = subprocess.run(
+                ["bwrap", *probe_args, "--", "true"],
+                capture_output=True, timeout=5,
+            )
+            supported = result.returncode == 0
+            if not supported:
+                logger.info(
+                    "bwrap rejected %s: %s", flag,
+                    result.stderr.decode(errors="replace").strip(),
+                )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(
+                "bwrap probe for %s could not run (%s); treating it as "
+                "unsupported for the rest of this process", flag, exc,
+            )
+        _bwrap_flag_support[flag] = supported
+        return supported
 
 
 def _bwrap_supports_disable_userns() -> bool:
@@ -783,28 +830,50 @@ def _bwrap_supports_disable_userns() -> bool:
 
     Probed rather than assumed: passing an unsupported flag makes bwrap exit
     non-zero, which would fail every task on an older host.
-    """
-    global _userns_checked
-    if _userns_checked is not None:
-        return _userns_checked
-    if not _bwrap_available():
-        _userns_checked = False
-        return False
 
-    try:
-        result = subprocess.run(
-            ["bwrap", "--ro-bind", "/", "/", "--disable-userns", "--", "true"],
-            capture_output=True, timeout=5,
-        )
-        _userns_checked = result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
-        _userns_checked = False
-    if not _userns_checked:
+    The probe carries ``--unshare-user`` because bwrap refuses the pair without
+    it ("--disable-userns requires --unshare-user", exit 1) — so a probe without
+    it answers "unsupported" on every host, which is what it did from the flag's
+    introduction until this was found. `build_bwrap_cmd` emits the two together
+    for the same reason. Unprivileged bwrap unshares the user namespace anyway,
+    so on the supported deployment the companion flag changes nothing on its own.
+    """
+    already_probed = "--disable-userns" in _bwrap_flag_support
+    supported = _bwrap_supports(
+        "--disable-userns",
+        ["--unshare-user", "--ro-bind", "/", "/", "--disable-userns"],
+    )
+    if not supported and not already_probed and _bwrap_available():
         logger.info(
             "bwrap does not support --disable-userns; sandbox masks can be "
             "lifted from a nested user namespace. Keep sandbox_ro_paths narrow."
         )
-    return _userns_checked
+    return supported
+
+
+def _bwrap_supports_remount_ro() -> bool:
+    """Whether this bwrap accepts ``--remount-ro`` (added in 0.2).
+
+    The database masks are read-only so that a probe against a path that is no
+    longer in the namespace fails at open time instead of quietly creating a
+    zero-byte file on the mask's tmpfs — which then answers `no such table` and
+    reads as a corrupt database rather than as a boundary, and litters the
+    directory for the rest of the task.
+
+    Old enough that every supported host has it, but probed all the same: the
+    cost of being wrong is every task failing, against a cosmetic gain.
+    """
+    already_probed = "--remount-ro" in _bwrap_flag_support
+    supported = _bwrap_supports(
+        "--remount-ro",
+        ["--ro-bind", "/", "/", "--tmpfs", "/tmp", "--remount-ro", "/tmp"],
+    )
+    if not supported and not already_probed and _bwrap_available():
+        logger.info(
+            "bwrap does not support --remount-ro; the database masks stay "
+            "writable and a stray file written there will look like a database."
+        )
+    return supported
 
 
 def build_clean_env(config: Config) -> dict[str, str]:
@@ -1526,6 +1595,10 @@ def build_bwrap_cmd(
     # feeds DB, the local DB backups and the browser profile. An empty tmpfs
     # over the directories shadows whatever earlier binds put there, because
     # bwrap applies operations in argv order and these are last. Keep them last.
+    # `--remount-ro` on each mask is part of the same operation — see `_mask_dir`
+    # for why an empty *writable* tmpfs makes the dead end look like a corrupt
+    # database — and is the one thing that may follow a mask, since it can only
+    # take permissions away.
     #
     # It is a mask, not a revocation: with `kernel.unprivileged_userns_clone`
     # on (bwrap needs it) a process can `unshare -Urm` and umount a tmpfs to
@@ -1544,9 +1617,11 @@ def build_bwrap_cmd(
         _mask_protected.append(workspace_resolved)
     if mount:
         _mask_protected.append(mount)
+    _masked: list[Path] = []
 
     def _mask_dir(target: Path) -> None:
-        """Cover ``target`` with an empty tmpfs, at every name it answers to.
+        """Cover ``target`` with an empty, read-only tmpfs, at every name it
+        answers to.
 
         Both the resolved path and the path as written: `_ro_bind` uses the
         *unresolved* string as its sandbox destination, so under a symlinked
@@ -1554,6 +1629,23 @@ def build_bwrap_cmd(
         while a resolved-only mask lands at `/realstore/app/...` — a path not
         in the namespace at all, leaving the databases readable at the name the
         model would actually use.
+
+        Read-only because a writable mask makes the dead end lie. `sqlite3
+        {db_dir}/istota.db "select …"` on a writable tmpfs *creates* the file
+        and then reports `no such table` — which reads as a missing schema or a
+        corrupt database, sends the model hunting, and leaves a zero-byte
+        `istota.db` sitting in the directory for the rest of the task. On a
+        read-only mask the same command fails at open, which is the truth: the
+        file is not in this namespace. It also means nothing a task writes
+        under a database directory can survive to be mistaken for a database.
+
+        Read-only makes a mask *under* an existing mask fatal rather than
+        merely redundant: bwrap has to `mkdir` the second mountpoint on the
+        first mask's tmpfs, gets EROFS, and exits before running anything — so
+        a second mask nested in the first would fail every task rather than
+        weakening one directory. Already-covered candidates are therefore
+        skipped here, where every mask can see the others, rather than by each
+        caller checking one path against one other.
         """
         candidates: list[Path] = []
         for candidate in (target, target.resolve()):
@@ -1572,7 +1664,15 @@ def build_bwrap_cmd(
                     candidate, ", ".join(str(p) for p in shadowed),
                 )
                 continue
+            if any(candidate.is_relative_to(m) for m in _masked):
+                continue
             args.extend(["--tmpfs", str(candidate)])
+            if _bwrap_supports_remount_ro():
+                # After the tmpfs, never before: --remount-ro acts on whatever
+                # is mounted at that path at the time bwrap reaches it, and
+                # before the tmpfs that is the host directory.
+                args.extend(["--remount-ro", str(candidate)])
+            _masked.append(candidate)
 
     if config.db_path:
         db_dir = Path(config.db_path).parent
@@ -1590,11 +1690,22 @@ def build_bwrap_cmd(
                 "sandbox mask (module resolution will raise on use)",
             )
         else:
-            if not module_root.is_relative_to(db_dir.resolve()):
-                _mask_dir(module_root)
+            # No "is it already under db_dir?" test here: `_mask_dir` skips a
+            # candidate any earlier mask already covers, and it does it against
+            # every name each mask answers to. The check that used to live here
+            # compared one resolved path against one other, and it also skipped
+            # the module root when the db_dir mask had been *refused* — leaving
+            # it unmasked for want of a cover that was never mounted.
+            _mask_dir(module_root)
 
     if _bwrap_supports_disable_userns():
-        args.append("--disable-userns")
+        # Both, or neither: bwrap exits 1 on `--disable-userns` without
+        # `--unshare-user` ("--disable-userns requires --unshare-user"), which
+        # is why this flag never once reached a real sandbox — the probe had
+        # the same gap and answered "unsupported" on every host. Unprivileged
+        # bwrap unshares the user namespace regardless, so on the supported
+        # deployment the companion flag only makes the request explicit.
+        args.extend(["--unshare-user", "--disable-userns"])
 
     # --- Lifecycle ---
     chdir_target = workspace_resolved or user_temp_dir.resolve()

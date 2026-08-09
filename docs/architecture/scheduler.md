@@ -142,7 +142,7 @@ Where a task's result goes is resolved by `transport.routing.resolve_delivery_pl
 
 ## Deferred DB operations
 
-With the bubblewrap sandbox, no database is reachable inside the subprocess at all — the framework DB directory and the per-user module-DB root are covered by empty tmpfs masks applied as the last mount operations. Claude and skill CLIs write JSON files to a writable temp dir instead. The scheduler processes these after successful completion. The handlers and the file envelope helper live in `scheduler_deferred.py` (extracted from `scheduler.py` for size and testability; `scheduler.py` keeps a re-export shim so `from istota.scheduler import _process_deferred_*` still works).
+With the bubblewrap sandbox, no database is reachable inside the subprocess at all — the framework DB directory and the per-user module-DB root are covered by empty, read-only tmpfs masks applied as the last mount operations. Claude and skill CLIs write JSON files to a writable temp dir instead. The scheduler processes these after successful completion. The handlers and the file envelope helper live in `scheduler_deferred.py` (extracted from `scheduler.py` for size and testability; `scheduler.py` keeps a re-export shim so `from istota.scheduler import _process_deferred_*` still works).
 
 | File | Handler | Purpose |
 |---|---|---|
