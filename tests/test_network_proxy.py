@@ -5,13 +5,11 @@ import socket
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from istota.network_proxy import (
     BRIDGE_PORT,
-    BRIDGE_SCRIPT,
     NetworkProxy,
     write_bridge_script,
 )

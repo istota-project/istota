@@ -5,7 +5,6 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from istota.skills.memory_search import (
     build_parser,

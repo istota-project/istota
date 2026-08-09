@@ -1223,7 +1223,6 @@ class TestDocuments:
         Both are brand new, so `CREATE TABLE IF NOT EXISTS` inside
         executescript covers it — no migration function needed.
         """
-        import sqlite3
 
         ctx = _ctx(tmp_path)
         ctx.ensure_dirs()

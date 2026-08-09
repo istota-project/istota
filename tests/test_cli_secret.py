@@ -15,9 +15,7 @@ service or key is rejected with exit 1 before any DB write.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from unittest import mock
 
 import pytest
 

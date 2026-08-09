@@ -308,7 +308,7 @@ class TestLLMContextIsolation:
 
         with db.get_db(db_path) as conn:
             db.register_room(conn, "R", "u", origin="talk")
-            t1 = _add_task_row(conn, "R", "q1", "a1", source_type="talk")
+            _add_task_row(conn, "R", "q1", "a1", source_type="talk")
             _add_task_row(conn, "R", "INTERNAL-extraction", "NEWSLETTER-BLOCK",
                           source_type="subtask")
             _add_task_row(conn, "R", "hb-prompt", "hb-result", source_type="heartbeat")

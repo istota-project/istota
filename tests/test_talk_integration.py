@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from istota.config import load_config
-from istota.talk import TalkClient, truncate_message
+from istota.talk import TalkClient
 
 # Load config from project root — skip all tests if missing or misconfigured
 _CONFIG_PATHS = [
@@ -219,7 +219,7 @@ class TestMessageTypes:
     def test_system_messages_identifiable(self, client, run):
         """System messages have messageType='system' for filtering."""
         messages = run(client.poll_messages(TEST_ROOM, last_known_message_id=None, limit=100))
-        system_msgs = [m for m in messages if m.get("messageType") == "system"]
+        [m for m in messages if m.get("messageType") == "system"]
         # A group room should have at least one system message (user added, etc.)
         # If not, that's fine — we just verify the field exists on all messages
         for msg in messages:

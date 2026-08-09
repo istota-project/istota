@@ -19,13 +19,12 @@ manually).
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from istota import db as framework_db
-from istota.health import db as health_db
 from istota.health import garmin as gm
 from istota.health import garmin_sync
 from istota.health._migrate import ensure_initialised

@@ -4,8 +4,6 @@ The ``ensure`` action replaces ansible's per-user TOML resource templating.
 Same partial-update + status-output contract as ``istota user ensure``.
 """
 
-import json
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest

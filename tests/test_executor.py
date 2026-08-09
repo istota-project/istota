@@ -1,6 +1,5 @@
 """Configuration loading for istota.executor module."""
 
-import json
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -11,12 +10,8 @@ from istota.executor import (
     _is_automated_task,
     _is_terse,
     _last_substantial_region,
-    _text_similarity,
-    _AUTOMATED_SOURCE_TYPES,
-    _CM_SEGMENT_MIN_CHARS,
     _NO_FINAL_ANSWER_NOTICE,
     _TERSE_RESULT_MAX_CHARS,
-    _TRAILING_REGION_MIN_CHARS,
     detect_malformed_result,
     parse_api_error,
     is_transient_api_error,
@@ -39,7 +34,7 @@ from istota.brain import BrainRequest, ClaudeCodeBrain
 from istota.brain._types import BrainResult
 from pathlib import Path
 
-from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, ResourceConfig, SchedulerConfig, SecurityConfig, SiteConfig, UserConfig
+from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, SecurityConfig, SiteConfig, UserConfig
 from istota import db
 
 

@@ -7,11 +7,9 @@ behavior-preserving contract).
 
 from __future__ import annotations
 
-import pytest
 
 from istota import db
 from istota.config import (
-    BriefingConfig,
     Config,
     EmailConfig,
     NextcloudConfig,

@@ -36,7 +36,6 @@ from istota.scheduler import (
     _talk_target_for_delivery,
     check_briefings,
     check_scheduled_jobs,
-    post_result_to_email,
     process_one_task,
     recover_orphaned_tasks_on_startup,
     _stuck_running_minutes,
@@ -52,7 +51,6 @@ from istota.config import (
     BriefingConfig,
     EmailConfig,
     MemorySearchConfig,
-    ResourceConfig,
     LocationReceiverConfig,
 )
 from istota import db
@@ -2925,7 +2923,7 @@ class TestTalkPollThread:
             sched_mod._shutdown_requested = True
             return []
 
-        with patch("istota.scheduler.run_coro", side_effect=stop_after_one) as mock_run, \
+        with patch("istota.scheduler.run_coro", side_effect=stop_after_one), \
              patch("istota.scheduler._shutdown_requested", False):
             # _shutdown_requested is checked at loop top, so we set it inside the poll
             _talk_poll_loop(config)
@@ -6608,7 +6606,8 @@ class TestCleanupOldClaudeLogs:
         debug = claude_dir / "debug"
         debug.mkdir(parents=True)
 
-        import time, os
+        import time
+        import os
         old_file = debug / "debug-2026-01-01.txt"
         old_file.write_text("log")
         old_mtime = time.time() - (10 * 24 * 60 * 60)
@@ -6625,7 +6624,8 @@ class TestCleanupOldClaudeLogs:
         todos = claude_dir / "todos"
         todos.mkdir(parents=True)
 
-        import time, os
+        import time
+        import os
         old_file = todos / "tasks.json"
         old_file.write_text("[]")
         old_mtime = time.time() - (10 * 24 * 60 * 60)
@@ -6641,7 +6641,8 @@ class TestCleanupOldClaudeLogs:
         subdir = claude_dir / "projects" / "empty-project"
         subdir.mkdir(parents=True)
 
-        import time, os
+        import time
+        import os
         old_file = subdir / "session.jsonl"
         old_file.write_text("{}")
         old_mtime = time.time() - (10 * 24 * 60 * 60)
@@ -6755,7 +6756,7 @@ class TestPostResultToTalk:
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 300}}}
             )
-            result = await post_result_to_talk(
+            await post_result_to_talk(
                 config, task, "Long message", use_reply_threading=True,
             )
 
@@ -6779,7 +6780,7 @@ class TestPostResultToTalk:
             mock_instance.send_message = AsyncMock(
                 return_value={"ocs": {"data": {"id": 400}}}
             )
-            result = await post_result_to_talk(
+            await post_result_to_talk(
                 config, task, "Response", use_reply_threading=True,
             )
 
@@ -6799,7 +6800,7 @@ class TestPostResultToTalk:
                 return_value={"ocs": {"data": {"id": 500}}}
             )
             # Default use_reply_threading=False (progress/ack messages)
-            result = await post_result_to_talk(config, task, "Working on it...")
+            await post_result_to_talk(config, task, "Working on it...")
 
         mock_instance.send_message.assert_called_once_with(
             "room123", "Working on it...", reply_to=None, reference_id=None,
@@ -7502,7 +7503,7 @@ class TestBriefingJsonDelivery:
         # Check that Talk was called with the body, not the raw JSON
         assert mock_arun.call_count >= 1
         # The first asyncio.run call should be post_result_to_talk with the body
-        talk_call_args = mock_arun.call_args_list[0]
+        mock_arun.call_args_list[0]
         # asyncio.run receives a coroutine; check the message was the extracted body
         # We verify indirectly: the raw JSON should NOT be in the completed task result
         with db.get_db(db_path) as conn:
@@ -7518,7 +7519,7 @@ class TestBriefingJsonDelivery:
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
-            task_id = db.create_task(
+            db.create_task(
                 conn, prompt="Generate a evening briefing", user_id="testuser",
                 source_type="briefing", output_target="email",
             )
@@ -7543,7 +7544,7 @@ class TestBriefingJsonDelivery:
         config = self._make_config(db_path, tmp_path)
 
         with db.get_db(db_path) as conn:
-            task_id = db.create_task(
+            db.create_task(
                 conn, prompt="Generate a morning briefing", user_id="testuser",
                 source_type="briefing", conversation_token="room1",
             )
@@ -7722,13 +7723,12 @@ class TestTaskIdInProgress:
         process_one_task(config)
 
         # Find the ack call (first asyncio.run call with post_result_to_talk)
-        ack_calls = [
+        [
             c for c in mock_arun.call_args_list
             if c.args and hasattr(c.args[0], '__name__') is False  # coroutine
         ]
         # The ack text is passed as the second argument to post_result_to_talk
         # Check all asyncio.run calls for one containing the task ID in ack format
-        found_ack = False
         for call in mock_arun.call_args_list:
             args = call.args
             if args and hasattr(args[0], 'cr_frame'):

@@ -1,8 +1,6 @@
 """Configuration loading for istota.briefing_loader module."""
 
-from pathlib import Path
 
-import pytest
 
 from istota.skills.briefing import (
     _load_workspace_briefings,

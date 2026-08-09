@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from istota import db
-from istota.briefings.routes import require_admin, require_auth, router, verify_origin
+from istota.briefings.routes import require_auth, router, verify_origin
 from istota.config import Config, UserConfig
 
 

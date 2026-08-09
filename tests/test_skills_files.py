@@ -1,12 +1,11 @@
 """Tests for skills/files.py module."""
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.config import Config, NextcloudConfig
+from istota.config import Config
 from istota.skills.files import (
     get_local_path,
     list_files,

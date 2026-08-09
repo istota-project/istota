@@ -385,7 +385,6 @@ class TestFormatContextForPrompt:
 
     def test_actions_taken_capped_at_15(self):
         actions_list = [f"action {i}" for i in range(20)]
-        import json
         actions = json.dumps(actions_list)
         msgs = [_msg(1, "q", "a", actions_taken=actions)]
         result = format_context_for_prompt(msgs)

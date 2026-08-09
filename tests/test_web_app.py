@@ -26,8 +26,6 @@ if _has_web_deps:
 from istota.config import (
     Config,
     LocationReceiverConfig,
-    NextcloudConfig,
-    ResourceConfig,
     SiteConfig,
     UserConfig,
     WebConfig,

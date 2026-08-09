@@ -2,7 +2,6 @@
 
 import asyncio
 
-import pytest
 
 from istota.brain import native
 from istota.brain.native import _drain_one_steer, _STEER_FRAME, NativeBrain

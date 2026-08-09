@@ -58,7 +58,7 @@ class TestStripHtml:
         assert "First" in result
         assert "Second" in result
         # Block elements should be on separate lines
-        lines = [l.strip() for l in result.splitlines() if l.strip()]
+        lines = [line.strip() for line in result.splitlines() if line.strip()]
         assert len(lines) >= 2
 
     def test_removes_invisible_chars(self):

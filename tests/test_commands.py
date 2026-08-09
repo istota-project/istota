@@ -429,7 +429,7 @@ class TestCmdHelp:
     async def test_lists_all_commands(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
 
         assert "!help" in result
@@ -441,7 +441,7 @@ class TestCmdHelp:
     async def test_help_mentions_model_prefix(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
 
         assert "!model" in result
@@ -459,7 +459,7 @@ class TestCmdStop:
     async def test_no_active_task(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
         assert "No active task" in result
 
@@ -476,7 +476,7 @@ class TestCmdStop:
             )
             db.update_task_status(conn, task_id, "running")
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
 
         assert f"#{task_id}" in result
@@ -498,7 +498,7 @@ class TestCmdStop:
             )
             db.set_task_confirmation(conn, task_id, "Are you sure?")
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
 
         assert f"#{task_id}" in result
@@ -518,7 +518,7 @@ class TestCmdStop:
             )
             db.update_task_status(conn, task_id, "running")
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
 
         assert "No active task" in result
@@ -537,7 +537,7 @@ class TestCmdStatus:
     async def test_no_tasks(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
         assert "No active or pending tasks" in result
         assert "System:" in result
@@ -546,7 +546,7 @@ class TestCmdStatus:
     async def test_shows_user_tasks(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            t1 = db.create_task(
+            db.create_task(
                 conn,
                 prompt="Task one",
                 user_id="alice",
@@ -560,7 +560,7 @@ class TestCmdStatus:
             )
             db.update_task_status(conn, t2, "running")
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Your tasks (2)" in result
@@ -581,7 +581,7 @@ class TestCmdStatus:
                 source_type="talk",
             )
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "No active or pending tasks" in result
@@ -602,7 +602,7 @@ class TestCmdStatus:
                 conn, prompt="Pending", user_id="alice", source_type="talk"
             )
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "1 running" in result
@@ -624,7 +624,7 @@ class TestCmdStatus:
                 conn, prompt="Pending", user_id="bob", source_type="talk"
             )
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "System:" not in result
@@ -639,7 +639,7 @@ class TestCmdStatus:
             db.create_task(conn, prompt="Scheduled job", user_id="alice", source_type="scheduled")
             db.create_task(conn, prompt="Briefing", user_id="alice", source_type="briefing")
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Your tasks (1)" in result
@@ -653,7 +653,7 @@ class TestCmdStatus:
         with db.get_db(config.db_path) as conn:
             db.create_task(conn, prompt="Cron job", user_id="alice", source_type="scheduled")
 
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_status(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Background (1)" in result
@@ -670,7 +670,7 @@ class TestCmdCron:
     async def test_no_jobs(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
         assert "No scheduled jobs" in result
 
@@ -683,7 +683,7 @@ class TestCmdCron:
                    VALUES (?, ?, ?, ?, 1)""",
                 ("alice", "daily-check", "0 9 * * *", "check stuff"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
 
         assert "daily-check" in result
@@ -699,7 +699,7 @@ class TestCmdCron:
                    VALUES (?, ?, ?, ?, 1, 3)""",
                 ("alice", "flaky", "0 * * * *", "flaky job"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", ""))
 
         assert "3 failures" in result
@@ -726,7 +726,7 @@ enabled = false
                    VALUES (?, ?, ?, ?, 0, 5)""",
                 ("alice", "broken", "0 * * * *", "stuff"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable broken"))
 
         assert "Enabled" in result
@@ -764,7 +764,7 @@ enabled = false
                    VALUES (?, ?, ?, ?, 0, '2026-01-01 00:00:00')""",
                 ("alice", "nightly", "0 22 * * *", "stuff"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable nightly"))
 
         assert "Enabled" in result
@@ -796,7 +796,7 @@ prompt = "stuff"
                    VALUES (?, ?, ?, ?, 1)""",
                 ("alice", "active-job", "0 * * * *", "stuff"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", "disable active-job"))
 
         assert "Disabled" in result
@@ -820,7 +820,7 @@ prompt = "stuff"
                    VALUES (?, ?, ?, ?, 0, 5)""",
                 ("alice", "broken", "0 * * * *", "stuff"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable broken"))
 
         assert "Enabled" in result
@@ -833,7 +833,7 @@ prompt = "stuff"
     async def test_enable_nonexistent(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(_ctx(config, conn, "alice", "room1", "enable nope"))
         assert "not found" in result or "No scheduled job" in result
 
@@ -848,7 +848,7 @@ class TestCmdMemory:
     async def test_no_args_shows_usage(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", ""))
         assert "!memory user" in result
         assert "!memory channel" in result
@@ -858,7 +858,7 @@ class TestCmdMemory:
     async def test_user_memory_empty(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         assert "User memory:** (empty)" in result
 
@@ -871,7 +871,7 @@ class TestCmdMemory:
         user_mem_path.write_text("Alice likes coffee")
 
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         assert "Alice likes coffee" in result
         assert "User memory**" in result
@@ -886,7 +886,7 @@ class TestCmdMemory:
         user_mem_path.write_text(long_content)
 
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         # Full content should be present, not truncated
         assert long_content in result
@@ -895,7 +895,7 @@ class TestCmdMemory:
     async def test_channel_memory_empty(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "channel"))
         assert "Channel memory:** (empty)" in result
 
@@ -908,7 +908,7 @@ class TestCmdMemory:
         channel_mem_path.write_text("This is the dev channel")
 
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "channel"))
         assert "This is the dev channel" in result
         assert "Channel memory**" in result
@@ -919,7 +919,7 @@ class TestCmdMemory:
         config.nextcloud_mount_path = None
 
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "user"))
         assert "mount not configured" in result
 
@@ -927,7 +927,7 @@ class TestCmdMemory:
     async def test_facts_empty(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "no facts" in result
 
@@ -941,7 +941,7 @@ class TestCmdMemory:
             add_fact(conn, "alice", "alice", "works_at", "acme")
             add_fact(conn, "alice", "alice", "knows", "python")
             conn.commit()
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "Knowledge graph" in result
         assert "2 facts" in result
@@ -958,7 +958,7 @@ class TestCmdMemory:
             for i in range(25):
                 add_fact(conn, "alice", "alice", "knows", f"tech_{i}")
             conn.commit()
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "25 facts" in result
         assert "Entities:" in result
@@ -976,7 +976,7 @@ class TestCmdMemory:
             add_fact(conn, "alice", "alice", "works_at", "acme")
             add_fact(conn, "alice", "bob", "works_at", "globex")
             conn.commit()
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts alice"))
         assert "Facts about alice" in result
         assert "works_at" in result
@@ -988,7 +988,7 @@ class TestCmdMemory:
         from istota.memory.knowledge_graph import ensure_table
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts nobody"))
         assert "none found" in result
 
@@ -1002,7 +1002,7 @@ class TestCmdMemory:
             ensure_table(conn)
             add_fact(conn, "alice", "alice", "speaks", "portuguese")
             conn.commit()
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
         assert "Knowledge graph" in result
         assert "speaks" in result
@@ -1139,7 +1139,7 @@ class TestCmdSkills:
     async def test_lists_bundled_skills(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Skills" in result
@@ -1153,7 +1153,7 @@ class TestCmdSkills:
         config = make_config()
         config.admin_users = {"bob"}  # alice is not admin
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         # tasks skill is admin_only, should not appear for non-admin
@@ -1164,7 +1164,7 @@ class TestCmdSkills:
         config = make_config()
         config.admin_users = set()  # empty = all admin
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         # With all users as admin, admin-only skills should be visible
@@ -1174,7 +1174,7 @@ class TestCmdSkills:
     async def test_shows_unavailable_skills(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             with patch("istota.skills._loader.get_skill_availability") as mock_avail:
                 # Make one skill unavailable
                 def side_effect(meta):
@@ -1192,7 +1192,7 @@ class TestCmdSkills:
         config = make_config()
         config.disabled_skills = ["browse"]
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
 
         assert "Disabled" in result
@@ -1230,7 +1230,7 @@ class TestCmdSkills:
     async def test_skill_detail_view(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_skills(_ctx(config, conn, "alice", "room1", "calendar"))
 
         assert "**calendar**" in result
@@ -1253,7 +1253,7 @@ class TestCmdCheck:
             t = db.create_task(conn, prompt="test", user_id="alice", source_type="cli")
             db.update_task_status(conn, t, "completed")
 
-            client = AsyncMock()
+            AsyncMock()
             with (
                 patch("istota.commands.shutil.which", return_value="/usr/local/bin/claude"),
                 patch("istota.commands.subprocess.run") as mock_run,
@@ -1276,7 +1276,7 @@ class TestCmdCheck:
     async def test_claude_not_found(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             with (
                 patch("istota.commands.shutil.which", return_value=None),
                 patch("istota.commands.subprocess.run") as mock_run,
@@ -1296,7 +1296,7 @@ class TestCmdCheck:
         config.security = SecurityConfig(sandbox_enabled=True)
 
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
 
             def which_side_effect(name):
                 return f"/usr/bin/{name}"
@@ -1320,7 +1320,7 @@ class TestCmdCheck:
         config.security = SecurityConfig(sandbox_enabled=True)
 
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
 
             def which_side_effect(name):
                 if name == "bwrap":
@@ -1345,7 +1345,7 @@ class TestCmdCheck:
 
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
 
             def run_side_effect(*args, **kwargs):
                 cmd = args[0] if args else kwargs.get("args", [])
@@ -1365,7 +1365,7 @@ class TestCmdCheck:
     async def test_execution_wrong_output(self, make_config):
         config = make_config(security=SecurityConfig(sandbox_enabled=False))
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             with (
                 patch("istota.commands.shutil.which", return_value="/usr/bin/claude"),
                 patch("istota.commands.subprocess.run") as mock_run,
@@ -1390,7 +1390,7 @@ class TestCmdCheck:
             t = db.create_task(conn, prompt="ok", user_id="alice", source_type="cli")
             db.update_task_status(conn, t, "completed")
 
-            client = AsyncMock()
+            AsyncMock()
             with (
                 patch("istota.commands.shutil.which", return_value="/usr/bin/claude"),
                 patch("istota.commands.subprocess.run") as mock_run,
@@ -1408,7 +1408,7 @@ class TestCmdCheck:
     async def test_help_includes_check(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
         assert "!check" in result
 
@@ -1686,7 +1686,7 @@ class TestCmdMore:
             task_id = db.create_task(conn, prompt="Fix the config", user_id="alice")
             db.update_task_status(conn, task_id, "completed", result="Fixed it.", execution_trace=trace)
 
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
@@ -1704,7 +1704,7 @@ class TestCmdMore:
             task_id = db.create_task(conn, prompt="Test", user_id="alice")
             db.update_task_status(conn, task_id, "completed", result="Done", execution_trace=trace)
 
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", f"#{task_id}"))
 
@@ -1717,7 +1717,7 @@ class TestCmdMore:
             task_id = db.create_task(conn, prompt="Old task", user_id="alice")
             db.update_task_status(conn, task_id, "completed", result="Done")
 
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
@@ -1726,7 +1726,7 @@ class TestCmdMore:
     @pytest.mark.asyncio
     async def test_task_not_found(self, make_config, db_path):
         config = make_config()
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", "99999"))
 
@@ -1740,7 +1740,7 @@ class TestCmdMore:
             task_id = db.create_task(conn, prompt="Secret", user_id="bob")
             db.update_task_status(conn, task_id, "completed", result="Done")
 
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
@@ -1749,7 +1749,7 @@ class TestCmdMore:
     @pytest.mark.asyncio
     async def test_invalid_task_id(self, make_config, db_path):
         config = make_config()
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", "notanumber"))
 
@@ -1762,7 +1762,7 @@ class TestCmdMore:
             task_id = db.create_task(conn, prompt="In progress", user_id="alice")
             db.update_task_status(conn, task_id, "running")
 
-        client = MagicMock()
+        MagicMock()
         with db.get_db(db_path) as conn:
             result = await cmd_more(_ctx(config, conn, "alice", "room1", str(task_id)))
 
@@ -1787,7 +1787,7 @@ class TestCmdSearch:
     async def test_empty_query_returns_usage(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", ""))
         assert "Usage" in result
         assert "!search" in result
@@ -1796,7 +1796,7 @@ class TestCmdSearch:
     async def test_whitespace_only_query_returns_usage(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "   "))
         assert "Usage" in result
 
@@ -1804,7 +1804,7 @@ class TestCmdSearch:
     async def test_search_current_room_no_results(self, make_config, db_path):
         config = make_config()
         with db.get_db(db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "nonexistent query xyz"))
         assert "No results" in result
 
@@ -1835,7 +1835,7 @@ class TestCmdSearch:
                  "task_id": t2, "conversation_token": "room2"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "parser bug"))
 
         # Only room1 result should appear
@@ -1859,7 +1859,7 @@ class TestCmdSearch:
                  "task_id": 200, "conversation_token": "room2"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
 
         assert "room1" in result
@@ -1882,7 +1882,7 @@ class TestCmdSearch:
                  "task_id": 200, "conversation_token": "otherroom"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--room otherroom some query"))
 
         assert "otherroom" in result
@@ -1903,7 +1903,7 @@ class TestCmdSearch:
                  "task_id": 46945, "conversation_token": "room1"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
 
         assert "#46945" in result
@@ -1948,7 +1948,7 @@ class TestCmdSearch:
                  "conversation_token": "room1"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all parser bug"))
 
         assert "https://nc.test/call/room1#message_38939" in result
@@ -1968,7 +1968,7 @@ class TestCmdSearch:
                  "task_id": 100, "conversation_token": "room1"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all test query"))
 
         assert "1 result" in result
@@ -1990,7 +1990,7 @@ class TestCmdSearch:
                  "talk_link": "https://nc.test/call/room1#message_123",
                  "conversation_token": "room1"},
             ]
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all recent chat"))
 
         assert "Recent chat message" in result
@@ -2015,7 +2015,7 @@ class TestCmdSearch:
                  "talk_link": "https://nc.test/call/room2#message_2",
                  "conversation_token": "room2"},
             ]
-            client = MagicMock()
+            MagicMock()
             # Default: current room only
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "some query"))
 
@@ -2039,7 +2039,7 @@ class TestCmdSearch:
         ):
             mock_mem.return_value = many_results
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all lots of results"))
 
         # Count numbered results (lines starting with "N. ")
@@ -2066,7 +2066,7 @@ class TestCmdSearch:
                 {"date": "Apr 1", "room": "room1", "summary": "From talk",
                  "task_id": 100, "conversation_token": "room1"},
             ]
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all test"))
 
         assert "1 result" in result
@@ -2090,7 +2090,7 @@ class TestCmdSearch:
                  "task_id": 100, "conversation_token": "room1"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all discussion"))
 
         assert "in General" in result
@@ -2101,7 +2101,7 @@ class TestCmdSearch:
         """!search should appear in !help output."""
         config = make_config()
         with db.get_db(config.db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_help(_ctx(config, conn, "alice", "room1", ""))
         assert "!search" in result
 
@@ -2331,7 +2331,7 @@ class TestCmdSearchFiltering:
                  "task_id": None, "conversation_token": "room1", "source_type": "memory_file"},
             ]
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
 
         mock_talk.assert_not_called()
@@ -2350,7 +2350,7 @@ class TestCmdSearchFiltering:
         ):
             mock_mem.return_value = []
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
 
         call_kwargs = mock_mem.call_args
@@ -2370,7 +2370,7 @@ class TestCmdSearchFiltering:
         ):
             mock_mem.return_value = []
             mock_talk.return_value = []
-            client = MagicMock()
+            MagicMock()
             await cmd_search(_ctx(config, conn, "alice", "room1", "--all --since 2026-03-01 test"))
 
         call_kwargs = mock_mem.call_args
@@ -2393,7 +2393,7 @@ class TestCmdSearchFiltering:
                 {"date": "2026-03-25", "room": "room1", "summary": "Recent result",
                  "conversation_token": "room1"},
             ]
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", "--all --since 2026-03-20 test"))
 
         assert "Recent result" in result
@@ -2404,7 +2404,7 @@ class TestCmdSearchFiltering:
         """Usage string should mention new flags."""
         config = make_config()
         with db.get_db(db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_search(_ctx(config, conn, "alice", "room1", ""))
         assert "--since" in result
         assert "--memories" in result
@@ -2421,7 +2421,7 @@ class TestTrustCommand:
         from istota.commands import cmd_trust
         config = make_config()
         with db.get_db(db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_trust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
         assert "Trusted" in result
         assert "joe@example.com" in result
@@ -2434,7 +2434,7 @@ class TestTrustCommand:
         config = make_config()
         with db.get_db(db_path) as conn:
             db.add_trusted_sender(conn, "alice", "joe@example.com")
-            client = MagicMock()
+            MagicMock()
             result = await cmd_trust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
         assert "already trusted" in result
 
@@ -2445,7 +2445,7 @@ class TestTrustCommand:
         config.users["alice"] = UserConfig(trusted_email_senders=["*@corp.com"])
         with db.get_db(db_path) as conn:
             db.add_trusted_sender(conn, "alice", "joe@example.com")
-            client = MagicMock()
+            MagicMock()
             result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
         assert "*@corp.com" in result
         assert "(config)" in result
@@ -2456,7 +2456,7 @@ class TestTrustCommand:
         from istota.commands import cmd_trust
         config = make_config()
         with db.get_db(db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_trust(_ctx(config, conn, "alice", "room1", "notanemail"))
         assert "Usage" in result
 
@@ -2466,7 +2466,7 @@ class TestTrustCommand:
         config = make_config()
         with db.get_db(db_path) as conn:
             db.add_trusted_sender(conn, "alice", "joe@example.com")
-            client = MagicMock()
+            MagicMock()
             result = await cmd_untrust(_ctx(config, conn, "alice", "room1", "joe@example.com"))
         assert "Removed" in result
         with db.get_db(db_path) as conn:
@@ -2477,7 +2477,7 @@ class TestTrustCommand:
         from istota.commands import cmd_untrust
         config = make_config()
         with db.get_db(db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_untrust(_ctx(config, conn, "alice", "room1", "nobody@example.com"))
         assert "not in your trusted" in result
 
@@ -2486,6 +2486,6 @@ class TestTrustCommand:
         from istota.commands import cmd_trust
         config = make_config()
         with db.get_db(db_path) as conn:
-            client = MagicMock()
+            MagicMock()
             result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
         assert "No trusted senders" in result

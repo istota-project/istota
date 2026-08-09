@@ -32,7 +32,7 @@ def test_writes_usage_log_row(tmp_path):
         _persist_task_usage(_Cfg(dbp), conn, tid, usage)
     with db.get_db(dbp) as conn:
         logs = db.get_task_logs(conn, tid)
-    usage_lines = [l for l in logs if "usage " in l["message"]]
+    usage_lines = [rec for rec in logs if "usage " in rec["message"]]
     assert len(usage_lines) == 1
     payload = json.loads(usage_lines[0]["message"].split("usage ", 1)[1])
     assert payload["input_tokens"] == 1200
@@ -46,7 +46,7 @@ def test_none_usage_is_noop(tmp_path):
     with db.get_db(dbp) as conn:
         _persist_task_usage(_Cfg(dbp), conn, tid, None)
         logs = db.get_task_logs(conn, tid)
-    assert not [l for l in logs if "usage " in l["message"]]
+    assert not [rec for rec in logs if "usage " in rec["message"]]
 
 
 def test_opens_own_conn_when_none(tmp_path):
@@ -55,4 +55,4 @@ def test_opens_own_conn_when_none(tmp_path):
     _persist_task_usage(_Cfg(dbp), None, tid, usage)
     with db.get_db(dbp) as conn:
         logs = db.get_task_logs(conn, tid)
-    assert [l for l in logs if "usage " in l["message"]]
+    assert [rec for rec in logs if "usage " in rec["message"]]

@@ -1,9 +1,7 @@
 """Tests for briefings generation assembly + archive + executor routing."""
 
 from datetime import datetime, timezone
-from pathlib import Path
 
-import pytest
 
 from istota import db
 from istota.briefings import db as bdb

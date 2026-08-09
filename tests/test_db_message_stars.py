@@ -248,7 +248,7 @@ class TestMarkAllRoomsRead:
         rb = _room(conn, "bob", "bobs")
         a1 = _msg(conn, r1.token)
         a2 = _msg(conn, r2.token)
-        bmsg = _msg(conn, rb.token)
+        _msg(conn, rb.token)
         moved = db.mark_all_rooms_read(conn, "alice")
         assert moved == 2
         assert db.get_room_read_state(conn, r1.token, "web", "alice") == a1

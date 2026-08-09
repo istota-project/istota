@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from istota import db
-from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, ResourceConfig, SecurityConfig, UserConfig
+from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, SecurityConfig
 from istota.executor import (
     _build_network_allowlist,
     build_bwrap_cmd,
@@ -352,9 +352,9 @@ class TestBuildBwrapCmdCredentials:
         rw_pairs = _get_bind_pairs(result, "--bind")
 
         assert any(src == creds_str for src, _ in ro_pairs), \
-            f".credentials.json not in --ro-bind pairs"
+            ".credentials.json not in --ro-bind pairs"
         assert not any(src == creds_str for src, _ in rw_pairs), \
-            f".credentials.json should not be in --bind (RW) pairs"
+            ".credentials.json should not be in --bind (RW) pairs"
 
 
 class TestBuildBwrapCmdDeveloperDir:

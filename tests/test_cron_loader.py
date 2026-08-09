@@ -1,11 +1,10 @@
 """Configuration loading for istota.cron_loader module."""
 
-from pathlib import Path
 
 import pytest
 
 from istota import db
-from istota.config import Config, UserConfig
+from istota.config import Config
 from istota.brain import set_alias_overrides
 from istota.cron_loader import (
     CronJob,
@@ -837,7 +836,7 @@ prompt = "daily check"
         content = generate_cron_md(jobs)
         assert "once = true" in content
         # Recurring job should NOT have once line
-        lines = content.split("\n")
+        content.split("\n")
         # Find the recurring job section — once should only appear once in entire output
         assert content.count("once = true") == 1
 
@@ -1068,7 +1067,7 @@ prompt_file = "/Users/alice/scripts/prompts/exists.txt"
 
     def test_sync_prompt_file_to_db_uses_resolved_prompt(self, db_path, mount_path, make_config_with_mount):
         """DB should get the resolved prompt text, not the file path."""
-        config = make_config_with_mount(db_path=db_path)
+        make_config_with_mount(db_path=db_path)
         file_jobs = [CronJob(
             name="from-file", cron="0 9 * * *",
             prompt="resolved content", prompt_file="/some/path.txt",

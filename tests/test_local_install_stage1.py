@@ -6,7 +6,6 @@ Covers the new ``[web] auth`` field + ``ISTOTA_WEB_AUTH`` override, the
 ``/api/admin/stats`` standalone ``runtime`` block.
 """
 
-from pathlib import Path
 
 import pytest
 

@@ -16,7 +16,7 @@ from istota.scheduler import _sync_money_module_jobs
 pytest.importorskip("istota.money", reason="money extra not installed")
 pytest.importorskip("beancount", reason="money requires beancount")
 
-from istota.money.jobs import DEFAULT_JOBS, MODULE_PREFIX, jobs_for_user
+from istota.money.jobs import MODULE_PREFIX, jobs_for_user
 
 
 def _conn(tmp_path: Path):

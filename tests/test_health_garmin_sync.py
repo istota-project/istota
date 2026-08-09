@@ -7,7 +7,7 @@ rate-limit / missing-data shapes without touching the real SDK.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any
 
 import pytest

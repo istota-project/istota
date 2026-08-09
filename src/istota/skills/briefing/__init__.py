@@ -576,8 +576,8 @@ def _parse_reminders(content: str) -> list[str]:
         if not block:
             continue
         # Skip headers-only blocks and horizontal rules
-        lines = [l.strip() for l in block.splitlines() if l.strip()]
-        if all(l.startswith("#") or l in ("---", "***", "___") for l in lines):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if all(line.startswith("#") or line in ("---", "***", "___") for line in lines):
             continue
         # Drop leading header lines within a block
         while lines and lines[0].startswith("#"):

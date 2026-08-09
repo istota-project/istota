@@ -4,7 +4,7 @@ import io
 import json
 import sys
 from types import SimpleNamespace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +26,6 @@ _needs_geopy = pytest.mark.skipif(not _has_geopy, reason="geopy not installed")
 _needs_fastapi = pytest.mark.skipif(not _has_fastapi, reason="fastapi not installed")
 
 from istota import db
-from istota.config import Config, UserConfig
 from istota.geo import haversine
 from istota.location import db as location_db
 
@@ -757,7 +756,8 @@ class TestLocationCLI:
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
             from istota.skills.location import cmd_places
-            import io, sys
+            import io
+            import sys
             from unittest.mock import MagicMock
 
             args = MagicMock()
@@ -1045,7 +1045,8 @@ class TestLocationCLI:
         env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
         with patch.dict("os.environ", env):
             from istota.skills.location import cmd_history
-            import io, sys
+            import io
+            import sys
             from unittest.mock import MagicMock
 
             args = MagicMock()
@@ -2689,7 +2690,7 @@ class TestClusterPlaceAttribution:
         17 stationary pings inside the geofence still drive attribution.
         Reproduces the ISSUE-062 case: real-time webhook fired correct
         arrival/departure, day-summary should match."""
-        from istota.geo import cluster_pings, haversine
+        from istota.geo import cluster_pings
 
         # 5 walk-in pings drifting east toward the store, no place_id
         # 17 stationary pings at the store (within the 75m geofence)
@@ -3202,7 +3203,7 @@ class TestAccuracyGate:
         from istota import webhook_receiver as wr
         db_path = _init_loc_db(tmp_path)
         with location_db.connect(db_path) as conn:
-            pid = location_db.add_place(
+            location_db.add_place(
                 conn, "home", 35.629, 139.741, radius_meters=200,
             )
             places = location_db.get_places(conn)

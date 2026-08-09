@@ -144,6 +144,32 @@ artifacts = ["src/istota/web_static/**"]
 [tool.hatch.build.targets.wheel.force-include]
 "schema.sql" = "istota/schema.sql"
 
+[tool.ruff]
+target-version = "py311"
+# Declared so a rule that reads it has a number, and so anyone running the
+# formatter by hand lands near the tree's own shape (p95 is 80 chars). It is
+# not enforced: E501 is not in the rule set below.
+line-length = 100
+
+[tool.ruff.lint]
+# The default rule set, stated explicitly so it cannot drift with a ruff
+# upgrade. Deliberately no formatting-adjacent rules — E1 (indentation),
+# E2 (whitespace) and E501 (line length) are all out, because `ruff format`
+# is NOT adopted here and the existing hand formatting is the baseline. A
+# reformat would rewrite ~525 of 637 files and take `git blame` with it; the
+# lint pass is worth having on its own, and the two are separable.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Both files carry module-level setup before their local imports (constants and
+# a helper in scheduler.py, route-adjacent import clusters deep in web_app.py).
+# Hoisting the imports in a 5,000- and a 6,600-line module is a refactor with
+# real circular-import risk, not a lint fix.
+"src/istota/scheduler.py" = ["E402"]
+"src/istota/web_app.py" = ["E402"]
+# Tests legitimately import after a sys.path tweak or a pytest.importorskip.
+"tests/**" = ["E402"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

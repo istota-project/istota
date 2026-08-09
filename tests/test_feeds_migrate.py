@@ -8,7 +8,6 @@ import pytest
 
 from istota.feeds import db as feeds_db
 from istota.feeds._migrate import (
-    _DEFAULT_INTERVAL_SETTING_KEY,
     _DEFAULTS_SENTINEL_KEY,
     _SENTINEL_KEY,
     ensure_initialised,

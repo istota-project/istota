@@ -14,7 +14,6 @@ import pytest
 from istota.brain._types import BrainRequest, BrainResult
 from istota.brain.tmux_claude import (
     TmuxClaudeBrain,
-    _CircuitBreaker,
     consume_circuit_open_alert,
     reset_circuit_breaker,
 )

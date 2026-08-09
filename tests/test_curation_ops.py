@@ -2,7 +2,7 @@
 
 from istota.memory.curation.ops import apply_ops
 from istota.memory.curation.parser import parse_sectioned_doc, serialize_sectioned_doc
-from istota.memory.curation.types import Section, SectionedDoc
+from istota.memory.curation.types import SectionedDoc
 
 
 def _doc(text: str) -> SectionedDoc:
@@ -19,7 +19,7 @@ class TestAppend:
         assert len(applied) == 1
         section = new_doc.find("Pref")
         # Last bullet is now Baz (before any trailing blank line)
-        bullets = [l for l in section.lines if l.startswith("- ")]
+        bullets = [line for line in section.lines if line.startswith("- ")]
         assert bullets[-1] == "- Baz"
 
     def test_append_inserts_before_trailing_blank_lines(self):
@@ -109,7 +109,7 @@ class TestAppend:
         assert applied[0]["outcome"] == "noop_dup"
         assert rejected == []
         # No new bullet
-        bullets = [l for l in new_doc.find("Pref").lines if l.startswith("- ")]
+        bullets = [line for line in new_doc.find("Pref").lines if line.startswith("- ")]
         assert bullets == ["- Foo bar"]
 
     def test_append_dedup_is_case_insensitive(self):
@@ -458,7 +458,7 @@ class TestReplace:
         )
         assert rejected == []
         assert applied and applied[0]["outcome"] == "noop_dup"
-        bullets = [l for l in new_doc.find("Pref").lines if l.startswith("- ")]
+        bullets = [line for line in new_doc.find("Pref").lines if line.startswith("- ")]
         assert bullets == ["- apple", "- banana"]
 
     def test_replace_missing_heading_rejected(self):

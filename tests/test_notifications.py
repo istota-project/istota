@@ -1,6 +1,6 @@
 """Configuration loading for istota.notifications module."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

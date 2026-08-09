@@ -206,7 +206,7 @@ class _FakeUpstream:
         head = await reader.readuntil(b"\r\n\r\n")
         self.received.extend(head)
         request_line = head.split(b"\r\n", 1)[0].decode()
-        is_exec = b"/exec\r\n" in head or b"/exec " in request_line.encode() or "/exec " in request_line
+        b"/exec\r\n" in head or b"/exec " in request_line.encode() or "/exec " in request_line
         # crude: exec-create path ends with /exec
         path = request_line.split(" ")[1] if len(request_line.split(" ")) > 1 else ""
         if path.endswith("/exec"):

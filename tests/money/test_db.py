@@ -1,11 +1,9 @@
 """Tests for money.db module."""
 
-from pathlib import Path
 
 import pytest
 
 from istota.money.db import (
-    MonarchSyncedTransaction,
     clear_invoice_state,
     clear_overdue_notification,
     get_active_monarch_synced_transactions,

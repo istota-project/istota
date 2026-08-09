@@ -1,7 +1,5 @@
 """Tests for shared_file_organizer module."""
 
-import sqlite3
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,7 +7,6 @@ import pytest
 from istota.config import Config, NextcloudConfig, UserConfig
 from istota import db
 from istota.shared_file_organizer import (
-    OrganizedFile,
     discover_and_organize_shared_files,
     get_file_owner,
 )

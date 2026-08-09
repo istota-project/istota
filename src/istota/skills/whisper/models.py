@@ -1,6 +1,5 @@
 """Model selection and RAM guard for faster-whisper."""
 
-import json
 import os
 from pathlib import Path
 

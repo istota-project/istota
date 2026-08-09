@@ -8,7 +8,6 @@ instead of an image part, so a transcribe-then-reason task degrades cleanly
 rather than 400ing.
 """
 
-from pathlib import Path
 
 from istota.brain import BrainRequest
 from istota.brain.native import NativeBrain

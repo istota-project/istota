@@ -1,7 +1,6 @@
 """Shared test fixtures for istota tests."""
 
 import os
-import sqlite3
 from pathlib import Path
 
 import pytest

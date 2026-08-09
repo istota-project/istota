@@ -1,11 +1,10 @@
 """Tests for the task-event-streaming infrastructure (events.py + db helpers)."""
 
-import json
 
 import pytest
 
 from istota import db
-from istota.events import PAYLOAD_MAX_BYTES, EventWriter, TaskEvent
+from istota.events import PAYLOAD_MAX_BYTES, EventWriter
 
 
 @pytest.fixture

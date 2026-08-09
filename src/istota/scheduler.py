@@ -66,7 +66,7 @@ from .skills.briefing import (
     parse_briefing_json,
     strip_briefing_preamble,
 )
-from .config import Config, SchedulerConfig, load_config
+from .config import BriefingConfig, Config, SchedulerConfig, load_config
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
     detect_malformed_result,

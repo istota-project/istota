@@ -7,12 +7,9 @@ the four helpers that replace the deleted ``_PROXY_CREDENTIAL_VARS``,
 ``_build_skill_credential_map`` constants/functions.
 """
 
-import os
 import time
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from istota.executor import (
     _PROXY_LOOKUP_BLOCKED,

@@ -9,7 +9,6 @@ probe + this file are how we'll catch the regression fast.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 import pytest
 
