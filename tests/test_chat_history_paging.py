@@ -42,12 +42,18 @@ def _loader(db_path):
 def _turn(
     conn, token, user_text, asst_text, *, created_at,
     status="completed", user="u", surface="web", spine=True, asst_spine=True,
+    task_skew_seconds=0,
 ):
     """Insert a turn: a task row (+ optional user / assistant spine rows), all
     stamped at `created_at`. `spine=False` omits the user spine row (a legacy,
     un-backfilled turn); `asst_spine=False` omits the assistant spine row (a
     failed/cancelled turn — the scheduler only stores successful assistant
-    turns). Returns the task id. Insert order controls the auto-increment ids."""
+    turns). Returns the task id. Insert order controls the auto-increment ids.
+
+    `task_skew_seconds` backdates the *task* row relative to its spine rows,
+    reproducing what `record_inbound` produces whenever a turn's two inserts
+    straddle a clock second: it creates the task and then writes the user row,
+    each defaulting to its own second-granularity `datetime('now')`."""
     tid = int(conn.execute(
         "INSERT INTO tasks (source_type, user_id, conversation_token, prompt, "
         "result, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
@@ -61,6 +67,11 @@ def _turn(
                               task_id=tid, origin_surface=surface)
     conn.execute("UPDATE messages SET created_at = ? WHERE task_id = ?",
                  (created_at, tid))
+    if task_skew_seconds:
+        conn.execute(
+            "UPDATE tasks SET created_at = datetime(?, ?) WHERE id = ?",
+            (created_at, f"-{task_skew_seconds} seconds", tid),
+        )
     return tid
 
 
@@ -252,6 +263,152 @@ class TestAuxBands:
         for page in [out, *_paginate(load, out)]:
             all_text.extend(m["text"] for m in page["messages"])
         assert any("old alert" in (t or "") for t in all_text)
+
+
+@_needs_web
+class TestTaskStampSkew:
+    """A turn's `tasks` row and its spine rows are written by separate statements
+    against `datetime('now')`, so a turn whose inserts straddle a clock second
+    has a task stamped a second before the user row it belongs to. The aux
+    gap-fill bands on the *turn's* position (its user spine row), not on the raw
+    task stamp, or that one second silently moves a failed answer off its page.
+
+    This surfaced as an intermittent xdist failure in
+    `test_chat_history_durable.py` — a real race the suite was losing under load,
+    not a test-ordering artifact.
+    """
+
+    def _failed(self, conn, token, *, created_at, skew, err="kaboom", q="boom-q"):
+        tf = _turn(conn, token, q, None, created_at=created_at, status="failed",
+                   asst_spine=False, task_skew_seconds=skew)
+        conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (err, tf))
+        return tf
+
+    @pytest.mark.parametrize("skew", [0, 1])
+    def test_lone_failed_turn_renders_regardless_of_skew(self, db_path, skew):
+        # The exact shape that flaked: the failed turn is the whole room, so it
+        # is also the page's oldest spine row (t1 == its user row). Banding on
+        # the raw task stamp excludes it by one second and the user sees their
+        # question with no error under it — on every load, not intermittently.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            self._failed(conn, "tok", created_at=_ts(20), skew=skew)
+        out = _loader(db_path)("u", "tok", 50)
+        assert any("kaboom" in (m["text"] or "") for m in out["messages"]), \
+            f"failed answer dropped at skew={skew}s"
+        # And the aux `has_more` probe reads the same key: banded on the raw
+        # task stamp it sees a failed task one second below the page floor and
+        # offers an older page that does not exist.
+        assert out["has_more"] is False
+
+    def test_skewed_failed_answer_sorts_under_its_question(self, db_path):
+        # The rendered stamp matters too: the transcript's final sort is on
+        # created_at, so an error bubble carrying the backdated task stamp sorts
+        # *above* the question it answers.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            self._failed(conn, "tok", created_at=_ts(20), skew=1)
+        out = _loader(db_path)("u", "tok", 50)
+        assert [m["role"] for m in out["messages"]] == ["user", "assistant"]
+
+    def test_skewed_failed_turn_pages_once_and_stays_ordered(self, db_path):
+        # Mid-history rather than at the window edge, so the turn is reachable
+        # but its backdated task stamp lands it in a neighbouring band. Two
+        # invariants across the whole scrollback: the answer appears exactly
+        # once, and it appears directly under its own question rather than
+        # above it (the raw task stamp sorts it one second early).
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            for i in range(3):
+                _turn(conn, "tok", f"old{i}", f"a{i}", created_at=_ts(10 + i))
+            self._failed(conn, "tok", created_at=_ts(20), skew=1, err="edge-boom")
+            for i in range(3):
+                _turn(conn, "tok", f"new{i}", f"a{i}", created_at=_ts(30 + i))
+        load = _loader(db_path)
+        first = load("u", "tok", 2)
+        pages = [first, *_paginate(load, first)]
+        booms = [
+            (page_no, i, page["messages"])
+            for page_no, page in enumerate(pages)
+            for i, m in enumerate(page["messages"])
+            if "edge-boom" in (m["text"] or "")
+        ]
+        assert len(booms) == 1, f"rendered {len(booms)}× across pages, expected 1"
+        _, idx, rows = booms[0]
+        assert idx > 0 and rows[idx - 1]["text"] == "boom-q", \
+            "the error must render directly under the question it answers"
+
+    def test_skewed_failed_turn_at_older_page_floor(self, db_path):
+        # The older-page band specifically: the skewed turn is the *oldest* spine
+        # row of page 2, so page 2's floor is its own user row and the raw task
+        # stamp sits one second under it. Banded on the raw stamp the answer is
+        # excluded here and then picked up by the aux-only tail on page 3 —
+        # question and error on different pages.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            self._failed(conn, "tok", created_at=_ts(20), skew=1, err="floor-boom")
+            for i in range(3):
+                _turn(conn, "tok", f"ok{i}", f"a{i}", created_at=_ts(30 + i))
+        load = _loader(db_path)
+        first = load("u", "tok", 2)
+        for page in [first, *_paginate(load, first)]:
+            texts = [m["text"] for m in page["messages"]]
+            if any("floor-boom" in (t or "") for t in texts):
+                assert "boom-q" in texts, \
+                    "the error must page together with the question it answers"
+                assert texts.index("boom-q") + 1 == next(
+                    i for i, t in enumerate(texts) if "floor-boom" in (t or "")
+                )
+                break
+        else:
+            pytest.fail("failed answer never rendered on any page")
+
+    def test_skewed_turn_in_mixed_aux_tail_renders_once(self, db_path):
+        # Guard on the aux-only tail path with both row kinds present: spineless
+        # legacy failures (placed by their own task stamp — the COALESCE
+        # fallback) below a skewed failed turn that does have a spine row.
+        # Everything must be reachable and appear exactly once.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            for i in range(3):
+                tf = _turn(conn, "tok", f"legacy{i}", None, created_at=_ts(i),
+                           status="failed", spine=False)
+                conn.execute("UPDATE tasks SET error = ? WHERE id = ?",
+                             (f"legacy-fail{i}", tf))
+            self._failed(conn, "tok", created_at=_ts(20), skew=1, err="mixed-boom")
+            _turn(conn, "tok", "ok-q", "ok-a", created_at=_ts(40))
+        load = _loader(db_path)
+        first = load("u", "tok", 2)
+        rendered = [
+            m["text"] or ""
+            for page in [first, *_paginate(load, first)]
+            for m in page["messages"]
+        ]
+        for marker in ["mixed-boom", *(f"legacy-fail{i}" for i in range(3))]:
+            hits = sum(1 for t in rendered if marker in t)
+            assert hits == 1, f"{marker} rendered {hits}×, expected 1"
+
+    def test_skewed_in_flight_turn_still_resumes(self, db_path):
+        # The in-flight slot is read unbanded, so skew must not disturb it — but
+        # its placeholder now carries the turn's stamp, so it must still sort
+        # under its own question rather than above it.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            _turn(conn, "tok", "live-q", None, created_at=_ts(40),
+                  status="running", asst_spine=False, task_skew_seconds=1)
+        out = _loader(db_path)("u", "tok", 50)
+        assert any(at["status"] == "running" for at in out["active_tasks"])
+        assert [m["role"] for m in out["messages"]] == ["user", "assistant"]
+
+    def test_spineless_turn_still_bands_on_its_task_stamp(self, db_path):
+        # The fallback half of the coalesce: a legacy turn with no spine row at
+        # all has only the task stamp to be placed by, and must keep rendering.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            _turn(conn, "tok", "legacy-q", "legacy-a", created_at=_ts(10), spine=False)
+        out = _loader(db_path)("u", "tok", 50)
+        assert ("user", "legacy-q") in _texts(out)
+        assert ("assistant", "legacy-a") in _texts(out)
 
 
 @_needs_web
