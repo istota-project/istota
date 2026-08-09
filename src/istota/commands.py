@@ -43,6 +43,10 @@ class CommandContext:
     args: str
     surface: str = "talk"
     registry: "TransportRegistry | None" = None
+    # The name the user actually typed, before alias resolution. Almost every
+    # handler ignores it; `!confirm` reads it because `!yes` and `!no` are two
+    # answers to one question and the alias table maps both onto one handler.
+    invoked_as: str = ""
     # Output slot: a handler that returns plain text but also has a structured
     # payload (e.g. !search's result cards) sets this; ``dispatch`` threads it
     # onto the returned ``CommandResult.data`` for rich stream surfaces. Most
@@ -81,7 +85,20 @@ COMMANDS: dict[str, tuple[CommandHandler, str]] = {}
 
 # Hidden command aliases: alias -> canonical command name. Resolved in
 # `dispatch` but omitted from `!help` / autocomplete (which read `COMMANDS`).
-_COMMAND_ALIASES: dict[str, str] = {"inject": "steer"}
+_COMMAND_ALIASES: dict[str, str] = {
+    "inject": "steer",
+    # Answering a held task. `!confirm` is the documented spelling; these are
+    # the words people actually type, and `!no` needs to reach the same handler
+    # as `!yes` so a decline is not a different command to learn. `cmd_confirm`
+    # reads `ctx.invoked_as` to tell them apart.
+    "yes": "confirm",
+    "y": "confirm",
+    "approve": "confirm",
+    "no": "confirm",
+    "n": "confirm",
+    "decline": "confirm",
+    "reject": "confirm",
+}
 
 # Brain kinds that can actually be steered mid-flight today (`!steer`). A brain
 # may *declare* `supports_steering` before its live wiring lands (tmux), so the
@@ -282,6 +299,9 @@ async def dispatch(
 
     cmd_name, args_str = parsed
     # Resolve hidden aliases (e.g. `!inject` -> `steer`) to the canonical name.
+    # The typed name is kept — `!yes` and `!no` share one handler and it needs
+    # to know which was said.
+    invoked_as = cmd_name
     cmd_name = _COMMAND_ALIASES.get(cmd_name, cmd_name)
     if registry is None:
         from .transport import make_registry
@@ -302,6 +322,7 @@ async def dispatch(
             args=args_str,
             surface=surface,
             registry=registry,
+            invoked_as=invoked_as,
         )
         result = await handler(ctx)
         # A handler returns plain text (and may set ``ctx.result_data`` for a
@@ -382,6 +403,110 @@ async def cmd_stop(ctx: CommandContext):
 
     preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
     return f"Cancelling task #{task_id}: {preview}"
+
+
+# `!confirm` verbs, keyed by the alias the user typed. A bare `!confirm` is an
+# approval; the decline spellings are listed so `!no` reaches the same handler.
+_DECLINE_ALIASES = frozenset({"no", "n", "decline", "reject"})
+# Trailing words a user may append instead of using an alias: `!confirm 41 no`.
+_VERB_WORDS = {
+    "yes": "approve", "y": "approve", "ok": "approve", "approve": "approve",
+    "confirm": "approve", "trust": "trust",
+    "no": "decline", "n": "decline", "cancel": "decline", "decline": "decline",
+    "reject": "decline",
+}
+
+
+@command(
+    "confirm",
+    "Answer a held task: `!confirm`, `!confirm <task-id>`, `!confirm <id> no`, "
+    "`!confirm <id> trust`. `!yes` / `!no` are shorthands",
+)
+async def cmd_confirm(ctx: CommandContext):
+    """Approve or decline a task parked in `pending_confirmation`, from any surface.
+
+    This is the surface-agnostic half of the confirmation loop (ISSUE-241).
+    Talk had one — a plain "yes" intercepted by `handle_confirmation_reply` —
+    and no other surface had any, so a gated inbound email was unanswerable
+    from web chat: typing "yes" there just started a new task.
+
+    A bare invocation acts only when exactly **one** question is open. With
+    several it lists them and does nothing: the held task is untrusted inbound
+    mail, and approving the wrong one is precisely the misfire the gate exists
+    to prevent.
+    """
+    from . import confirmations
+
+    conn, user_id = ctx.conn, ctx.user_id
+    words = ctx.args.split()
+
+    target_id: int | None = None
+    # `isdecimal`, not `isdigit`: the latter is True for '²', which `int()` then
+    # refuses, turning a typo into a traceback instead of the usage message.
+    if words and words[0].lstrip("#").isdecimal():
+        target_id = int(words.pop(0).lstrip("#"))
+
+    # Contradictions are refused, not resolved. `verb = mapped` last-word-wins
+    # made `!no 41 trust` approve *and* trust — resolving an ambiguous input
+    # towards approval, on a gate whose whole job is holding untrusted mail.
+    spoken = "decline" if ctx.invoked_as in _DECLINE_ALIASES else None
+    for word in words:
+        mapped = _VERB_WORDS.get(word.lower())
+        if mapped is None:
+            return (
+                f"Don't know what `{word}` means here. Try `!confirm <task-id>`, "
+                "`!confirm <task-id> no`, or `!confirm <task-id> trust`."
+            )
+        if spoken is not None and mapped != spoken:
+            return (
+                f"`!{ctx.invoked_as} … {word}` says two different things. "
+                "Use `!confirm <task-id>` to approve, `!confirm <task-id> no` to "
+                "discard, or `!confirm <task-id> trust` to approve and trust the "
+                "sender."
+            )
+        spoken = mapped
+    verb = spoken or "approve"
+
+    pending = confirmations.pending_for_user(conn, user_id)
+    if not pending:
+        return "Nothing is waiting for your confirmation."
+
+    if target_id is not None:
+        task = next((t for t in pending if t.id == target_id), None)
+        if task is None:
+            # Deliberately one message for "no such task", "not yours" and
+            # "already answered": the command must not become an oracle for
+            # which task ids exist, and the three are the same to the user.
+            return (
+                f"Task #{target_id} isn't waiting for your confirmation. "
+                f"Open right now:\n{confirmations.format_listing(conn, pending)}"
+            )
+    elif len(pending) == 1:
+        task = pending[0]
+    else:
+        return (
+            f"{len(pending)} things are waiting for your confirmation — say which:\n"
+            f"{confirmations.format_listing(conn, pending)}\n\n"
+            "Answer with `!confirm <task-id>` or `!confirm <task-id> no`."
+        )
+
+    label = confirmations.describe(conn, task)
+    if verb == "decline":
+        confirmations.decline(conn, task)
+        conn.commit()
+        return f"Declined #{task.id} — {label}. Nothing was run."
+
+    trusted = confirmations.approve(conn, task, trust_sender=(verb == "trust"))
+    conn.commit()
+    if trusted:
+        return (
+            f"Confirmed #{task.id} — {label}. Future mail from this sender is "
+            "processed without asking."
+        )
+    # Deliberately keyed on what happened, not on what was asked: `trust` on a
+    # task with no recorded sender trusts nobody, and claiming otherwise would
+    # leave the user believing a control is in place that isn't.
+    return f"Confirmed #{task.id} — {label}. Running it now."
 
 
 # Max steers that may sit `pending` (undrained) on one task at once. A steer is
@@ -666,6 +791,12 @@ async def cmd_status(ctx: CommandContext):
                 lines.append(f"- {emoji} #{row['id']} {tag}{preview}")
         if not interactive and not background:
             lines.append("No active or pending tasks.")
+
+    # `[confirm?]` used to be a dead end — the row said a task was waiting on
+    # the user and nothing here said how to answer it (ISSUE-241).
+    if any(r["status"] == "pending_confirmation" for r in rows):
+        lines.append("")
+        lines.append("Answer a `[confirm?]` with `!confirm <task-id>` or `!confirm <task-id> no`.")
 
     if config.is_admin(user_id):
         total_running = conn.execute(

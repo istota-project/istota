@@ -484,14 +484,14 @@ class TestTaskColumnRoundTrip:
                 db.get_pending_confirmation(conn, "conf-room"),
             )
 
-    def test_get_pending_confirmation_for_user(self, db_path):
+    def test_list_pending_confirmations_for_user(self, db_path):
         with db.get_db(db_path) as conn:
             tid = self._create_rich(conn)
             conn.execute(
                 "UPDATE tasks SET status='pending_confirmation' WHERE id=?", (tid,),
             )
             self._assert_dispatch_preserved(
-                db.get_pending_confirmation_for_user(conn, "user1"),
+                db.list_pending_confirmations_for_user(conn, "user1")[0],
             )
 
     def test_get_pending_confirmation_by_response_id(self, db_path):
@@ -1290,8 +1290,12 @@ class TestCancelPendingConfirmations:
             assert count == 0
 
 
-class TestGetPendingConfirmationForUser:
-    def test_returns_newest_pending_confirmation(self, db_path):
+class TestListPendingConfirmationsForUser:
+    """Replaced `get_pending_confirmation_for_user`, which returned only the
+    newest — the shape that let a bare "yes" answer the wrong gate during a
+    burst (ISSUE-241). Same scoping properties, plural, oldest first."""
+
+    def test_returns_every_open_question_oldest_first(self, db_path):
         with db.get_db(db_path) as conn:
             t1 = db.create_task(
                 conn, prompt="older", user_id="alice", conversation_token="thread1",
@@ -1302,14 +1306,12 @@ class TestGetPendingConfirmationForUser:
             )
             db.set_task_confirmation(conn, t2, "Confirm newer?")
 
-            result = db.get_pending_confirmation_for_user(conn, "alice")
-            assert result is not None
-            assert result.id == t2
+            result = db.list_pending_confirmations_for_user(conn, "alice")
+            assert [t.id for t in result] == [t1, t2]
 
-    def test_returns_none_when_no_pending(self, db_path):
+    def test_returns_empty_when_no_pending(self, db_path):
         with db.get_db(db_path) as conn:
-            result = db.get_pending_confirmation_for_user(conn, "alice")
-            assert result is None
+            assert db.list_pending_confirmations_for_user(conn, "alice") == []
 
     def test_ignores_other_users(self, db_path):
         with db.get_db(db_path) as conn:
@@ -1318,8 +1320,7 @@ class TestGetPendingConfirmationForUser:
             )
             db.set_task_confirmation(conn, t1, "Confirm?")
 
-            result = db.get_pending_confirmation_for_user(conn, "alice")
-            assert result is None
+            assert db.list_pending_confirmations_for_user(conn, "alice") == []
 
     def test_ignores_non_confirmation_statuses(self, db_path):
         with db.get_db(db_path) as conn:
@@ -1327,8 +1328,7 @@ class TestGetPendingConfirmationForUser:
                 conn, prompt="pending task", user_id="alice", conversation_token="room1",
             )
             # Task stays in 'pending' status, not 'pending_confirmation'
-            result = db.get_pending_confirmation_for_user(conn, "alice")
-            assert result is None
+            assert db.list_pending_confirmations_for_user(conn, "alice") == []
 
 
 class TestGetPendingConfirmationByResponseId:

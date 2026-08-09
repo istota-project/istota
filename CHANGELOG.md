@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Mail from a stranger was held for your approval and then asked about in a room you might never open. If you live in the web dashboard you were never asked at all, and the message was dropped a couple of hours later with no notice anywhere. The question now follows wherever you have routed your alerts, web chat shows any unanswered ones in a banner you can approve or discard from, and `!confirm` answers one from any surface.
+
+- Answering "yes" while two requests were waiting approved whichever arrived last, not the one you were looking at. Each question now carries its own number, and a bare "yes" with more than one open lists them and asks which instead of guessing.
+
+- Approving a held email left the room showing the reply with no question above it, and a confirmation left unanswered in web chat blocked that room until it timed out. Both are fixed: approving publishes the question it had been holding back, and sending a new message clears a question you have moved on from, as it already did in Talk.
+
+- The notice that a request timed out never arrived for email, and said nothing about what had expired. It now goes to your alert destination and names the sender and subject, so the message can be found again in the mailbox.
+
 ## [0.39.0] - 2026-08-09
 
 ### Added

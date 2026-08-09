@@ -157,7 +157,7 @@ class TestQuietBranch:
         cfg = _config(db_path, tmp_path, quiet_email_senders=["*@stratechery.com"])
         env = _env("ben@stratechery.com")
         mail = _mail("ben@stratechery.com", to=("bot+alice@test.com",))
-        with patch("istota.notifications.send_talk_confirmation") as conf, \
+        with patch("istota.notifications.send_confirmation_prompt") as conf, \
              patch("istota.transport.email.inbound.list_emails", return_value=[env]), \
              patch("istota.transport.email.inbound.read_email", return_value=mail), \
              patch("istota.transport.email.inbound.download_attachments", return_value=[]):

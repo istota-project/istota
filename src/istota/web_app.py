@@ -3875,6 +3875,28 @@ def _chat_create_web_task(
             if target is None or target[0] != token:
                 return ("reply_target_gone", 0)
             reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
+        # Sending a new message in a room means the user has moved on from any
+        # question parked in it — the rule the Talk poller has always applied
+        # (`transport/talk/inbound.py`, before its own `ingest_message`). Web
+        # never did, and a `pending_confirmation` task holds its room under
+        # `_CLAIM_CHANNEL_GATE_SQL`, so an unanswered gate froze the room until
+        # `confirmation_timeout_minutes` (ISSUE-241, via ISSUE-227).
+        #
+        # Two things make it safe. It is **room-scoped**, so an email gate
+        # parked under its own synthetic thread token is untouched — only a
+        # question the user can actually see. And it is skipped on a **replay**:
+        # a retry returns the prior task without creating anything, so
+        # cancelling here would discard the confirmation that very send
+        # produced, which is the durability path this key exists to serve.
+        # Ordered before `record_inbound` for the same reason Talk orders it
+        # that way — the new task must not be a candidate for its own cancel.
+        if not replaying:
+            cancelled = db.cancel_pending_confirmations(conn, token, username)
+            if cancelled:
+                logger.info(
+                    "Cancelled %d pending confirmation(s) in %s for %s (new message)",
+                    cancelled, token, username,
+                )
         # Route through the shared inbound helper so the web user turn lands in
         # the canonical `messages` store (and the room is registered) exactly
         # like Talk — instead of living only in tasks.prompt.
@@ -4825,12 +4847,10 @@ async def chat_send_message(
 
 
 def _chat_confirm_task(task_id: int) -> None:
-    from . import db
+    from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
-        row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        if not row or row["status"] != "pending_confirmation":
+        task = db.get_task(conn, task_id)
+        if task is None or task.status != "pending_confirmation":
             # Only a parked confirmation is confirmable. Returning early keeps a
             # stray confirm (a duplicate click, a running re-run) from wiping a
             # live task's event log — delete_task_events is unconditional, so
@@ -4839,11 +4859,77 @@ def _chat_confirm_task(task_id: int) -> None:
         # Clear prior events so the confirmed re-run's reset seq counter can't
         # collide on UNIQUE(task_id, seq) — the client already captured them.
         db.delete_task_events(conn, task_id)
-        db.confirm_task(conn, task_id)
+        # Shared with the Talk poller and `!confirm` so all three restore the
+        # transcript mirror the gate withheld (ISSUE-241).
+        confirmations.approve(conn, task)
+
+
+def _chat_pending_confirmations(username: str) -> list[dict]:
+    """Every question waiting on this user, oldest first.
+
+    The API equivalent of `handle_confirmation_reply`'s Path C, and the reason
+    it is its own endpoint rather than a widening of `_AUX_SOURCE_SCOPE`: a
+    first-contact email's `conversation_token` is the synthetic thread hash, so
+    there is no room whose history query could ever surface it — and the aux
+    query renders `tasks.prompt`, which for a gated email is exactly the
+    untrusted body the gate is holding back.
+
+    What ships is the bot-composed prompt plus the sender / subject / routing
+    method off `processed_emails`. Sender and subject are still attacker
+    supplied, so the client renders them as text, never as markup.
+    """
+    from . import confirmations, db
+    from .transport.ingest import ROOM_SURFACES
+    out: list[dict] = []
+    with db.get_db(_config.db_path) as conn:
+        for task in confirmations.pending_for_user(conn, username):
+            # A turn that started on a room surface already renders its own
+            # `ConfirmationCard` in the transcript (its `confirmation` event
+            # replays on the task stream). Listing it here too would show one
+            # question twice with two answer paths, and answering from the
+            # banner leaves the card stale. `ROOM_SURFACES` is the same set
+            # `record_inbound` uses to decide who owns a room.
+            if (task.source_type or "") in ROOM_SURFACES:
+                continue
+            email: dict | None = None
+            if task.source_type == "email":
+                record = db.get_email_for_task(conn, task.id)
+                if record is not None:
+                    email = {
+                        "sender": record.sender_email,
+                        "subject": record.subject,
+                        "routing_method": record.routing_method,
+                    }
+            out.append({
+                "task_id": task.id,
+                "source_type": task.source_type,
+                "created_at": _iso_utc(task.created_at),
+                "prompt": task.confirmation_prompt or "",
+                "summary": confirmations.describe(conn, task),
+                "room_token": (
+                    task.conversation_token
+                    if db.get_room(conn, task.conversation_token or "") is not None
+                    else None
+                ),
+                "email": email,
+            })
+    return out
+
+
+@api_router.get("/chat/confirmations")
+async def chat_pending_confirmations(user: dict = Depends(_require_api_auth)):
+    """Questions the user has been asked but not answered, on any surface.
+
+    Unconditionally reachable from web chat — it needs no routing
+    configuration, which is what makes a web-only user able to see an email
+    gate at all (ISSUE-241).
+    """
+    items = await asyncio.to_thread(_chat_pending_confirmations, user["username"])
+    return {"confirmations": items}
 
 
 def _chat_cancel_task(task_id: int) -> None:
-    from . import db
+    from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
         row = conn.execute(
             "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
@@ -4851,8 +4937,12 @@ def _chat_cancel_task(task_id: int) -> None:
         status = row["status"] if row else None
         if status == "pending_confirmation":
             # A parked confirmation isn't running — reject it outright rather
-            # than flagging a worker that will never see the flag.
-            db.cancel_task(conn, task_id)
+            # than flagging a worker that will never see the flag. Through the
+            # shared verb, so this path records the same `task_logs` row the
+            # Talk poller and `!confirm` do.
+            task = db.get_task(conn, task_id)
+            if task is not None:
+                confirmations.decline(conn, task)
             return
         conn.execute(
             "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)

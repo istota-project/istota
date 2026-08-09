@@ -3777,39 +3777,90 @@ def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
     return configured
 
 
+def _confirmation_notice_token(task_info: dict) -> str | None:
+    """The Talk room an expiry notice may fall back to, or None.
+
+    The old code passed ``conversation_token`` verbatim, which for an email gate
+    is the synthetic `compute_thread_id` hash — not a room token at all, so the
+    notice posted into nothing and the user was never told their mail had been
+    dropped (ISSUE-241). Same shape as `_talk_target_for_delivery`: a synthetic
+    thread id or a stream-surface token is not a Talk channel. Returning None
+    lets the routing ladder (alerts_channel → briefing → DM) resolve one.
+    """
+    from .email_support import is_synthetic_email_thread_token
+
+    token = task_info.get("conversation_token")
+    if not token:
+        return None
+    if token.startswith(("web-", "repl-")):
+        return None
+    if is_synthetic_email_thread_token(token):
+        return None
+    return token
+
+
+def _expired_confirmation_notice(conn, task_info: dict) -> str:
+    """Say *which* request expired, not just that one did.
+
+    A bare "your pending confirmation timed out" is unactionable: the user has
+    no way to tell which message was dropped, and for inbound mail the message
+    was marked processed when it was gated, so nothing re-polls it. Naming the
+    sender and subject is what makes going back to the mailbox possible.
+    """
+    from . import confirmations
+
+    lead = "A request that was waiting for your confirmation timed out and was cancelled."
+    if task_info.get("source_type") == "email":
+        try:
+            task = db.get_task(conn, task_info["id"])
+            # Through the shared describer, so the sender and subject are
+            # truncated and stripped of markup here too — this notice can land
+            # in Talk (markdown), in an email, or in an ntfy header, and the
+            # subject is a stranger's text.
+            label = confirmations.describe(conn, task) if task else None
+        except Exception:
+            label = None
+        if label:
+            return (
+                f"{lead}\n\nIt was {label}. It is still in the mailbox; forward "
+                "it again, or add the sender with `!trust` if you want it "
+                "processed without asking."
+            )
+    return f"{lead}\n\nSubmit it again if you still need it."
+
+
 def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
     Call periodically from daemon loop.
 
-    Synchronous: the rare Talk notices (expired-confirmation / failed-ancient)
+    Synchronous: the rare notices (expired-confirmation / failed-ancient)
     go through the sync ``send_notification`` dispatcher, which routes Talk
     through the persistent loop. The body otherwise does blocking DB / IMAP /
     filesystem cleanup that must NOT run on the persistent asyncio loop.
     """
     sched = config.scheduler
 
+    # Composed inside the transaction below, delivered after it closes. The
+    # notice routes by purpose now, so it can land on the web surface, whose
+    # delivery opens a second connection to this database — inline it would
+    # block on the write lock `expire_stale_confirmations` takes, for the full
+    # busy timeout, per expired task, on the dispatch loop.
+    expiry_notices: list[tuple[str, str, str | None]] = []
+
     with db.get_db(config.db_path) as conn:
-        # 1. Expire stale confirmations and notify users via Talk
+        # 1. Expire stale confirmations; the user is told after the transaction.
         expired = db.expire_stale_confirmations(conn, sched.confirmation_timeout_minutes)
         for task_info in expired:
             logger.info(
                 f"Expired stale confirmation: task {task_info['id']} "
                 f"(user: {task_info['user_id']})"
             )
-            # Notify user via Talk if conversation_token is set
-            if task_info["conversation_token"] and config.nextcloud.url:
-                try:
-                    msg = (
-                        "Your pending confirmation request timed out and was cancelled. "
-                        "Please submit your request again if you still need this action."
-                    )
-                    send_notification(
-                        config, task_info["user_id"], msg,
-                        conversation_token=task_info["conversation_token"],
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to notify user about expired confirmation: {e}")
+            expiry_notices.append((
+                task_info["user_id"],
+                _expired_confirmation_notice(conn, task_info),
+                _confirmation_notice_token(task_info),
+            ))
 
         # 1b. Recover stuck locked/running tasks (mirrors claim_task recovery
         # but runs even when no tasks are being claimed)
@@ -3884,6 +3935,17 @@ def run_cleanup_checks(config: Config) -> None:
         pruned = db.prune_message_deletions(conn, _MESSAGE_DELETION_RETENTION_DAYS)
         if pruned > 0:
             logger.info(f"Pruned {pruned} message-deletion ledger row(s)")
+
+    # 4c. Tell users about the confirmations that just expired. Outside the
+    # transaction on purpose — see `expiry_notices` above.
+    for user_id, message, token in expiry_notices:
+        try:
+            send_notification(
+                config, user_id, message,
+                purpose="alert", conversation_token=token,
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user about expired confirmation: {e}")
 
     # 5. Clean up old emails from IMAP (outside db context)
     if config.email.enabled and sched.email_retention_days > 0:

@@ -242,15 +242,35 @@ async def _send_talk(
     return await TalkTransport(config).deliver(token, message)
 
 
-def send_talk_confirmation(
+def send_confirmation_prompt(
     config: "Config",
     user_id: str,
     message: str,
+    *,
     conversation_token: str | None = None,
-) -> int | None:
-    """Send a confirmation prompt via Talk (sync). Returns message_id or None."""
-    from .async_runtime import run_coro
-    return run_coro(_send_talk(config, user_id, message, conversation_token))
+) -> tuple[bool, int | None]:
+    """Ask the user to approve a held task, on whatever surface they read.
+
+    Returns ``(delivered, talk_message_id)``. The Talk id is what
+    ``handle_confirmation_reply``'s Path A matches a *reply* against, so it is
+    handed back even though every other surface has no equivalent; it is None
+    when Talk was not among the destinations or the post failed.
+
+    Routed through the ``alert`` purpose rather than a hardwired Talk send
+    (ISSUE-241). A confirmation is the one notification the user *must* see —
+    the task is cancelled unanswered at ``confirmation_timeout_minutes`` and,
+    for an inbound email, the message was marked processed in the same
+    transaction, so a prompt nobody reads is silent mail loss. Routing it means
+    a user who has pointed alerts at web or ntfy is actually asked;
+    ``resolve_destinations`` still falls back to Talk, so a deployment that has
+    configured nothing behaves exactly as before.
+
+    ``conversation_token`` overrides the channel of a *bare* talk destination
+    only (the caller's ``alerts_channel``), matching ``send_notification``.
+    """
+    dests = resolve_destinations(config, user_id, "alert")
+    return _dispatch(config, user_id, message, dests,
+                     conversation_token=conversation_token)
 
 
 def _send_email(
@@ -382,6 +402,56 @@ def is_channel_configured(
     return any(probes.get(d.surface, lambda: False)() for d in dests)
 
 
+def _dispatch(
+    config: "Config",
+    user_id: str,
+    message: str,
+    dests,
+    *,
+    conversation_token: str | None = None,
+    title: str | None = None,
+    priority: int | None = None,
+    tags: str | None = None,
+) -> tuple[bool, int | None]:
+    """Deliver ``message`` to every resolved destination.
+
+    Returns ``(sent, talk_message_id)`` — the second value only for callers that
+    need to address the posted message later (the confirmation prompt, whose
+    Talk id is how a *reply* to it is matched). One loop, shared by
+    :func:`send_notification` and :func:`send_confirmation_prompt`, so the two
+    cannot disagree about what a destination list means.
+    """
+    from .async_runtime import run_coro
+
+    sent = False
+    talk_message_id: int | None = None
+    for dest in dests:
+        if dest.surface == "talk":
+            token = dest.channel or conversation_token
+            msg_id = run_coro(_send_talk(config, user_id, message, token))
+            if msg_id:
+                sent = True
+                if talk_message_id is None:
+                    talk_message_id = msg_id
+        elif dest.surface == "email":
+            if _send_email(config, user_id, title or "Notification", message):
+                sent = True
+        elif dest.surface == "ntfy":
+            if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
+                sent = True
+        elif dest.surface == "web":
+            # A bare `web` route carries no channel; the explicit conversation_token
+            # override only applies to bare `talk`, so pass the descriptor channel.
+            if _send_web(config, user_id, message, dest.channel, title=title):
+                sent = True
+        else:
+            logger.warning(
+                "Unsupported notification surface %r (user: %s)",
+                dest.surface, user_id,
+            )
+    return sent, talk_message_id
+
+
 def send_notification(
     config: "Config",
     user_id: str,
@@ -410,7 +480,6 @@ def send_notification(
             (``talk`` with no explicit ``:token``); an explicit ``talk:<token>``
             in the descriptor (or a routed channel) keeps its own channel.
     """
-    from .async_runtime import run_coro
     from .transport import parse_output_target
 
     if surface is not None:
@@ -420,28 +489,11 @@ def send_notification(
     else:
         dests = parse_output_target("talk")
 
-    sent = False
-    for dest in dests:
-        if dest.surface == "talk":
-            token = dest.channel or conversation_token
-            if run_coro(_send_talk(config, user_id, message, token)):
-                sent = True
-        elif dest.surface == "email":
-            if _send_email(config, user_id, title or "Notification", message):
-                sent = True
-        elif dest.surface == "ntfy":
-            if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
-                sent = True
-        elif dest.surface == "web":
-            # A bare `web` route carries no channel; the explicit conversation_token
-            # override only applies to bare `talk`, so pass the descriptor channel.
-            if _send_web(config, user_id, message, dest.channel, title=title):
-                sent = True
-        else:
-            logger.warning(
-                "Unsupported notification surface %r (user: %s)",
-                dest.surface, user_id,
-            )
+    sent, _talk_msg_id = _dispatch(
+        config, user_id, message, dests,
+        conversation_token=conversation_token,
+        title=title, priority=priority, tags=tags,
+    )
 
     if not sent:
         logger.warning(

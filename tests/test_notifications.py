@@ -171,8 +171,16 @@ class TestSendTalk:
         assert result is None
 
 
-class TestSendTalkConfirmation:
-    def test_returns_message_id(self):
+class TestSendConfirmationPrompt:
+    """The prompt for a held task, routed through the `alert` purpose (ISSUE-241).
+
+    It reports both whether *anything* was delivered and the Talk message id,
+    because Path A of `handle_confirmation_reply` matches a reply against that
+    id while the delivered flag decides whether to warn about a question
+    nobody was asked.
+    """
+
+    def test_talk_route_returns_the_message_id(self):
         config = Config(
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig()},
@@ -181,15 +189,35 @@ class TestSendTalkConfirmation:
             mock_client = AsyncMock()
             mock_client.send_message.return_value = {"ocs": {"data": {"id": 99}}}
             MockClient.return_value = mock_client
-            from istota.notifications import send_talk_confirmation
-            result = send_talk_confirmation(config, "alice", "Confirm?", conversation_token="room1")
-        assert result == 99
+            from istota.notifications import send_confirmation_prompt
+            delivered, msg_id = send_confirmation_prompt(
+                config, "alice", "Confirm?", conversation_token="room1",
+            )
+        assert (delivered, msg_id) == (True, 99)
 
-    def test_returns_none_without_token(self):
+    def test_undeliverable_reports_not_delivered(self):
         config = Config(users={"alice": UserConfig()})
-        from istota.notifications import send_talk_confirmation
-        result = send_talk_confirmation(config, "alice", "Confirm?")
-        assert result is None
+        from istota.notifications import send_confirmation_prompt
+        assert send_confirmation_prompt(config, "alice", "Confirm?") == (False, None)
+
+    def test_routing_table_decides_the_surface(self):
+        """A user who routes alerts to ntfy is asked there, not on Talk."""
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"alice": UserConfig(routing={"alert": "ntfy"})},
+        )
+        from istota import notifications
+        with (
+            patch.object(notifications, "_send_ntfy", return_value=True) as ntfy,
+            patch.object(notifications, "_send_talk", new=AsyncMock(return_value=1)) as talk,
+        ):
+            delivered, msg_id = notifications.send_confirmation_prompt(
+                config, "alice", "Confirm?",
+            )
+        assert delivered is True
+        assert msg_id is None  # no Talk destination, so no id to reply against
+        ntfy.assert_called_once()
+        talk.assert_not_called()
 
 
 class TestSendEmail:
