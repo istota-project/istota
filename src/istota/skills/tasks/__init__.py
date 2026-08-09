@@ -5,8 +5,12 @@ task find out what happened to work it handed off — a subtask it queued, a
 scheduled job it registered. Before this the ``tasks`` skill was write-only
 (deferred subtask creation), so an agent that needed the answer hand-rolled a
 poll against the SQLite file and got ``unable to open database file`` for ten
-minutes: the framework DB is bind-mounted read-only into the sandbox and it is
-in WAL mode, so SQLite cannot create the ``-shm`` sibling a normal open needs.
+minutes.
+
+There is no file to poll: ``build_bwrap_cmd`` ends by masking the framework
+and per-user module database directories with an empty, read-only tmpfs, so
+nothing inside the sandbox can open a database or create one to mistake for
+the real thing later.
 
 This CLI does not run in the sandbox. ``istota-skill`` is a thin Unix-socket
 client; the skill proxy executes the real module host-side, in the daemon's
@@ -14,8 +18,8 @@ namespace, against the live read-write connection. That is the whole reason a
 skill subcommand is the supported way to reach anything the sandbox can't.
 
 Every query is scoped to ``ISTOTA_USER_ID``. That scope is the boundary, not
-the read-only mount — the mount blocks reads only as a side effect of WAL, and
-that could change without anyone noticing.
+the mask — the mask is defence in depth behind it, and it is the scoping that
+makes this command answer the same way for admin and non-admin tasks alike.
 """
 
 import argparse
