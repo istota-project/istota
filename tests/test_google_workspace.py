@@ -257,6 +257,138 @@ class TestGoogleOAuthMigration:
 
 
 # ============================================================================
+# Granted scopes (ISSUE-240)
+# ============================================================================
+
+class TestGrantedScopesRead:
+    """``get_google_scopes`` is the decryption-free sibling of
+    ``has_google_token``: the settings card needs the granted set, and paying
+    a Fernet decrypt of two tokens to render a badge is the wrong trade — it
+    also turns a rotated key into "not connected" on a display that should
+    still offer Disconnect."""
+
+    def test_returns_none_without_a_row(self, tmp_path):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            assert db.get_google_scopes(conn, "alice") is None
+
+    def test_returns_the_stored_list(self, tmp_path, secret_key):
+        db_path = _init_db(tmp_path)
+        scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2025-12-31T00:00:00+00:00",
+                json.dumps(scopes),
+            )
+            assert db.get_google_scopes(conn, "alice") == scopes
+
+    def test_works_without_the_secret_key(self, tmp_path, secret_key):
+        """The point of the separate read: a stale key must not hide scopes."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2025-12-31T00:00:00+00:00",
+                '["https://www.googleapis.com/auth/drive"]',
+            )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with db.get_db(db_path) as conn:
+                assert db.get_google_token(conn, "alice") is None
+                assert db.get_google_scopes(conn, "alice") == [
+                    "https://www.googleapis.com/auth/drive",
+                ]
+
+    def test_empty_default_reads_as_empty_list(self, tmp_path, secret_key):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(conn, "alice", "a", "r", "2025-12-31T00:00:00+00:00")
+            assert db.get_google_scopes(conn, "alice") == []
+
+    def test_malformed_json_reads_as_empty_list(self, tmp_path, secret_key):
+        """A row is a row: the card must still say Connected, not 500."""
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2025-12-31T00:00:00+00:00", "not json",
+            )
+            assert db.get_google_scopes(conn, "alice") == []
+
+    def test_non_list_json_reads_as_empty_list(self, tmp_path, secret_key):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2025-12-31T00:00:00+00:00", '{"a": 1}',
+            )
+            assert db.get_google_scopes(conn, "alice") == []
+
+    def test_per_user_isolation(self, tmp_path, secret_key):
+        db_path = _init_db(tmp_path)
+        with db.get_db(db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2025-12-31T00:00:00+00:00", '["a-scope"]',
+            )
+            db.upsert_google_token(
+                conn, "bob", "b", "r", "2025-12-31T00:00:00+00:00", '["b-scope"]',
+            )
+            assert db.get_google_scopes(conn, "alice") == ["a-scope"]
+            assert db.get_google_scopes(conn, "bob") == ["b-scope"]
+
+
+class TestGoogleScopeSelectionProfile:
+    """The per-user selection lives in ``user_profiles.google_scopes``."""
+
+    def test_defaults_to_unset(self, tmp_path):
+        from istota import user_profiles
+
+        db_path = _init_db(tmp_path)
+        profile = user_profiles.ensure_profile(db_path, "alice")
+        assert profile.google_scopes == {}
+
+    def test_round_trips(self, tmp_path):
+        from istota import user_profiles
+
+        db_path = _init_db(tmp_path)
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile(
+            db_path, "alice", google_scopes={"drive": "full", "gmail": "off"},
+        )
+        reread = user_profiles.get_profile(db_path, "alice")
+        assert reread.google_scopes == {"drive": "full", "gmail": "off"}
+
+    def test_idempotent_write_is_a_noop(self, tmp_path):
+        from istota import user_profiles
+
+        db_path = _init_db(tmp_path)
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile_with_status(
+            db_path, "alice", google_scopes={"drive": "full"},
+        )
+        _, state = user_profiles.update_profile_with_status(
+            db_path, "alice", google_scopes={"drive": "full"},
+        )
+        assert state == "noop"
+
+    def test_migration_adds_the_column_to_an_existing_row(self, tmp_path):
+        """An upgrade must not lose the row or invent a selection."""
+        from istota import user_profiles
+
+        db_path = _init_db(tmp_path)
+        # Rewind to the pre-ISSUE-240 shape, then upgrade again.
+        with sqlite3.connect(db_path) as raw:
+            raw.execute("ALTER TABLE user_profiles DROP COLUMN google_scopes")
+            raw.execute(
+                "INSERT INTO user_profiles (user_id, display_name) VALUES ('alice', 'Alice')",
+            )
+        # A read against the not-yet-migrated row must not blow up either.
+        assert user_profiles.get_profile(db_path, "alice").google_scopes == {}
+
+        db.init_db(db_path)
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile is not None
+        assert profile.display_name == "Alice"
+        assert profile.google_scopes == {}
+
+
+# ============================================================================
 # Skill selection
 # ============================================================================
 

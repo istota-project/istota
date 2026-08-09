@@ -64,6 +64,11 @@ class UserProfile:
     # Follow the user's GPS timezone on travel (ISSUE-096). Default OFF: this
     # rewrites a setting the user chose, so it is opted into, not inferred.
     timezone_follow_location: bool = False
+    # Per-user Google Workspace scope selection: {service -> off|readonly|full},
+    # clamped at connect time to the operator's [google_workspace] scopes
+    # ceiling. Empty is "unset" and resolves to the whole ceiling, which is
+    # what every user had before the picker existed. See istota.google_scopes.
+    google_scopes: dict[str, str] = field(default_factory=dict)
 
 
 _PROFILE_COLUMNS = (
@@ -75,10 +80,11 @@ _PROFILE_COLUMNS = (
     "routing", "default_destination", "email_reply_routing",
     "default_briefings", "briefing_email_html",
     "timezone_follow_location",
+    "google_scopes",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
-_DICT_COLUMNS = frozenset({"routing"})
+_DICT_COLUMNS = frozenset({"routing", "google_scopes"})
 _LIST_COLUMNS = frozenset({
     "email_addresses", "disabled_skills", "trusted_email_senders",
     "quiet_email_senders", "disabled_modules",
@@ -147,6 +153,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         timezone_follow_location=_coerce_bool(
             _row_get(row, "timezone_follow_location"), False,
         ),
+        google_scopes=_parse_json_dict(_row_get(row, "google_scopes")),
     )
 
 
@@ -158,7 +165,9 @@ def _row_get(row: sqlite3.Row, key: str) -> object:
         return None
 
 
-def _parse_json_dict(value: str | None) -> dict[str, str]:
+def _parse_json_dict(value: object) -> dict[str, str]:
+    # ``object`` rather than ``str | None``: a not-yet-migrated row reaches
+    # here through ``_row_get``, which can only promise "some column value".
     if not value:
         return {}
     try:
@@ -511,6 +520,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         1 if profile.default_briefings else 0,
         1 if profile.briefing_email_html else 0,
         1 if profile.timezone_follow_location else 0,
+        json.dumps(dict(profile.google_scopes)),
     )
     cols_sql = ", ".join(insert_cols)
     if replace:

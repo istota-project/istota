@@ -447,6 +447,19 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: per-user Google Workspace scope selection (ISSUE-240).
+    # JSON object {service -> off|readonly|full}, bounded by the operator's
+    # [google_workspace] scopes ceiling. Empty means "unset", which resolves
+    # to the whole ceiling — so an existing user's next reconnect asks for
+    # exactly what it asked for before this column existed.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "google_scopes TEXT NOT NULL DEFAULT '{}'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
     # reserved `__output__` key. Add the column, then hoist `__output__` out of
@@ -4945,6 +4958,41 @@ def has_google_token(conn: sqlite3.Connection, user_id: str) -> bool:
         "SELECT 1 FROM google_oauth_tokens WHERE user_id = ? LIMIT 1", (user_id,),
     ).fetchone()
     return row is not None
+
+
+def get_google_scopes(conn: sqlite3.Connection, user_id: str) -> list[str] | None:
+    """The scopes Google actually granted, without decrypting the tokens.
+
+    Sibling of ``has_google_token``: the settings card needs to say *what*
+    was granted, and ``get_google_token`` is the wrong read for that — it
+    decrypts two tokens the display never uses, and returns None on a rotated
+    ``ISTOTA_SECRET_KEY``, which would blank the scope list on a row that is
+    still very much present.
+
+    Returns None when there is no row (never connected), and ``[]`` when the
+    row's column is empty or unparseable — a row is a row, so the caller
+    still renders Connected rather than a failure.
+    """
+    row = conn.execute(
+        "SELECT scopes FROM google_oauth_tokens WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["scopes"]
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("google_oauth: unparseable scopes column for user=%s", user_id)
+        return []
+    if not isinstance(parsed, list):
+        logger.warning(
+            "google_oauth: scopes column for user=%s is %s, not a list",
+            user_id, type(parsed).__name__,
+        )
+        return []
+    return [str(s) for s in parsed]
 
 
 # ============================================================================
