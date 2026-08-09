@@ -902,7 +902,16 @@ async def google_connect(request: Request):
         return Response("Google Workspace not configured", status_code=500)
     hostname, scheme = _get_external_origin()
     redirect_uri = f"{scheme}://{hostname}/istota/google/callback"
-    return await _oauth.google.authorize_redirect(request, redirect_uri)
+    # ``access_type=offline`` is what makes Google issue a refresh token at
+    # all, and ``prompt=consent`` is what makes it issue one *again* on a
+    # reconnect — otherwise it returns only an access token for a grant the
+    # user has already consented to. ``google_callback`` refuses to store a
+    # response without a refresh token (it could not refresh an hour later),
+    # so without both, reconnecting after a scope change or a revoke fails
+    # with a bare ``?google=error`` and no indication of the cause.
+    return await _oauth.google.authorize_redirect(
+        request, redirect_uri, access_type="offline", prompt="consent",
+    )
 
 
 @auth_router.get("/google/callback")

@@ -261,6 +261,55 @@ class TestCallbackRoute:
 
 
 @_needs_web_deps
+class TestGoogleConnectRoute:
+    """The connect redirect must ask Google for offline access explicitly.
+
+    ``google_callback`` hard-rejects a token response carrying no refresh
+    token (it can't refresh an hour later, so there is nothing worth
+    storing) and bounces to ``?google=error``. Google only issues a refresh
+    token when ``access_type=offline`` is requested, and only on the *first*
+    consent for a given grant unless ``prompt=consent`` re-prompts. Without
+    both, a reconnect — the normal path after widening scopes, or after a
+    user revokes access in their Google account — silently returns no
+    refresh token and the connect fails with no clue why.
+    """
+
+    async def _connect(self, client, app):
+        import istota.web_app as mod
+
+        from fastapi.responses import RedirectResponse
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        await client.get("/istota/callback", follow_redirects=False)
+
+        mod._oauth.google.authorize_redirect = AsyncMock(
+            return_value=RedirectResponse(url="https://accounts.google.com/o/oauth2/auth")
+        )
+        resp = await client.get("/istota/google/connect", follow_redirects=False)
+        return resp, mod._oauth.google.authorize_redirect
+
+    async def test_requests_offline_access_and_reconsent(self, client, app):
+        resp, redirect = await self._connect(client, app)
+        assert resp.status_code in (302, 307)
+        redirect.assert_called_once()
+        kwargs = redirect.call_args.kwargs
+        assert kwargs["access_type"] == "offline"
+        assert kwargs["prompt"] == "consent"
+
+    async def test_redirect_uri_still_passed(self, client, app):
+        """The added params must not displace the callback URI."""
+        _, redirect = await self._connect(client, app)
+        args = redirect.call_args.args
+        assert args[1] == "https://example.com/istota/google/callback"
+
+    async def test_unauthenticated_connect_redirects_to_login(self, client, app):
+        resp = await client.get("/istota/google/connect", follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/istota/login"
+
+
+@_needs_web_deps
 class TestUnauthenticatedAccess:
     async def test_api_me_returns_401(self, client):
         resp = await client.get("/istota/api/me")
