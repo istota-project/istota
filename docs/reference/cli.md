@@ -287,7 +287,7 @@ istota init                                  # Initialize database
 ```bash
 istota-scheduler                             # Start daemon
 istota-scheduler -c PATH                     # Explicit config file
-istota-scheduler -d                          # Debug mode
+istota-scheduler -d                          # Run as daemon (continuous loop)
 istota-scheduler -v                          # Verbose logging
 istota-scheduler --max-tasks N               # Limit tasks per run
 istota-scheduler --dry-run                   # Walk the loop without executing

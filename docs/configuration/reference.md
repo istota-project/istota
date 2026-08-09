@@ -168,7 +168,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 |---|---|---|
 | `db_backup_enabled` | `true` | Take timed online-backup snapshots of the local DBs |
 | `db_backup_interval` | `86400` | Seconds between snapshots (24h) |
-| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty disables |
+| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{nextcloud_mount_path}/istota-db-backups`. Use `db_backup_enabled = false` to disable |
 | `db_backup_retention` | `7` | Keep this many snapshot dirs |
 
 ## `[security]`
@@ -405,7 +405,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 |---|---|---|
 | `enabled` | `false` | Enable web interface |
 | `auth` | `"nextcloud"` | Auth mode. `"nextcloud"` is OAuth2 against Nextcloud; `"none"` disables auth entirely for the single-user local install and must never be used on a reachable host. Env override: `ISTOTA_WEB_AUTH` |
-| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"persistent"` encrypts them into `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
+| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"encrypted"` retains them in `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Any other value warns and falls back to ephemeral. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
 | `port` | `8766` | Web app port |
 | `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
 | `oauth2_client_id` | `""` | NC OAuth 2.0 client ID |
@@ -481,7 +481,7 @@ A persistent per-user Linux container — the escape hatch for work the bwrap sa
 | `exec_timeout_seconds` | `300` | Default per-exec timeout |
 | `max_output_bytes` | `102400` | Cap per output stream |
 | `api_proxy_enabled` | `true` | Bind an allowlist proxy at `/var/run/docker.sock` instead of the raw socket |
-| `api_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user proxy sockets live |
+| `api_proxy_socket_dir` | `"/var/run/istota-docker"` | Where the per-user Docker-API proxy sockets live (distinct from `[developer] devbox_proxy_socket_dir`) |
 | `api_proxy_audit_log` | `""` | Optional path for a proxy audit log |
 
 The raw Docker socket is root-equivalent, so it is never bound into the sandbox. The allowlist proxy permits only exec/cp/inspect/restart against the user's own container.

@@ -65,4 +65,4 @@ Formats: `markdown` (default) or `text`.
 
 `!search` queries the memory search index and Talk API for matching messages. Returns results with timestamps and conversation context.
 
-Flags: `--since YYYY-MM-DD`, `--week`, `--memories` (memory files only), `--all` (search every room, not just this one). A bare `#TOKEN` argument scopes the search to that room.
+Flags: `--since YYYY-MM-DD`, `--week`, `--memories` (memory files only), `--all` (search every room, not just this one), `--room <token>` (scope to one room; a leading `#` is stripped). Anything else is treated as query text.
