@@ -655,13 +655,19 @@ class NetworkConfig:
 class SecurityConfig:
     """Security hardening configuration."""
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
-    sandbox_admin_db_write: bool = False  # allow admin DB writes in sandbox
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket
     skill_proxy_timeout: int = 300  # timeout for proxied skill commands (seconds)
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
-    sandbox_ro_paths: list[str] = field(default_factory=lambda: ["/srv/app"])
+    # Extra RO bind-mounts inside the sandbox, for co-located services the
+    # agent genuinely needs to read. Empty by default: the entry that used to
+    # be here ("/srv/app") was added for a co-located moneyman install that no
+    # longer exists, and on the reference deployment it contained istota_home
+    # — so it exposed the framework DB and every user's module DB to every
+    # task. build_bwrap_cmd masks the database directories after applying this
+    # list, so a re-added broad path can't undo that, but keep entries narrow.
+    sandbox_ro_paths: list[str] = field(default_factory=list)
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
 
@@ -1111,15 +1117,8 @@ class Config:
         root = self.nextcloud_mount_path
         return root / "Users" / user_id if user_id else root
 
-    def module_db_path(self, user_id: str, module: str) -> Path:
-        """Local-disk path for a user's per-module SQLite DB.
-
-        ``{module_data_dir}/{user_id}/{module}.db``. Module DBs live on local
-        disk (not the Nextcloud mount) so they can use WAL — WAL's mmap'd -shm
-        SIGBUSes on the rclone FUSE mount (ISSUE-157). The module loaders pass
-        the result as the ``db_path`` override into their workspace synth, so
-        the user-facing ``data_dir`` (health uploads, money ledgers, feeds
-        exports) stays on the mount while only the ``.db`` relocates.
+    def module_db_root(self) -> Path:
+        """Local-disk root holding every user's per-module SQLite DBs.
 
         When ``module_data_dir`` is unset (None) the root derives as
         ``{db_path.parent}/modules`` — alongside the framework DB, which is
@@ -1127,19 +1126,35 @@ class Config:
         ``module_data_dir`` is refused if it resolves under
         ``nextcloud_mount_path`` — a WAL DB there would SIGBUS the process, so
         a misconfigured value fails loud rather than at runtime.
+
+        Split out of ``module_db_path`` because the sandbox needs the root on
+        its own: ``build_bwrap_cmd`` masks it, and ``_validate_workspace_dir``
+        refuses a REPL workspace that would bind it back in. Deriving that root
+        in three places is how it went unmasked in the first place.
         """
-        if self.module_data_dir is not None:
-            root = Path(self.module_data_dir).resolve()
-            mount = self.nextcloud_mount_path
-            if mount is not None and root.is_relative_to(Path(mount).resolve()):
-                raise ValueError(
-                    f"module_data_dir {root} is under nextcloud_mount_path "
-                    f"{mount}; per-module DBs must live on local disk (WAL -shm "
-                    "SIGBUSes on the FUSE mount — ISSUE-157)"
-                )
-        else:
-            root = Path(self.db_path).parent.resolve() / "modules"
-        return root / user_id / f"{module}.db"
+        if self.module_data_dir is None:
+            return Path(self.db_path).parent.resolve() / "modules"
+        root = Path(self.module_data_dir).resolve()
+        mount = self.nextcloud_mount_path
+        if mount is not None and root.is_relative_to(Path(mount).resolve()):
+            raise ValueError(
+                f"module_data_dir {root} is under nextcloud_mount_path "
+                f"{mount}; per-module DBs must live on local disk (WAL -shm "
+                "SIGBUSes on the FUSE mount — ISSUE-157)"
+            )
+        return root
+
+    def module_db_path(self, user_id: str, module: str) -> Path:
+        """Local-disk path for a user's per-module SQLite DB.
+
+        ``{module_db_root()}/{user_id}/{module}.db``. Module DBs live on local
+        disk (not the Nextcloud mount) so they can use WAL — WAL's mmap'd -shm
+        SIGBUSes on the rclone FUSE mount (ISSUE-157). The module loaders pass
+        the result as the ``db_path`` override into their workspace synth, so
+        the user-facing ``data_dir`` (health uploads, money ledgers, feeds
+        exports) stays on the mount while only the ``.db`` relocates.
+        """
+        return self.module_db_root() / user_id / f"{module}.db"
 
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
@@ -2368,15 +2383,28 @@ def load_config(config_path: Path | None = None) -> Config:
             allow_pypi=net_data.get("allow_pypi", True),
             extra_hosts=net_data.get("extra_hosts", []),
         )
+        if "sandbox_admin_db_write" in sec:
+            logger.warning(
+                "[security] sandbox_admin_db_write is no longer supported and is "
+                "being ignored. The framework database is not bound into the "
+                "sandbox at all any more (for admins or anyone else); writes go "
+                "through skill CLIs and deferred ops. Remove the key."
+            )
         config.security = SecurityConfig(
             sandbox_enabled=sec.get("sandbox_enabled", True),
-            sandbox_admin_db_write=sec.get("sandbox_admin_db_write", False),
             skill_proxy_enabled=sec.get("skill_proxy_enabled", True),
             skill_proxy_timeout=sec.get("skill_proxy_timeout", 300),
             network=network_config,
             **({
                 "passthrough_env_vars": sec["passthrough_env_vars"]
             } if "passthrough_env_vars" in sec else {}),
+            # Never parsed before this: the field existed and both
+            # config.example.toml and the Ansible template advertised it, but
+            # load_config dropped the key on the floor, so every deployment ran
+            # the hardcoded default and no operator could narrow it.
+            **({
+                "sandbox_ro_paths": sec["sandbox_ro_paths"]
+            } if "sandbox_ro_paths" in sec else {}),
         )
 
     config.admin_users = load_admin_users()

@@ -970,6 +970,32 @@ def derive_credential_set(skill_index: dict) -> frozenset[str]:
     )
 
 
+# Non-secret env vars the executor itself withholds from Claude, on top of the
+# manifest-declared ``proxy_only`` ones. ISTOTA_DB_PATH is in no skill.md — it
+# is set imperatively for every task — so it has no manifest to carry the flag.
+_EXECUTOR_PROXY_ONLY_VARS = frozenset({"ISTOTA_DB_PATH"})
+
+
+def derive_proxy_only_set(skill_index: dict) -> frozenset[str]:
+    """Env-var names to route through the proxy without treating as credentials.
+
+    The third bucket alongside credentials and the clean env: values the
+    host-side skill CLI needs but the model must not hold. Today that is the
+    database paths — ``ISTOTA_DB_PATH`` plus the ``proxy_only`` vars the health
+    and location manifests declare for their per-user module DBs.
+
+    Unlike ``derive_credential_set`` this is not per-skill-scoped. These aren't
+    secrets, so there is nothing to leak between skills, and scoping them would
+    mean re-deriving each skill's DB path in the proxy for no gain.
+    """
+    return frozenset(
+        spec.var
+        for meta in skill_index.values()
+        for spec in meta.env_specs
+        if spec.proxy_only and spec.var
+    ) | _EXECUTOR_PROXY_ONLY_VARS
+
+
 def derive_authorized_skills(
     selected_skills: list[str],
     skill_index: dict,
@@ -1123,11 +1149,18 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     """Resolve and bounds-check a REPL workspace directory (blocklist posture).
 
     An arbitrary RW bind expands the sandbox's writable surface, so reject paths
-    that overlap sensitive roots: other users' Nextcloud mounts, the istota
-    source tree, the credential/secret dirs, and $HOME dotfile config dirs
-    (~/.ssh, ~/.config, ~/.claude, ~/.developer). The bwrap-host
-    ``--workspace cwd`` case is the security-relevant one; Mac/Docker have no
-    bwrap and degrade to running in cwd directly.
+    that overlap sensitive roots: the database directories, other users'
+    Nextcloud mounts, the istota source tree, the credential/secret dirs, and
+    $HOME dotfile config dirs (~/.ssh, ~/.config, ~/.claude, ~/.developer). The
+    bwrap-host ``--workspace cwd`` case is the security-relevant one; Mac/Docker
+    have no bwrap and degrade to running in cwd directly.
+
+    The database entries matter because the workspace bind is applied *before*
+    build_bwrap_cmd's masks and is read-write: without them, pointing
+    ``istota repl --workspace`` at the data directory would hand back RW access
+    to exactly the files the masks exist to remove. In the default layout the
+    source-tree entry covers them incidentally; a relocated ``db_path`` or
+    ``module_data_dir`` is the case that needs naming.
 
     Raises ValueError when the path is forbidden. Returns the resolved path.
     """
@@ -1143,6 +1176,15 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     # Nextcloud mount root (other users' data live under here).
     if config.nextcloud_mount_path:
         forbidden.append(Path(config.nextcloud_mount_path).resolve())
+    # The framework DB directory and the per-user module-DB root.
+    if config.db_path:
+        forbidden.append(Path(config.db_path).parent.resolve())
+    try:
+        forbidden.append(config.module_db_root())
+    except ValueError:
+        # Misconfigured module_data_dir (under the mount). The mount root is
+        # already forbidden above, so the path is covered either way.
+        pass
     # Credential / secret dirs + $HOME dotfile config dirs.
     for rel in (".ssh", ".config", ".claude", ".developer", ".aws", ".gnupg"):
         forbidden.append(home / rel)
@@ -1361,23 +1403,6 @@ def build_bwrap_cmd(
             if channel_dir.exists():
                 _bind(channel_dir)
 
-    # --- DB access for admin ---
-    if is_admin:
-        db_path = config.db_path.resolve()
-        if db_path.exists():
-            if config.security.sandbox_admin_db_write:
-                _bind(db_path)
-            else:
-                _ro_bind(db_path)
-            # SQLite WAL/SHM files — use --*-bind-try because these are
-            # transient (disappear briefly after WAL checkpoint flushes).
-            for suffix in ["-wal", "-shm"]:
-                wal_path = str(db_path.parent / (db_path.name + suffix))
-                if config.security.sandbox_admin_db_write:
-                    args.extend(["--bind-try", wal_path, wal_path])
-                else:
-                    args.extend(["--ro-bind-try", wal_path, wal_path])
-
     # --- Huggingface model cache (RO) ---
     hf_cache = home / ".cache" / "huggingface"
     if hf_cache.exists():
@@ -1408,6 +1433,25 @@ def build_bwrap_cmd(
                 _bind(rpath)
             else:
                 _ro_bind(rpath)
+
+    # --- Database masks (must be the LAST mount operations) ---
+    # No SQLite file the daemon owns is readable from inside the sandbox, for
+    # admins or anyone else. Reads and writes go through skill CLIs, which the
+    # proxy runs host-side scoped by ISTOTA_USER_ID.
+    #
+    # These are masks rather than "just don't bind it" because not binding was
+    # never sufficient and the gap was invisible: `module_data_dir` defaults
+    # under `{db_path.parent}`, the reference deployment puts that under
+    # `istota_home`, and `sandbox_ro_paths` defaulted to the `/srv/app` that
+    # contains it — so one RO bind that mentions no database exposed the
+    # framework DB, its live -wal/-shm, every user's health/money/location/
+    # feeds DB, the local DB backups and the browser profile. An empty tmpfs
+    # over the directories holds regardless of what earlier binds did, because
+    # bwrap applies operations in argv order and these are last. Keep them last.
+    _tmpfs(config.db_path.parent)
+    module_root = config.module_db_root()
+    if not module_root.is_relative_to(config.db_path.parent.resolve()):
+        _tmpfs(module_root)
 
     # --- Lifecycle ---
     chdir_target = workspace_resolved or user_temp_dir.resolve()
@@ -1505,12 +1549,9 @@ def native_fs_roots(
         if task.conversation_token:
             _add(write, mount / "Channels" / task.conversation_token)
 
-    # Admin DB (RW or RO, matching sandbox_admin_db_write).
-    if is_admin:
-        if config.security.sandbox_admin_db_write:
-            _add(write, config.db_path)
-        else:
-            _add(read_only, config.db_path)
+    # No database root of any kind. The file tools are the native brain's
+    # stand-in for the bwrap binds, and bwrap no longer exposes the framework
+    # DB or the module DBs to anyone — see the mask block in build_bwrap_cmd.
 
     # Developer repos (RW, admin only).
     if is_admin and config.developer.enabled and config.developer.repos_dir:
@@ -3236,12 +3277,20 @@ def execute_task(
         # reads back (silent memory loss). Per-user filesystem isolation is
         # enforced by the bwrap bind (build_bwrap_cmd binds only the user's own
         # Users/<uid> dir, for admin and non-admin alike) and the CLIs self-scope
-        # by ISTOTA_USER_ID, so the real root is safe here. DB access stays
-        # admin-only; the prompt still shows non-admins their scoped path.
+        # by ISTOTA_USER_ID, so the real root is safe here; the prompt still
+        # shows non-admins their scoped path.
         env["NEXTCLOUD_MOUNT_PATH"] = (
             str(config.nextcloud_mount_path) if config.nextcloud_mount_path else ""
         )
-        if is_admin:
+        # Set for every user, admin or not, and then split out of Claude's env
+        # into the proxy's below. It used to be admin-gated, which was never a
+        # real boundary — the path is fixed and derivable from
+        # ISTOTA_CONFIG_PATH — while it *did* break every framework-DB skill CLI
+        # for non-admins (`tasks status`, `memory_search`, `kv` reads all
+        # self-scope by ISTOTA_USER_ID and returned an error instead of that
+        # user's own rows). The boundary is the SQL, plus the fact that the file
+        # is not in the sandbox at all.
+        if config.db_path:
             env["ISTOTA_DB_PATH"] = str(config.db_path)
 
         # Browser container credentials
@@ -3325,40 +3374,68 @@ def execute_task(
             # credential map and the lookup-endpoint allowlist.
             credential_set = derive_credential_set(skill_index)
             credential_env, env = _split_credential_env(env, credential_set)
-            if credential_env:
-                # Use /tmp for socket path to stay within AF_UNIX length limit (~104 chars).
-                # build_bwrap_cmd() bind-mounts this file into the sandbox.
-                # PID is included so concurrent processes (xdist test workers,
-                # parallel scheduler instances on the same host) don't race on
-                # the same path — task.id alone collides when each process has
-                # its own DB.
-                _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
-                env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
-                allowed_creds = derive_lookup_allowlist(
-                    authorized_skills, skill_index,
-                )
-                skill_cred_map = derive_skill_credential_map(
-                    authorized_skills, skill_index,
-                )
-                cli_skills = frozenset(
-                    name for name, meta in skill_index.items() if meta.cli
-                )
-                logger.info(
-                    "proxy_authorization task_id=%d selected=%d authorized=%d "
-                    "selected_skills=%s authorized_skills=%s",
-                    task.id, len(selected_skills), len(authorized_skills),
-                    ",".join(sorted(selected_skills)),
-                    ",".join(authorized_skills),
-                )
-                _proxy_ctx = SkillProxy(
-                    _proxy_sock, credential_env, env,
-                    timeout=config.security.skill_proxy_timeout,
-                    allowed_credentials=allowed_creds,
-                    skill_credential_map=skill_cred_map,
-                    allowed_skills=cli_skills,
-                    authorized_skills=frozenset(authorized_skills),
-                    task_id=task.id,
-                )
+            # Third bucket: non-secret values (database paths) that belong to
+            # the host-side CLI and not to the model.
+            proxy_only_env, env = _split_credential_env(
+                env, derive_proxy_only_set(skill_index),
+            )
+            # Started unconditionally. This used to be gated on
+            # ``if credential_env:``, so a task whose authorized skills declared
+            # no secret got no socket — and `istota-skill` then silently fell
+            # back to running the skill module *inside* the sandbox, which is
+            # the one place it must never run. On a Nextcloud deployment
+            # NC_PASS made the gate true nearly always, so the fallback was
+            # rare rather than absent; that is a property of the configuration,
+            # not an invariant.
+            #
+            # Use /tmp for the socket path to stay within the AF_UNIX length
+            # limit (~104 chars). build_bwrap_cmd() bind-mounts this file into
+            # the sandbox. PID is included so concurrent processes (xdist test
+            # workers, parallel scheduler instances on the same host) don't race
+            # on the same path — task.id alone collides when each process has
+            # its own DB.
+            _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
+            env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
+            allowed_creds = derive_lookup_allowlist(
+                authorized_skills, skill_index,
+            )
+            skill_cred_map = derive_skill_credential_map(
+                authorized_skills, skill_index,
+            )
+            cli_skills = frozenset(
+                name for name, meta in skill_index.items() if meta.cli
+            )
+            logger.info(
+                "proxy_authorization task_id=%d selected=%d authorized=%d "
+                "selected_skills=%s authorized_skills=%s",
+                task.id, len(selected_skills), len(authorized_skills),
+                ",".join(sorted(selected_skills)),
+                ",".join(authorized_skills),
+            )
+            # Snapshot, not the live dict: ``env`` picks up ISTOTA_SANDBOXED
+            # below, and the proxy runs skills on the host where that would be
+            # a lie. Everything else the CLIs rely on rides along — notably
+            # ISTOTA_DEFERRED_DIR, whose absence is what makes a deferring skill
+            # take its direct-write fallback instead.
+            proxy_base_env = {**env, **proxy_only_env}
+            _proxy_ctx = SkillProxy(
+                _proxy_sock, credential_env, proxy_base_env,
+                timeout=config.security.skill_proxy_timeout,
+                allowed_credentials=allowed_creds,
+                skill_credential_map=skill_cred_map,
+                allowed_skills=cli_skills,
+                authorized_skills=frozenset(authorized_skills),
+                task_id=task.id,
+            )
+
+        # Marks the env as one that will run under bwrap, so `istota-skill`
+        # refuses to execute a skill module in-process rather than silently
+        # doing it against databases that aren't there. Set after the proxy's
+        # base env is snapshotted, and only when the sandbox is really in
+        # effect — on macOS / a container without CAP_SYS_ADMIN,
+        # build_bwrap_cmd returns the command unwrapped.
+        if config.security.sandbox_enabled and _bwrap_available():
+            env["ISTOTA_SANDBOXED"] = "1"
 
         # Network isolation via CONNECT proxy: outbound traffic restricted
         # to an allowlist of host:port pairs via --unshare-net + proxy.
@@ -3745,6 +3822,7 @@ def execute_task(
                 else Path(config.temp_dir)
             ),
             env=env,
+            db_path=config.db_path,
             timeout_seconds=config.scheduler.task_timeout_minutes * 60,
             model=brain.resolve_model_name((task.model or "").strip() or config.model),
             effort=_resolve_effort(task, config),

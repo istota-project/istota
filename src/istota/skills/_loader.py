@@ -40,6 +40,7 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
             service=entry.get("service", ""),
             key=entry.get("key", ""),
             sensitive=bool(entry.get("sensitive", False)),
+            proxy_only=bool(entry.get("proxy_only", False)),
             fallback_var=entry.get("fallback_var", ""),
             gate_has_discovered_calendars=bool(
                 entry.get("gate_has_discovered_calendars", False)

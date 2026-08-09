@@ -590,17 +590,20 @@ class NativeBrain:
     def _catalog_cache_dir(req: BrainRequest) -> Path | None:
         """Local, writable dir for the OpenRouter cache = ``db_path.parent``.
 
-        Resolved from ``ISTOTA_DB_PATH`` in the per-task env (the executor sets
-        it to ``str(config.db_path)``). Absent (a direct brain call that built no
-        task env, e.g. some sleep-cycle paths) → ``None``: the in-memory
-        ``_FETCHED`` table + the process-global TTL guard still prevent refetch
-        storms, only the cross-process disk cache is skipped.
+        Taken from ``BrainRequest.db_path``, which the executor sets from
+        ``config.db_path``. It used to read ``ISTOTA_DB_PATH`` out of the task
+        env; that var no longer reaches the sandbox env at all (it is routed to
+        the skill proxy instead), and this is a daemon-side path anyway.
+
+        Absent (a direct brain call that built no task env, e.g. some
+        sleep-cycle paths) → ``None``: the in-memory ``_FETCHED`` table + the
+        process-global TTL guard still prevent refetch storms, only the
+        cross-process disk cache is skipped.
         """
-        db_path = (req.env or {}).get("ISTOTA_DB_PATH")
-        if not db_path:
+        if not req.db_path:
             return None
         try:
-            return Path(db_path).parent
+            return Path(req.db_path).parent
         except Exception:  # noqa: BLE001
             return None
 

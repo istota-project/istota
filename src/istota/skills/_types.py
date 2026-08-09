@@ -32,6 +32,15 @@ class EnvSpec:
     # / derive_skill_credential_map (Phase 3) to compute the proxy auth map
     # from manifests.
     sensitive: bool = False
+    # Withhold this var from Claude's subprocess and hand it to the skill proxy
+    # instead — same routing as ``sensitive``, but without the credential
+    # semantics (no auto-authorization, no ``credential-fetch`` lookup, no
+    # per-skill scoping). For non-secret values the model still must not have:
+    # today that means paths to SQLite files (HEALTH_DB_PATH, LOCATION_DB_PATH).
+    # Knowing the path is harmless on its own — the file is masked out of the
+    # sandbox — but a var that names a database belongs with the host-side CLI
+    # that opens it, not in the env of the thing we don't trust.
+    proxy_only: bool = False
     # Migration helper: read this os.environ var if primary resolution
     # fails. Honored on the value path only — derive_authorized_skills
     # passes ``fallbacks_disabled=True`` so an instance-wide

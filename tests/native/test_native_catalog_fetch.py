@@ -33,12 +33,15 @@ def _brain(**cfg) -> NativeBrain:
 
 
 def _req(tmp_path, *, db_path=True) -> BrainRequest:
-    env = {"ISTOTA_DB_PATH": str(tmp_path / "istota.db")} if db_path else {}
+    # The cache dir comes from BrainRequest.db_path, not from ISTOTA_DB_PATH in
+    # the task env — that var is routed to the skill proxy and never reaches
+    # the sandbox env the brain carries.
     return BrainRequest(
         prompt="hi",
         allowed_tools=[],
         cwd=tmp_path,
-        env=env,
+        env={},
+        db_path=(tmp_path / "istota.db") if db_path else None,
         timeout_seconds=30,
         model="anthropic/claude-opus-4.8",
     )

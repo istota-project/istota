@@ -84,6 +84,14 @@ class BrainRequest:
     fs_read_roots: list[Path] | None = None
     fs_write_roots: list[Path] | None = None
 
+    # The framework DB path, for brains that need a local writable dir of their
+    # own (NativeBrain's OpenRouter catalog cache uses its parent). Passed
+    # explicitly rather than read out of ``env``: ``env`` is the *sandbox*
+    # environment and no longer carries ISTOTA_DB_PATH — that goes to the skill
+    # proxy instead, since the model must not hold a path to a database.
+    # ``None`` for direct brain callers that build no task env.
+    db_path: Path | None = None
+
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None

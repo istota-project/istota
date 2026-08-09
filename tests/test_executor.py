@@ -1555,7 +1555,14 @@ class TestAdminEnvVarIsolation:
         return db.get_task(conn, task_id)
 
     @patch("istota.executor.subprocess.run")
-    def test_admin_gets_db_path_env(self, mock_run, tmp_path):
+    def test_admin_no_db_path_env(self, mock_run, tmp_path):
+        """Admins used to get ISTOTA_DB_PATH in Claude's env. Nobody does now.
+
+        It goes to the skill proxy instead — see
+        tests/test_sandbox_db_env.py::TestFrameworkDbPathRouting, which also
+        covers the non-admin half (the path reaches the proxy for every user,
+        which is what un-broke scoped reads for non-admins).
+        """
         config = self._make_config(tmp_path)
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -1566,7 +1573,7 @@ class TestAdminEnvVarIsolation:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_DB_PATH"] == str(config.db_path)
+        assert "ISTOTA_DB_PATH" not in env
 
     @patch("istota.executor.subprocess.run")
     def test_non_admin_no_db_path_env(self, mock_run, tmp_path):
@@ -4131,7 +4138,12 @@ class TestWorkspaceDirBwrap:
     """build_bwrap_cmd workspace_dir: RW bind + --chdir + blocklist validation."""
 
     def _cfg(self, tmp_path):
-        db_path = tmp_path / "test.db"
+        # The DB lives in its own subdirectory, as it does everywhere real
+        # (`{istota_home}/data/istota.db`). Putting it at tmp_path root would
+        # make every sibling fixture dir a child of the now-protected DB
+        # directory, which is a property of the fixture, not of the blocklist.
+        db_path = tmp_path / "data" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         _db.init_db(db_path)
         return Config(
             db_path=db_path,
@@ -4140,7 +4152,7 @@ class TestWorkspaceDirBwrap:
         )
 
     def _task(self, tmp_path):
-        with _db.get_db((tmp_path / "test.db")) as conn:
+        with _db.get_db((tmp_path / "data" / "test.db")) as conn:
             tid = _db.create_task(conn, prompt="x", user_id="alice", source_type="repl")
             return _db.get_task(conn, tid)
 
