@@ -133,6 +133,20 @@ describe('welcomeNotes', () => {
       expect(fact.length, fact).toBeLessThanOrEqual(90);
     }
   });
+
+  it('has tips short enough not to grow the card either', () => {
+    // Same budget, same row — a tip is drawn into the same line as a fact. The
+    // email tip is excluded because its length is the deployment's address, not
+    // ours to keep under a cap.
+    for (const tip of availableTips({ ...everything, email: null }, 'Istota')) {
+      expect(tip.length, tip).toBeLessThanOrEqual(90);
+    }
+  });
+
+  it('says each line only once', () => {
+    const notes = welcomeNotes(everything, 'Istota');
+    expect(new Set(notes).size).toBe(notes.length);
+  });
 });
 
 describe('noteSegments', () => {
