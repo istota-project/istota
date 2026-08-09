@@ -99,9 +99,9 @@ a heuristic, which is part of why gitleaks runs alongside it.
 suite uses — 16-hex conversation tokens, `key == "..."` comparisons. Add a
 *shape* or a *path* there, never a real secret, not even to allowlist it.
 
-`CHANGELOG.md` and `DEVLOG.md` are deliberately **not** allowlisted. Prose
-written up from a terminal session is exactly where a pasted credential or a
-production hostname ends up.
+`CHANGELOG.md` is deliberately **not** allowlisted. Prose written up from a
+terminal session is exactly where a pasted credential or a production hostname
+ends up.
 
 ## Tests
 

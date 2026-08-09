@@ -82,6 +82,8 @@ nav:
     - features/briefings.md
     - features/scheduling.md
     - features/heartbeat.md
+    - features/feeds.md
+    - features/money.md
     - features/location.md
     - features/health.md
     - features/nextcloud.md
@@ -91,8 +93,10 @@ nav:
     - configuration/overview.md
     - configuration/reference.md
     - configuration/per-user.md
+    - configuration/credentials.md
     - configuration/persona.md
     - configuration/native-brain.md
+    - EXPERIMENTAL.md
   - Deployment:
     - deployment/ansible.md
     - deployment/docker.md

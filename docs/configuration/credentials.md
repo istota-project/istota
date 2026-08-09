@@ -20,11 +20,15 @@ These belong to the Istota instance, not to any user. They live in `config.toml`
 | Google OAuth client secret | `[google_workspace]` | `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` | Google OAuth flow |
 | Web OAuth2 client secret | `[web]` | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | Nextcloud login flow |
 | Web session signing key | `[web]` | `ISTOTA_WEB_SESSION_SECRET_KEY` | Session cookies |
+| Native brain API key | `[brain.native]` | `ISTOTA_BRAIN_NATIVE_API_KEY` | The native brain's model provider |
 | `ISTOTA_SECRET_KEY` | env only | `ISTOTA_SECRET_KEY` | Fernet encryption for tier-2 secrets |
+| `ISTOTA_WEB_TOKEN_KEY` | env only | `ISTOTA_WEB_TOKEN_KEY` | Separate Fernet key for stored per-user Talk tokens (`web_user_tokens`) |
 
 CalDAV credentials are derived from the Nextcloud app password automatically — no separate config needed.
 
 `ISTOTA_SECRET_KEY` is the master encryption key for the `secrets` table and `google_oauth_tokens`. It must be at least 32 characters; the key is scrypt-derived into a Fernet key at runtime. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`.
+
+`ISTOTA_WEB_TOKEN_KEY` is a *separate* key, env-only, used by `web_tokens.py` for the per-user Nextcloud tokens the web UI stores when `[web] token_storage = "persistent"`. It derives with a different salt, so the two key custodies stay independent — the web tier holding user tokens does not imply access to everything in the secrets table.
 
 ### Provisioning global credentials
 
@@ -50,9 +54,13 @@ Available to all users regardless of which modules are enabled.
 |---|---|---|
 | Karakeep | `base_url`, `api_key` | `bookmarks` skill |
 | Google Workspace | (OAuth flow — tokens in `google_oauth_tokens` table) | `google_workspace` skill |
+| Garmin Connect | (interactive email/password → MFA; the stored blob is machine-managed) | `health` and `location` modules |
 | ntfy | `topic`, `server_url`\*, `username`\*, `password`\*, `token`\* | push notifications |
+| Native brain provider | `api_key` | The native brain — a per-user key overlaying the instance one |
 
 \* = optional
+
+Garmin is neither a writable-fields service nor a plain OAuth redirect, so the settings page renders a bespoke card for it; its auth routes live under `/istota/api/garmin/*` and are shared by both modules. The native-brain key is CLI-only — provision it with `istota secret ensure -s native_brain` — because a web knob that set only the key would be a per-user *billing* override dressed up as "bring your own brain".
 
 ### Module services
 
@@ -60,7 +68,7 @@ Gated by module enablement. Appear on per-module settings pages.
 
 | Module | Service | Keys | Consumed by |
 |---|---|---|---|
-| money | Monarch Money | `session_id`\*, `csrftoken`\* | `money` skill (transaction sync via cookie auth) |
+| money | Monarch Money | `session_id`, `csrftoken` | `money` skill (transaction sync via cookie auth) |
 | feeds | Tumblr | `tumblr_api_key`\* | `feeds` skill (Tumblr feed ingestion) |
 | location | Overland | `ingest_token` | `location` skill (GPS ingestion webhook) |
 
@@ -82,8 +90,9 @@ config.toml / env vars / encrypted secrets table
         │
         ▼
   _split_credential_env(env, derive_credential_set(skill_index))
+  _split_credential_env(env, derive_proxy_only_set(skill_index))   ← second pass: DB paths
         │                │
-        │                └──▶ Claude subprocess (clean_env — no secrets)
+        │                └──▶ Claude subprocess (clean_env — no secrets, no DB paths)
         ▼
   SkillProxy(credential_env, derive_skill_credential_map(...), derive_lookup_allowlist(...))
         │
@@ -94,12 +103,13 @@ config.toml / env vars / encrypted secrets table
   skill subprocess env
 ```
 
-The credential set, per-skill scope, and lookup allowlist are all **derived from skill manifests** by four pure helpers in `executor.py`:
+The credential set, per-skill scope, and lookup allowlist are all **derived from skill manifests** by five pure helpers in `executor.py`:
 
 | Helper | Returns |
 |---|---|
 | `derive_credential_set(skill_index)` | every env var declared with `sensitive: true` across all skills |
-| `derive_authorized_skills(selected, skill_index, ctx)` | selected skills ∪ skills whose sensitive `EnvSpec`s actually resolve under this task's context |
+| `derive_proxy_only_set(skill_index)` | `ISTOTA_DB_PATH` plus manifest `proxy_only: true` vars (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`). Not secrets — paths that route to the proxy so the model never holds them |
+| `derive_authorized_skills(selected, skill_index, ctx, hook_env=None)` | selected skills ∪ skills whose sensitive `EnvSpec`s actually resolve under this task's context. `hook_env` matters: without it a credential produced by a `setup_env` hook — the live `google_workspace` case — can never authorize its own skill |
 | `derive_skill_credential_map(authorized, skill_index)` | per-skill credential map (proxy uses this to scope injection) |
 | `derive_lookup_allowlist(authorized, skill_index)` | vars the proxy will respond to over `credential-fetch`, minus `_PROXY_LOOKUP_BLOCKED` |
 

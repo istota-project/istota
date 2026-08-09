@@ -6,11 +6,11 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Description |
 |---|---|
-| `files` | Nextcloud file operations (mount-aware, rclone fallback) |
+| `files` | File operations in your workspace |
 | `sensitive_actions` | Confirmation rules for destructive operations |
-| `memory` | Memory file reference (USER.md, CHANNEL.md, dated memories) |
+| `memory` | Persistent memory writes — USER.md (behavioral) and the knowledge graph (facts). CLI: append, add-heading, remove, replace, remove-heading, show, headings |
 | `scripts` | User's reusable Python scripts |
-| `memory_search` | Memory search CLI (search, index, reindex, stats, facts, timeline, add-fact, invalidate, delete-fact) |
+| `memory_search` | Memory search CLI (search, index, reindex, stats, facts, timeline, add-fact, invalidate, delete-fact, fact-history) |
 | `kv` | Key-value store for persistent runtime state |
 | `skills` | On-demand skill loader (`istota-skill skills show <name>` / `list`) — always eager so the model can pull menu skills |
 
@@ -18,7 +18,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `email` | email, mail, send, inbox, reply, message | yes -- send, output |
+| `email` | email, mail, send, inbox, reply, message | yes -- list, read, search, thread, attachments, from-senders, newsletters, send, reply, reply-all, mark, delete, output |
 | `nextcloud` | share, sharing, download link, nextcloud, permission, access, capabilities, quota | yes -- capabilities, user, group, share (incl. `share link`), files, talk, notify, activity. Gated on `requires_capability: [nextcloud]` |
 | `ntfy` | ntfy, push notification, notify me, notify my phone, mobile alert | yes -- send (one-way push to the user's ntfy device) |
 
@@ -26,12 +26,12 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `calendar` | calendar, event, meeting, schedule, appointment | yes -- list, create, update, delete |
+| `calendar` | calendar, event, meeting, schedule, appointment | yes -- list (alias `agenda`), create, update, delete |
 | `todos` | todo, task, checklist, reminder, done, complete | doc-only |
 | `reminders` | remind, reminder, alert me, notify me | doc-only |
 | `schedules` | schedule, recurring, cron, daily, weekly | doc-only |
-| `tasks` | subtask, queue, background, later | doc-only (admin-only) |
-| `bookmarks` | bookmark, karakeep, save, read later | yes -- search, list, add, tags, etc. |
+| `tasks` | subtask, queue, background, later | yes -- status, recent (admin-only; read your own task state, queue subtasks) |
+| `bookmarks` | bookmark, bookmarks, karakeep, saved, reading list, favourited, favorite | yes -- search, list, add, tags, etc. |
 
 ## Information
 
@@ -39,17 +39,17 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 |---|---|---|
 | `briefing` | (auto-selected for briefing source type) | doc-only -- output formatting for a generated briefing |
 | `briefings` | briefing, block, digest, briefing source | yes -- blocks list/add/set/reorder/remove, sources list/add/remove, archive list/show |
-| `briefings_config` | briefing config, briefing schedule | doc-only -- user-editable `BRIEFINGS.md` schedule |
+| `briefings_config` | briefing config, briefing schedule | doc-only -- user-editable briefing schedule in `{bot_dir}/config/` |
 | `markets` | market, stock, ticker, index, futures | yes -- quote, summary, finviz |
-| `feeds` | feed, rss, subscribe, unsubscribe, opml | yes -- list, categories, entries, add, remove, refresh, poll, run-scheduled, import-opml, export-opml, star, starred, mark-read |
-| `browse` | browse, website, scrape, screenshot, url | yes -- get, screenshot, extract, interact |
+| `feeds` | feed, rss, subscribe, unsubscribe, opml | yes -- list, categories, entries, add, remove, refresh, poll, run-scheduled, import-opml, export-opml |
+| `browse` | browse, website, scrape, screenshot, url | yes -- get, render, screenshot, extract, interact, links, close |
 
 ## Media
 
 | Skill | Keywords | CLI |
 |---|---|---|
 | `transcribe` | transcribe, ocr, screenshot, scan, image | yes -- OCR via Tesseract |
-| `whisper` | transcribe, whisper, audio, voice, speech | yes -- audio transcription via faster-whisper |
+| `whisper` | transcribe, whisper, audio, voice, speech | yes -- transcribe, models, download (faster-whisper, CPU int8) |
 | `notes` | note, save, write, markdown | doc-only (companion to transcribe) |
 
 ## Development
@@ -62,13 +62,13 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI | Notes |
 |---|---|---|---|
-| `money` | accounting, ledger, beancount, invoice, expense, money | yes -- in-process accounting (ledger, invoicing, transactions, work log) | Default-on module — no resource needed; opt out via the user's `disabled_modules`. Operations are also operator-reachable as `istota money <op>` |
+| `money` | accounting, ledger, beancount, invoice, expense, money | yes -- in-process accounting (ledger, invoicing, transactions, work log, investment portfolio) | Default-on module — no resource needed; opt out via the user's `disabled_modules`. Operations are also operator-reachable as `istota money <op>` |
 
 ## Google Workspace
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `google_workspace` | google drive, google docs, google sheets, google calendar, google chat, spreadsheet, gws | doc-only (uses `gws` CLI via Bash) |
+| `google_workspace` | google drive, google docs, google sheets, google calendar, google chat, spreadsheet, gws | yes -- a thin `istota-skill google_workspace …` entry point that execs the `gws` binary |
 
 Requires OAuth connection via the [web dashboard](../features/google-workspace.md). Token injected via `setup_env()` hook.
 
@@ -76,7 +76,7 @@ Requires OAuth connection via the [web dashboard](../features/google-workspace.m
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `location` | location, gps, where, place, tracking | yes -- current, history, places, learn, etc. |
+| `location` | location, gps, where, place, tracking | yes -- current (alias `last`), history, places, learn, update, delete, attendance, reverse-geocode, day-summary, discover, dismiss-cluster, list-dismissed, restore-dismissed, place-stats, import-garmin-tracks |
 
 ## Health
 
@@ -112,7 +112,7 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 |---|---|---|
 | `untrusted_input` | (none — never selected directly) | doc-only |
 
-`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
+`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on the ten ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`, `briefings`, `nextcloud`, `tasks`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
 
 ## Selection
 

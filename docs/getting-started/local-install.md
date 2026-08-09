@@ -31,7 +31,7 @@ The `local` extra is the lean footprint: the core agent, the web UI, and the lig
 uv tool install 'istota[local,money,location]'
 ```
 
-Heavier, genuinely optional extras (`memory-search`, `whisper`, `transcribe`, `health`, `garmin`) stay off unless you name them:
+Heavier, genuinely optional extras (`memory-search`, `whisper`, `transcribe`, `garmin`) stay off unless you name them:
 
 ```bash
 uv tool install 'istota[local,money,location,memory-search,whisper,transcribe]'
@@ -91,7 +91,7 @@ See the [CLI reference](../reference/cli.md) for the full `setup` / `serve` / `r
 istota update
 ```
 
-Pulls the latest code from the checkout `install.sh` recorded (under `~/.local/share/istota/src`), reinstalls, and runs any database migrations. When it finishes, restart `istota serve` to pick up the new code — a running process holds the old code in memory until then. Pass `--force` to update even if that checkout has uncommitted changes (it discards them with `git reset --hard`).
+Pulls the latest code from the checkout `install.sh` recorded in `~/.config/istota/install.json` (by default a clone under `~/.local/share/istota/src`), reinstalls, and runs any database migrations. When it finishes, restart `istota serve` to pick up the new code — a running process holds the old code in memory until then. Pass `--force` to update even if that checkout has uncommitted changes (it discards them with `git reset --hard`).
 
 By default `update` follows the **stable** channel — the latest tagged release. To ride the development branch instead (newer, less tested), run `istota update --channel main`; switch back with `istota update --channel stable`. The choice is remembered, so you set it once. (An install made before this option existed keeps tracking `main` until you pick a channel.)
 

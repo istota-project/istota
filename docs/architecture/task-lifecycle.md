@@ -35,13 +35,20 @@ All sources call `db.create_task()`, which inserts a row with `status='pending'`
 
 1. Fail tasks locked > 30 min that are too old to retry
 2. Release recent stale locks back to `pending`
-3. Same for stuck `running` tasks — "stuck" is decided by worker liveness, not a flat runtime (ISSUE-112): a `running` task is reclaimable once its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 10), or, if it never heartbeated, once `started_at` exceeds `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds`, so a slow-but-alive worker (e.g. the in-process native brain) is never reclaimed
+3. Fail stuck `running` tasks that are too old to retry
+4. Release recent stuck `running` tasks back to `pending`. "Stuck" is decided by worker liveness, not a flat runtime (ISSUE-112): a `running` task is reclaimable once its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 10), or, if it never heartbeated, once `started_at` exceeds `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds`, so a slow-but-alive worker (e.g. the in-process native brain) is never reclaimed
 
 Tasks are ordered by `priority DESC, created_at ASC`. Workers filter by `user_id` and `queue` type.
 
 ## Execution
 
 After claiming, the worker immediately updates status to `running` and closes the DB connection. Everything from here until result processing happens outside any DB transaction to avoid long locks.
+
+`process_one_task` forks three ways: a `task.skill` goes to `_execute_skill_task()`, a `task.command` to `_execute_command_task()`, and everything else to the brain.
+
+### Skill tasks
+
+If the task names a `skill`, it runs via `_execute_skill_task()` — a direct subprocess invocation of that skill's CLI, with the same manifest-derived env the prompt path would have resolved. No skill selection, no prompt assembly, no model call.
 
 ### Command tasks
 
@@ -57,7 +64,7 @@ For all other tasks, `execute_task()` handles the full pipeline:
 4. **Context loading** (Talk message cache or email thread)
 5. **Memory loading** (USER.md, CHANNEL.md, dated memories, recalled memories)
 6. **Prompt assembly** (see [executor docs](executor.md) for section order)
-7. **Brain execution** — the executor builds a `BrainRequest` and calls `brain.execute(req)`. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. `NativeBrain` runs an in-process agent loop over HTTP against any OpenAI-compatible model; `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (not HTTP). See [brain](brain.md).
+7. **Brain execution** — the executor picks the brain with `resolve_brain_kind(task.source_type, config.brain)`, so a deployment can route (say) briefings to a cheaper brain than Talk, builds a `BrainRequest`, and calls `brain.execute(req)`. If the primary brain is unavailable, the fallback brain reruns the same request. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. `NativeBrain` runs an in-process agent loop over HTTP against any OpenAI-compatible model; `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (not HTTP). See [brain](brain.md).
 8. **Result composition** (still in executor) — `_compose_full_result(text, trace)` handles context-management boundaries and terse-result recovery; both brains produce the same `(result_text, execution_trace)` shape.
 
 The executor returns `(success, result_text, actions_taken_json, execution_trace_json)`.
@@ -96,7 +103,7 @@ Back in the scheduler, `process_one_task()` handles the result inside a DB trans
 
 After the DB transaction closes:
 
-1. **Deferred operations**: process JSON files from the sandbox temp dir (subtasks, transaction tracking, sent emails, KV ops, KG ops, health ops, user alerts, email output)
+1. **Deferred operations**: process JSON files from the sandbox temp dir — nine handlers (subtasks, transaction tracking, sent emails, KV ops, KG ops, health ops, Garmin import, user alerts, email output)
 2. **Briefing digest**: save for next-run deduplication
 3. **Talk progress finalize**: edit ack message with final summary
 4. **Log channel finalize**: edit/post completion message with skills and tool summary
@@ -134,6 +141,6 @@ The `get_task()` function uses an explicit column list in its SELECT, not `SELEC
 
 The scheduler opens and closes DB connections for each phase (claim, execute, result processing, finalize). This is intentional — long-held connections would block other workers via SQLite's write lock. Each `with db.get_db()` block is a separate transaction.
 
-### Command tasks skip the executor
+### Skill and command tasks skip the executor
 
-Shell command tasks (`task.command` is set) bypass `execute_task()` entirely. They have no skill selection, no prompt, no streaming. Their log channel entries will never show skills.
+Shell command tasks (`task.command` is set) and skill tasks (`task.skill` is set) bypass `execute_task()` entirely. They have no skill selection, no prompt, no streaming. Their log channel entries will never show skills.

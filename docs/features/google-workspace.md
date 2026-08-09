@@ -34,7 +34,7 @@ client_id = "123456789-abc.apps.googleusercontent.com"
 client_secret = ""    # or ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET env var
 ```
 
-The default scopes request read-only access to Drive, Gmail, and Calendar; add Sheets/Docs or write scopes explicitly via the `scopes` list:
+The default scopes request read-only access to Drive, Gmail, Calendar, Sheets, and Docs. Add write scopes explicitly via the `scopes` list:
 
 ```toml
 [google_workspace]
@@ -83,6 +83,7 @@ The bot invokes `istota-skill google_workspace <args>` (the skill wrapper); the 
 | `istota_google_workspace_enabled` | `false` | Enable the Google Workspace skill |
 | `istota_google_workspace_client_id` | `""` | OAuth client ID |
 | `istota_google_workspace_client_secret` | `""` | OAuth client secret (goes to secrets.env) |
+| `istota_google_workspace_scopes` | (the five read-only scopes) | Override the requested OAuth scopes |
 
 ## Security
 

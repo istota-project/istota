@@ -9,6 +9,7 @@
 
 | Service | Purpose |
 |---|---|
+| `init-shared` | One-shot: creates and chowns the shared-files volume before the rest start |
 | `postgres` | Nextcloud database |
 | `redis` | Nextcloud session cache |
 | `nextcloud` | Fresh Nextcloud instance with auto-provisioning |
@@ -17,6 +18,7 @@
 | `nginx` | Reverse proxy (single entry port) |
 | `browser` (profile) | Chrome + VNC container for web browsing |
 | `webhooks` (profile) | GPS webhook receiver |
+| `devbox` (profile) | Per-user development container for the developer skill |
 
 ## Configuration
 
@@ -41,7 +43,8 @@ docker compose restart istota
 ```bash
 docker compose --profile browser up -d              # Web browsing
 docker compose --profile location up -d             # GPS tracking
-docker compose --profile browser --profile location up -d  # Both
+docker compose --profile devbox up -d               # Developer skill container
+docker compose --profile browser --profile location up -d  # Combine as needed
 ```
 
 The browser container requires x86-64 (Chrome has no ARM packages).
@@ -50,10 +53,14 @@ The browser container requires x86-64 (Chrome has no ARM packages).
 
 | Volume | Purpose |
 |---|---|
+| `istota_data` | Istota's `/data` — config, databases, workspace. **This is the one to back up.** |
 | `nextcloud_data` | Nextcloud user data |
+| `nextcloud_html` | Nextcloud application code and installed apps |
 | `shared_files` | Shared between Nextcloud and Istota (RW both) |
 | `postgres_data` | PostgreSQL data |
 | `redis_data` | Redis data |
+| `browser_profile` | Chrome profile for the browser container (logged-in sessions) |
+| `devbox_home` | Home directory for the devbox container |
 
 Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Talk attachment fallback.
 

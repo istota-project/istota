@@ -43,14 +43,17 @@ Channel-specific formatting rules in `config/guidelines/`:
 - **`talk.md`**: Brief, conversational, minimal formatting, ~500 word limit
 - **`email.md`**: Plain text or HTML, email etiquette, ALL CAPS section headers
 - **`briefing.md`**: Concise, scannable, time-sensitive info prioritized
+- **`web.md`**: Web chat formatting, including how a file is handed to the user
 
-Loaded based on the task's `source_type`. Applied after the request section in the prompt.
+Loaded by `source_type` — the loader reads `{source_type}.md` generically, so adding a file is all it takes to cover a new surface. Applied after the request section in the prompt. Guidelines substitute a third placeholder beyond the two above, `{user_id}`, which `web.md` needs for its file-handover link.
 
 ## Custom system prompt
 
-When `custom_system_prompt = true`, `config/system-prompt.md` replaces Claude Code's default system prompt with a minimal one (~2,600 tokens) focused on tool usage and working practices. This eliminates identity conflicts with persona/emissaries and removes irrelevant interactive/git/IDE instructions.
+When `custom_system_prompt = true`, `config/system-prompt.md` replaces Claude Code's default system prompt with a minimal one (~1,200 words) focused on tool usage and working practices. This eliminates identity conflicts with persona/emissaries and removes irrelevant interactive/git/IDE instructions.
 
 Disabled by default. Toggle via config.
+
+Unlike the files above, this one is passed to Claude Code as a *path* and read by the CLI itself, from inside the sandbox — so it is bind-mounted read-only where it sits. Nothing else in the config directory is: emissaries, persona and the guidelines are read by the daemon and become prompt text, and `config.toml` is deliberately left outside. Keep `system-prompt.md` where `skills_dir`'s parent puts it, and out of the database directory (which the sandbox blanks out last of all).
 
 ## Technical vs user-facing identity
 

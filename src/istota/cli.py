@@ -1517,7 +1517,7 @@ def main():
     resource_parser.add_argument("-t", "--type", choices=["folder"], help="Resource type (folder only — other types were retired by the Resources sunset)")
     resource_parser.add_argument("-p", "--path", help="Resource path (required for folder)")
     resource_parser.add_argument("-n", "--name", help="Display name")
-    resource_parser.add_argument("--permissions", help="Permissions (read, write)")
+    resource_parser.add_argument("--permissions", help="Permissions: read (default) or readwrite")
     resource_parser.add_argument(
         "--extras", action="append",
         help="Extra resource-specific config as key=value (repeatable). "

@@ -10,26 +10,28 @@ Istota provides three console scripts: `istota` (main CLI), `istota-scheduler` (
 istota task "prompt" -u USER -x              # Execute a task
 istota task "prompt" -u USER -x --dry-run    # Show prompt without running
 istota task "prompt" -u USER -t ROOM -x      # With conversation context
+istota task "prompt" -u USER -x --source-type talk   # Fake a source type
+istota task "prompt" -u USER -x --no-context         # Skip conversation context
 ```
 
 ### Task management
 
 ```bash
-istota list [-s STATUS] [-u USER]            # List tasks
+istota list [-s STATUS] [-u USER] [-n N]     # List tasks (default limit 20)
 istota show <task-id>                        # Task details
-istota run [--once] [--briefings]            # Process pending tasks
+istota run [--once] [--briefings] [--dry-run]  # Process pending tasks
 ```
 
 ### User management
 
 ```bash
 istota user list                             # List configured users
-istota user lookup EMAIL                     # Find user by email
+istota user lookup --email ADDR               # Find user by email
 istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
 istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
-istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread] [--default-briefings | --no-default-briefings]
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread] [--default-briefings | --no-default-briefings] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
 ```
 
 `istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
@@ -37,6 +39,8 @@ istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR 
 `--default-briefings` / `--no-default-briefings` controls whether the shared `[[default_briefings]]` set is seeded into this user (on by default). Seeding is one-time per briefing name, so a later opt-in never clobbers briefings the user has edited.
 
 `--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
+
+`--quiet-sender` is the counterpart to `--trusted-sender`: mail matching the pattern is filed without creating a task. `--briefing-email-html` selects HTML rather than plain-text briefing email. `--timezone-follow-location` opts into having the stored timezone updated when the location module sees you settle in a new one (off by default; see [location](../features/location.md)).
 
 ### Resources
 
@@ -134,7 +138,7 @@ istota tasks-file status [-u USER]           # Show file task status
 
 ### Key-value store
 
-Every `kv` subcommand takes a required `NAMESPACE` positional and a required `-u`/`--user`:
+Every `kv` subcommand takes a required `-u`/`--user`; the ones that address a single namespace also take it as a positional:
 
 ```bash
 istota kv get NAMESPACE KEY -u USER          # Get value
@@ -142,7 +146,10 @@ istota kv set NAMESPACE KEY VALUE -u USER    # Set value (JSON)
 istota kv list NAMESPACE -u USER             # List entries in a namespace
 istota kv delete NAMESPACE KEY -u USER       # Delete key
 istota kv namespaces -u USER                 # List namespaces
+istota kv shared-status -u USER              # Report whether this user may write shared KV
 ```
+
+Add `--shared` to `get`/`set`/`list`/`delete`/`namespaces` to operate on the cross-user `shared_kv` store instead of the user's own. Reads are open to everyone; writes are admin-only and fail closed, which is what `shared-status` reports on. See [shared curated content](../features/briefings.md#shared-curated-content).
 
 The skill proxy client also exposes set operations for membership-tracking patterns (seen IDs, processed hashes). These operate on a JSON-array value and avoid round-tripping large blobs:
 
@@ -153,6 +160,14 @@ istota-skill kv set-members  <ns> <key> [--limit N] [--offset N]  # Paginated sl
 istota-skill kv set-add      <ns> <key> <member> [<member>...]    # Add members (deferred)
 istota-skill kv set-remove   <ns> <key> <member> [<member>...]    # Remove members (deferred)
 ```
+
+### Web chat maintenance
+
+```bash
+istota chat backfill-history [-t TOKEN]      # Recover dormant rooms' transcripts from the Talk message cache
+```
+
+Without `-t`, it walks every Talk-origin room. Use it after binding existing Talk rooms into web chat, so their history is visible on the web surface rather than starting from the next message.
 
 ### Nextcloud
 
@@ -181,11 +196,21 @@ istota money balances -u USER                 # account balances
 istota money query -u USER "<bql>"            # run a BQL query
 istota money report -u USER                   # financial report
 istota money add-transaction -u USER ...      # append a transaction
+istota money edit-transaction -u USER ...     # edit a transaction in place by id
+istota money backfill-ids -u USER             # backfill stable transaction ids
 istota money import-csv -u USER ...           # import transactions from CSV
 istota money sync-monarch -u USER             # sync from Monarch Money
+istota money debug-monarch -u USER            # health-check Monarch credentials
+istota money run-scheduled -u USER            # periodic sync + invoice scheduler
+istota money users                            # users visible to the money CLI
 istota money invoice -u USER <generate|list|paid|create|void> ...
 istota money work -u USER <list|add|update|remove> ...
+istota money portfolio -u USER <import|snapshots|summary|history|diff|accounts|classify> ...
+istota money lots -u USER                     # tax lots (experimental: money_tax)
+istota money wash-sales -u USER               # wash sales (experimental: money_wash_sales)
 ```
+
+`lots` and `wash-sales` are behind operator feature flags — see [experimental features](../EXPERIMENTAL.md).
 
 Config-management subcommands manage the per-user money DB config:
 
@@ -195,7 +220,7 @@ istota money client  <add|update|remove|list> ...
 istota money company <add|update|remove|list> ...
 istota money service <add|update|remove|list> ...
 istota money tax     <set|rates|schedule|pattern> ...
-istota money monarch <profile|account-map> ...
+istota money monarch <profile|account-map|category-map|tag-filter> ...
 ```
 
 `tax set` takes `--state CA` (or `--state ""` for no state tax) alongside the
@@ -242,11 +267,14 @@ A streamed, full-stack terminal assistant. Each line becomes a `source_type="rep
 istota setup [--yes] [--workspace DIR] [--brain claude_code|native] \
     [--native-base-url URL] [--native-model ID] [--native-api-key KEY] \
     [--user ID] [--display-name NAME] [--timezone TZ] [--port N] \
-    [--email] [--location] [--force]        # Interactive first-run installer
+    [--email] [--location] [--no-money] [--force]   # Interactive first-run installer
 istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
+istota update [--force] [--channel stable|main]           # Self-update the standalone install
 ```
 
-`istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). See [Local install](../getting-started/local-install.md) for the full walkthrough.
+`istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`).
+
+`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on a server-shape deployment, which is updated through Ansible instead. See [Local install](../getting-started/local-install.md) for the full walkthrough.
 
 ### Database
 
@@ -258,9 +286,11 @@ istota init                                  # Initialize database
 
 ```bash
 istota-scheduler                             # Start daemon
+istota-scheduler -c PATH                     # Explicit config file
 istota-scheduler -d                          # Debug mode
 istota-scheduler -v                          # Verbose logging
 istota-scheduler --max-tasks N               # Limit tasks per run
+istota-scheduler --dry-run                   # Walk the loop without executing
 ```
 
 ## istota-skill

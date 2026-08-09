@@ -30,6 +30,8 @@ The executor is the only consumer of memory data at task time. During prompt ass
 4. **Dated memories** — `read_dated_memories()` reads the last `auto_load_dated_days` files from `memories/YYYY-MM-DD.md`. Skipped for briefings.
 5. **Recalled memories** — `_recall_memories()` runs a hybrid search using the task prompt as the query, keyed on the user's namespace plus `channel:{token}` when applicable. Off by default (`auto_recall = false`). Two ISSUE-109 scope levers shape the results: **recency decay** down-weights each hit by age with a half-life of `recency_half_life_days` (default 180; 0 disables) so dense old clusters don't outrank current context on sheer mass, and **episode windows** suppress any chunk whose `valid_until` has passed so time-boxed memories age out cleanly.
 
+6. **Learned playbooks** — `_recall_playbooks()` queries only `source_type="playbook"` chunks and emits a `## Learned Playbooks` section. Gated on `playbooks.enabled` (off by default) and skipped for automated / `skip_memory` tasks.
+
 If the resulting memory section exceeds `max_memory_chars`, `_apply_memory_cap()` truncates in this order: recalled → knowledge facts → dated → playbooks. Playbooks are truncated last (most protected — an actionable procedure outranks recalled snippets and dated context). User and channel memory are always preserved.
 
 The read path is pure I/O and FTS5 lookups — there is no LLM call in the executor's memory layer.
@@ -57,7 +59,7 @@ Two filters apply before indexing:
 
 ### Nightly extraction (sleep cycle)
 
-`check_sleep_cycles()` and `check_channel_sleep_cycles()` run from the scheduler's main loop on `briefing_check_interval` (default 60 s). Each evaluates a per-user (or per-channel) cron expression and calls into `memory/sleep_cycle.py` when due.
+`check_sleep_cycles()` and `check_channel_sleep_cycles()` are polled on `briefing_check_interval` (default 60 s), but run **off** the loop thread — `_spawn_background_check("sleep-cycles", …, overlap_expected=True)` puts `_run_sleep_cycles` on its own daemon thread, because extraction makes synchronous per-user LLM calls and can take minutes. The interval is only the poll cadence; each check's own cron decides whether there is work, and the in-flight guard rather than the clock is what stops it re-firing. Each evaluates a per-user (or per-channel) cron expression and calls into `memory/sleep_cycle.py` when due.
 
 `process_user_sleep_cycle()`:
 
@@ -65,14 +67,19 @@ Two filters apply before indexing:
 2. `gather_day_data()` partitions completed tasks since the last run into INTERACTIVE (`talk`, `email`, `cli`) and AUTOMATED (`cron`, `briefing`, `subtask`) sections. Interactive tasks get 80% of a 50,000-char budget; each task gets an equal share of the section budget (`interactive_budget // len(interactive)`, min-floored) with tail-biased truncation (40% head + 60% tail).
 3. `build_memory_extraction_prompt()` includes the day data, the current USER.md (so Sonnet skips already-known facts), and a list of suggested predicates with usage hints.
 4. Runs a privileged text-only model call through the **configured brain** (`make_brain(config.brain).execute(BrainRequest(...))`) — no streaming, no sandbox, no task queue. The sleep cycle is privileged orchestration: it goes through the brain abstraction (so a `native` deployment extracts with its own provider) but skips the isolation pipeline user-initiated tasks run through. Per-feature model overrides come from `[sleep_cycle]` (`extraction_model`, `curation_model`).
-5. `_parse_structured_extraction()` extracts `MEMORIES:` (bullets), `FACTS:` (JSON triples), and `TOPICS:` (JSON map). Missing or malformed sections degrade gracefully.
+5. `_parse_structured_extraction()` extracts `MEMORIES:` (bullets), `FACTS:` (JSON triples), `TOPICS:` (JSON map), and `PLAYBOOKS:` (distilled procedures). Missing or malformed sections degrade gracefully.
 6. Writes `memories/YYYY-MM-DD.md` with the bullets only.
 7. Inserts each fact via `add_fact()` (fuzzy-deduped, single-valued predicates auto-supersede).
 8. Picks the dominant topic from the TOPICS map and indexes the dated file with that topic via `index_file(..., source_type="memory_file", topic=...)`.
-9. Advances `sleep_cycle_state.last_processed_task_id`.
-10. Calls `cleanup_old_memory_files()` (file pruning by date in filename).
-11. Calls `cleanup_old_chunks()` (chunk pruning, see [Retention](#retention)).
-12. If `curate_user_memory` is on, calls `curate_user_memory()`.
+9. Writes and indexes the learned playbooks (Part B) under `source_type="playbook"`.
+10. Advances `sleep_cycle_state.last_processed_task_id`.
+11. Calls `cleanup_old_memory_files()` (file pruning by date in filename).
+12. Calls `cleanup_old_chunks()` (chunk pruning, see [Retention](#retention)).
+13. Calls `cleanup_old_playbooks()` — age measured from last *use*, not creation, and passed the open connection so the pruned playbook's chunks go with it.
+14. Prunes `knowledge_facts_audit` on its own retention knob, independent of `memory_retention_days`.
+15. If `curate_user_memory` is on, calls `curate_user_memory()`.
+
+The whole pass is skipped when the primary brain is degraded. It calls the brain directly and consults the shared availability breaker (`brain/_fallback.primary_brain_unavailable`), so a `usage_limit` or `not_found` state means no extraction that night rather than a run that burns the quota reporting failures. This is the dominant real-world failure mode.
 
 `process_channel_sleep_cycle()` is the same shape, keyed on `conversation_token`, runs in UTC, attributes each task by `user_id`, focuses on shared context, and indexes under namespace `channel:{token}` with `source_type = "channel_memory"`.
 
@@ -101,7 +108,7 @@ curate_user_memory(config, user_id, conn)
 
 The skip-write decision is outcome-based, not text-based: if every applied op was a no-op (`noop_dup` or `noop_no_match`), the file is left alone. Comparing serialized output against the file's current text would trigger a spurious rewrite whenever USER.md had harmless drift (CRLF, trailing whitespace on headings, missing trailing newline) that the round-trip normalized away.
 
-Detailed semantics — op shapes, validation rules, reject reasons, audit format — live in [Memory § Op-based USER.md curation](../features/memory.md#op-based-userd-curation).
+Detailed semantics — op shapes, validation rules, reject reasons, audit format — live in [Memory § Op-based USER.md curation](../features/memory.md#op-based-usermd-curation).
 
 ## Retention
 
@@ -109,6 +116,9 @@ Detailed semantics — op shapes, validation rules, reject reasons, audit format
 
 1. `cleanup_old_memory_files(config, user_id, retention_days)` — deletes dated files in `memories/` whose date prefix is older than the cutoff.
 2. `cleanup_old_chunks(conn, user_id, retention_days)` — deletes `memory_chunks` rows where `source_type ∈ ("conversation", "memory_file", "channel_memory")` and `created_at` is older than the cutoff. Vec rows cascade row-by-row (the vec table has no trigger; the FTS5 trigger handles `memory_chunks_fts` automatically). Durable `user_memory` chunks are never pruned by age — they refresh on file edit and after curation re-indexes.
+
+3. `cleanup_old_playbooks(...)` — prunes playbooks on `[playbooks] retention_days` (90), measuring age from last *use* rather than creation, so a procedure that keeps proving useful survives. It takes the open connection, so the playbook's `memory_chunks` rows go with it.
+4. Knowledge-graph audit pruning — `knowledge_facts_audit` ages out on its own knob, independent of `memory_retention_days`.
 
 The channel sleep cycle does the same chunk sweep scoped to `channel_memory` only, gated by `[channel_sleep_cycle] memory_retention_days`.
 
@@ -122,6 +132,7 @@ Files written to the user's Nextcloud workspace:
 /Users/{user_id}/{bot_dir}/config/USER.md           # durable, hand- or curation-edited
 /Users/{user_id}/{bot_dir}/config/USER.md.audit.jsonl  # curation audit log (sidecar)
 /Users/{user_id}/memories/YYYY-MM-DD.md              # dated memory files
+/Users/{user_id}/{bot_dir}/playbooks/                 # distilled procedures (source_type="playbook")
 
 /Channels/{conversation_token}/CHANNEL.md            # durable, hand-edited
 /Channels/{conversation_token}/memories/YYYY-MM-DD.md
@@ -146,6 +157,8 @@ SQLite tables (`schema.sql`):
 | `memory_file` | `index_file()` for dated `memories/YYYY-MM-DD.md` | Ephemeral — pruned by retention |
 | `user_memory` | `index_file()` for USER.md (after curation or `reindex_all`) | Durable — never pruned by age |
 | `channel_memory` | `index_file()` for dated channel memory files | Ephemeral — pruned by retention |
+| `channel_memory_durable` | `index_file()` for CHANNEL.md itself | Durable — never pruned by age |
+| `playbook` | Sleep-cycle playbook distillation | Pruned by `playbooks.retention_days`, aged from last use |
 
 ## Knowledge graph integration
 
@@ -177,17 +190,22 @@ The graph stores temporal validity in dedicated columns rather than baking dates
 The `memory_search` skill exposes the index and the knowledge graph:
 
 ```
-istota-skill memory_search search QUERY [--topic ...] [--entity ...] [--since YYYY-MM-DD]
+istota-skill memory_search search QUERY [--topic ...] [--entity ...] [--since YYYY-MM-DD] [--limit N] [--source-type T]
 istota-skill memory_search index conversation TASK_ID
 istota-skill memory_search index file PATH
 istota-skill memory_search reindex
 istota-skill memory_search stats
-istota-skill memory_search facts [--entity ...]
+istota-skill memory_search facts [--subject ...] [--predicate ...] [--as-of YYYY-MM-DD]
 istota-skill memory_search timeline ENTITY
+istota-skill memory_search fact-history [--entity ...] [--since ...] [--limit N]
 istota-skill memory_search add-fact …
 istota-skill memory_search invalidate ID
 istota-skill memory_search delete-fact ID
 ```
+
+`index file` is scoped: it will only read paths inside your own workspace, the channel directory the task is running in, and the task's scratch directory. Anything indexed can be read back out through `search`, so an unscoped read would have been a way to reach files a task is not meant to see.
+
+Runtime memory *writes* go through a separate skill — `istota-skill memory append|add-heading|remove|replace|remove-heading|show|headings` — which takes a file lock and writes an audit record. Never append to `USER.md` with shell redirection.
 
 ## Related pages
 

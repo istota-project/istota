@@ -36,7 +36,6 @@ Use `{BOT_NAME}`, `{BOT_DIR}`, and `{user_id}` placeholders -- they're substitut
 
 | Field | Type | Purpose |
 |---|---|---|
-| `name` | string | Skill identifier, matches directory name |
 | `triggers` | list | Documentation-only keywords surfaced by `!skills`; not a selector |
 | `description` | string | Shown in the menu catalogue and `!skills` |
 | `always_include` | bool | Load for every task |
@@ -47,11 +46,15 @@ Use `{BOT_NAME}`, `{BOT_DIR}`, and `{user_id}` placeholders -- they're substitut
 | `companion_skills` | list | Pull in these skills when this one is selected |
 | `exclude_skills` | list | Remove these skills when this one is selected |
 | `dependencies` | list | Python packages required (skip skill if missing) |
+| `requires_capability` | list | Gate the skill on a runtime capability (`browser`, `devbox`) being configured |
+| `experimental` | bool | Hide unless the operator enables the `skill_<name>` feature flag |
 | `exclude_memory` | bool | Skip memory loading for tasks using this skill |
 | `exclude_persona` | bool | Skip persona loading |
 | `env` | JSON array | Declarative env var specs (see env var sources below) |
 
 Boolean fields default to `false`. List fields default to `[]`. Only include fields that differ from defaults.
+
+There is no `name` field. The directory name *is* the skill's identity — `_loader.py` takes `name=skill_dir.name` and never reads a `name:` key, so writing one has no effect and renaming a skill means renaming its directory.
 
 ## 3. (Optional) Create a CLI module
 

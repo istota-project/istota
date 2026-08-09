@@ -13,6 +13,9 @@ brain/
 ├── _events.py      # StreamEvent types + Claude Code stream-json parser
 ├── _aliases.py     # CANONICAL_ROLES, EFFORT_LEVELS, split_effort, is_portable_alias
 ├── _roles.py       # Global operator alias-override state (provider-agnostic)
+├── _fallback.py    # Shared availability breaker: trigger/cooldown state consulted
+│                   # by the fallback rerun and by the sleep cycle
+├── _postures.py    # Per-role prompt postures
 ├── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess +
 │                   # owns the Anthropic model namespace (canonical IDs,
 │                   # DEFAULT_ALIASES, resolver methods)
@@ -78,6 +81,10 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `on_pid` | Called once with subprocess PID immediately after spawn |
 | `sandbox_wrap` | Closure that wraps the brain's raw cmd (e.g. with bubblewrap); brain stays sandbox-agnostic |
 | `result_file` | claude_code-specific fallback file path |
+| `advisor` | Advisor-model config: a stronger model the cheap default can consult at moments the advisor tool picks. Anthropic-namespace brains only; skipped when the task pins its own model |
+| `fs_read_roots` / `fs_write_roots` | Filesystem roots the in-process tools may read from and write to (NativeBrain — it has no bwrap wrapper of its own) |
+| `db_path` | Handed to the brain rather than to the model: `env` no longer carries `ISTOTA_DB_PATH` |
+| `session_label` | Label for the session transcript, so a run is identifiable in the logs |
 
 ## BrainResult
 

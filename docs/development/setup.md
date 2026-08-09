@@ -17,7 +17,7 @@ uv sync --extra all
 This installs all optional dependencies. To install only specific feature groups:
 
 ```bash
-uv sync                          # Core only (httpx, croniter, tomli)
+uv sync                          # Core only (see "Dependencies" below)
 uv sync --extra calendar         # caldav + icalendar
 uv sync --extra email            # imap-tools
 uv sync --extra markets          # yfinance
@@ -74,17 +74,26 @@ uv run istota-scheduler
 ```bash
 uv run istota task "prompt" -u USER -x [--dry-run]  # Execute task
 uv run istota task "prompt" -u USER -t ROOM -x       # With conversation context
-uv run istota resource add -u USER -t folder -p PATH   # Add folder mount
+uv run istota resource ensure -u USER -t folder -p PATH  # Declare a folder mount
 uv run istota resource list -u USER                   # List resources
 uv run istota run [--once] [--briefings]              # Process tasks
+uv run istota serve                                   # Scheduler + web UI in one process
+uv run istota repl                                    # Interactive REPL
+uv run istota chat                                    # Send a message to a room
 uv run istota email list|poll|test                    # Email commands
-uv run istota user list|lookup|init|status            # User management
+uv run istota user ensure|list|show|lookup|remove     # User management
+uv run istota briefing ensure|list|remove             # Per-user briefings
+uv run istota secret ensure|list|remove               # Encrypted credential store
 uv run istota calendar discover|test                  # Calendar commands
+uv run istota nextcloud ...                           # Nextcloud helpers
+uv run istota experimental list                       # Operator feature flags
 uv run istota tasks-file poll|status [-u USER]        # TASKS.md commands
 uv run istota kv get|set|list|delete|namespaces       # Key-value store
 uv run istota list [-s STATUS] [-u USER]              # List tasks
 uv run istota show <task-id>                          # Task details
 ```
+
+`istota setup` and `istota update` also exist, but they belong to the standalone single-user install rather than a dev checkout — see [local install](../getting-started/local-install.md). The full command surface is in the [CLI reference](../reference/cli.md).
 
 ## Project layout
 
@@ -115,7 +124,7 @@ These are not Python packages -- they're system-level tools used at runtime:
 
 ## Dependencies
 
-Core (always installed): `httpx`, `croniter`, `tomli`.
+Core (always installed): `httpx`, `requests`, `croniter`, `tomli`, `cryptography`, `Pillow`, `pillow-heif`. Pillow and its HEIC plugin are core rather than an extra because every task with an image attachment pre-shrinks it before the model sees it; `cryptography` backs the encrypted secrets store.
 
 Optional extras add feature-specific dependencies. Notable packages across extras: `caldav` + `icalendar` (calendar), `imap-tools` (email), `yfinance` (markets), `feedparser` (RSS), `pytesseract` (OCR), `faster-whisper` (audio), `sqlite-vec` + `sentence-transformers` (memory search), `fastapi` + `uvicorn` (web/location).
 

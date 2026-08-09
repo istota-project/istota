@@ -67,17 +67,17 @@ def build_prompt(
 1. Header: role, user_id, datetime, task_id, conversation_token, and a database line that names no path (the file is masked out of the sandbox; naming it would point at nothing)
 2. Emissaries: `config/emissaries.md` constitutional principles (skipped for briefings)
 3. Persona: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings or `skip_persona`)
-4. Resources: calendars, folders, todos, email_folders, notes_folders, reminders
+4. Workspace layout: one static line, plus CalDAV-discovered calendars. The Resources sunset replaced the enumerated Folders / TODO Files / Notes / Reminders sections with that single line
 5. User memory: USER.md (skipped for briefings)
 5b. Knowledge facts: relevance-filtered KG triples (skipped for briefings)
 6. Channel memory: CHANNEL.md
 7. Dated memories: auto-loaded from `memories/YYYY-MM-DD.md` (configurable via `auto_load_dated_days`)
 7b. Recalled memories: BM25 search results (when `auto_recall` enabled)
 7c. Learned Playbooks: `_recall_playbooks` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated/`skip_memory` tasks)
-8. Confirmation context: previous bot output for confirmed actions
 9. Tools: file access, browser, CalDAV, email, then `skills_index` ("Available skills (load on demand)" — the menu catalogue) when the menu is non-empty. The **file-access framing is storage-backend-aware** (storage-agnostic-vocabulary spec): it renders in one of three modes keyed on `config.storage_backend` — Nextcloud-via-mount, Nextcloud-via-rclone, or local — and the folders header + attachments prose follow the same switch. Local mode adds a bullet clarifying the workspace is the *managed* area, not the limit of what an unsandboxed local bot can read (fixes the "I can only see the Nextcloud mount" false claim). Server/Nextcloud prompts are byte-unchanged. The executor is the single home of storage framing; skill bodies are storage-neutral and reference paths through the `{workspace}` / `{storage}` placeholders (see below).
 10. Rules: resource restrictions, confirmation, subtasks, output
 11. Context: previous messages
+11b. Confirmation context: previous bot output for confirmed actions — interpolated after the context section, immediately before the request
 12. Request: prompt + attachments
 13. Guidelines: `config/guidelines/{source_type}.md`
 14. Skills changelog
@@ -379,7 +379,8 @@ Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=…
 | `load_channel_guidelines(config, source_type, user_id=None)` | Load guidelines/{source_type}.md, substituting `{BOT_NAME}`/`{BOT_DIR}`/`{user_id}`. `{user_id}` joined the set so web.md's file-handover link can name a concrete workspace path; skill bodies already substituted it. |
 | `_split_credential_env()` | Split an env dict into (matched, rest). Called twice: once with the credential set, once with the proxy-only set. `proxy_base_env = {**env, **proxy_only_env}` is snapshotted *before* `ISTOTA_SANDBOXED` is added, so the host-side CLI isn't told it is sandboxed. |
 | `_build_network_allowlist()` | Build host:port allowlist for CONNECT proxy |
-| `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper. Binds the per-user Docker-API allowlist proxy socket at `/var/run/docker.sock` (unconditionally when `config.devbox.enabled and config.devbox.api_proxy_enabled` and the socket exists; no selection gate, raw socket never bound) + ro-binds `docker_cli`. |
+| `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper. Binds the per-user Docker-API allowlist proxy socket at `/var/run/docker.sock` (unconditionally when `config.devbox.enabled and config.devbox.api_proxy_enabled` and the socket exists; no selection gate, raw socket never bound) + ro-binds `docker_cli`. Also ro-binds `custom_system_prompt_path(config)` — the file, never its directory. |
+| `custom_system_prompt_path(config)` | `config/system-prompt.md` as an absolute path (`abspath`, not `resolve` — the bind lands at the name as written, which is also the name the CLI is handed) when `custom_system_prompt` is set, else `None`. One source for both the `BrainRequest` field and the bind. The config dir is otherwise absent from the sandbox and stays that way: it holds `config.toml`, and emissaries / persona / guidelines / skill bodies all reach the model as content the daemon read. This is the one file the *CLI* opens, inside the namespace — which is why it silently depended on the `sandbox_ro_paths = ["/srv/app"]` default that also exposed the databases, and why narrowing that to `[]` made every task on a `custom_system_prompt` install exit with "System prompt file not found". Caveat: the DB masks run last, so a config dir sitting under `db_path.parent` would shadow the bind. |
 | `native_fs_confinement_active(config)` | Whether NativeBrain's in-process file tools should be path-confined — `sandbox_enabled and _bwrap_available()`, the same predicate the `cwd` choice uses (NB-1). |
 | `native_fs_roots(config, task, is_admin, user_resources, user_temp_dir, workspace_dir=None)` | The `(read_roots, write_roots)` for a native-brain task — mirrors `build_bwrap_cmd`'s user-data binds (user temp dir, mount user/channel dirs RW, Talk RO, developer repos, per-resource). **No DB root** — the admin read root went with the bwrap bind. No site/website write root — ISSUE-194 removed that primitive entirely; see `.claude/rules/config.md` under `SiteConfig`. Threaded into `BrainRequest.fs_read_roots`/`fs_write_roots` when confinement is active. |
 | `_execute_simple()` | subprocess.run mode |

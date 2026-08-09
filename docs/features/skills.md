@@ -80,7 +80,11 @@ dependencies: [caldav, icalendar]
 Calendar operations use CalDAV...
 ```
 
-Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `env` (JSON-encoded array of env spec objects).
+Supported frontmatter fields: `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `exclude_memory`, `exclude_persona`, `env` (JSON-encoded array of env spec objects).
+
+`requires_capability` gates a skill on a runtime capability being configured — `browser`, `devbox`, `nextcloud`. A standalone install with no Nextcloud drops the `nextcloud` skill from both selection and the menu rather than offering something that cannot work.
+
+There is no `name` field: the directory name is the skill's identity.
 
 Operator overrides in `config/skills/` can use `skill.md` (or `skill.toml` for backward compatibility).
 

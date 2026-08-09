@@ -7,7 +7,7 @@ An always-on, in-app chat surface in the web UI. It is a full-page console at `/
 Each room is a persistent conversation backed by its own per-surface channel token, stored in the `web_chat_rooms` table. A room gets its own `CHANNEL.md` and its own channel sleep-cycle handling, exactly like a Talk channel.
 
 - **Create / select** — rooms live in the sidebar; selecting one loads its history.
-- **Per-room settings** — a kebab (⋮) on each room opens a settings modal that renames the room (the token stays the same), copies its token (to paste into a `web:<token>` output route), and hard-deletes the room behind a GitHub-style type-the-name confirm. A room with a task still running can't be deleted until it finishes.
+- **Per-room settings** — a kebab (⋮) on each room opens a settings modal that renames the room (the token stays the same), copies its token (to paste into a `web:<token>` output route), promotes a web-origin room to a real Nextcloud Talk conversation and binds the two, and hard-deletes the room behind a GitHub-style type-the-name confirm. A room with a task still running can't be deleted until it finishes.
 - **Deep link** — `/chat?room=<token>` selects a room on load, silently falling back if the token is unknown or belongs to another user.
 
 Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `web_chat_messages`, and `channel_sleep_cycle_state`, plus a best-effort removal of the `Channels/<token>/` workspace folder. (Channel `memory_chunks` are a documented residual.)

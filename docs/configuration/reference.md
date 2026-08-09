@@ -11,8 +11,10 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-5"`. |
 | `effort` | `""` | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` (empty = model default) |
 | `advisor_model` | `""` | Advisor model — Anthropic-namespace brains only (`claude_code` / `tmux_claude`); resolves through the same alias table as `model` but carries no effort. Must resolve to a model capable of *being* an advisor (a weak/cheap tier fails every task it runs on). Dropped for any task carrying its own model pin (`!model`, `!room model`, a `[[jobs]] model`). |
-| `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default |
+| `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default. That file — and nothing else in the config directory — is bind-mounted read-only into the sandbox, since the CLI opens it there |
+| `namespace` | `"istota"` | Instance namespace — prefixes systemd units, lock paths and similar, so two instances can share a host |
 | `db_path` | `"data/istota.db"` | SQLite database path |
+| `module_data_dir` | derived | Root for per-user module DBs; defaults to `{db_path.parent}/modules` |
 | `rclone_remote` | `"nextcloud"` | rclone remote name |
 | `nextcloud_mount_path` | not set | Local mount path (enables mount mode when set) |
 | `skills_dir` | `"config/skills"` | Operator skill overrides directory |
@@ -28,6 +30,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `url` | `""` | Nextcloud server URL |
 | `username` | `""` | Bot's Nextcloud username |
 | `app_password` | `""` | Nextcloud app password |
+| `share_default_expire_days` | `14` | Default expiry on links the bot creates |
 
 ## `[talk]`
 
@@ -43,6 +46,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `enabled` | `false` | Enable email |
 | `imap_host` | `""` | IMAP server |
 | `imap_port` | `993` | IMAP port |
+| `imap_timeout_seconds` | `30` | IMAP socket timeout |
 | `imap_user` | `""` | IMAP username |
 | `imap_password` | `""` | IMAP password |
 | `smtp_host` | `""` | SMTP server |
@@ -126,6 +130,8 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `user_max_foreground_workers` | `2` | Global per-user fg default |
 | `user_max_background_workers` | `1` | Global per-user bg default |
 | `worker_idle_timeout` | `10` | Seconds before idle worker exits |
+| `worker_idle_poll_interval` | `0.5` | Idle worker's queue re-check cadence |
+| `main_loop_read_timeout_ms` | `2000` | SQLite read timeout on the main loop |
 
 ### Robustness
 
@@ -144,6 +150,26 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `scheduled_job_max_consecutive_failures` | `5` | Auto-disable threshold |
 | `cron_max_staleness_minutes` | `60` | Skip cron-driven catch-up fires older than this (jobs + briefings). After a long daemon outage, fires missed by more than N minutes are skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. 0 = legacy unconditional catch-up. |
 | `log_channel_show_skills` | `true` | Include selected skills in log channel messages |
+| `max_retry_age_minutes` | `60` | A task older than this is failed rather than retried |
+| `temp_file_retention_days` | `7` | Delete task temp files older than this |
+| `location_ping_retention_days` | `365` | Prune per-user `location.db` pings older than this |
+
+### Subtasks
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_subtasks_per_task` | `10` | Cap on subtasks one task may queue |
+| `max_subtask_depth` | `3` | Cap on subtask nesting depth |
+| `max_subtask_prompt_chars` | `8000` | Cap on a subtask's prompt length |
+
+### Database backup
+
+| Setting | Default | Description |
+|---|---|---|
+| `db_backup_enabled` | `true` | Take timed online-backup snapshots of the local DBs |
+| `db_backup_interval` | `86400` | Seconds between snapshots (24h) |
+| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty disables |
+| `db_backup_retention` | `7` | Keep this many snapshot dirs |
 
 ## `[security]`
 
@@ -216,10 +242,13 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 |---|---|---|
 | `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the headless `claude -p` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`); `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing (configured under `[brain.tmux]`, with automatic fallback to `claude_code`). |
 | `source_type_overrides` | `{}` | Per-`source_type` brain override (e.g. route `scheduled` to `native` while interactive tasks stay on `claude_code`). |
+| `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
+| `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
+| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary this long before retrying it; 0 disables |
 
-`[brain.native]` (used when `kind = "native"` or a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file.
+`[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file. Full annotations in the [native brain runbook](native-brain.md).
 
-`[brain.tmux]` (used when `kind = "tmux_claude"` or routed-to): every field defaults in code to the prototype's pinned values, so an absent block is behavioral parity. Knobs include `fallback_trip_threshold`, `fallback_cooldown_seconds`, `ready_timeout_seconds`, `tmux_command_timeout`, `cli_version_pin`, and the pane-text marker lists (`ready_markers`, `trust_markers`, `theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`) — heuristics pinned to a `claude` CLI version, so a CLI reword that breaks readiness detection is a config hotfix, not a code release. See `config.example.toml` for the full annotated block.
+`[brain.tmux]` (used when `kind = "tmux_claude"` or routed-to): every field defaults in code to the prototype's pinned values, so an absent block is behavioral parity. Knobs include `fallback_trip_threshold`, `fallback_cooldown_seconds`, `ready_timeout_seconds`, `tmux_command_timeout`, `cli_version_pin`, and the pane-text marker lists (`ready_markers`, `trust_markers`, `theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`, `usage_limit_markers` — the last is what drives `stop_reason=usage_limit` and therefore failover) — heuristics pinned to a `claude` CLI version, so a CLI reword that breaks readiness detection is a config hotfix, not a code release. See `config.example.toml` for the full annotated block.
 
 ## `[sleep_cycle]`
 
@@ -230,6 +259,8 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `lookback_hours` | `24` | How far back to gather day data |
 | `memory_retention_days` | `0` | Prune dated memory files **and** ephemeral `memory_chunks` rows (`conversation`, `memory_file`, `channel_memory`) older than N days. Durable `user_memory` chunks are not touched. 0 = unlimited |
 | `auto_load_dated_days` | `3` | Days of dated memories injected into prompts; 0 disables |
+| `extraction_model` | `"general"` | Role used for the nightly extraction call |
+| `curation_model` | `"general"` | Role used for the USER.md curation call |
 | `curate_user_memory` | `false` | Run op-based USER.md curation after extraction |
 | `curation_log_summary` | `true` | Post a one-line summary to the user's `log_channel` after applied curation ops |
 | `knowledge_graph_audit_retention_days` | `365` | Prune `knowledge_facts_audit` rows older than N days. Independent of `memory_retention_days`. 0 = unlimited |
@@ -252,6 +283,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `auto_index_memory_files` | `true` | Index after sleep cycle |
 | `auto_recall` | `false` | BM25 auto-recall in prompts |
 | `auto_recall_limit` | `5` | Max recall results |
+| `recency_half_life_days` | `180.0` | Age half-life for the recency down-weight; 0 disables |
 
 ## `[briefings]`
 
@@ -261,6 +293,7 @@ Module-level settings for the briefings module (per-user content store + archive
 |---|---|---|
 | `archive_retention_days` | `90` | Prune archived briefing results older than this, on insert (0 = keep forever) |
 | `default_lookback_hours` | `12` | Seeds the `email` / `rss` source window when a source omits it |
+| `newsletter_max_links_per_source` | `20` | Cap on links pulled from one newsletter source |
 | `max_source_chars` | `5000` | Cap on a single source's gathered text. The `todos` source spends it item by item and never cuts one in half — a half-item would read as a todo the file does not contain — dropping from the end and saying in its provenance line how many were left out |
 | `max_browse_chars` | `20000` | The same cap for a `browse` source, which gathers markdown rather than flattened text. Bigger because the URLs the markdown keeps cost characters, and a frontpage spends its first couple of thousand on masthead chrome before the headline grid starts. A `browse` source's own `max_chars` wins over either cap — it is the only kind that reads one; `email`, `notes` and `todos` take the module cap directly. |
 | `shared_block_timezone` | `"UTC"` | Timezone module-owned shared blocks evaluate their cron in. Shared blocks are global (generated once, no per-user timezone), so this is one operator-chosen zone — typically the operator's own, so morning/evening regeneration lines up with their day. An invalid name falls back to UTC at run time. |
@@ -307,6 +340,13 @@ output = "talk"
 | `github_username` | `""` | GitHub username |
 | `github_default_owner` | `""` | Default org/user for short repo names |
 | `github_reviewer` | `""` | PR reviewer username |
+| `author_credit` | `""` | Name credited as author on commits the bot makes |
+| `gitlab_api_allowlist` | (GitLab API paths) | API paths the GitLab wrapper may call |
+| `github_api_allowlist` | (GitHub API paths) | API paths the GitHub wrapper may call |
+| `api_timeout_seconds` | `30` | Timeout for GitLab/GitHub API calls |
+| `devbox_proxy_enabled` | `true` | Keep tokens host-side behind the devbox proxy |
+| `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
+| `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |
 
 ## ntfy push notifications
 
@@ -324,7 +364,12 @@ What it IS: a one-way push channel (bot → device) used by heartbeat alerts and
 
 ## Money
 
-There is no instance-level `[money]` config section. Money is a **module** (on by default; opt out per user via `disabled_modules = ["money"]`). The bot auto-discovers `*.beancount` files at the top level of `{user_workspace}/ledgers/` — no per-resource path is required. Monarch credentials are a cookie pair in the encrypted `secrets` table — provision both keys (`session_id` and `csrftoken`) via the CLI or the web settings UI:
+Money is a **module** (on by default; opt out per user via `disabled_modules = ["money"]`). Per-user money settings live in the per-user money DB, not in `config.toml`; the one instance-level knob is:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `autoclass_lookup` | `true` | Allow transaction auto-classification to look up unknown payees |
+ The bot auto-discovers `*.beancount` files at the top level of `{user_workspace}/ledgers/` — no per-resource path is required. Monarch credentials are a cookie pair in the encrypted `secrets` table — provision both keys (`session_id` and `csrftoken`) via the CLI or the web settings UI:
 
 ```bash
 istota secret ensure --user alice --service monarch --key session_id --value …
@@ -359,6 +404,8 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable web interface |
+| `auth` | `"nextcloud"` | Auth mode. `"nextcloud"` is OAuth2 against Nextcloud; `"none"` disables auth entirely for the single-user local install and must never be used on a reachable host. Env override: `ISTOTA_WEB_AUTH` |
+| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"persistent"` encrypts them into `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
 | `port` | `8766` | Web app port |
 | `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
 | `oauth2_client_id` | `""` | NC OAuth 2.0 client ID |
@@ -394,3 +441,71 @@ Knobs for the in-app web chat surface (the "Chat" tab). The surface is always en
 |---|---|---|
 | `enabled` | `false` | Enable GPS webhook receiver |
 | `webhooks_port` | `8765` | Receiver port |
+| `accuracy_threshold_m` | `100.0` | Discard pings less accurate than this, in metres |
+| `visit_exit_minutes` | `5.0` | Minutes away from a place before a visit is closed |
+| `reconcile_enabled` | `true` | Batch-reconcile visits from pings, cleaning up state-machine drift |
+| `reconcile_lookback_hours` | `6.0` | How far back a reconcile pass looks |
+| `reconcile_buffer_minutes` | `10.0` | Buffer around the lookback window |
+| `reconcile_grace_minutes` | `10.0` | Grace period before a gap counts as a departure |
+| `reconcile_min_pings` | `3` | Minimum pings for a reconstructed visit to count |
+| `reconcile_min_dwell_sec` | `60` | Minimum dwell for a reconstructed visit to count |
+
+## `[caldav]`
+
+Explicit CalDAV override. When any field is set it wins over the value derived from `[nextcloud]`, which is how a standalone install points calendar at an external CalDAV server (Radicale, Fastmail, Google) with no Nextcloud in the picture. All-blank — the default — falls back to the Nextcloud derivation, so server deployments are unaffected.
+
+| Setting | Default | Description |
+|---|---|---|
+| `url` | `""` | CalDAV base URL |
+| `username` | `""` | CalDAV username |
+| `password` | `""` | CalDAV password |
+
+## `[browser]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable the headless browser container |
+| `api_url` | `"http://localhost:9223"` | Browser container's Flask API |
+| `vnc_url` | `""` | External noVNC URL, surfaced to the user for observation |
+
+## `[devbox]`
+
+A persistent per-user Linux container — the escape hatch for work the bwrap sandbox can't do (installing packages, network diagnostics, compiling).
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable the devbox skill |
+| `container_prefix` | `"devbox-"` | Container name is `{prefix}{user_id}` |
+| `docker_cli` | `"/usr/bin/docker"` | Host path to the Docker CLI binary |
+| `docker_socket` | `"/var/run/docker.sock"` | Host path to the real Docker socket (the proxy's upstream) |
+| `exec_timeout_seconds` | `300` | Default per-exec timeout |
+| `max_output_bytes` | `102400` | Cap per output stream |
+| `api_proxy_enabled` | `true` | Bind an allowlist proxy at `/var/run/docker.sock` instead of the raw socket |
+| `api_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user proxy sockets live |
+| `api_proxy_audit_log` | `""` | Optional path for a proxy audit log |
+
+The raw Docker socket is root-equivalent, so it is never bound into the sandbox. The allowlist proxy permits only exec/cp/inspect/restart against the user's own container.
+
+## `[playbooks]`
+
+Procedural memory — see [memory](../features/memory.md#layer-6-learned-playbooks-procedural-memory).
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master switch |
+| `recall_limit` | `3` | Top-K playbooks injected per task |
+| `min_tool_calls` | `4` | Tool calls a task needs to qualify for distillation |
+| `retention_days` | `90` | Age-prune by last use; 0 = keep forever |
+| `max_chars` | `0` | 0 = share the global `max_memory_chars` budget |
+
+## `[experimental]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `features` | `[]` | Operator-enabled feature flags. See [experimental features](../EXPERIMENTAL.md) |
+
+## `[health]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_document_bytes` | `26214400` (25 MiB) | Cap on a single stored document (scan, discharge summary, vaccination card). 0 = unlimited |

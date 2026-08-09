@@ -15,12 +15,12 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!room` | Show this room's standing model/effort default; `!room model ALIAS` / `!room effort LEVEL` set it, `default` clears |
 | `!memory user` | Show USER.md contents |
 | `!memory channel` | Show CHANNEL.md contents |
-| `!memory facts` | Show knowledge graph facts |
+| `!memory facts [ENTITY]` | Show knowledge graph facts, optionally filtered to one subject |
 | `!models` | List available model aliases and what they resolve to |
 | `!cron` | List scheduled jobs with status |
 | `!cron enable NAME` | Re-enable a disabled job |
 | `!cron disable NAME` | Disable a job |
-| `!check` | Run system health check (self-check heartbeat) |
+| `!check` | Run an inline system health check: model binary, bwrap, DB connectivity, recent-task stats, and a live sandboxed execution test |
 | `!export [markdown\|text]` | Export conversation history to a file |
 | `!skills` | List available skills (grouped: available, unavailable, disabled) |
 | `!skills NAME` | Show details for a specific skill |
@@ -65,4 +65,4 @@ Formats: `markdown` (default) or `text`.
 
 `!search` queries the memory search index and Talk API for matching messages. Returns results with timestamps and conversation context.
 
-Flags: `--since YYYY-MM-DD`, `--week`, `--memories` (memory files only).
+Flags: `--since YYYY-MM-DD`, `--week`, `--memories` (memory files only), `--all` (search every room, not just this one). A bare `#TOKEN` argument scopes the search to that room.

@@ -52,7 +52,7 @@ Every interaction follows the same path:
 3. The **scheduler** dispatches a `UserWorker` thread for the task's user
 4. The worker **claims** the task (atomic `UPDATE...RETURNING`, setting status to `locked` then `running`)
 5. The **executor** assembles the prompt: persona + resources + memory + context + skills + guidelines + the actual request
-6. The executor builds a `BrainRequest` and calls `make_brain(config.brain).execute(req)`. The default `ClaudeCodeBrain` invokes `claude -p - --output-format stream-json` as a subprocess
+6. The executor resolves which brain to use for this task's source type (`resolve_brain_kind`), builds a `BrainRequest`, and calls `brain.execute(req)`, rerunning through the fallback brain if the primary is unavailable. The default `ClaudeCodeBrain` invokes `claude -p - --output-format stream-json` as a subprocess
 7. The brain returns a `BrainResult`; the executor composes the final text (CM-aware), stores it in the DB, and delivers it to the originating channel
 8. Post-completion: conversation indexed for memory search, deferred DB operations processed, scheduled job counters reset
 
@@ -119,7 +119,7 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 | `executor.py` | Builds prompts, constructs the per-task environment, orchestrates a `Brain`, composes results |
 | `brain/` | Pluggable model-invocation backend: `Brain` Protocol + `make_brain` factory, `BrainRequest`/`BrainResult` types, stream events, `ClaudeCodeBrain` (subprocess + stream-json + transient-API retry), and `NativeBrain` (Istota's in-process agent loop). The native loop's machinery lives in `llm/` (provider abstraction), `agent/` (the loop + tool dispatch), and `session/` (turn state + compaction). |
 | `context.py` | Selects relevant conversation history using hybrid recent + LLM-triaged approach |
-| `skills/_loader.py` | Loads skill documentation selectively based on keywords, resources, source types |
+| `skills/_loader.py` | Loads skill documentation selectively: `always_include`, source types, file types, sticky skills, companions. Keyword and resource matching are deliberately *not* selectors |
 | `stream_parser.py` | Backward-compat shim — re-exports stream event types from `brain/_events.py` |
 
 ### Storage and state
@@ -159,7 +159,8 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `feeds/` | Native RSS/Atom/Tumblr/Are.na — poller, per-user SQLite, routes, OPML |
 | `health/` | Body stats, bloodwork panels, biomarker trends, Garmin sync, immunizations, medical history |
 | `location/` (+ `location_logic.py`) | GPS pings, place detection, visit logging, cluster discovery |
-| `money` (vendored) | Beancount ledger, invoicing, transactions, work log |
+| `money` (vendored) | Beancount ledger, invoicing, transactions, work log, investment portfolio |
+| `briefings/` | Block/source briefings — per-user SQLite, source resolvers, generation, reader and settings routes |
 
 ### Subsystems
 
@@ -181,6 +182,7 @@ The headless browser runs in a Docker container (`docker/browser/`) — Google C
 | Module | Purpose |
 |---|---|
 | `browse_api.py` | Flask API endpoints: get, screenshot, extract, interact, close, health |
+| `render.py` | Page rendering helpers behind the extract/screenshot endpoints |
 | `chrome.py` | Chrome process lifecycle and CDP connection management |
 | `browsing.py` | Human simulation: Gaussian mouse movements, Bezier curves, scrolling patterns, captcha detection |
 | `xdotool.py` | X11 input helpers for CDP-free browser interaction |

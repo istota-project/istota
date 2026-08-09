@@ -137,7 +137,7 @@ Then a briefing reads it via a `shared_block` source (the key becomes the block 
     config = { name = "my-digest", max_age_hours = 12 }
 ```
 
-A full copy-paste example lives at [`scripts/examples/shared_kv_curation.sh`](../../scripts/examples/shared_kv_curation.sh).
+A full copy-paste example lives at [`scripts/examples/shared_kv_curation.sh`](https://github.com/istota-project/istota/blob/main/scripts/examples/shared_kv_curation.sh).
 
 ### Value shape controls granularity
 

@@ -6,20 +6,20 @@ The executor (`executor.py`) is responsible for assembling prompts, building the
 
 The prompt is built in a specific order, each section adding context for Claude:
 
-1. **Header**: role definition, user_id, current datetime, task_id, conversation_token, db_path
+1. **Header**: role definition, user_id, current datetime, task_id, conversation_token, and a line stating the database is reachable only through skill CLIs — the path itself is deliberately not in the prompt
 2. **Emissaries**: constitutional principles from `config/emissaries.md` (skipped for briefings)
 3. **Persona**: user workspace `PERSONA.md` overrides `config/persona.md` (skipped for briefings)
-4. **Resources**: calendars, folders, todos, email folders, notes, reminders
+4. **Workspace layout**: one static line describing the workspace, plus any CalDAV-discovered calendars. The Resources sunset replaced the enumerated Folders / TODO Files / Notes / Reminders sections with that single line
 5. **User memory**: `USER.md` content (skipped for briefings)
 6. **Knowledge graph facts**: relevance-filtered entity-relationship triples from `knowledge_facts` table, capped by `max_knowledge_facts` (skipped for briefings)
 7. **Channel memory**: `CHANNEL.md` content (when `conversation_token` is set)
 8. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`)
 9. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
 10. **Learned playbooks**: `_recall_playbooks()` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated / `skip_memory` tasks)
-11. **Confirmation context**: previous bot output for confirmed actions
-12. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
-13. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
-14. **Conversation context**: previous messages (selected by the context module)
+11. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
+12. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
+13. **Conversation context**: previous messages (selected by the context module)
+14. **Confirmation context**: previous bot output for confirmed actions — interpolated after the conversation context, immediately before the request
 15. **Request**: the actual prompt text + file attachments
 16. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
 17. **Skills changelog**: "what's new" if skills updated since last interaction
@@ -35,22 +35,25 @@ The brain returns a `BrainResult` carrying `(success, result_text, actions_taken
 
 ```
 claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow \
-  --output-format stream-json --verbose
+  --output-format stream-json --verbose --include-partial-messages
 ```
 
-with optional `--model`, `--effort`, and `--system-prompt-file` flags. Tool-bearing tasks run with `--dangerously-skip-permissions` and no `--allowedTools` allowlist — the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. See [brain](brain.md) for the full implementation.
+with optional `--model`, `--effort`, and `--system-prompt-file` flags. `--system-prompt-file` names `config/system-prompt.md`, which the CLI opens itself, from inside the sandbox — so `build_bwrap_cmd` binds that one file read-only. It is the only config-directory file the sandbox sees; everything else in there (emissaries, persona, guidelines, skill bodies) reaches the model as prompt text the daemon read, and `config.toml` stays out. Tool-bearing tasks run with `--dangerously-skip-permissions` and no `--allowedTools` allowlist — the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. See [brain](brain.md) for the full implementation.
 
 ## Environment variables
 
-The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`, plus `ISTOTA_SANDBOXED` when bwrap is in effect). Database paths (`ISTOTA_DB_PATH`, `HEALTH_DB_PATH`, `LOCATION_DB_PATH`) are split out into the skill proxy's environment instead and never reach the subprocess plus a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
+The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with PATH, HOME, USER, LOGNAME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`), plus `CLAUDE_CODE_OAUTH_TOKEN`, and `ISTOTA_ADMINS_FILE` / `ISTOTA_CONFIG_PATH` where those are set — the last so a subprocess resolves the same config the daemon loaded rather than searching afresh.
+
+The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_USER_TZ`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`, plus `ISTOTA_SANDBOXED` when bwrap is in effect), a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
+
+Database paths (`ISTOTA_DB_PATH`, `HEALTH_DB_PATH`, `LOCATION_DB_PATH`) go into the skill proxy's environment instead and never reach the subprocess.
 
 Everything else — Nextcloud / CalDAV / IMAP / SMTP credentials, service tokens, per-user secrets — is **manifest-derived**. Each skill's `skill.md` frontmatter declares its env vars in the `env:` block; `build_skill_env()` walks the loaded skill index and resolves each `EnvSpec` against the task's `EnvContext`. This replaces the hardcoded credential-injection block in `execute_task` that used to duplicate the same wiring across the executor, the proxy strip-set, and the auth map.
 
-`EnvSpec` sources: `config` (dotted config path with `when` guard), `template_file` (auto-create from template), `secret` (per-user encrypted secret), `setup_env` (skill-defined hook in `__init__.py:setup_env(ctx)` — used by `developer` for the git credential helper + API wrappers it bind-mounts into the sandbox). The resource-backed sources (`resource`, `resource_json`, `user_resource_config`) and the `gate_user_has_resource` flag were removed in the Resources sunset — no bundled skill used them.
+`EnvSpec` sources: `config` (dotted config path with `when` guard), `template_file` (auto-create from template), `secret` (per-user encrypted secret), `user_id` (the task's user id, for skills that scope by it), `setup_env` (skill-defined hook in `__init__.py:setup_env(ctx)` — used by `developer` for the git credential helper + API wrappers it bind-mounts into the sandbox, and by `google_workspace` for its OAuth token). The resource-backed sources (`resource`, `resource_json`, `user_resource_config`) and the `gate_user_has_resource` flag were removed in the Resources sunset — no bundled skill used them.
 
-Two pre-resolution gates filter out specs that shouldn't fire:
+One pre-resolution gate filters out specs that shouldn't fire:
 
-- `gate_has_discovered_calendars: true` — only resolve when CalDAV discovery returned at least one calendar
 - `gate_has_discovered_calendars: true` — only resolve when CalDAV discovery returned at least one calendar
 
 CalDAV discovery is itself a best-effort step: `discover_calendars_for_task(task, config)` returns `[]` when CalDAV is unconfigured / unreachable / the user owns no calendars. The same helper is reused by the scheduler's two subprocess paths (`_execute_skill_task`, `_execute_command_task`) so the gate fires consistently across LLM, skill-task, and command-task dispatch.
@@ -124,11 +127,13 @@ Malformed results are reclassified as failures and retried.
 | `build_stripped_env()` | `os.environ` minus anything containing `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, `APP_PASSWORD`, `NC_PASS`, or `PRIVATE_KEY` in its name. Substring match — no preserve list (`ISTOTA_SECRET_KEY` is stripped). For heartbeat/cron commands. |
 | `build_model_cli_env()` | `build_clean_env()` plus an inherited `ANTHROPIC_API_KEY`. Used by the daemon-side `claude` spawns that send a prompt without going through a `BrainRequest`: conversation-context triage and the `!check` / self-check execution test. `build_clean_env()` already carries `CLAUDE_CODE_OAUTH_TOKEN`, so both auth shapes reach the CLI while the rest of the daemon environment does not. |
 | `build_allowed_tools()` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]`. The CLI brains no longer pass this as an `--allowedTools` allowlist (they run `--dangerously-skip-permissions`); the list survives as NativeBrain's in-process tool filter and the non-empty/empty signal for tool-bearing vs text-only tasks. `WebSearch` runs server-side (titles + URLs only), so page reads are steered to the `browse` skill. |
-| `_split_credential_env()` | Separates credential vars for proxy routing using a manifest-derived `credential_set` |
+| `_split_credential_env()` | Separates vars out of the model's env for proxy routing. Called twice — once with the credential set, once with the proxy-only set |
 | `derive_credential_set()` | Sensitive env-var names across all skill manifests (replaces `_PROXY_CREDENTIAL_VARS`) |
-| `derive_authorized_skills()` | Selected skills ∪ skills whose sensitive `EnvSpec`s resolve under this task's context (replaces `_authorized_skills_from_credentials`) |
+| `derive_proxy_only_set()` | The second bucket: `ISTOTA_DB_PATH` plus manifest `proxy_only: true` vars (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`). Routed to the proxy without credential semantics — not secrets, just paths the model has no business holding |
+| `derive_authorized_skills()` | Selected skills ∪ skills whose sensitive `EnvSpec`s resolve under this task's context. Takes `hook_env` so a credential produced by a `setup_env` hook (the `google_workspace` case) can authorize its own skill |
 | `derive_skill_credential_map()` | Per-skill credential map used by the proxy (replaces `_build_skill_credential_map`) |
 | `derive_lookup_allowlist()` | Vars the proxy will respond to over `credential-fetch`, minus `_PROXY_LOOKUP_BLOCKED` |
 | `discover_calendars_for_task()` | Best-effort CalDAV discovery; returns `[]` on any failure. Reused across LLM and subprocess dispatch paths |
 | `build_bwrap_cmd()` | Builds bubblewrap sandbox command wrapper |
+| `custom_system_prompt_path()` | `config/system-prompt.md` as an absolute path when `custom_system_prompt` is on — one source for both the `BrainRequest` field and the sandbox bind |
 | `_build_network_allowlist()` | Builds host:port allowlist for CONNECT proxy |

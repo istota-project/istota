@@ -24,27 +24,33 @@ All Nextcloud Talk I/O runs on **one** long-lived asyncio loop on a dedicated da
 recover_orphaned_tasks_on_startup()  # once, under the flock, before any worker spawns
 
 while not shutdown_requested:
+    watchdog.tick()
+    pool.dispatch()             # FIRST — spawn workers for users with pending tasks
     check_briefings()           # every briefing_check_interval (60s)
-    check_scheduled_jobs()      # every briefing_check_interval
     check_shared_blocks()       # every briefing_check_interval
+    check_briefing_triggers()   # every tasks_file_poll_interval (30s; NC-app trigger files)
+    check_scheduled_jobs()      # every briefing_check_interval
     _run_sleep_cycles()         # off-thread; polled every briefing_check_interval
+    check_travel_timezone()     # off-thread; every TRAVEL_TZ_CHECK_INTERVAL
     poll_emails()               # every email_poll_interval (60s)
-    organize_shared_files()     # every shared_file_check_interval (120s)
-    poll_tasks_files()          # every tasks_file_poll_interval (30s)
+    discover_and_organize_shared_files()  # every shared_file_check_interval (120s)
+    poll_all_tasks_files()      # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
-    check_briefing_triggers()   # every briefing_check_interval (NC-app trigger files)
     check_heartbeats()          # every heartbeat_check_interval (60s)
     check_db_health()           # off-thread; every db_health_check_interval (24h)
     _run_db_backup()            # off-thread; every db_backup_interval (24h)
-    pool.dispatch()             # spawn workers for users with pending tasks
+    _maybe_alert_backup_stale() # every tick
+    _emit_scheduler_stats()     # every tick
     sleep(poll_interval)        # 2s, sub-ticking pool.dispatch() every dispatch_interval
 ```
+
+`pool.dispatch()` runs first, before the clock is even read — pending-task latency is the thing the loop is optimizing for, and every interval check below it is a potential delay.
 
 Talk polling runs in a separate daemon thread, started at scheduler launch.
 
 ### Off-thread periodic checks
 
-Three checks are multi-minute — the DB health sweep and the DB backup snapshot both walk every per-user DB (the backup writing to the rclone FUSE mount, where latency is unbounded), and the nightly sleep cycles make synchronous per-user LLM calls. Run inline they blocked `pool.dispatch()` for their whole duration. `_spawn_background_check(name, fn, inflight)` puts each on a short-lived `bgcheck-<name>` daemon thread, skipping the tick when the previous run under the same name is still alive, so a wedged sweep cannot stack one thread per tick. Exceptions are contained and logged. The interval clocks advance at spawn time (fixed cadence; the in-flight guard prevents overlap), while the *staleness* alert reads the persisted last-run clock, which only advances on a durable OK run.
+Four checks can outlast a tick — the DB health sweep and the DB backup snapshot both walk every per-user DB (the backup writing to the rclone FUSE mount, where latency is unbounded), the nightly sleep cycles make synchronous per-user LLM calls, and the travel-timezone check opens a per-user `location.db` and may send a notification. Run inline they blocked `pool.dispatch()` for their whole duration. `_spawn_background_check(name, fn, inflight, *, overlap_expected=False)` puts each on a short-lived `bgcheck-<name>` daemon thread, skipping the tick when the previous run under the same name is still alive, so a wedged sweep cannot stack one thread per tick. `overlap_expected=True` (sleep cycles, travel timezone) demotes that skip log to DEBUG, because for those two a pass outliving the poll interval is the normal case rather than a symptom. Exceptions are contained and logged. The interval clocks advance at spawn time (fixed cadence; the in-flight guard prevents overlap), while the *staleness* alert reads the persisted last-run clock, which only advances on a durable OK run.
 
 Because none of the known-long checks runs on the loop thread any more, there are no `LoopWatchdog.suspended()` call sites left — the stall watchdog covers the whole loop.
 
@@ -135,7 +141,7 @@ Where a task's result goes is resolved by `transport.routing.resolve_delivery_pl
 
 ## Deferred DB operations
 
-With the bubblewrap sandbox, the DB is read-only inside the subprocess. Claude and skill CLIs write JSON files to a writable temp dir. The scheduler processes these after successful completion. The handlers and the file envelope helper live in `scheduler_deferred.py` (extracted from `scheduler.py` for size and testability; `scheduler.py` keeps a re-export shim so `from istota.scheduler import _process_deferred_*` still works).
+With the bubblewrap sandbox, no database is reachable inside the subprocess at all — the framework DB directory and the per-user module-DB root are covered by empty tmpfs masks applied as the last mount operations. Claude and skill CLIs write JSON files to a writable temp dir instead. The scheduler processes these after successful completion. The handlers and the file envelope helper live in `scheduler_deferred.py` (extracted from `scheduler.py` for size and testability; `scheduler.py` keeps a re-export shim so `from istota.scheduler import _process_deferred_*` still works).
 
 | File | Handler | Purpose |
 |---|---|---|
@@ -147,10 +153,13 @@ With the bubblewrap sandbox, the DB is read-only inside the subprocess. Claude a
 | `task_{id}_user_alerts.json` | `_process_deferred_user_alerts` | Alerts/notifications for the user's alerts channel |
 | `task_{id}_health_ops.json` | `_process_deferred_health_ops` | Health module inserts/updates replayed against the per-user `health.db` |
 | `task_{id}_email_output.json` | `_deliver_deferred_email_output` | Structured email reply (preferred over the legacy stdout-JSON parser) |
+| `task_{id}_garmin_import.json` | `_process_deferred_garmin_import` | Garmin Connect sync requested from inside the sandbox |
 
 `_load_deferred_json(user_temp_dir, task_id, suffix, expected_type=...)` is the shared envelope helper: builds the path, exists-checks, parses JSON, validates the top-level shape (`list` or `dict`), and warns + unlinks on a malformed file. Each handler then runs its own business logic and unlinks at the call site so per-handler invariants (admin gate, depth gate, KG per-op commit) read cleanly.
 
-`_purge_deferred_files_for_retry` clears the slate when a task is set back to `pending_retry`, so a non-idempotent op like a KG `invalidate` isn't replayed twice across attempts. `_warn_unconsumed_deferred_files` scans the user temp dir after the drain phase and logs WARN for files missing the `task_` prefix or carrying an unknown suffix; the misnamed file is left on disk for inspection.
+`_purge_deferred_files_for_retry` clears the slate when a task is re-claimed after a crash, a restart, or a retry, so a non-idempotent op like a KG `invalidate` isn't replayed twice across attempts. `_warn_unconsumed_deferred_files` scans the user temp dir after the drain phase and logs WARN for files missing the `task_` prefix or carrying an unknown suffix; the misnamed file is left on disk for inspection.
+
+One suffix is recognized but never purged: `task_{id}_health_op_failures.json`, in `_KNOWN_ARTIFACT_SUFFIXES`. It is written *by* a handler rather than read by one — the rows a health op lost mid-batch, preserved so an operator can recover them after the task settles.
 
 Identity fields (`user_id`, `conversation_token`) always come from the task, not from the JSON, to prevent spoofing.
 
@@ -159,12 +168,18 @@ Identity fields (`user_id`, `conversation_token`) always come from the task, not
 Runs every `briefing_check_interval`:
 
 - Cancel stale confirmations after 120 min, notify user
+- Recover stuck `locked`/`running` tasks (mirrors the `claim_task` recovery, for rows no claim happens to touch)
 - Log warnings for tasks pending longer than 30 min
 - Auto-fail tasks pending longer than `stale_pending_fail_hours` (2)
 - Delete completed tasks older than `task_retention_days` (7)
-- Delete processed emails from IMAP older than `email_retention_days` (7), via one server-side `BEFORE` search
 - Prune `processed_emails` rows older than `processed_email_retention_days` (90, floored at `email_retention_days + 1`), excluding rows the stored transcript still references
+- Prune the `message_deletions` ledger (fixed 30 days) — it exists only to tell a reconnecting client what vanished while it was away
+- Delete processed emails from IMAP older than `email_retention_days` (7), via one server-side `BEFORE` search
+- Trim the Talk message cache
 - Delete old temp files
+- Delete location pings older than `location_ping_retention_days` (365) from each per-user `location.db`
+- Reconcile visits from pings (batch cleanup of visit state-machine drift)
+- Delete old Claude session logs
 
 ## Poller intervals
 

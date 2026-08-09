@@ -1,16 +1,22 @@
 # Testing
 
-Istota uses TDD with pytest and pytest-asyncio. The test suite has ~6,500 tests across ~200 files.
+Istota uses TDD with pytest and pytest-asyncio. The test suite has ~10,750 tests across ~280 files.
 
 ## Running tests
 
 ```bash
-uv run pytest tests/ -v                                # Unit tests
-uv run pytest -m integration -v                        # Integration tests
+uv run pytest tests/                                   # Unit tests
+uv run pytest -m integration                           # Integration tests
+uv run pytest -m live                                  # Native-brain tests against a real API
 uv run pytest tests/ --cov=istota --cov-report=term-missing  # Coverage
 ```
 
-Integration tests are deselected by default (configured in `pyproject.toml`). They require a live Nextcloud instance and are marked with `@pytest.mark.integration`.
+`addopts` in `pyproject.toml` pins `-n auto`, so the suite runs under pytest-xdist by default. New tests must be order-independent. For a local edit loop, `--testmon -n0` reruns only what your change touched; `-v` is only readable with `-n0`, since xdist interleaves worker output.
+
+Two marker sets are deselected by default (also via `addopts`):
+
+- `@pytest.mark.integration` — needs a live Nextcloud instance.
+- `@pytest.mark.live` — native-brain tests that hit a real LLM API, so they need a key and cost money.
 
 ## Test patterns
 
@@ -29,6 +35,8 @@ Integration tests are deselected by default (configured in `pyproject.toml`). Th
 | `make_task` | Factory for creating test tasks |
 | `make_config` | Factory for creating Config objects |
 | `make_user_config` | Factory for creating UserConfig objects |
+
+Three autouse fixtures apply to every test whether you ask for them or not: `_no_network_symbol_lookups` (fails a test that tries to resolve a ticker symbol over the network), `_reset_async_runtime_singletons` (drops the persistent asyncio loop and pooled HTTP client between tests), and `_reset_expunge_warning_latch` (clears the once-per-process IMAP expunge warning).
 
 ## Testing skills
 

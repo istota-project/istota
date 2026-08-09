@@ -3,7 +3,7 @@
 Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
 1. **DB tables** (authoritative)
-   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table)
+   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`
    - `user_resources` — folder mounts (`folder`) and internal `shared_file` organizer state. Only `folder` is declarable after the Resources sunset; the other path-shaped types were retired (calendars are CalDAV-discovered, todo/reminders/notes are workspace-convention files).
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
@@ -86,10 +86,10 @@ name = "Projects"
 permissions = "write"
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`.
+`folder` is the only declarable resource type (plus the internal `shared_file` organizer state). `permissions` is `read` (default) or `readwrite` — no other value grants writes.
 
 > **Modules vs resources vs connected services.** The retired `feeds` / `money` / `monarch` / `karakeep` / `overland` resource types were split apart in the modules / connected services refactor:
-> - **Modules** (`feeds`, `money`, `location`) are on by default; opt out per user via `disabled_modules`. Module-owned secrets (Tumblr API key, Monarch session, Overland ingest token) live on the per-module settings page.
+> - **Modules** (`feeds`, `money`, `location`, `health`, `briefings`) are on by default; opt out per user via `disabled_modules`. Module-owned secrets (Tumblr API key, Monarch session, Overland ingest token) live on the per-module settings page.
 > - **Connected services** (`karakeep`, `google_workspace`) are external API credentials in the encrypted `secrets` table.
 > - The scheduler auto-cleans the obsolete resource types from `user_resources` on startup; their TOML extras are migrated into `secrets` via `secrets_store.import_from_user_configs`.
 

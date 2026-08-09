@@ -27,7 +27,7 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 | Area | What you get |
 |------|--------------|
 | **Messaging** | Nextcloud Talk (DMs + group rooms with @mentions), always-on web chat with live streaming, file attachments, recorded voice messages, per-room drafts that survive leaving the page, and authenticated download links for files a task produces, email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
-| **Skills** | ~35 skills the agent loads on demand: calendar, email, web browsing (Dockerized Chrome), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
+| **Skills** | 34 skills the agent loads on demand: calendar, email, web browsing (Dockerized Chrome), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
 | **Memory** | Per-user (USER.md) and per-channel memory, nightly-extracted dated memories, hybrid BM25 + vector recall, and a temporal knowledge graph. Optional learned playbooks distilled from successful multi-step tasks. |
 | **Web UI** | Authenticated SvelteKit dashboard (Nextcloud OAuth2): multi-room chat, RSS reader, location/places map, money and health dashboards, and per-user settings. |
 | **Scheduling** | Cron jobs via CRON.md (prompts, prompt files, or shell commands), natural-language reminders, and briefings built from reorderable content blocks — each gathering newsletters, RSS, a browsed news frontpage, markets, calendar, or todos — with a web reader and archive, delivered to Talk, email, or ntfy. |
@@ -75,7 +75,7 @@ Config files (persona, briefings, cron jobs, heartbeat checks) live in each user
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~6500 unit tests)
+uv run pytest tests/                       # Run tests (~10,750 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
@@ -87,7 +87,6 @@ Most skill dependencies are optional — install everything with `--extra all`, 
 - [Documentation](https://istota.cynium.com/docs) — full docs (also buildable locally with `mkdocs serve`)
 - [Architecture overview](https://istota.cynium.com/docs/architecture/overview/) — how the system fits together
 - [CHANGELOG.md](CHANGELOG.md) — release notes
-- [DEVLOG.md](DEVLOG.md) — development journal
 
 ## License
 

@@ -67,7 +67,7 @@ Two things to get right:
 
 ## Ansible deployment
 
-The role renders the `[brain]` block from inventory variables. The `[brain.native]` and `[brain.source_type_overrides]` tables are only written when `istota_brain_kind` is `native` or `istota_brain_source_type_overrides` is non-empty, so existing deployments stay byte-identical until you opt in. After templating, `files/validate_config.py` parses the rendered config and gates the scheduler restart, so a malformed brain block fails the play instead of the running daemon.
+The role renders the `[brain]` block from inventory variables. The `[brain.native]` and `[brain.source_type_overrides]` tables are only written when `istota_brain_kind` is `native`, `istota_brain_fallback` is `native`, or `istota_brain_source_type_overrides` is non-empty, so existing deployments stay byte-identical until you opt in. After templating, `files/validate_config.py` parses the rendered config and gates the scheduler restart, so a malformed brain block fails the play instead of the running daemon.
 
 Instance-wide native brain:
 
@@ -92,7 +92,48 @@ istota_brain_source_type_overrides:
   heartbeat: native
 ```
 
-The full variable set (all defaulted to the code defaults) is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,effort,base_url,extra_headers,context_window,max_turns,max_tokens,model_catalog_fetch,model_catalog_cache_ttl_hours,prompt_caching,api_key}` and `istota_brain_source_type_overrides`. `istota_brain_native_prompt_caching` defaults to `""` (derive from `base_url`); set it to `true`/`false` only to force.
+The full variable set is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,effort,base_url,extra_headers,context_window,max_turns,max_tokens,model_catalog_fetch,model_catalog_cache_ttl_hours,prompt_caching,bash_spill_full_output,turn_budget_nudge,turn_budget_nudge_early_percent,turn_budget_nudge_remaining,api_key}`, the `istota_brain_native_web_fetch_*` family, and `istota_brain_source_type_overrides`. `istota_brain_native_prompt_caching` defaults to `""` (derive from `base_url`); set it to `true`/`false` only to force.
+
+!!! warning "The Ansible defaults are not the code defaults"
+    Several Ansible variables ship opinionated values rather than mirroring the dataclass:
+
+    | Variable | Ansible default | Code default |
+    |---|---|---|
+    | `istota_brain_native_model` | `z-ai/glm-5.2` | `""` |
+    | `istota_brain_native_base_url` | `https://openrouter.ai/api/v1` | `https://api.anthropic.com/v1` |
+    | `istota_brain_native_effort` | `medium` | `""` |
+    | `istota_brain_native_max_tokens` | `32000` | `16384` |
+    | `istota_brain_fallback_cooldown_seconds` | `3600` | `900` |
+
+    The base_url one has a consequence worth spelling out: because a stock Ansible deploy points at OpenRouter, the "prompt caching defaults off for a non-Anthropic base_url" note above applies to it. Set `istota_brain_native_prompt_caching: true` if you want caching there.
+
+## `[brain.native.web_fetch]`
+
+The native harness ships its own daemon-side `WebFetch` tool. It runs in the daemon's network namespace, so it is *not* gated by the sandbox CONNECT allowlist — but it is credential-free (no cookies, `trust_env=False`) and SSRF-hardened: every resolved IP is validated against a private/reserved blocklist on each request and each redirect hop, the connection is pinned to the validated IP to close DNS rebinding, and it is GET/text-only with size and time caps. Fetched content is wrapped in an untrusted-content delimiter.
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Master switch; false omits the tool entirely |
+| `allow_http` | `false` | Permit cleartext `http://` |
+| `timeout_seconds` | `20` | Total wall-clock per fetch |
+| `max_bytes` | `5000000` | Response body cap (streamed) |
+| `max_content_chars` | `100000` | Extracted-text cap returned to the model |
+| `max_redirects` | `5` | Redirect hops before giving up |
+| `require_url_provenance` | `false` | Only fetch URLs that appeared in the task — for sensitive deployments |
+| `allow_hosts` | `[]` | If non-empty, a host allowlist (suffix match) |
+| `block_hosts` | `[]` | Always-denied hosts (suffix match) |
+
+## Availability fallback
+
+`[brain]` carries a failover mechanism independent of which brain is primary:
+
+| Setting | Default | Description |
+|---|---|---|
+| `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
+| `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
+| `fallback_cooldown_seconds` | `900` | Skip an unavailable primary this long before retrying it; 0 disables |
+
+The same availability breaker is what the nightly sleep cycle consults before deciding to run at all. Pin `istota_brain_native_model` whenever native is either primary *or* fallback — an empty model id 400s on failover, which is the worst moment to discover it.
 
 Key handling:
 

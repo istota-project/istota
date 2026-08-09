@@ -24,15 +24,17 @@ src/istota/memory/
 
 ### Layer 1 — User memory (USER.md)
 
-Persistent per-user memory at `/Users/{user_id}/{bot_dir}/config/USER.md`. Auto-loaded into every interactive prompt (skipped for briefings). Claude reads and writes this file directly during task execution; it is the slow, deliberate, almost append-only tier.
+Persistent per-user memory at `/Users/{user_id}/{bot_dir}/config/USER.md`. Auto-loaded into every interactive prompt (skipped for briefings). It is the slow, deliberate, almost append-only tier.
+
+Runtime writes go through `istota-skill memory append|add-heading|remove|replace|remove-heading|show|headings` — never shell redirection. The skill takes a file lock and records an audit entry, which is what lets the nightly curator tell a deliberate edit from drift.
 
 USER.md is also indexed into `memory_chunks` with `source_type = "user_memory"`. Unlike conversation chunks, these are durable — they refresh on file edit (and after curation) but are never pruned by age.
 
 ### Layer 2 — Channel memory (CHANNEL.md)
 
-Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded into the prompt when `conversation_token` is set. Holds shared context for group conversations: decisions, agreements, project status. Written by Claude during execution and refreshed by the channel sleep cycle.
+Per-conversation memory at `/Channels/{conversation_token}/CHANNEL.md`. Loaded into the prompt when `conversation_token` is set. Holds shared context for group conversations: decisions, agreements, project status. Written through the same `memory` skill and refreshed by the channel sleep cycle.
 
-CHANNEL.md is currently not indexed (only the dated channel memory files written by the channel sleep cycle are). If indexing is added later, it must use a separate source_type so it stays durable like USER.md.
+CHANNEL.md is indexed under `source_type = "channel_memory_durable"` — a separate type from the dated `channel_memory` files, so it survives retention pruning the way USER.md does.
 
 ### Layer 3 — Dated memories
 
@@ -59,7 +61,7 @@ Hybrid BM25 + vector search over conversations, dated memory files, USER.md, and
 
 When `sqlite-vec` or `sentence-transformers` is missing, the search degrades to BM25-only without changing the API.
 
-**Auto-recall.** When `[memory_search] auto_recall = true`, the executor runs an FTS5 query using the task prompt before each interactive task (briefings excluded) and injects the top `auto_recall_limit` (default 5) results into the prompt as a "Recalled memories" section. There is no LLM call — recall is just SQLite FTS5. When a `conversation_token` is set, the channel namespace `channel:{token}` is included in the search.
+**Auto-recall.** When `[memory_search] auto_recall = true`, the executor runs the same hybrid search described above using the task prompt as the query, before each interactive task (briefings excluded), and injects the top `auto_recall_limit` (default 5) results into the prompt as a "Recalled memories" section. Recency decay applies here too. There is no LLM call in the recall path. When a `conversation_token` is set, the channel namespace `channel:{token}` is included in the search.
 
 **Auto-indexing.** After every successful task the conversation is indexed under the user's namespace (and the channel namespace if applicable). Silent scheduled jobs (`heartbeat_silent = True`) skip indexing — high-volume retrieve-and-render crons have no recall value and would otherwise inflate `memory_chunks`.
 
@@ -73,26 +75,40 @@ When `sqlite-vec` or `sentence-transformers` is missing, the search degrades to 
 
 Structured entity-relationship facts with optional validity windows, stored in `knowledge_facts`. Each fact is `(subject, predicate, object)` plus optional `valid_from`, `valid_until`, `temporary`, `confidence`, and provenance fields (`source_task_id`, `source_type`).
 
-Predicates are freeform — any short snake_case verb is accepted. Three classes of predicates have special handling:
+Predicates are freeform — any short snake_case verb is accepted. Five classes of predicates have special handling:
 
 - **Single-valued**: `works_at`, `lives_in`, `has_role`, `has_status`. A new value with the same `(subject, predicate)` invalidates the existing fact (sets `valid_until`).
 - **Temporary**: `staying_in`, `visiting`. Coexist with permanent facts and never trigger supersession; intended for trips and short-term states (use `valid_from` / `valid_until` for the dates rather than baking them into the object string).
+- **Ephemeral**: `decided`, `interested_in`, `completed`, `acquired`, `disposed_of`, `traveled_to`. Excluded from always-on identity loading even when the subject is the user, so a one-off shopping decision only surfaces when the current task is about it.
+- **Auto-expiring**: stamped with a default `valid_until` 90 days out (`DEFAULT_EPHEMERAL_TTL_DAYS`) unless the caller sets one.
 - **Multi-valued (everything else)**: `works_on`, `uses_tech`, `knows`, `prefers`, `allergic_to`, etc. Concurrent facts are allowed.
 
-Insertion goes through `add_fact()`, which dedupes via word-level Jaccard similarity (threshold 0.7) on the `predicate object` signature to catch near-duplicates like "uses python" vs. "uses python 3". A unique index on `(user_id, subject, predicate, object)` (where `valid_until IS NULL`) prevents exact duplicates.
+Insertion goes through `add_fact()`, which dedupes via word-level Jaccard similarity (`FUZZY_DEDUP_THRESHOLD = 0.6`) over the *object* tokens, comparing only against facts with an identical predicate, to catch near-duplicates like "uses python" vs. "uses python 3". A token-subset fast path short-circuits the obvious cases. A unique index on `(user_id, subject, predicate, object)` (where `valid_until IS NULL`) prevents exact duplicates.
 
-**Loading into prompts.** `select_relevant_facts()` always includes the user's own identity facts (subject equals `user_id`) and adds any other fact whose subject or object appears in the prompt. The result is formatted as a "Known facts" section between user memory and channel memory. The total is capped by `max_knowledge_facts` (default 0 = unlimited).
+**Loading into prompts.** `select_relevant_facts()` always includes the user's own identity facts (subject equals `user_id`) and adds any other fact whose subject or object appears in the prompt. The result is formatted as a "Known facts" section between user memory and channel memory. The total is capped by `max_knowledge_facts` (default 50; 0 = unlimited).
 
 **Manual management** via the `memory_search` skill CLI:
 
 ```bash
 istota-skill memory_search facts                     # list current facts
-istota-skill memory_search facts --entity alice      # facts mentioning an entity
+istota-skill memory_search facts --subject alice     # facts about a subject
+istota-skill memory_search facts --predicate works_at --as-of 2026-01-01
 istota-skill memory_search timeline alice            # entity timeline including expired
+istota-skill memory_search fact-history --entity alice  # audit trail of changes to a fact
 istota-skill memory_search add-fact …                # add interactively
 istota-skill memory_search invalidate <id>           # mark fact as ended (valid_until=today)
 istota-skill memory_search delete-fact <id>          # permanent removal
 ```
+
+### Layer 6 — Learned playbooks (procedural memory)
+
+Where the other layers remember *facts*, playbooks remember *how*. The sleep cycle distils a successful multi-step task into a per-user markdown procedure, stored as a `memory_chunks` row with `source_type = "playbook"` and recalled by relevance through the same search path.
+
+A task qualifies only if it used at least `min_tool_calls` tools — a one-shot answer has no procedure to extract. Recall injects the top `recall_limit` playbooks as a `## Learned Playbooks` section, skipped for automated and `skip_memory` tasks. In the memory size cap, playbooks are truncated *last*: an actionable procedure outranks a recalled snippet.
+
+Retention ages from last *use*, not creation, so a playbook that keeps proving useful survives while one that never gets recalled expires.
+
+Off by default. Enable with `[playbooks] enabled = true`.
 
 ## Sleep cycle
 
@@ -205,8 +221,9 @@ The executor injects memory in this order (briefings get none of it):
 2. Knowledge graph facts (current, non-expired, relevance-filtered)
 3. Channel memory (CHANNEL.md)
 4. Dated memories (last `auto_load_dated_days` days)
-5. Recalled memories (BM25 results when `auto_recall` is on)
-6. Confirmation context (only on confirmed tasks)
+5. Recalled memories (hybrid search results when `auto_recall` is on)
+6. Learned playbooks (`## Learned Playbooks`, when `[playbooks] enabled` is on)
+7. Confirmation context (only on confirmed tasks) — emitted after the conversation context, immediately before the request
 
 ## Configuration
 
@@ -222,6 +239,8 @@ The executor injects memory in this order (briefings get none of it):
 | `curate_user_memory` | `false` | Run op-based USER.md curation after extraction |
 | `curation_log_summary` | `true` | Post a one-line summary to `log_channel` after applied curation ops |
 | `knowledge_graph_audit_retention_days` | `365` | Prune `knowledge_facts_audit` rows older than N days. Independent of `memory_retention_days` so default deployments still keep the audit table bounded; 0 = unlimited |
+| `extraction_model` | `"general"` | Role used for the nightly extraction call |
+| `curation_model` | `"general"` | Role used for the USER.md curation call |
 
 ### `[channel_sleep_cycle]`
 
@@ -239,13 +258,24 @@ The executor injects memory in this order (briefings get none of it):
 | `enabled` | `true` | Master switch for hybrid search and indexing |
 | `auto_index_conversations` | `true` | Index after task completion |
 | `auto_index_memory_files` | `true` | Index after sleep cycle and after curation writes |
-| `auto_recall` | `false` | Inject FTS5 recall results into prompts |
+| `auto_recall` | `false` | Inject recall results into prompts |
 | `auto_recall_limit` | `5` | Max recall results |
+| `recency_half_life_days` | `180.0` | Age half-life for the recency down-weight; 0 disables |
+
+### `[playbooks]`
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `enabled` | `false` | Master switch for procedural memory |
+| `recall_limit` | `3` | Top-K playbooks injected per task |
+| `min_tool_calls` | `4` | Minimum tool calls for a task to qualify for distillation |
+| `retention_days` | `90` | Age-prune by last use; 0 = keep forever |
+| `max_chars` | `0` | 0 = share the global `max_memory_chars` budget |
 
 ### Other knobs
 
 - `max_memory_chars` (top-level Config) — total memory cap; 0 = unlimited.
-- `max_knowledge_facts` (top-level Config) — cap on KG facts injected per prompt; 0 = unlimited.
+- `max_knowledge_facts` (top-level Config, default 50) — cap on KG facts injected per prompt; 0 = unlimited.
 
 ## Schema
 
@@ -255,17 +285,18 @@ Memory tables in SQLite (`schema.sql`):
 |---|---|
 | `sleep_cycle_state` | Per-user nightly state (`last_run_at`, `last_processed_task_id`) |
 | `channel_sleep_cycle_state` | Same, keyed on `conversation_token` |
-| `memory_chunks` | Indexed text chunks (`source_type` ∈ `conversation`, `memory_file`, `user_memory`, `channel_memory`); `topic`, `entities`, `metadata_json` columns |
+| `memory_chunks` | Indexed text chunks (`source_type` ∈ `conversation`, `memory_file`, `user_memory`, `channel_memory`, `channel_memory_durable`, `playbook`); `topic`, `entities`, `metadata_json` columns |
 | `memory_chunks_fts` | FTS5 virtual table, trigger-synced from `memory_chunks` |
 | `memory_chunks_vec` | sqlite-vec table (created lazily via `ensure_vec_table()`) |
 | `knowledge_facts` | Temporal triples with validity windows; unique-current index prevents duplicate active facts |
+| `knowledge_facts_audit` | Append-only trail of fact adds/invalidations, pruned on its own retention knob |
 
 ## CLI surface
 
 The `memory_search` skill exposes everything via `istota-skill`:
 
-- `search QUERY [--topic ...] [--entity ...] [--since YYYY-MM-DD]`
-- `index conversation TASK_ID` / `index file PATH`
+- `search QUERY [--topic ...] [--entity ...] [--since YYYY-MM-DD] [--limit N] [--source-type T]`
+- `index conversation TASK_ID` / `index file PATH` — `index file` only reads paths inside your workspace, the task's channel directory, or its scratch dir
 - `reindex` — rebuild from current files and conversation history
 - `stats` — counts and source-type breakdown
-- `facts [--entity ...]` / `timeline ENTITY` / `add-fact …` / `invalidate ID` / `delete-fact ID`
+- `facts [--subject ...] [--predicate ...] [--as-of ...]` / `timeline ENTITY` / `fact-history [--entity ...]` / `add-fact …` / `invalidate ID` / `delete-fact ID`

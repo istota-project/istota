@@ -39,6 +39,8 @@ A mask hides rather than revokes: `kernel.unprivileged_userns_clone` is on (bwra
 
 **Also hidden from non-admin**: other users' directories, `/etc/istota/`, user config files.
 
+The config directory is not bound — it holds `config.toml`. `emissaries.md`, `persona.md`, `guidelines/*.md` and the skill bodies reach the model as content the daemon read and put in the prompt, so they never needed to be there. `system-prompt.md` is the exception, since `custom_system_prompt = true` makes the CLI open the path itself; that one file is bound read-only, which leaves `config.toml` outside. Until now the file arrived only via the `sandbox_ro_paths = ["/srv/app"]` default, which is why narrowing that default broke every task on such an install.
+
 **Admin users additionally see**: full Nextcloud mount (read-write), developer repos.
 
 The masks are unconditional rather than a matter of not binding the files, because not binding them was the previous design and it did not hold. `module_data_dir` defaults under the framework DB's directory, the reference deployment puts that under `istota_home`, and `sandbox_ro_paths` defaulted to the `/srv/app` containing it — so one RO bind that named no database exposed all of them, to every task. `sandbox_ro_paths` now defaults to `[]` and is honoured from config (it was previously never parsed), but the masks are what makes the property hold regardless.
@@ -123,7 +125,7 @@ No MITM -- TLS is end-to-end between Claude Code and the destination.
 
 ## Deferred DB operations
 
-With the sandbox making the DB read-only, skills write JSON request files to the always-writable temp dir. The scheduler (unsandboxed) processes them after successful completion:
+With no database reachable from inside the sandbox at all, skills write JSON request files to the always-writable temp dir. The scheduler (unsandboxed) processes them after successful completion:
 
 - `task_{id}_subtasks.json` -- subtask creation (admin-only)
 - `task_{id}_tracked_transactions.json` -- transaction dedup
@@ -132,6 +134,10 @@ With the sandbox making the DB read-only, skills write JSON request files to the
 - `task_{id}_kg_ops.json` -- knowledge-graph fact add/invalidate/delete (per-op commit)
 - `task_{id}_user_alerts.json` -- suspicious email alerts posted to user's alerts channel
 - `task_{id}_email_output.json` -- deferred email sends (SMTP delivery after task completion)
+- `task_{id}_health_ops.json` -- health module writes (stats, bloodwork, encounters)
+- `task_{id}_garmin_import.json` -- Garmin Connect sync requests
+
+One recovery artifact is written *by* the scheduler rather than read by it: `task_{id}_health_op_failures.json`, left behind when a health op fails mid-batch so an operator can recover the lost rows. It is recognized but never purged on retry.
 
 Handlers and the shared envelope helper (`_load_deferred_json`) live in `scheduler_deferred.py`. Identity fields (`user_id`, `conversation_token`) come from the task, not the JSON, preventing spoofing via prompt injection. See [scheduler](../architecture/scheduler.md#deferred-db-operations) for retry-replay safety and the unconsumed-file warning.
 
@@ -140,7 +146,9 @@ Handlers and the shared envelope helper (`_load_deferred_json`) live in `schedul
 ```toml
 [security]
 sandbox_enabled = true
-skill_proxy_enabled = true   # required wherever sandbox_enabled is true
+skill_proxy_enabled = true   # needed wherever sandbox_enabled is true; turning it
+                             # off with the sandbox on warns at startup and leaves
+                             # skill commands with nothing to read
 skill_proxy_timeout = 300
 passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths = []        # extra RO binds for co-located services; keep narrow

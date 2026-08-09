@@ -1,6 +1,6 @@
 # Conversation context
 
-The context module (`context.py`) selects which previous messages to include in the prompt. This keeps token usage reasonable while preserving relevant history.
+The context module (`context.py`) triages which previous messages to include in the prompt. This keeps token usage reasonable while preserving relevant history. One step of the algorithm below lives elsewhere: the recency window (step 2) is applied by `_apply_recency_window_talk` / `_apply_recency_window_db` in `executor.py`, before `context.py` sees the list.
 
 ## Selection algorithm
 
@@ -10,7 +10,7 @@ The context module (`context.py`) selects which previous messages to include in 
 4. Most recent `always_include_recent` (5) messages are always included
 5. Older messages are triaged by a fast model that returns which message IDs are relevant to the current request. Triage runs through the **task's own brain**, not a hardcoded `claude` CLI call: a `claude_code` task triages with Haiku via the CLI subprocess, a `native` task triages through its own provider's fast completer. If a completer can't be built (e.g. a native task with no API key), triage fails open — all older messages are kept rather than dropped
 6. Selected older messages + guaranteed recent messages are combined in chronological order
-7. On any error: fall back to guaranteed recent messages only
+7. On any triage error: **fail open** — keep every older message rather than dropping it. Losing context silently is the worse failure, so an unavailable triage costs tokens instead of history
 
 Reply-to messages are force-included regardless of selection. Actions taken (tool use descriptions) are appended after bot responses so Claude can see what it did previously.
 

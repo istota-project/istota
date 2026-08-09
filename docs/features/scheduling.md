@@ -14,19 +14,18 @@ Each user can define scheduled jobs in `/Users/{user_id}/{bot_dir}/config/CRON.m
 name = "daily-check"
 cron = "0 9 * * *"
 prompt = "Check my calendar for today and summarize what's coming up"
-conversation_token = "room123"
+room = "room123"
 
 [[jobs]]
 name = "backup-reminder"
 cron = "0 10 * * 1"
 prompt = "Remind me to check the backup logs"
-output_target = "talk"
+target = "talk"
 silent_unless_action = true
 
 [[jobs]]
 name = "disk-check"
 cron = "0 */6 * * *"
-type = "command"
 command = "df -h / | tail -1"
 ```
 ````
@@ -35,11 +34,13 @@ CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definiti
 
 ## Job types
 
-**Prompt jobs** (default): Run through Claude Code like any other task. The prompt is sent to the executor with full skill and context support.
+There is no `type` field. The loader infers the kind from which of `prompt`, `prompt_file`, or `command` a job sets, and a job that sets more than one is skipped with a warning rather than guessed at.
 
-**Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the Nextcloud mount root.
+**Prompt jobs** (default): Run through the brain like any other task. The prompt is sent to the executor with full skill and context support.
 
-**Command jobs**: Run shell commands in a subprocess (via `_run_capture`, which kills the whole process group on timeout). No Claude invocation. Output captured and optionally posted to Talk.
+**Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the Nextcloud mount root. `prompt_file` cannot be combined with `prompt` or `command`.
+
+**Command jobs**: Run shell commands in a subprocess (via `_run_capture`, which kills the whole process group on timeout). No brain invocation. Output captured and optionally posted to Talk.
 
 All job types go through the same task queue with retry logic, `!stop` support, failure tracking, and auto-disable.
 

@@ -29,6 +29,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `talk_messages` | Poller-fed message cache for conversation context |
 | `processed_emails` | Email dedup with RFC 5322 thread tracking |
 | `sent_emails` | Outbound email tracking for emissary thread matching |
+| `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate |
 | `task_events` | Task-event-streaming log: `id, task_id, seq, kind, payload (JSON), created_at`, `UNIQUE(task_id, seq)`. One persisted, typed event stream per task feeding Talk / SSE / log / push consumers. `seq` is monotonic per task (writer-assigned, resumed across retries via `get_max_task_event_seq`); rows are deleted only by `cleanup_old_tasks` (retention) |
 
 ### Web chat (per-user rooms)
@@ -44,14 +45,14 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 
 | Table | Purpose |
 |---|---|
-| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (talk\|web), display name, `archived` flag |
+| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (talk\|web), display name, `archived` flag, plus the standing per-room `model` / `effort` default applied by `record_inbound` |
 | `room_bindings` | One row per (room, surface) exposing a room; maps canonical token to each surface's ref |
 | `messages` | Canonical transcript (role user\|assistant\|system, `task_id`, `origin_surface`, `external_ids` mirror ledger) |
 | `room_members` | Per-user membership of a shared room; web visibility resolves through this, not the single-owner `rooms.user_id` |
 | `room_dismissals` | Per-user "hide this room" tombstone, cleared by the user's own next inbound |
 | `room_read_state` | Per-surface, per-user read cursors driving unread badges |
 | `message_stars` | Per-user starred messages (Talk has no per-message star API, so this is web-only) |
-| `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate |
+| `message_deletions` | Hard-delete ledger with its own stream cursor, so a reconnecting client learns what vanished while it was away. Pruned at 30 days |
 
 ### Scheduling
 
@@ -92,6 +93,8 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 
 Invoice timing tables (`invoice_schedule_state`, `invoice_overdue_notified`) live in the per-user money DB (`money/db.py`), not the framework `istota.db`.
 
+Watch the names: `money/db.py` creates its *own* `monarch_synced_transactions`, `csv_imported_transactions`, and `kv_store` in the per-user money DB. The framework copies listed above are the ones `_process_deferred_tracking` writes; the money-DB copies are internal to the module.
+
 ### Feeds (per-user feeds.db)
 
 | Table | Purpose |
@@ -115,6 +118,7 @@ Location tables live in a per-user `location.db`, not in the framework DB. The m
 | `visits` | Detected place visits |
 | `location_state` | Per-user location tracking state |
 | `dismissed_clusters` | Clusters the user chose not to save as places |
+| `schema_meta` | Schema version |
 
 The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup.
 
@@ -141,7 +145,17 @@ Only the `.db` is local; document and panel bytes stay in the workspace on the m
 
 ### Briefings (per-user briefings.db)
 
-Blocks, their sources, and the archive of rendered results live in a per-user `briefings.db`. Schedule and delivery stay framework-owned in `briefing_configs`. Archived results are pruned by `[briefings] archive_retention_days` on insert, and individually deletable from the web reader.
+Blocks, their sources, and the archive of rendered results live in a per-user `briefings.db`. Schedule and delivery stay framework-owned in `briefing_configs`.
+
+| Table | Purpose |
+|---|---|
+| `briefing_blocks` | The blocks a user's briefing is assembled from, in order |
+| `briefing_block_sources` | Per-block source rows (kind + config) |
+| `briefing_items` | Items gathered for a block |
+| `briefing_item_state` | Per-item seen/dismissed state for next-run dedup |
+| `briefing_archive` | Rendered briefing results |
+| `schema_meta` | Schema version |
+ Archived results are pruned by `[briefings] archive_retention_days` on insert, and individually deletable from the web reader.
 
 ### Module DB storage
 

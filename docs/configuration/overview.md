@@ -2,7 +2,7 @@
 
 ## Config file locations
 
-Config is loaded from the first file found in this search order:
+`ISTOTA_CONFIG_PATH`, when set, wins outright — it is how a subprocess resolves the same config the daemon loaded rather than searching afresh. Otherwise config is loaded from the first file found in this search order:
 
 1. `config/config.toml` (relative to working directory)
 2. `~/src/config/config.toml`
@@ -70,14 +70,23 @@ Override path via `ISTOTA_ADMINS_FILE` env var.
 
 ## CalDAV
 
-CalDAV settings are derived from Nextcloud credentials automatically: `{url}/remote.php/dav` with the same username and app password. No separate configuration needed.
+By default CalDAV settings are derived from Nextcloud credentials: `{url}/remote.php/dav` with the same username and app password. Nothing to configure in the common case.
+
+An explicit `[caldav]` section overrides that derivation, which is what a standalone install without Nextcloud uses to reach an external CalDAV server:
+
+```toml
+[caldav]
+url = "https://caldav.example.com/dav"
+username = "alice"
+password = ""    # or via the encrypted secrets store
+```
 
 ## Derived properties
 
 | Property | Derived from |
 |---|---|
 | `bot_dir_name` | `bot_name` sanitized for filesystem (ASCII lowercase, spaces to underscores) |
-| `caldav_url` | `nextcloud.url + /remote.php/dav` |
-| `caldav_username` | `nextcloud.username` |
-| `caldav_password` | `nextcloud.app_password` |
+| `caldav_url` | `[caldav] url` if set, else `nextcloud.url + /remote.php/dav` |
+| `caldav_username` | `[caldav] username` if set, else `nextcloud.username` |
+| `caldav_password` | `[caldav] password` if set, else `nextcloud.app_password` |
 | `use_mount` | `True` if `nextcloud_mount_path` is set |
