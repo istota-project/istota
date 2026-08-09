@@ -358,8 +358,7 @@
         <SettingsField
           label="Update timezone when I travel"
           checkbox
-          warning="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so."
-          hint="Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
+          hint="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so. Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
         >
           <input type="checkbox" bind:checked={profile.timezone_follow_location} />
         </SettingsField>

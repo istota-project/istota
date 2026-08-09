@@ -1746,6 +1746,11 @@ function dropClusterNear(point: { lat: number; lon: number }, radius: number): v
 const mockSecrets: Record<string, Record<string, string>> = {
   karakeep: {},
   google_workspace: {},
+  // Seeded half-configured, because that is the state the ntfy card is
+  // actually met in — a topic set, the optional auth fields empty — and it
+  // is the only state in which a row with a clear button and a row without
+  // one appear together, which is what the field widths have to survive.
+  ntfy: { topic: 'mock-topic' },
   monarch: {},
   feeds: {},
   overland: {},
@@ -1779,6 +1784,21 @@ const _CONNECTED_SCHEMAS: ServiceSchema[] = [
     // read-only/full picker bounded by the operator's ceiling.
     custom_ui: true,
     fields: [],
+  },
+  // Mirrors secret_schema.py's `ntfy` entry, which the mock had been missing
+  // altogether — so the card with the most fields, and the only one mixing
+  // required and optional ones, could not be seen in dev at all.
+  {
+    service: 'ntfy',
+    label: 'ntfy push',
+    used_by: ['heartbeat', 'scheduler'],
+    fields: [
+      { key: 'server_url', label: 'Server URL', type: 'url' },
+      { key: 'topic', label: 'Default topic', type: 'text' },
+      { key: 'token', label: 'Access token (optional)', type: 'password' },
+      { key: 'username', label: 'Username (optional)', type: 'text' },
+      { key: 'password', label: 'Password (optional)', type: 'password' },
+    ],
   },
 ];
 

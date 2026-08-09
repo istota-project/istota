@@ -589,6 +589,77 @@ class TestSkillProxyLifecycle:
         proxy.stop()
         proxy.stop()  # Should not raise
 
+    def test_stop_returns_promptly(self, sock_path):
+        """The accept loop must be woken, not polled out.
+
+        It used to sit in ``accept()`` on a 1s socket timeout, so every
+        teardown — one per task, and one per executor test — paid a full
+        second waiting for the loop to notice the stop event.
+        """
+        proxy = SkillProxy(sock_path, {}, {})
+        proxy.start()
+        started = time.monotonic()
+        proxy.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.25, f"stop() took {elapsed:.2f}s"
+
+    def test_serves_several_requests_on_one_instance(self, sock_path):
+        """The loop takes one connection per readiness event; it must not go
+        deaf after the first.
+
+        Asserting on the *response* is the point. ``connect()`` alone succeeds
+        out of the listen backlog whether or not anything ever calls
+        ``accept()``, so a connect-and-close test passes against a proxy with
+        no accept loop at all.
+        """
+        with SkillProxy(sock_path, {}, {}, allowed_skills=frozenset()):
+            for _ in range(3):
+                resp = TestSkillProxyProtocol()._send_request(
+                    sock_path, {"skill": "nope", "args": []},
+                )
+                assert resp["returncode"] == 1
+                assert "Unknown skill" in resp["stderr"]
+
+    def test_transient_accept_failure_does_not_kill_the_loop(self, sock_path):
+        """One failed accept() must not deafen the proxy for the rest of the task.
+
+        The listening socket stays bound whether or not the loop is alive, so
+        a dead loop turns every later skill call into a hang in the backlog
+        rather than the clean refusal skill_client knows how to report.
+        """
+        proxy = SkillProxy(sock_path, {}, {}, allowed_skills=frozenset())
+        real_accept = socket.socket.accept
+        calls = {"n": 0}
+
+        def flaky_accept(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionAbortedError("simulated ECONNABORTED")
+            return real_accept(self)
+
+        with patch.object(socket.socket, "accept", flaky_accept):
+            with proxy:
+                resp = TestSkillProxyProtocol()._send_request(
+                    sock_path, {"skill": "nope", "args": []},
+                )
+        assert calls["n"] >= 2, "accept() was not retried after the failure"
+        assert resp["returncode"] == 1
+        assert "Unknown skill" in resp["stderr"]
+
+    def test_restart_after_stop_serves_again(self, sock_path):
+        """start() must clear the stop state, or the second run is silently deaf."""
+        proxy = SkillProxy(sock_path, {}, {}, allowed_skills=frozenset())
+        proxy.start()
+        proxy.stop()
+        proxy.start()
+        try:
+            resp = TestSkillProxyProtocol()._send_request(
+                sock_path, {"skill": "nope", "args": []},
+            )
+            assert "Unknown skill" in resp["stderr"]
+        finally:
+            proxy.stop()
+
 
 class TestSkillProxyProtocol:
     def _send_request(self, sock_path, request_dict):
