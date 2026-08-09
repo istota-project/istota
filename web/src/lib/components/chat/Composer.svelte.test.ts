@@ -30,6 +30,7 @@ import {
 } from '$lib/platform/nativePicker';
 import { resetCommandCatalogue } from './autocomplete/providers';
 import { readDraft, writeDraft, DRAFT_STORAGE_KEY, MAX_DRAFT_CHARS } from '$lib/stores/drafts';
+import { IME_COMMIT_GRACE_MS } from '$lib/platform/input';
 import Composer, { DRAFT_SAVE_DEBOUNCE_MS } from './Composer.svelte';
 
 const upload = uploadChatAttachment as ReturnType<typeof vi.fn>;
@@ -110,7 +111,10 @@ function enableMic() {
 /** Which keyboard the composer thinks it is talking to. */
 function softKeyboard(on: boolean) {
   window.matchMedia = ((q: string) => ({
-    matches: on === q.includes('coarse'),
+    // `on && …`, not `on === …`: the equality form answered **true** to every
+    // non-coarse query when `on` was false, which was inert only while nothing
+    // else in this file's tree asked `matchMedia` anything.
+    matches: on && q.includes('coarse'),
     media: q,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -528,14 +532,100 @@ describe('Composer send control', () => {
     expect(notPrevented).toBe(true);
   });
 
-  it('refuses a bare Enter while a turn is running', async () => {
-    // Same rule the chord follows: a key that sends must consult the send/stop
-    // mode, or holding it starts a second turn in a room that already has one.
+  it('does not send on the Enter WebKit reports after compositionend', async () => {
+    // WebKit can dispatch `compositionend` *before* the keydown that confirmed
+    // the candidate, which then carries neither mark — so the event alone
+    // cannot answer the question and a short window after the event stands in.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'にほん');
+    await fireEvent.compositionEnd(textarea);
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('sends on the Enter after that window has passed', async () => {
+    // The window is a stand-in for a missing flag, not a cooldown on the key.
+    vi.useFakeTimers();
+    try {
+      const onSend = vi.fn();
+      const { textarea } = mount({ onSend });
+      await type(textarea, 'にほん');
+      await fireEvent.compositionEnd(textarea);
+      vi.advanceTimersByTime(IME_COMMIT_GRACE_MS);
+      await fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(onSend).toHaveBeenCalledWith('にほん', [], null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves Enter a newline while a turn is running', async () => {
+    // The mode gate is the chord's rule too: a key that sends must consult it,
+    // or holding it starts a second turn in a room that already has one. What
+    // the key must not do is go dead — the send key silently doing nothing is
+    // the one failure the user has no way to read — so it falls through to the
+    // browser and writes the newline it used to.
     const onSend = vi.fn();
     const { textarea } = mount({ onSend, busy: true, onCancel: () => {} });
     await type(textarea, 'let me in');
-    await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
+
     expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('does not send on Enter while a voice message is recording', async () => {
+    // The send button is deliberately swapped out for Discard/Finish here and
+    // the field sits under an opaque overlay, so a key that sent would post
+    // text the user cannot see and strand the memo in the next message.
+    enableMic();
+    const onSend = vi.fn();
+    const { container, textarea } = mount({ onSend });
+    await type(textarea, 'hold on');
+    await fireEvent.click(btn(container, 'Record voice message')!);
+    await tick();
+    await tick();
+    expect(btn(container, 'Finish recording')).toBeTruthy();
+
+    await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('does not send on Enter while an attachment is still uploading', async () => {
+    // The file is part of this message. Sending without it posts the text alone
+    // and leaves the chip in the composer for whatever is typed next, which
+    // reads as the file having been sent.
+    let release: (v: unknown) => void = () => {};
+    upload.mockReturnValue(
+      new Promise((res) => {
+        release = res;
+      }),
+    );
+    const onSend = vi.fn();
+    const { container, textarea } = mount({ onSend });
+    await type(textarea, 'see attached');
+    const input = picker(container, 'file');
+    Object.defineProperty(input, 'files', { value: [sizedFile('a.png', 10)] });
+    await fireEvent.change(input);
+    await tick();
+
+    await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(onSend).not.toHaveBeenCalled();
+    // And the button agrees with the key, rather than the two disagreeing about
+    // whether the message is ready.
+    expect(btn(container, 'Send')!.disabled).toBe(true);
+
+    release({ path: 'inbox/a.png', name: 'a.png', size: 10 });
+    await tick();
+    await tick();
+    expect(btn(container, 'Send')!.disabled).toBe(false);
   });
 
   it('sends on Cmd+Enter', async () => {

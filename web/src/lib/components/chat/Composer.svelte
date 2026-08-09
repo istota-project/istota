@@ -32,7 +32,7 @@
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
   import { createRecorder, formatElapsed } from './useRecorder.svelte';
-  import { usesSoftKeyboard } from '$lib/platform/input';
+  import { usesSoftKeyboard, isImeComposing, IME_COMMIT_GRACE_MS } from '$lib/platform/input';
   import {
     nativePickersAvailable,
     takePhoto,
@@ -725,16 +725,54 @@
     if (CARET_KEYS.has(e.key)) syncAc();
   }
 
-  // An Enter still being fed to an input method is not a send — committing a
-  // candidate is the same key from the DOM's point of view, so acting on it
-  // posts a half-typed word for anyone composing Japanese, Korean or Chinese.
-  // `keyCode === 229` is the older shape of the same signal, which some IMEs
-  // still report with `isComposing` unset.
-  function isComposing(e: KeyboardEvent): boolean {
-    return e.isComposing || e.keyCode === 229;
+  // When the input method last handed a committed candidate back. WebKit can
+  // dispatch `compositionend` *before* the keydown that confirmed it, which
+  // then carries neither `isComposing` nor `keyCode === 229` — so the event
+  // alone cannot answer the question and this window stands in for it.
+  let lastCompositionEnd = 0;
+  function onCompositionEnd() {
+    lastCompositionEnd = Date.now();
+  }
+
+  /** Is this keydown still the input method's, rather than the user's? */
+  function composing(e: KeyboardEvent): boolean {
+    return isImeComposing(e) || Date.now() - lastCompositionEnd < IME_COMMIT_GRACE_MS;
+  }
+
+  /**
+   * Would a send actually happen right now?
+   *
+   * Every keyboard send path asks this before consuming the key, so a key that
+   * cannot send falls through to the browser and writes its newline instead of
+   * being silently eaten — the send key going dead is the one failure a user
+   * has no way to read.
+   */
+  function wouldSend(): boolean {
+    // The mode gate. This was the one path into a send that did not consult
+    // it, so holding the key started a second turn in a room that already had
+    // one — and two overlapping turns share one echo buffer, whose drain then
+    // releases the first turn's frames before its task id exists. Not
+    // repurposed as Stop: a key that cancels work is not what it looks like it
+    // does.
+    if (showStop) return false;
+    // The send button is deliberately swapped out for Discard/Finish while a
+    // voice message records, and the field is under an opaque overlay — so a
+    // key that sent here would post text the user cannot see and strand the
+    // memo in the *next* message, straight through a control that was removed
+    // on purpose.
+    if (recorder.recording || recorder.starting) return false;
+    // An attachment still uploading is part of this message. Sending without
+    // it posts the text alone and leaves the chip sitting in the composer for
+    // whatever is typed next, which reads as the file having been sent.
+    if (uploading > 0) return false;
+    return canSend;
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // Nothing in here belongs to a key the input method is still consuming —
+    // the popover navigates on the arrow keys an IME uses for its candidate
+    // list, and both send paths would act on the Enter that commits one.
+    if (composing(e)) return;
     // Sending is Enter, Cmd/Ctrl+Enter, or the button; a newline is
     // Shift+Enter. Nearly every message is one line, so the unmodified key
     // belongs to the common case — the chord stays because it was the send key
@@ -744,16 +782,10 @@
     // to accept a completion. That is the right owner of the unmodified key
     // while the popover is open, but the chord is unambiguous — it still means
     // send, not "accept the row and stay put".
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isComposing(e)) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      if (!wouldSend()) return;
       e.preventDefault();
-      // Only when the button would have sent. The chord was the one path into
-      // a send that did not consult the mode, so holding it started a second
-      // turn in a room that already had one — and two overlapping turns share
-      // one echo buffer, whose drain then releases the first turn's frames
-      // before its task id exists. Silently doing nothing rather than being
-      // repurposed as Stop: a key that cancels work is not what it looks like
-      // it does. The bare key below inherits the same gate.
-      if (!showStop) submit();
+      submit();
       return;
     }
     // The engine consumes Arrow/Tab/Enter/Escape only while the popover is
@@ -771,9 +803,10 @@
     // the only part of this rule the user can see before pressing the key.
     // Any other modifier (Shift, Alt) leaves the key to the browser, whose
     // default action is what writes the newline.
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !isComposing(e) && !usesSoftKeyboard()) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !usesSoftKeyboard()) {
+      if (!wouldSend()) return;
       e.preventDefault();
-      if (!showStop) submit();
+      submit();
       return;
     }
     // Escape reaches the chip only once every open menu has declined it. The
@@ -966,6 +999,7 @@
         oninput={onInput}
         onkeydown={onKeydown}
         onkeyup={onKeyup}
+        oncompositionend={onCompositionEnd}
         onclick={syncAc}
         onpaste={onPaste}
         onfocus={onFocus}
@@ -1043,7 +1077,7 @@
           onmousedown={keepFocus}
           onclick={activatePrimary}
           type="button"
-          disabled={showStop ? false : !canSend}
+          disabled={showStop ? false : !wouldSend()}
           aria-label={showStop ? 'Stop' : 'Send'}
           title={showStop ? 'Stop' : 'Send'}
         >

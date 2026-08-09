@@ -106,6 +106,19 @@ describe('Composer autocomplete', () => {
     expect(onSend).toHaveBeenCalledWith('!models', [], null);
   });
 
+  it('leaves Shift+Enter a newline even with the popover open', async () => {
+    // Shift+Enter is the field's one newline now that a bare Enter sends, so a
+    // popover eating it would leave no way to break a line while one happens to
+    // be open — and a modified key was never how a row gets accepted.
+    const { textarea, onSend } = mount();
+    await type(textarea, '!mo');
+    const notPrevented = await key(textarea, 'Enter', { shiftKey: true });
+    await tick();
+    expect(textarea.value).toBe('!mo');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
   it('Tab accepts the highlighted command', async () => {
     const { textarea } = mount();
     await type(textarea, '!mo'); // first row = !models

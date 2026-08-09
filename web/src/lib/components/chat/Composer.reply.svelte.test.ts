@@ -121,7 +121,8 @@ describe('composer reply chip', () => {
   it('a send carries the citation and then clears it', async () => {
     const { textarea, onSend, onReplyChange } = mount({ replyTo: CITATION });
     await type(textarea, 'about that');
-    // Bare Enter is a newline here; the chord is the keyboard send.
+    // The chord rather than a bare Enter: both send, and the chord is the one
+    // that does not have to care which keyboard the test is pretending to have.
     await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
     expect(onSend).toHaveBeenCalledWith('about that', [], CITATION);
     expect(onReplyChange).toHaveBeenCalledWith(null);
