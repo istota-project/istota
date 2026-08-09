@@ -8,7 +8,7 @@
     type GoogleStatus,
     type GoogleScopeLevel,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SettingsCard from './SettingsCard.svelte';
   import SettingsField from './SettingsField.svelte';
@@ -148,9 +148,32 @@
   onMount(refresh);
 </script>
 
+<!--
+  The connection state is a pill beside the card title, like every other
+  service card's. It was a Badge in the body, which put the loudest thing on
+  the card two lines below the heading it qualifies. Withheld until the status
+  lands, and on an instance with Google switched off: there is no connection to
+  report in either case.
+
+  Declared out here and passed by name rather than written inside the card's
+  tags, which is the shorter form: that spelling takes the snippet's own name
+  as the prop, and `status` is already this component's loaded payload.
+-->
+{#snippet statusPill()}
+  {#if status?.enabled}
+    <span class="status-pill status-{status.connected ? 'configured' : 'missing'}">
+      {status.connected ? 'Connected' : 'Not connected'}
+    </span>
+    {#if status.connected && status.missing_scopes.length > 0}
+      <span class="status-pill status-partial">Reconnect needed</span>
+    {/if}
+  {/if}
+{/snippet}
+
 <SettingsCard
   title="Google Workspace"
   description="Choose which Google services the bot may use, and at what level. A change takes effect the next time you connect: Google has to ask you again."
+  status={statusPill}
 >
   {#if loading}
     <p class="muted">Loading…</p>
@@ -159,55 +182,7 @@
   {:else if !status.enabled}
     <p class="empty">Google Workspace OAuth is not configured on this Istota instance.</p>
   {:else}
-    <div class="state-row">
-      <Badge variant={status.connected ? 'success' : 'neutral'}>
-        {status.connected ? 'Connected' : 'Not connected'}
-      </Badge>
-      {#if status.connected && status.missing_scopes.length > 0}
-        <Badge variant="warn">Reconnect needed</Badge>
-      {/if}
-    </div>
-
     {#if status.connected}
-      <h3 class="micro-label">What you granted</h3>
-      {#if status.granted.length === 0}
-        <p class="empty small">Google granted no recognised service scopes.</p>
-      {:else}
-        <ul class="grants">
-          {#each status.granted as g (g.service)}
-            <li>
-              <span class="grant-name">{g.label}</span>
-              <Badge variant={g.level === 'full' ? 'warn' : 'info'}>
-                {LEVEL_LABELS[g.level]}
-              </Badge>
-              {#if !g.complete}
-                <span class="caption">partial — some boxes were deselected at consent</span>
-              {/if}
-              {#if g.also.length > 0}
-                <!-- A scope of the same service below the level reported: in
-                     the map, so never "unrecognised", and not in the reported
-                     level's set, so it would otherwise show nowhere. -->
-                <span class="caption">
-                  also: {#each g.also as s, i (s)}{#if i > 0},
-                    {/if}<code>{s}</code>{/each}
-                </span>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-
-      {#if status.unrecognized_scopes.length > 0}
-        <!-- Shown rather than dropped: the service map lags a hand-edited
-             config, and hiding a granted scope is the thing this display
-             exists to stop. -->
-        <p class="caption">
-          Also granted, not recognised as a service:
-          {#each status.unrecognized_scopes as s, i (s)}{#if i > 0},
-            {/if}<code>{s}</code>{/each}
-        </p>
-      {/if}
-
       {#if status.missing_scopes.length > 0}
         <div class="banner warn">
           Your grant is narrower than what this instance now asks for. Reconnect to apply the
@@ -221,17 +196,10 @@
       {/if}
     {/if}
 
-    <h3 class="micro-label">What to ask for</h3>
-    {#if status.unoffered_scopes.length > 0}
-      <!-- Ceiling scopes with no service row. They are requested regardless —
-           no picker row can turn one off — so naming them is the difference
-           between an informed consent and a surprise on Google's screen. -->
-      <p class="caption">
-        This instance also always requests, with no per-service control:
-        {#each status.unoffered_scopes as s, i (s)}{#if i > 0},
-          {/if}<code>{s}</code>{/each}
-      </p>
-    {/if}
+    <!-- One row per service, and the row is the whole account of that service:
+         what to ask for next time, and what Google currently holds. The two
+         used to be separate sections, which said each level twice and left the
+         reader matching names across them. -->
     {#each status.offered as svc (svc.service)}
       {@const held = grantedByService.get(svc.service)}
       <SettingsField
@@ -249,11 +217,47 @@
             fullWidth
           />
           {#if held}
-            <span class="caption">granted: {LEVEL_LABELS[held.level]}</span>
+            <!-- Flat text rather than nested spans: the partial note qualifies
+                 the level it follows, and splitting them reads as two facts. -->
+            <span class="caption"
+              >granted: {LEVEL_LABELS[held.level]}{#if !held.complete}
+                — partial, some boxes were deselected at consent{/if}</span
+            >
           {/if}
         </div>
+        {#if held && held.also.length > 0}
+          <!-- A scope of the same service below the level reported: in the map,
+               so never "unrecognised", and not in the reported level's set, so
+               it would otherwise show nowhere. -->
+          <p class="caption also">
+            also granted:
+            {#each held.also as s, i (s)}{#if i > 0},
+              {/if}<code>{s}</code>{/each}
+          </p>
+        {/if}
       </SettingsField>
     {/each}
+
+    {#if status.connected && status.unrecognized_scopes.length > 0}
+      <!-- Shown rather than dropped: the service map lags a hand-edited
+           config, and hiding a granted scope is the thing this display
+           exists to stop. -->
+      <p class="caption footnote">
+        Also granted, not recognised as a service:
+        {#each status.unrecognized_scopes as s, i (s)}{#if i > 0},
+          {/if}<code>{s}</code>{/each}
+      </p>
+    {/if}
+    {#if status.unoffered_scopes.length > 0}
+      <!-- Ceiling scopes with no service row. They are requested regardless —
+           no picker row can turn one off — so naming them is the difference
+           between an informed consent and a surprise on Google's screen. -->
+      <p class="caption footnote">
+        This instance also always requests, with no per-service control:
+        {#each status.unoffered_scopes as s, i (s)}{#if i > 0},
+          {/if}<code>{s}</code>{/each}
+      </p>
+    {/if}
 
     <div class="actions">
       {#if status.connected}
@@ -296,32 +300,12 @@
 />
 
 <style>
-  .state-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-bottom: var(--space-3);
-  }
-  /* .micro-label is typography only by design, so the spacing stays here. */
-  h3.micro-label {
-    margin: var(--space-4) 0 var(--space-2);
-  }
-  .grants {
-    list-style: none;
-    margin: 0 0 var(--space-3);
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-  .grants li {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
-  .grant-name {
-    font-size: var(--text-sm);
+  /* .caption is typography only by design, so the spacing stays here — and
+     here it is nothing: the card is a flex column with its own gap, and the
+     field the `also` line sits in is another. */
+  .also,
+  .footnote {
+    margin: 0;
   }
   .level-row {
     display: flex;

@@ -69,7 +69,7 @@ describe('GoogleWorkspaceCard', () => {
     expect(await screen.findByText('Not connected')).toBeInTheDocument();
   });
 
-  it('renders the granted services with their level', async () => {
+  it('reports what Google holds on the service row itself', async () => {
     await mount(
       status({
         connected: true,
@@ -86,7 +86,59 @@ describe('GoogleWorkspaceCard', () => {
       }),
     );
     expect(await screen.findByText('Connected')).toBeInTheDocument();
-    expect(screen.getAllByText('Read-only').length).toBeGreaterThan(0);
+    expect(screen.getByText('granted: Read-only')).toBeInTheDocument();
+  });
+
+  /**
+   * The level used to be stated twice — once in a "What you granted" list and
+   * again beside the picker — which is what the two section headings were
+   * separating. One statement per service means neither heading has anything
+   * to head, so both went with the list.
+   */
+  it('states a granted level once, under no section heading', async () => {
+    await mount(
+      status({
+        connected: true,
+        granted: [
+          {
+            service: 'drive',
+            label: 'Drive',
+            level: 'readonly',
+            scopes: [DRIVE_RO],
+            complete: true,
+            also: [],
+          },
+        ],
+      }),
+    );
+    await screen.findByText('granted: Read-only');
+    expect(screen.getAllByText(/granted: Read-only/)).toHaveLength(1);
+    expect(screen.queryByText(/what you granted/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/what to ask for/i)).not.toBeInTheDocument();
+    expect(document.querySelector('h3')).toBeNull();
+  });
+
+  /**
+   * Beside the title, like every other service card's — not a Badge two lines
+   * into the body, below the description it qualifies.
+   */
+  it('puts the connection pill in the card header', async () => {
+    await mount(status({ connected: true }));
+    const pill = await screen.findByText('Connected');
+    expect(pill).toHaveClass('status-pill');
+    expect(pill.closest('.section-header')).not.toBeNull();
+  });
+
+  it('withholds the pill while the status is still loading', () => {
+    api.getGoogleStatus.mockReturnValue(new Promise(() => {}));
+    render(GoogleWorkspaceCard, {});
+    expect(screen.queryByText('Not connected')).not.toBeInTheDocument();
+  });
+
+  it('reports no connection state on an instance with Google switched off', async () => {
+    await mount(status({ enabled: false }));
+    expect(screen.queryByText('Not connected')).not.toBeInTheDocument();
+    expect(screen.queryByText('Connected')).not.toBeInTheDocument();
   });
 
   it('flags a partial grant rather than showing it as complete', async () => {
