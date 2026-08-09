@@ -156,3 +156,19 @@ def _reset_async_runtime_singletons():
     yield
     reset_talk_client()
     reset_async_runtime()
+
+
+@pytest.fixture(autouse=True)
+def _reset_expunge_warning_latch():
+    """Isolate ``skills.email._expunge_warned_hosts``.
+
+    A process-global "warned about this host already" set, so any test that
+    drives a mailbox without UIDPLUS seeds it for the rest of that xdist
+    worker. Tests must be order-independent, and a test asserting on that
+    warning would otherwise pass or fail on who ran first.
+    """
+    from istota.skills import email as email_skill
+
+    email_skill._expunge_warned_hosts.clear()
+    yield
+    email_skill._expunge_warned_hosts.clear()

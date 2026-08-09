@@ -48,6 +48,10 @@ class TestServerSideImapSweep:
         mailbox.__enter__ = MagicMock(return_value=mailbox)
         mailbox.__exit__ = MagicMock(return_value=False)
         mailbox.uids.return_value = uids
+        # No UIDPLUS, so removal goes through the folder-wide `mailbox.delete`
+        # these tests assert on. The targeted `UID EXPUNGE` path a UIDPLUS
+        # server gets is covered in test_email_retention_expunge.py.
+        mailbox.client.capabilities = ("IMAP4REV1",)
         return mailbox
 
     def test_searches_server_side_and_deletes_the_whole_result(self):
@@ -153,10 +157,12 @@ class TestCleanupOldEmails:
         mailbox.__enter__ = MagicMock(return_value=mailbox)
         mailbox.__exit__ = MagicMock(return_value=False)
         mailbox.uids.return_value = [str(i) for i in range(1200)]
+        mailbox.client.capabilities = ("IMAP4REV1",)
 
         with patch("istota.skills.email._get_mailbox", return_value=mailbox):
             deleted = cleanup_old_emails(config, days=7)
 
+        # Under the per-sweep bound, so one pass still clears the lot.
         assert deleted == 1200
 
     def test_handles_imap_error(self):
