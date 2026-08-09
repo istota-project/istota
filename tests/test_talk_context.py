@@ -3,7 +3,6 @@
 import json
 import os
 
-import pytest
 from unittest.mock import patch, MagicMock
 
 from istota.context import (
@@ -426,7 +425,7 @@ class TestFormatTalkContextForPrompt:
         assert "...[truncated]" in result
         # Total line length should be reasonable
         lines = result.split("\n")
-        bot_line = [l for l in lines if "Bot:" in l][0]
+        [line for line in lines if "Bot:" in line][0]
         # Content portion should be truncated
         assert len(long_content) > 100
 
@@ -459,10 +458,10 @@ class TestFormatTalkContextForPrompt:
         ]
         result = format_talk_context_for_prompt(messages)
         lines = result.split("\n")
-        assert any("alice: Hey everyone" in l for l in lines)
-        assert any("bob: Hi Alice!" in l for l in lines)
-        assert any("Bot (task 1): Hello!" in l for l in lines)
-        assert any("carol: Nice" in l for l in lines)
+        assert any("alice: Hey everyone" in line for line in lines)
+        assert any("bob: Hi Alice!" in line for line in lines)
+        assert any("Bot (task 1): Hello!" in line for line in lines)
+        assert any("carol: Nice" in line for line in lines)
 
     def test_user_with_no_actor_id(self):
         msg = TalkMessage(1, "", "Unknown", False, "Hello", 1000000, None, "user", None)

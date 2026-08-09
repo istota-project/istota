@@ -1126,7 +1126,7 @@ class TestSentEmails:
     def test_record_with_all_fields(self, db_path):
         with db.get_db(db_path) as conn:
             task_id = db.create_task(conn, prompt="send email", user_id="carol")
-            rid = db.record_sent_email(
+            db.record_sent_email(
                 conn,
                 user_id="carol",
                 message_id="<full@example.com>",
@@ -1323,7 +1323,7 @@ class TestGetPendingConfirmationForUser:
 
     def test_ignores_non_confirmation_statuses(self, db_path):
         with db.get_db(db_path) as conn:
-            t1 = db.create_task(
+            db.create_task(
                 conn, prompt="pending task", user_id="alice", conversation_token="room1",
             )
             # Task stays in 'pending' status, not 'pending_confirmation'

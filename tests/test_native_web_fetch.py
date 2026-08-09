@@ -127,7 +127,7 @@ class TestIpIsPublic:
         assert wf._ip_is_public(ipaddress.ip_address(addr)) is True
 
     def test_extra_blocked_cidr(self):
-        ip = ipaddress.ip_address("203.0.113.7")
+        ipaddress.ip_address("203.0.113.7")
         # 203.0.113.0/24 is TEST-NET-3 → is_reserved handles it already, but
         # verify an operator CIDR blocks an otherwise-public address.
         assert wf._ip_is_public(ipaddress.ip_address("8.8.8.8"), ("8.8.8.0/24",)) is False

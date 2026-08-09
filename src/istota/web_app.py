@@ -5354,7 +5354,6 @@ async def money_monarch_login(
       the server IP, Monarch's CAPTCHA gate is up, or the client-version
       contract moved. Only the message text tells them apart.
     """
-    import asyncio
     from fastapi import HTTPException
 
     from . import secrets_store
@@ -5782,7 +5781,6 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
     if _config is None:
         return {"briefings": [], "rooms": []}
 
-    from . import db as _db
     from . import user_briefings as _ub
 
     username = user["username"]

@@ -4,10 +4,8 @@ Used by Pass-2 skill routing (and any caller wanting a quick prompt->text
 completion) so the native brain doesn't have to shell out to the `claude` CLI.
 """
 
-import pytest
 
 from istota.llm.oneshot import complete_text
-from istota.llm.provider import StreamError
 from istota.llm.types import AssistantMessage, TextContent
 
 from ._mock_provider import MockProvider

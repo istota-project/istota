@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 
 from istota.briefings import blocks_from_components, normalize_block_specs
 from istota.briefings import db as bdb

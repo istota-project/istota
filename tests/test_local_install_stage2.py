@@ -8,14 +8,12 @@ uvicorn), and the bootstrap / flock / loopback error paths.
 import signal
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
 from istota import db
 from istota.config import (
     Config,
-    NextcloudConfig,
     SecurityConfig,
     TalkConfig,
     UserConfig,
@@ -76,7 +74,6 @@ class TestRequestShutdown:
 
         # Record signal installs — must NOT happen when install_signal_handlers=False.
         installed = []
-        real_signal = signal.signal
         monkeypatch.setattr(
             signal, "signal",
             lambda sig, handler: installed.append(sig),

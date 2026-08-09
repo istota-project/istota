@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import tomli
 
@@ -15,11 +14,9 @@ from istota.money.core.models import (
     InvoicingConfig,
     MonarchConfig,
     MonarchCredentials,
-    MonarchProfile,
     MonarchSyncSettings,
     MonarchTagFilters,
     ServiceConfig,
-    TaxConfig,
 )
 
 

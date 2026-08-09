@@ -1,7 +1,6 @@
 """Tests for money.core.tax module."""
 
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -16,10 +15,7 @@ from istota.money.core.tax import (
     parse_tax_config,
     payment_quarter_from_date,
     ANNUALIZATION_PERIOD_END_MONTH,
-    ADDITIONAL_MEDICARE_RATE,
-    ADDITIONAL_MEDICARE_THRESHOLD,
 )
-from istota.money.core.models import TaxConfig
 
 
 class TestComputeSeTax:

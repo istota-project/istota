@@ -15,7 +15,6 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Iterator
 from zoneinfo import ZoneInfo
 
 try:

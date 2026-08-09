@@ -2,21 +2,17 @@
 
 import json
 import smtplib
-from datetime import datetime, timezone
-from email.message import EmailMessage
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from istota.skills.email import (
     Email,
     EmailConfig,
-    EmailEnvelope,
     _config_from_env,
     _parse_email_date,
     _sanitize_header,
     _write_deferred_sent_email,
-    cmd_output,
     cmd_send,
     list_emails,
     main,

@@ -2,12 +2,11 @@
 
 from pathlib import Path
 
-import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
-from istota.cron_loader import _MODULE_JOB_PREFIX, sync_cron_jobs_to_db
-from istota.feeds.jobs import DEFAULT_JOBS, MODULE_PREFIX, jobs_for_user
+from istota.cron_loader import sync_cron_jobs_to_db
+from istota.feeds.jobs import MODULE_PREFIX, jobs_for_user
 from istota.feeds.workspace import synthesize_feeds_context
 from istota.scheduler import _sync_feeds_module_jobs
 

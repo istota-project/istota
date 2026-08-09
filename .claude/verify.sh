@@ -70,13 +70,10 @@ case "$scope" in
 esac
 
 if [ "$do_py" = 1 ]; then
-  # Deliberately narrow: syntax errors and comparison bugs only. A full
-  # `ruff check` reports ~470 style findings and `ruff format --check` would
-  # rewrite ~525 files, because the tree has never been ruff-formatted and the
-  # repo ships no [tool.ruff] config. Widening this belongs in its own commit,
-  # not in a gate that has to stay green. F82 (undefined name) is excluded too:
-  # it flags six string annotations naming modules imported only locally.
-  run "ruff (critical)" ruff check --select E9,F63,F7 --output-format concise src tests
+  # Rules and per-file ignores live in [tool.ruff.lint] in pyproject.toml.
+  # No formatter check: `ruff format` is not adopted, and the hand formatting
+  # in the tree is the baseline — see the comment on the config block.
+  run "ruff" ruff check --output-format concise src tests
 
   # pyproject pins `-m 'not integration and not live' -n auto`.
   run "pytest" ${filter[@]+"${filter[@]}"} uv run pytest

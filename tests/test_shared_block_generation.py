@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 
 from istota import db
 from istota.briefings import shared_blocks

@@ -177,7 +177,7 @@ class KarakeepClient:
         """Find a list by name (case-insensitive)."""
         lists = self.list_lists()
         name_lower = name.lower()
-        return next((l for l in lists if l["name"].lower() == name_lower), None)
+        return next((lst for lst in lists if lst["name"].lower() == name_lower), None)
 
     # --- Stats ---
 
@@ -345,8 +345,8 @@ def cmd_lists(args) -> dict:
         "status": "ok",
         "count": len(lists),
         "lists": [
-            {"id": l["id"], "name": l["name"], "icon": l.get("icon", ""), "type": l.get("type", "manual")}
-            for l in lists
+            {"id": lst["id"], "name": lst["name"], "icon": lst.get("icon", ""), "type": lst.get("type", "manual")}
+            for lst in lists
         ],
     }
 

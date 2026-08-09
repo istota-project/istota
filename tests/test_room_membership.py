@@ -347,7 +347,7 @@ class TestReviewFixes:
                 "SELECT COUNT(*) c FROM web_chat_rooms WHERE token = ?", (token,)
             ).fetchone()["c"] == 2
             # carol hard-deletes the room.
-            owner_handle = db.get_web_chat_room_by_token(conn, token)
+            db.get_web_chat_room_by_token(conn, token)
         carol_room_id = next(
             r["id"] for r in web_app._chat_list_rooms("carol") if r["token"] == token
         )

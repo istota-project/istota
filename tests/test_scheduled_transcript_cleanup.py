@@ -7,7 +7,6 @@ transcript backfill, the conversational-only `_messages_caught_up` scoping, and
 the one-time cleanup migration for rows the earlier blanket backfill imported.
 """
 
-import sqlite3
 
 import pytest
 

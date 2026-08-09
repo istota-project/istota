@@ -20,7 +20,6 @@ from istota.memory.search import (
     chunk_text,
     embed_batch,
     embed_text,
-    ensure_vec_table,
     get_stats,
     index_conversation,
     index_file,
@@ -619,7 +618,6 @@ class TestChunkMetadata:
                           ["Carol uses Python"], None, entities=["carol", "python"])
 
         row = conn.execute("SELECT entities FROM memory_chunks WHERE user_id = 'alice'").fetchone()
-        import json
         assert json.loads(row[0]) == ["carol", "python"]
         conn.close()
 
@@ -1083,11 +1081,11 @@ class TestRecencyDecayUnit:
 class TestSearchRecencyDecay:
     def test_decay_reorders_search_results(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
-        old = _insert_chunk_with_age(
+        _insert_chunk_with_age(
             conn, "alice", "conversation", "t_old",
             "traveling with cats on the flight to lisbon", age_days=300,
         )
-        new = _insert_chunk_with_age(
+        _insert_chunk_with_age(
             conn, "alice", "conversation", "t_new",
             "cats flight question for next week", age_days=2,
         )

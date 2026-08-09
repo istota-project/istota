@@ -8,7 +8,6 @@ retry loop) and the streaming integration tests
 
 import textwrap
 import typing
-from pathlib import Path
 
 import pytest
 

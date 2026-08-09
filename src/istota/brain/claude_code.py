@@ -20,12 +20,10 @@ import signal
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 from ._events import (
     ContextManagementEvent,
     ResultEvent,
-    StreamEvent,
     TextDeltaEvent,
     TextEvent,
     ThinkingDeltaEvent,

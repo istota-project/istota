@@ -1,6 +1,6 @@
 """Tests for money.core.invoicing module."""
 
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -875,7 +875,6 @@ class TestCheckScheduledInvoices:
 
     def test_skips_already_generated_this_month(self, tmp_path):
         from istota.money.core.invoicing import check_scheduled_invoices
-        from istota.money.db import set_invoice_schedule_generation
 
         config_file = self._make_config(tmp_path, day=15)
         config = parse_invoicing_config(config_file)

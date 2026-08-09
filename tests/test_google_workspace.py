@@ -1,6 +1,5 @@
 """Tests for Google Workspace skill — config, DB tokens, skill selection, setup_env, network."""
 
-import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone

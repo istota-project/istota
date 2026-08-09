@@ -1,6 +1,5 @@
 """Tests for the web chat surface (Phase 1 backend)."""
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1691,7 +1690,7 @@ class TestChatAttachments:
         """The name comes from the client, so it is sanitised rather than
         trusted: no separators, no traversal, no leading dot."""
         import os
-        from istota.web_app import _attachment_stem, _save_chat_attachment
+        from istota.web_app import _attachment_stem
 
         assert _attachment_stem("../../../etc/passwd") == "passwd"
         assert _attachment_stem("..") == ""

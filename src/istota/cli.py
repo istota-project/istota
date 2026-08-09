@@ -9,7 +9,7 @@ from pathlib import Path
 from . import db
 from .config import load_config
 from .logging_setup import setup_logging
-from .executor import execute_task, execute_task_interactive
+from .executor import execute_task
 from .scheduler import process_one_task, check_briefings
 from .email_support import get_email_config
 from .transport.email import poll_emails
@@ -32,7 +32,6 @@ from .skills.calendar import (
 from .tasks_file_poller import (
     discover_tasks_files,
     poll_user_tasks_file,
-    poll_all_tasks_files,
 )
 
 
@@ -398,7 +397,7 @@ def cmd_resource(args):
         with db.get_db(config.db_path) as conn:
             db_resources = db.get_user_resources(conn, args.user)
         if db_resources:
-            print(f"\nDynamic resources (DB):")
+            print("\nDynamic resources (DB):")
             for r in db_resources:
                 print(f"  [{r.id:4}] {r.resource_type:12} {r.resource_path:40} {r.permissions:6} {r.display_name or ''}")
 
@@ -1104,7 +1103,7 @@ def cmd_calendar_test(args):
                 except Exception as e:
                     error_msg = str(e).lower()
                     if "authorization" in error_msg or "forbidden" in error_msg or "403" in error_msg:
-                        print(f"  Write access: DENIED (read-only calendar)")
+                        print("  Write access: DENIED (read-only calendar)")
                     else:
                         print(f"  Write access: FAILED - {e}", file=sys.stderr)
                     sys.exit(1)
@@ -1463,7 +1462,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init
-    init_parser = subparsers.add_parser("init", help="Initialize database")
+    subparsers.add_parser("init", help="Initialize database")
 
     # task
     task_parser = subparsers.add_parser("task", help="Submit a task")
@@ -1634,7 +1633,7 @@ def main():
     user_subparsers = user_parser.add_subparsers(dest="user_action", required=True)
 
     # user list
-    user_list_parser = user_subparsers.add_parser("list", help="List configured users")
+    user_subparsers.add_parser("list", help="List configured users")
 
     # user lookup
     user_lookup_parser = user_subparsers.add_parser("lookup", help="Look up user by email")
@@ -1752,7 +1751,7 @@ def main():
     calendar_subparsers = calendar_parser.add_subparsers(dest="calendar_action", required=True)
 
     # calendar discover
-    calendar_discover_parser = calendar_subparsers.add_parser("discover", help="Discover accessible calendars")
+    calendar_subparsers.add_parser("discover", help="Discover accessible calendars")
 
     # calendar test
     calendar_test_parser = calendar_subparsers.add_parser("test", help="Test calendar access")

@@ -1,7 +1,6 @@
 """Tests for the unified ``istota briefings`` CLI + skill facade."""
 
 import json
-from pathlib import Path
 
 import pytest
 

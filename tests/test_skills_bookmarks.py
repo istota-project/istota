@@ -348,7 +348,7 @@ class TestKarakeepClientBookmarks:
         mock_request.return_value = mock_resp
 
         client = KarakeepClient("https://keep.example.com/api/v1", "key")
-        result = client.create_bookmark(text="A note to self")
+        client.create_bookmark(text="A note to self")
 
         call_kwargs = mock_request.call_args[1]
         body = call_kwargs["json"]

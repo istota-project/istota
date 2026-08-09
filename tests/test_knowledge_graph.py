@@ -2,7 +2,6 @@
 
 import sqlite3
 from datetime import date, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -267,7 +266,7 @@ class TestSupersession:
         """When new fact has no valid_from, supersession date is today."""
         from datetime import date as date_cls
         id1 = add_fact(conn, "user1", "bob", "lives_in", "brooklyn")
-        id2 = add_fact(conn, "user1", "bob", "lives_in", "manhattan")
+        add_fact(conn, "user1", "bob", "lives_in", "manhattan")
 
         old = get_fact(conn, id1)
         assert old.valid_until == date_cls.today().isoformat()
@@ -286,14 +285,14 @@ class TestSupersession:
         """Every predicate in SINGLE_VALUED_PREDICATES triggers supersession."""
         for pred in SINGLE_VALUED_PREDICATES:
             id1 = add_fact(conn, "user1", "test", pred, "old_value")
-            id2 = add_fact(conn, "user1", "test", pred, "new_value")
+            add_fact(conn, "user1", "test", pred, "new_value")
             old = get_fact(conn, id1)
             assert old.valid_until is not None, f"{pred} should supersede"
 
     def test_supersession_scoped_to_user(self, conn):
         """Supersession only affects same user's facts."""
         id1 = add_fact(conn, "user1", "bob", "works_at", "acme")
-        id2 = add_fact(conn, "user2", "bob", "works_at", "globex")
+        add_fact(conn, "user2", "bob", "works_at", "globex")
 
         fact1 = get_fact(conn, id1)
         assert fact1.valid_until is None  # User1's fact untouched
@@ -497,7 +496,7 @@ class TestGetCurrentFacts:
 
 class TestGetFactsAsOf:
     def test_historical_query(self, conn):
-        id1 = add_fact(conn, "user1", "bob", "works_at", "acme",
+        add_fact(conn, "user1", "bob", "works_at", "acme",
                        valid_from="2025-01-01")
         add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-04-01")
@@ -1022,7 +1021,7 @@ class TestKnowledgeFactsAudit:
 
     def test_supersede_writes_audit_row(self, conn):
         a = add_fact(conn, "alice", "bob", "works_at", "acme")
-        b = add_fact(conn, "alice", "bob", "works_at", "globex")
+        add_fact(conn, "alice", "bob", "works_at", "globex")
         ops = [r.op for r in get_fact_history(conn, "alice")]
         # Two inserts + one supersede on the prior row.
         assert ops.count("insert") == 2

@@ -1917,7 +1917,6 @@ async def api_config_tax_resolved(
     beside the new state's name, which reads as a bug.
     """
     from istota.money import config_store
-    from istota.money.core import tax_data
 
     cfg = config_store.load_tax(user_ctx.db_path)
     tax_year = year or cfg.tax_year

@@ -1,6 +1,6 @@
 """Tests for calendar skill — all-day event timezone filtering + CLI."""
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -8,9 +8,7 @@ import pytest
 
 from istota.skills.calendar import (
     Calendar,
-    get_events, get_tomorrow_events, get_today_events,
-    cmd_update, cmd_list, build_parser, main, _parse_datetime, _get_date_range,
-    update_event,
+    get_events, cmd_update, cmd_list, build_parser, main, _parse_datetime, _get_date_range,
 )
 
 _has_icalendar = Calendar is not None
@@ -261,7 +259,6 @@ class TestBuildParserUpdateSubcommand:
         assert args.week is True
 
     def test_agenda_alias_dispatches_to_cmd_list(self):
-        from istota.skills.calendar import cmd_list, main
         with patch("istota.skills.calendar.cmd_list", return_value={"status": "ok"}) as m:
             main(["agenda"])
         assert m.called

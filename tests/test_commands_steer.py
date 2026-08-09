@@ -146,7 +146,7 @@ class TestTranscriptAndEvents:
         config = make_config()
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk", name="Room 1")
-            tid = _running_task(conn)
+            _running_task(conn)
             await cmd_steer(_ctx(config, conn, args="check the db layer"))
             rows = conn.execute(
                 "SELECT role, body, task_id, origin_surface FROM messages "

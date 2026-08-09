@@ -29,18 +29,14 @@ from istota.storage import (
     read_user_memory_v2,
     read_channel_memory,
     read_dated_memories,
-    init_user_memory,
     init_user_memory_v2,
     init_channel_memory,
-    get_memory_line_count,
     get_memory_line_count_v2,
     upload_file_to_inbox,
     upload_file_to_inbox_v2,
-    user_directories_exist,
     user_directories_exist_v2,
     MEMORY_TEMPLATE,
     CHANNEL_MEMORY_TEMPLATE,
-    BOT_USER_BASE,
     _rclone_mkdir,
     _rclone_path_exists,
     _rclone_cat,
@@ -57,7 +53,6 @@ from istota.storage import (
     WORKSPACE_README_EXAMPLE,
     TASKS_FILE_TEMPLATE,
     TASKS_FILE_EXAMPLE,
-    BRIEFINGS_TEMPLATE,
     BRIEFINGS_EXAMPLE,
     HEARTBEAT_EXAMPLE,
 )
@@ -426,7 +421,7 @@ class TestRcloneOperations:
     def test_ensure_dirs_via_rclone(self, mock_run):
         """ensure_user_directories calls rclone mkdir for each subdir + istota/exports."""
         mock_run.return_value = self._mock_run(returncode=0)
-        config = Config(nextcloud_mount_path=None, rclone_remote="nc")
+        Config(nextcloud_mount_path=None, rclone_remote="nc")
 
         result = ensure_user_directories("nc", "alice", "istota")
         assert result is True

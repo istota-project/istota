@@ -25,7 +25,6 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Iterable
 
 from istota.health import db as health_db
 from istota.health.models import HealthContext

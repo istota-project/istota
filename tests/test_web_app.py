@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,8 +24,6 @@ if _has_web_deps:
 from istota.config import (
     Config,
     LocationReceiverConfig,
-    NextcloudConfig,
-    ResourceConfig,
     SiteConfig,
     UserConfig,
     WebConfig,

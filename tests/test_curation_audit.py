@@ -1,14 +1,11 @@
 """Tests for the curation audit log."""
 
 import json
-from unittest.mock import patch
 
 from istota.config import Config, NextcloudConfig
 from istota.memory.curation.audit import (
     detect_bypass_write,
     get_curation_audit_path,
-    get_user_md_last_seen_path,
-    read_last_seen,
     write_audit_log,
     write_last_seen,
 )
