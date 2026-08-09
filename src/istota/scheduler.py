@@ -1655,6 +1655,23 @@ def process_one_task(
                 channel_name = task.conversation_token
         log_channel_prefix = _log_channel_source_label(task, channel_name)
 
+    # A re-attempt starts with a clean slate (ISSUE-074). The retry branch
+    # below purges when *it* requeues, but three other paths requeue the same
+    # task.id with attempt_count + 1 and no purge — the periodic reclaim
+    # (db.fail_stuck_locked_running_tasks), startup orphan recovery
+    # (db.recover_orphaned_tasks), and claim_task's own inline copy of the
+    # stuck-running release, which has no scheduler-side hook at all. Purging
+    # here instead covers all of them at once, and has to run *before*
+    # execution so it clears the previous attempt's files rather than this
+    # attempt's. attempt_count == 0 is left alone: a first run has no prior
+    # attempt, and the confirmation re-run (same id, attempt still 0) is
+    # handled by the narrower email_output cleanup just below.
+    if task.attempt_count > 0:
+        from .executor import get_user_temp_dir
+        _purge_deferred_files_for_retry(
+            task, get_user_temp_dir(config, task.user_id),
+        )
+
     # Clean up stale deferred email output from a previous execution (e.g.
     # confirmation flow: first run writes a draft via `email output`, re-run
     # sends via `email send` — the stale file would cause a double-send).
@@ -2147,7 +2164,9 @@ def process_one_task(
                 # ISSUE-074: clear any deferred-op files this attempt accumulated
                 # so the next attempt starts with a clean slate. Producers append
                 # to these files, so without this, eventual success would replay
-                # the failed attempt's ops alongside the successful one's.
+                # the failed attempt's ops alongside the successful one's. The
+                # claim-time backstop above would catch this too; purging at the
+                # requeue keeps the disk clean for a task that never comes back.
                 from .executor import get_user_temp_dir
                 _purge_deferred_files_for_retry(
                     task, get_user_temp_dir(config, task.user_id),
