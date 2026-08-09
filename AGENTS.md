@@ -137,7 +137,29 @@ Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-jo
 
 Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces, everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
 
-Python is **linted but not formatted**. `ruff check` runs clean over `src/` and `tests/` and is part of `.claude/verify.sh`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
+Python is **linted but not formatted**. `ruff check` runs clean over `src/` and `tests/`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
+
+## Verification
+
+There is no wrapper script and no single entry point. Run the checks directly, and run only the half the change touches — Python and `web/` are independent.
+
+Python:
+
+```bash
+ruff check --output-format concise src tests
+uv run pytest                    # pyproject pins `-m 'not integration and not live' -n auto`
+```
+
+Web, from the repo root (needs `npm ci` in `web/` first):
+
+```bash
+npm --prefix web run lint:design
+npm --prefix web run check       # svelte-check
+npm --prefix web run test        # vitest run
+npm --prefix web run format:check
+```
+
+Chain them in one shell invocation rather than one call each, and use `-x` / `--bail=1` while iterating so the first real failure stops the run. Drop those flags for the full run before a commit.
 
 ## Committing
 
