@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A chat turn that failed or was cancelled could lose its error bubble, leaving the question sitting on screen with nothing under it. The turn's two records are written a moment apart, and when that moment crossed a whole second the transcript treated them as belonging to different pages and dropped the answer. Turns are now placed by when the message was posted rather than when the task row happened to be stamped, so the error stays with its question — and, in the same conditions, no longer renders above it.
+
 - Tasks failed outright on installs that use a custom system prompt. Narrowing what the sandbox can read also took away the prompt file itself, so the model exited immediately with "System prompt file not found". That one file is now made available directly; the configuration file sitting next to it still is not.
 
 ### Changed

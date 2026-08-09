@@ -3189,17 +3189,18 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     completed_at / model_used) — a `messages`⋈`tasks` row or a `tasks` row. When
     the task has been retention-deleted those columns are NULL and the turn
     degrades to a plain `text` bubble. `_row_get` tolerates either source."""
+    created_at = _turn_created_at(row)
     if confirmation:
         return {
             "role": "assistant", "text": text, "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
-            "status": status, "confirmation": True, "created_at": _row_get(row, "created_at"),
+            "status": status, "confirmation": True, "created_at": created_at,
         }
     trace = _row_get(row, "execution_trace")
     actions = _row_get(row, "actions_taken")
     out = {
         "role": "assistant", "text": text,
         "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
-        "status": status, "created_at": _row_get(row, "created_at"),
+        "status": status, "created_at": created_at,
         "tools": _trace_tool_descriptions(trace, actions),
         "segments": _trace_segments(trace, actions, text, status=status),
         "duration_seconds": _task_duration_seconds(
@@ -3221,6 +3222,18 @@ def _row_get(row, key: str):
     """sqlite3.Row.get() equivalent — returns None for a column absent from the
     row's keys instead of raising (the two source queries differ in columns)."""
     return row[key] if key in row.keys() else None
+
+
+def _turn_created_at(row):
+    """When a row places a turn on the timeline, prefer the turn's `turn_ts`.
+
+    Only the aux (`tasks`) gap-fill query selects `turn_ts` (see `_AUX_TURN_TS`);
+    a spine row has no such column and falls back to its own `created_at`. The
+    distinction matters because a `tasks` row is stamped up to a clock second
+    before the user row it answers, and the transcript's final sort is on
+    `created_at` — so a gap-filled error bubble rendered at the raw task stamp
+    sorts *above* the question it is answering."""
+    return _row_get(row, "turn_ts") or _row_get(row, "created_at")
 
 
 # Surface filter shared by the spine query and its `has_more` probe: web/talk
@@ -3254,11 +3267,53 @@ _SPINE_COLUMNS = (
     # lookup, and a NULL result against a non-NULL id is the deleted case.
     "LEFT JOIN messages p ON p.id = m.reply_to_message_id "
 )
-# Columns the aux (`tasks`) gap-fill query selects.
+# Where a gap-filled turn sits on the timeline: its **user spine row's**
+# `created_at`, falling back to the `tasks` row's own stamp for a turn the store
+# doesn't hold (spineless legacy / failed-only rooms).
+#
+# The two stamps are not the same instant. `record_inbound` creates the task and
+# *then* writes the user row, each defaulting to its own `datetime('now')` — a
+# second-granularity clock — so a turn whose two inserts straddle a clock second
+# has a `tasks.created_at` up to a second *before* the spine row it belongs to.
+# Banding the aux fill on the raw task stamp then drops the answer whenever that
+# turn is the page's oldest (`created_at >= t1` excludes it by one second),
+# which for a room shorter than one page is every load: the user sees their
+# question with no error bubble under it, permanently. Banding on the coalesced
+# stamp uses the same key the spine is ordered by, so a turn lands on the page
+# its user row is on — no gap at the boundary, and no double-render onto the
+# neighbouring page. Only the timestamp is coalesced, not the `id` tiebreaker,
+# so a turn tying the page floor second but sorting below it by id can still
+# split across two pages; that is the pre-existing limit of a timestamp-only
+# band, unchanged here.
+_AUX_TURN_TS = (
+    "COALESCE((SELECT m3.created_at FROM messages m3 "
+    "WHERE m3.task_id = tasks.id AND m3.room_token = tasks.conversation_token "
+    "AND m3.role = 'user' LIMIT 1), tasks.created_at)"
+)
+# Wrapping the column in a COALESCE costs the range bound `idx_tasks_user_created`
+# gave the raw `created_at`, so every band and probe degrades to a scan of all of
+# this user's tasks with one correlated lookup per row — measured at 0.003 ms →
+# 3.3 ms for one probe over 10k tasks, growing linearly, twice per page load.
+# Each bound therefore carries a redundant *sargable* companion on the raw
+# column, which restores the index range (measured back at 0.003 ms).
+#
+# The companion is safe because it is deliberately looser than the exact test it
+# accompanies, so it can never exclude a row the exact test would keep:
+# `record_inbound` writes the task before its user row, making
+# `turn_ts >= tasks.created_at`, and an hour of slack absorbs a backwards clock
+# step that would invert them. The one writer that stamps a user row far from
+# its task — `backfill_room_messages_from_talk_cache`, which uses the historical
+# Talk timestamp — recovers *completed* turns only, and every band below is
+# scoped to failed/cancelled, so the two cannot meet.
+_AUX_TS_BELOW = "tasks.created_at < datetime(?, '+1 hour')"
+_AUX_TS_ABOVE = "tasks.created_at >= datetime(?, '-1 hour')"
+# Columns the aux (`tasks`) gap-fill query selects. `turn_ts` is the banding,
+# cursor AND rendered key for these rows; the raw `created_at` is selected only
+# as the COALESCE fallback source and for `_task_duration_seconds`.
 _AUX_COLUMNS = (
     "SELECT id, prompt, result, status, error, confirmation_prompt, "
     "created_at, actions_taken, execution_trace, started_at, completed_at, "
-    "model_used, attachments FROM tasks "
+    f"model_used, attachments, {_AUX_TURN_TS} AS turn_ts FROM tasks "
 )
 
 # Which `tasks` rows may gap-fill a room transcript (failed/cancelled answers,
@@ -3429,6 +3484,18 @@ def _chat_room_messages(
     is returned only on the first load — an older page never carries an in-flight
     slot.
 
+    The aux fill bands on `_AUX_TURN_TS`, not on the `tasks` row's own
+    `created_at`: the two are written by separate statements against a
+    second-granularity `datetime('now')`, so the task stamp can fall a second
+    short of the spine row it belongs to and carry the turn off its own page.
+    Coalescing puts every aux band on the key the spine is ordered by. Only the
+    *timestamp* is coalesced, not the id tiebreaker, so a turn tying the page
+    floor second but sorting below it by id can still split across two pages —
+    the pre-existing limit of a timestamp-only band. On an aux-only page
+    (`msg_rows` empty) the cursor's `ts` is therefore a `turn_ts` paired with a
+    `tasks.id`; both the notes band and the `has_more` probe read the same value,
+    or the sliver between the two keys renders on both pages.
+
     ISSUE-130: the window is ordered `created_at DESC, id DESC` (not `id DESC`),
     so a backfilled room whose `id` order inverts `created_at` order keeps its
     most-recent-by-time turns instead of admitting stale-but-high-id rows.
@@ -3477,9 +3544,10 @@ def _chat_room_messages(
                     + "WHERE conversation_token = ? AND user_id = ? "
                     "AND " + _AUX_SOURCE_SCOPE + " "
                     "AND (status IN ('pending', 'locked', 'running', 'pending_confirmation') "
-                    "     OR (status IN ('failed', 'cancelled') AND created_at >= ?)) "
-                    "ORDER BY created_at DESC, id DESC",
-                    (token, username, t1),
+                    "     OR (status IN ('failed', 'cancelled') "
+                    f"         AND {_AUX_TS_ABOVE} AND {_AUX_TURN_TS} >= ?)) "
+                    "ORDER BY turn_ts DESC, id DESC",
+                    (token, username, t1, t1),
                 ).fetchall()
             else:
                 # Empty-spine fallback (un-backfilled legacy / failed-only room):
@@ -3489,7 +3557,7 @@ def _chat_room_messages(
                     _AUX_COLUMNS
                     + "WHERE conversation_token = ? AND user_id = ? "
                     "AND " + _AUX_SOURCE_SCOPE + " "
-                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    "ORDER BY turn_ts DESC, id DESC LIMIT ?",
                     (token, username, limit),
                 ).fetchall()
         else:
@@ -3507,9 +3575,10 @@ def _chat_room_messages(
                     + "WHERE conversation_token = ? AND user_id = ? "
                     "AND " + _AUX_SOURCE_SCOPE + " "
                     "AND status IN ('failed', 'cancelled') "
-                    "AND created_at >= ? AND created_at < ? "
-                    "ORDER BY created_at DESC, id DESC",
-                    (token, username, page_lo, before_ts),
+                    f"AND {_AUX_TS_ABOVE} AND {_AUX_TS_BELOW} "
+                    f"AND {_AUX_TURN_TS} >= ? AND {_AUX_TURN_TS} < ? "
+                    "ORDER BY turn_ts DESC, id DESC",
+                    (token, username, page_lo, before_ts, page_lo, before_ts),
                 ).fetchall()
             else:
                 # Aux-only tail (flaw #3): the spine is exhausted but failed/
@@ -3520,9 +3589,9 @@ def _chat_room_messages(
                     + "WHERE conversation_token = ? AND user_id = ? "
                     "AND " + _AUX_SOURCE_SCOPE + " "
                     "AND status IN ('failed', 'cancelled') "
-                    "AND (created_at, id) < (?, ?) "
-                    "ORDER BY created_at DESC, id DESC LIMIT ?",
-                    (token, username, before_ts, before_id, limit),
+                    f"AND {_AUX_TS_BELOW} AND ({_AUX_TURN_TS}, id) < (?, ?) "
+                    "ORDER BY turn_ts DESC, id DESC LIMIT ?",
+                    (token, username, before_ts, before_ts, before_id, limit),
                 ).fetchall()
 
         # 3. Bot-delivered system messages (alerts / logs / notifications routed
@@ -3532,9 +3601,14 @@ def _chat_room_messages(
         if before is None:
             notes = db.list_system_messages(conn, token, limit)
         else:
+            # `turn_ts` on the aux fallback, matching the cursor this page hands
+            # back: band the notes on a *lower* floor than the cursor and the
+            # sliver between the two is read on both pages, duplicating any
+            # system row in it (nothing dedups them — `seen` is keyed on
+            # (role, task_id) and a system row has no task_id).
             page_lo = (
                 msg_rows[-1]["created_at"] if msg_rows
-                else (task_rows[-1]["created_at"] if task_rows else before[0])
+                else (task_rows[-1]["turn_ts"] if task_rows else before[0])
             )
             notes = db.list_system_messages_in_band(
                 conn, token, lo_ts=page_lo, hi_ts=before[0],
@@ -3563,19 +3637,21 @@ def _chat_room_messages(
             aux_more = conn.execute(
                 "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
                 "AND " + _AUX_SOURCE_SCOPE + " AND status IN ('failed', 'cancelled') "
-                "AND created_at < ? LIMIT 1",
-                (token, username, page_lo_ts),
+                f"AND {_AUX_TS_BELOW} AND {_AUX_TURN_TS} < ? LIMIT 1",
+                (token, username, page_lo_ts, page_lo_ts),
             ).fetchone() is not None
             has_more = spine_more or aux_more
         elif before is not None and task_rows:
-            page_lo_ts = task_rows[-1]["created_at"]
+            # `turn_ts`, not `created_at` — the band this page was read with, so
+            # the cursor it hands back can't skip or re-return a row.
+            page_lo_ts = task_rows[-1]["turn_ts"]
             page_lo_id = task_rows[-1]["id"]
             oldest_cursor = {"ts": page_lo_ts, "id": page_lo_id}
             has_more = conn.execute(
                 "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
                 "AND " + _AUX_SOURCE_SCOPE + " AND status IN ('failed', 'cancelled') "
-                "AND (created_at, id) < (?, ?) LIMIT 1",
-                (token, username, page_lo_ts, page_lo_id),
+                f"AND {_AUX_TS_BELOW} AND ({_AUX_TURN_TS}, id) < (?, ?) LIMIT 1",
+                (token, username, page_lo_ts, page_lo_ts, page_lo_id),
             ).fetchone() is not None
 
     messages: list[dict] = []
@@ -3611,7 +3687,7 @@ def _chat_room_messages(
         if ("user", tid) not in seen:
             d = {
                 "role": "user", "text": r["prompt"], "task_id": tid,
-                "created_at": r["created_at"],
+                "created_at": _turn_created_at(r),
             }
             d.update(_row_attachment_fields(r, username, message_column=False))
             messages.append(d)
@@ -3631,7 +3707,7 @@ def _chat_room_messages(
         else:  # pending / locked / running — placeholder slot to stream into
             messages.append({
                 "role": "assistant", "text": "", "task_id": tid,
-                "status": status, "created_at": r["created_at"],
+                "status": status, "created_at": _turn_created_at(r),
             })
             active_tasks.append({"id": tid, "status": status})
 
