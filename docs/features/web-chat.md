@@ -14,6 +14,8 @@ Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `
 
 ## Sending a message
 
+**Enter** sends and **Shift+Enter** writes a newline; **Cmd/Ctrl+Enter** still sends, and so does the send button. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. The key does nothing while a turn is running, while a voice message is recording, or while an attachment is still uploading, and never sends the Enter that commits an input-method candidate.
+
 A sent message becomes a `source_type="web"` task with `output_target="web"`. It is an interactive task — it loads conversation context, the room's `CHANNEL.md`, and the `guidelines/web.md` channel guidelines. Because `web` is a stream surface, the result and progress are not pushed anywhere; they live in the `task_events` log, which the `/api/chat/tasks/{id}/stream` SSE endpoint tails.
 
 The live view streams:

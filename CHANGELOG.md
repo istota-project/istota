@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `smart` model tier and the bare `opus` shortcut now resolve to Opus 5 instead of Opus 4.8. A deployment that pins its own model under `[models.aliases]` is unaffected.
 
-- Enter sends a web chat message, and Shift+Enter writes a newline. Almost every message is one line, so the plain key now belongs to the common case; Cmd/Ctrl+Enter still sends, so nothing you had in your hands stops working. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. The key that commits an input-method candidate never sends.
+- Enter sends a web chat message, and Shift+Enter writes a newline. Almost every message is one line, so the plain key now belongs to the common case; Cmd/Ctrl+Enter still sends, so nothing you had in your hands stops working. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. It never sends the key that commits an input-method candidate, and it writes a newline rather than going dead in the cases where it cannot send: a turn already running, a voice message recording, an attachment still uploading. The send button now refuses an in-flight upload too, which used to post the message and leave the file behind.
 
 - The elevation profile has moved in behind "Show details", under the day's stops and trips. It was taking vertical space under the map on every visit for a reading that is supplementary. The day's elevation spread now sits in the stats bar beside the ping and stop counts, so you can see there is a profile to look at without opening the panel.
 
