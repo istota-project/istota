@@ -283,45 +283,26 @@ class TestBuildBwrapCmdAdmin:
         bind_pairs = _get_bind_pairs(result, "--bind")
         assert any(src == resolved for src, _ in bind_pairs)
 
-    def test_db_ro_by_default(self, sandbox_config, make_sandbox_task):
+    def test_db_not_bound_for_admin(self, sandbox_config, make_sandbox_task):
+        """Admins used to get an RO bind of the framework DB. They no longer do.
+
+        Full coverage of the replacement invariant — including the masks and
+        the module DBs — lives in tests/test_sandbox_db_isolation.py.
+        """
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
         db_str = str(sandbox_config.db_path.resolve())
-        ro_pairs = _get_bind_pairs(result, "--ro-bind")
-        assert any(src == db_str for src, _ in ro_pairs)
+        for bind_type in ("--bind", "--ro-bind", "--bind-try", "--ro-bind-try"):
+            assert not any(
+                src == db_str for src, _ in _get_bind_pairs(result, bind_type)
+            ), f"{db_str} bound with {bind_type}"
 
-    def test_db_rw_when_configured(self, sandbox_config, make_sandbox_task):
-        sandbox_config.security.sandbox_admin_db_write = True
+    def test_db_sidecars_not_bound_for_admin(self, sandbox_config, make_sandbox_task):
+        """The -wal/-shm binds went with it; they were the live-read path."""
         task = make_sandbox_task()
-        result = _run_bwrap(sandbox_config, task, True)
-        db_str = str(sandbox_config.db_path.resolve())
-        bind_pairs = _get_bind_pairs(result, "--bind")
-        assert any(src == db_str for src, _ in bind_pairs)
-
-    def test_db_wal_shm_use_bind_try_ro(self, sandbox_config, make_sandbox_task):
-        """WAL/SHM files use --ro-bind-try (transient, may not exist)."""
-        task = make_sandbox_task()
-        result = _run_bwrap(sandbox_config, task, True)
-        db_path = sandbox_config.db_path
+        joined = " ".join(_run_bwrap(sandbox_config, task, True))
         for suffix in ["-wal", "-shm"]:
-            expected = str(db_path.parent / (db_path.name + suffix))
-            pairs = _get_bind_pairs(result, "--ro-bind-try")
-            assert any(src == expected for src, _ in pairs), (
-                f"{expected} not in --ro-bind-try pairs"
-            )
-
-    def test_db_wal_shm_use_bind_try_rw(self, sandbox_config, make_sandbox_task):
-        """WAL/SHM files use --bind-try when DB write enabled."""
-        sandbox_config.security.sandbox_admin_db_write = True
-        task = make_sandbox_task()
-        result = _run_bwrap(sandbox_config, task, True)
-        db_path = sandbox_config.db_path
-        for suffix in ["-wal", "-shm"]:
-            expected = str(db_path.parent / (db_path.name + suffix))
-            pairs = _get_bind_pairs(result, "--bind-try")
-            assert any(src == expected for src, _ in pairs), (
-                f"{expected} not in --bind-try pairs"
-            )
+            assert str(sandbox_config.db_path) + suffix not in joined
 
     def test_developer_repos_mounted(self, sandbox_config, make_sandbox_task, tmp_path):
         repos_dir = tmp_path / "repos"
@@ -454,7 +435,8 @@ class TestSecurityConfigSandboxFields:
     def test_defaults(self):
         sc = SecurityConfig()
         assert sc.sandbox_enabled is True
-        assert sc.sandbox_admin_db_write is False
+        assert sc.skill_proxy_enabled is True
+        assert sc.sandbox_ro_paths == []
 
     def test_from_config_load(self, tmp_path):
         from istota.config import load_config
@@ -463,11 +445,11 @@ class TestSecurityConfigSandboxFields:
 [security]
 mode = "restricted"
 sandbox_enabled = true
-sandbox_admin_db_write = true
+sandbox_ro_paths = ["/opt/some-service"]
 """)
         config = load_config(config_file)
         assert config.security.sandbox_enabled is True
-        assert config.security.sandbox_admin_db_write is True
+        assert config.security.sandbox_ro_paths == ["/opt/some-service"]
 
 
 class TestNetworkProxyBwrapIntegration:
@@ -802,25 +784,14 @@ class TestNativeFsRoots:
         assert talk in read
         assert talk not in write
 
-    def test_db_read_only_for_admin_by_default(self, sandbox_config, make_sandbox_task):
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_db_absent_for_everyone(self, sandbox_config, make_sandbox_task, is_admin):
+        """Admins lost the RO read root along with the bwrap bind."""
         task = make_sandbox_task()
-        read, write = self._roots(sandbox_config, task, True)
-        db_path = sandbox_config.db_path.resolve()
-        assert db_path in read
-        assert db_path not in write
-
-    def test_db_absent_for_non_admin(self, sandbox_config, make_sandbox_task):
-        task = make_sandbox_task()
-        read, write = self._roots(sandbox_config, task, False)
+        read, write = self._roots(sandbox_config, task, is_admin)
         db_path = sandbox_config.db_path.resolve()
         assert db_path not in read
         assert db_path not in write
-
-    def test_db_writable_when_admin_db_write_enabled(self, sandbox_config, make_sandbox_task):
-        sandbox_config.security.sandbox_admin_db_write = True
-        task = make_sandbox_task()
-        _, write = self._roots(sandbox_config, task, True)
-        assert sandbox_config.db_path.resolve() in write
 
     def test_temp_dir_parent_not_a_root(self, sandbox_config, make_sandbox_task):
         # The shared temp_dir parent must NOT be a root — only the per-user dir.

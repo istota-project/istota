@@ -10,7 +10,7 @@ Set for every task:
 |---|---|
 | `ISTOTA_TASK_ID` | Task ID |
 | `ISTOTA_USER_ID` | Task's user ID |
-| `ISTOTA_DB_PATH` | Database path (admin only) |
+| `ISTOTA_DB_PATH` | Framework database path. Handed to skill CLIs via the proxy for every user; never present in the model's own environment |
 | `ISTOTA_CONVERSATION_TOKEN` | Talk room token (if set) |
 | `ISTOTA_DEFERRED_DIR` | Temp directory for deferred JSON writes |
 | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |

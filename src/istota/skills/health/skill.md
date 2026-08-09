@@ -3,12 +3,12 @@ name: health
 triggers: [health, weight, bloodwork, labs, lab results, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic, immunization, immunizations, vaccine, vaccines, vaccinated, vaccination, shot, booster, flu shot, tdap, mmr, shingles, hpv, covid shot, travel vaccine, mychart vaccines]
 description: Health tracking — body stats, bloodwork panels, biomarker trends, lab analysis, and Garmin daily summaries.
 cli: true
-env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
+env: [{"var":"HEALTH_DB_PATH","from":"setup_env","proxy_only":true}]
 ---
 
 # Health Skill
 
-Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Per-user SQLite at `{workspace}/{BOT_DIR}/health/data/health.db`. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Records live in a per-user SQLite database the CLI opens for you; uploaded documents stay under `{workspace}/{BOT_DIR}/health/`. The database itself is on local disk outside your sandbox — go through this CLI, there is nothing to read directly. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
 
 ## When to use
 

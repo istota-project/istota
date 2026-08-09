@@ -61,13 +61,14 @@ def _fail(message: str) -> None:
 def _db_path() -> str:
     path = os.environ.get("ISTOTA_DB_PATH", "")
     if not path:
-        # Usually a non-admin task (the executor exports ISTOTA_DB_PATH only
-        # for admins), but not always — a heartbeat shell-command builds its
-        # env from build_stripped_env, which doesn't carry it either. Name the
-        # condition and give the likely cause, rather than asserting one.
+        # No longer the admin gate it used to describe: the executor sets this
+        # for every user and hands it to the skill proxy, so a task reaching
+        # here is one whose caller built an env without it — a heartbeat
+        # shell-command (build_stripped_env doesn't carry it) or a hand-rolled
+        # operator shell. Name the condition rather than asserting a cause.
         _fail(
-            "the framework database path is not available to this task "
-            "(reading task state is admin-only on a multi-user instance)"
+            "the framework database path is not available to this task; it is "
+            "set for tasks that run through the scheduler or the skill proxy"
         )
     return path
 

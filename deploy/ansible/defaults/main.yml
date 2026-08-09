@@ -908,11 +908,16 @@ istota_configure_rclone: true
 
 # Security hardening
 istota_security_sandbox_enabled: true             # bwrap filesystem isolation per user
-istota_security_sandbox_admin_db_write: false     # allow admin DB writes inside sandbox
+# Required wherever sandbox_enabled is true. The databases are masked out of
+# the sandbox, so a skill CLI that can't reach the proxy has nothing to read.
 istota_security_skill_proxy_enabled: true         # proxy skill CLI calls via Unix socket (credential isolation)
 istota_security_skill_proxy_timeout: 300          # timeout for proxied skill commands (seconds)
-istota_security_sandbox_ro_paths:                  # extra RO bind-mounts in sandbox (co-located services)
-  - /srv/app
+# Extra RO bind-mounts in the sandbox, for co-located services the agent needs
+# to read. Was ["/srv/app"], for a co-located moneyman install that no longer
+# exists — and since istota_home lives under it, that entry exposed the
+# framework DB and every user's module DB to every task. Keep entries narrow;
+# the DB directories are masked after this list either way.
+istota_security_sandbox_ro_paths: []
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
 istota_security_network_extra_hosts: []            # operator-specific additions

@@ -170,6 +170,7 @@ Admin users are listed in `/etc/istota/admins`. Empty file = all users are admin
 Non-admin restrictions:
 
 - Scoped mount path (`/Users/{user_id}` only)
-- No DB access (no `ISTOTA_DB_PATH`, no sqlite3 tool)
 - No subtask creation
 - `admin_only` skills filtered out (e.g., tasks, schedules)
+
+Database access is **not** one of the differences. No task of either kind can open a database file — they are masked out of the sandbox for everyone — and every skill CLI that reads one runs host-side scoped by `ISTOTA_USER_ID`, so an admin and a non-admin both get exactly their own rows. `ISTOTA_DB_PATH` used to be exported for admins only, which was not a boundary (the path is derivable) but did break `tasks status`, `memory_search` and `kv` reads for non-admins; it now goes to the skill proxy for every user.

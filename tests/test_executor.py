@@ -1413,22 +1413,47 @@ class TestAdminPromptIsolation:
         task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
         return db.get_task(conn, task_id)
 
-    def test_admin_prompt_has_db_path(self, tmp_path):
-        config = self._make_config(tmp_path)
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_prompt_never_states_the_db_path(self, tmp_path, is_admin):
+        """Naming a file that has been masked out of the sandbox is worse than
+        saying nothing: a failed open reads as a broken command, not a boundary."""
+        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True)
-        assert f"Database path: {config.db_path}" in prompt
-
-    def test_non_admin_prompt_has_restricted_db(self, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False)
-        assert "Database path: (restricted)" in prompt
+        prompt = build_prompt(task, [], config, is_admin=is_admin)
         assert str(config.db_path) not in prompt
+        assert "Database: reachable only through skill CLIs" in prompt
+
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_absence_claim_only_when_sandbox_is_in_effect(self, tmp_path, is_admin):
+        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
+        config.security.sandbox_enabled = True
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        with patch("istota.executor._bwrap_available", return_value=True):
+            prompt = build_prompt(task, [], config, is_admin=is_admin)
+        assert "the directories that hold them are empty here" in prompt
+
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_prohibition_kept_where_there_is_no_sandbox(self, tmp_path, is_admin):
+        """Docker without CAP_SYS_ADMIN, and the standalone install.
+
+        The databases really are on the model's filesystem on those shapes, so
+        claiming they aren't would be a false boundary — the exact failure this
+        change set exists to correct. The older prohibition wording covers it.
+        """
+        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
+        config.security.sandbox_enabled = True
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        with patch("istota.executor._bwrap_available", return_value=False):
+            prompt = build_prompt(task, [], config, is_admin=is_admin)
+        assert "the directories that hold them are empty here" not in prompt
+        assert "Never open a database file directly" in prompt
+        assert "no filesystem sandbox" in prompt
 
     def test_admin_prompt_states_admin_privileges(self, tmp_path):
         config = self._make_config(tmp_path)
@@ -1555,7 +1580,14 @@ class TestAdminEnvVarIsolation:
         return db.get_task(conn, task_id)
 
     @patch("istota.executor.subprocess.run")
-    def test_admin_gets_db_path_env(self, mock_run, tmp_path):
+    def test_admin_no_db_path_env(self, mock_run, tmp_path):
+        """Admins used to get ISTOTA_DB_PATH in Claude's env. Nobody does now.
+
+        It goes to the skill proxy instead — see
+        tests/test_sandbox_db_env.py::TestFrameworkDbPathRouting, which also
+        covers the non-admin half (the path reaches the proxy for every user,
+        which is what un-broke scoped reads for non-admins).
+        """
         config = self._make_config(tmp_path)
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -1566,7 +1598,7 @@ class TestAdminEnvVarIsolation:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        assert env["ISTOTA_DB_PATH"] == str(config.db_path)
+        assert "ISTOTA_DB_PATH" not in env
 
     @patch("istota.executor.subprocess.run")
     def test_non_admin_no_db_path_env(self, mock_run, tmp_path):
@@ -4131,7 +4163,12 @@ class TestWorkspaceDirBwrap:
     """build_bwrap_cmd workspace_dir: RW bind + --chdir + blocklist validation."""
 
     def _cfg(self, tmp_path):
-        db_path = tmp_path / "test.db"
+        # The DB lives in its own subdirectory, as it does everywhere real
+        # (`{istota_home}/data/istota.db`). Putting it at tmp_path root would
+        # make every sibling fixture dir a child of the now-protected DB
+        # directory, which is a property of the fixture, not of the blocklist.
+        db_path = tmp_path / "data" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         _db.init_db(db_path)
         return Config(
             db_path=db_path,
@@ -4140,7 +4177,7 @@ class TestWorkspaceDirBwrap:
         )
 
     def _task(self, tmp_path):
-        with _db.get_db((tmp_path / "test.db")) as conn:
+        with _db.get_db((tmp_path / "data" / "test.db")) as conn:
             tid = _db.create_task(conn, prompt="x", user_id="alice", source_type="repl")
             return _db.get_task(conn, tid)
 

@@ -131,5 +131,6 @@ via `istota resource ensure`.
 | Flag | Meaning |
 |---|---|
 | `sensitive: true` | Treat as a credential — strip from Claude's env, route through the proxy. Auto-enrolls the skill in `derive_credential_set` / `derive_skill_credential_map` |
+| `proxy_only: true` | Withhold from Claude's env and hand to the proxy, *without* credential semantics: no auto-authorization, no `credential-fetch` lookup, no per-skill scoping. For non-secret values the model still must not hold — today, paths to SQLite files (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`). Mutually exclusive with `sensitive`; the credential split runs first, so a spec marked both routes as a credential |
 | `fallback_var: "FOO"` | Read `os.environ["FOO"]` if primary resolution fails. Honored on the value path only — auto-authorization disables fallbacks so an instance-wide `EnvironmentFile` value can't fan out to per-user auth |
 | `gate_has_discovered_calendars: true` | Only resolve when CalDAV discovery returned at least one calendar |

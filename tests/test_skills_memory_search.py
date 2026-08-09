@@ -197,11 +197,16 @@ class TestCmdIndexFile:
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
 
-        file_path = tmp_path / "memory.md"
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+        file_path = workspace / "memory.md"
         file_path.write_text("Some memory content about projects")
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # index file reads with the daemon's filesystem access, so it is bounded
+        # to the caller's own roots; the deferred dir is one of them.
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(workspace))
 
         args = MagicMock()
         args.path = str(file_path)
@@ -220,9 +225,107 @@ class TestCmdIndexFile:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
 
         args = MagicMock()
-        args.path = "/nonexistent/file.md"
+        args.path = str(tmp_path / "nonexistent.md")
+        args.source_type = None
+
+        result = cmd_index_file(args)
+        assert result["status"] == "error"
+
+    def test_refuses_path_outside_the_callers_roots(self, tmp_path, monkeypatch):
+        """`index file` + `search` is a file read-back oracle if left unbounded.
+
+        The CLI runs host-side under the skill proxy, so the path argument is
+        evaluated with the daemon's filesystem access — indexing the config
+        file and then retrieving it through `search` would walk past both the
+        sandbox masks and the credential proxy. The other subcommands are
+        scoped by their SQL; a filesystem argument needs its own bound.
+        """
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+        secret = tmp_path / "config.toml"
+        secret.write_text('app_password = "hunter2"')
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(workspace))
+
+        args = MagicMock()
+        args.path = str(secret)
+        args.source_type = None
+
+        result = cmd_index_file(args)
+        assert result["status"] == "error"
+        assert "outside your own workspace" in result["error"]
+
+    def test_refuses_traversal_out_of_a_permitted_root(self, tmp_path, monkeypatch):
+        """The bound is on the resolved path, or `../` walks straight out."""
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+        secret = tmp_path / "config.toml"
+        secret.write_text('app_password = "hunter2"')
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(workspace))
+
+        args = MagicMock()
+        args.path = str(workspace / ".." / "config.toml")
+        args.source_type = None
+
+        result = cmd_index_file(args)
+        assert result["status"] == "error"
+
+    def test_allows_the_users_own_mount_directory(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        mount = tmp_path / "mount"
+        user_dir = mount / "Users" / "alice"
+        user_dir.mkdir(parents=True)
+        note = user_dir / "USER.md"
+        note.write_text("Some memory content about projects")
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+
+        args = MagicMock()
+        args.path = str(note)
+        args.source_type = None
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            result = cmd_index_file(args)
+        assert result["status"] == "ok"
+
+    def test_refuses_another_users_mount_directory(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        other = mount / "Users" / "bob"
+        other.mkdir(parents=True)
+        theirs = other / "USER.md"
+        theirs.write_text("bob's private notes")
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+
+        args = MagicMock()
+        args.path = str(theirs)
         args.source_type = None
 
         result = cmd_index_file(args)

@@ -181,10 +181,27 @@ enabled: bool = True         allow_pypi: bool = True      extra_hosts: list[str]
 ### `SecurityConfig`
 ```
 sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
-sandbox_admin_db_write: bool = False skill_proxy_timeout: int = 300
+skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+sandbox_ro_paths: list[str] = []     # extra RO binds; keep narrow
 network: NetworkConfig = NetworkConfig()
 ```
+`skill_proxy_enabled` is **required wherever `sandbox_enabled` is true**: the DB
+directories are masked out of the sandbox, so a skill CLI that can't reach the
+proxy has nothing to open and `skill_client._run_direct` refuses (on
+`ISTOTA_SANDBOXED`) rather than failing as a missing table.
+
+`sandbox_ro_paths` defaults to `[]` and is now **parsed from TOML** — it never
+was, so every deployment silently ran the hardcoded old default (`["/srv/app"]`)
+and no operator could narrow it. That entry existed for a co-located moneyman
+install that no longer exists, and since `istota_home` lives under it, it
+exposed the framework DB and every user's module DB to every task.
+`build_bwrap_cmd` masks `db_path.parent` + `module_db_root()` *after* applying
+this list, so a broad entry can't undo that.
+
+`sandbox_admin_db_write` was **removed**: the framework DB is no longer bound
+into the sandbox for anyone, so there is no bind left to widen. A stale key
+logs a WARNING at load and is ignored.
 
 ### `SkillsConfig` — removed
 
@@ -476,7 +493,8 @@ bundled_skills_dir: Path | None = None  # override for testing
 ```
 Properties / methods:
 - `use_mount`: `bool` — True if `nextcloud_mount_path` set
-- `module_db_path(user_id, module) -> Path`: local-disk path for a per-user module DB (`{module_data_dir or db_path.parent/modules}/{user}/{module}.db`). The seam each module loader passes as its `db_path=` override; workspace/`data_dir` stays on the mount. Explicit `module_data_dir` under the mount raises `ValueError` (WAL SIGBUS guard); the derived default is trusted-local, unguarded. Single enumerator for `db_health.check_db_health` + `db_backup` + `db_relocate`
+- `module_db_root() -> Path`: the local-disk root holding every user's module DBs (`module_data_dir`, or `{db_path.parent}/modules`). Explicit `module_data_dir` under the mount raises `ValueError` (WAL SIGBUS guard); the derived default is trusted-local, unguarded. Split out of `module_db_path` because the sandbox needs the root on its own — `build_bwrap_cmd` masks it and `_validate_workspace_dir` refuses a REPL workspace overlapping it. Deriving that root in three places is how it went unmasked in the first place
+- `module_db_path(user_id, module) -> Path`: `module_db_root() / user / f"{module}.db"`. The seam each module loader passes as its `db_path=` override; workspace/`data_dir` stays on the mount. Single enumerator for `db_health.check_db_health` + `db_backup` + `db_relocate`
 - `bot_dir_name`: `str` — sanitized `bot_name` for filesystem use (ASCII lowercase, spaces→underscores)
 - `caldav_url`: derived from `nextcloud.url + /remote.php/dav`
 - `caldav_username`: `nextcloud.username`

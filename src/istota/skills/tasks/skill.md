@@ -20,11 +20,11 @@ Your environment has no credentials and a narrow network allowlist. When you hit
 
 If none of these covers what you need, say what's missing. Do not build a substitute out of file polling or direct database access.
 
-## Never open the database file
+## There is no database file to open
 
-Not "prefer not to" — never, for reads as much as writes. Do not point `sqlite3`, Python's `sqlite3` module, or anything else at the framework database, and do not reach for `immutable=1` when a plain open fails.
+Not a prohibition you have to take on trust: the directories holding the framework database and the per-user module databases are covered by an empty tmpfs inside the sandbox, so `sqlite3`, Python's `sqlite3` and `immutable=1` all have nothing to point at. Time spent hunting for a path is time spent finding an empty directory.
 
-Whether the open succeeds varies by deployment, and that is exactly why it is not the test. It may fail outright; it may fail with `unable to open database file`, which reads as a broken command rather than a refusal and will send a careless wait loop round until it times out; or it may succeed and hand you **every user's rows**. None of those is permission. The skill CLIs are the read path because they return your own data and nothing else.
+The skill CLIs are the read path. They run outside the sandbox, where the files are, and scope every query to you — which is also why they work the same for admin and non-admin tasks.
 
 ## Reading task state
 

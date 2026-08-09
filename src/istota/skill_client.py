@@ -1,8 +1,11 @@
 """Thin client for the skill proxy.
 
 Console script entry point ``istota-skill``. When ``ISTOTA_SKILL_PROXY_SOCK``
-is set, connects to the proxy socket and delegates execution. Otherwise falls
-back to running the skill module directly via subprocess.
+is set, connects to the proxy socket and delegates execution — the skill then
+runs host-side, where the databases are. Otherwise it runs the skill module
+directly via subprocess, which is right for the unsandboxed daemon callers
+(cron ``command:`` rows, heartbeat shell-commands, an operator shell) and
+refused inside the sandbox, where the databases are masked out.
 
 Usage::
 
@@ -85,7 +88,26 @@ def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
 
 
 def _run_direct(skill: str, args: list[str]) -> None:
-    """Fall back to running the skill module directly."""
+    """Run the skill module in this process tree.
+
+    Legitimate for the unsandboxed daemon-side callers — a CRON ``command:``
+    row, a heartbeat shell-command, an operator at a terminal. Inside the
+    sandbox it is not: the databases every skill CLI opens are masked out of
+    the mount table, so a direct run reaches nothing and reports it as a
+    missing table or an unopenable file rather than as the misconfiguration it
+    is. ``ISTOTA_SANDBOXED`` (set by the executor only when bwrap is really in
+    effect) makes that case fail closed and name the actual problem.
+    """
+    if os.environ.get("ISTOTA_SANDBOXED"):
+        print(
+            f"Cannot run skill {skill!r}: the skill proxy is unavailable "
+            "(ISTOTA_SKILL_PROXY_SOCK is not set) and skills cannot run inside "
+            "the sandbox — the databases they read are not mounted there. This "
+            "is an operator misconfiguration: [security] skill_proxy_enabled "
+            "must be true wherever sandbox_enabled is.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args
     try:
         result = subprocess.run(cmd)

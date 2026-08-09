@@ -452,7 +452,6 @@ TOML
 
 [security]
 sandbox_enabled = ${ISTOTA_SECURITY_SANDBOX_ENABLED:-true}
-sandbox_admin_db_write = ${ISTOTA_SECURITY_SANDBOX_ADMIN_DB_WRITE:-false}
 skill_proxy_enabled = ${ISTOTA_SECURITY_SKILL_PROXY_ENABLED:-true}
 skill_proxy_timeout = ${ISTOTA_SECURITY_SKILL_PROXY_TIMEOUT:-300}
 

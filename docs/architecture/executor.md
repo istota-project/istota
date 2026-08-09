@@ -17,7 +17,7 @@ The prompt is built in a specific order, each section adding context for Claude:
 9. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
 10. **Learned playbooks**: `_recall_playbooks()` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated / `skip_memory` tasks)
 11. **Confirmation context**: previous bot output for confirmed actions
-12. **Tools**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
+12. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
 13. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
 14. **Conversation context**: previous messages (selected by the context module)
 15. **Request**: the actual prompt text + file attachments
@@ -42,7 +42,7 @@ with optional `--model`, `--effort`, and `--system-prompt-file` flags. Tool-bear
 
 ## Environment variables
 
-The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_DB_PATH`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`) plus a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
+The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`, plus `ISTOTA_SANDBOXED` when bwrap is in effect). Database paths (`ISTOTA_DB_PATH`, `HEALTH_DB_PATH`, `LOCATION_DB_PATH`) are split out into the skill proxy's environment instead and never reach the subprocess plus a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
 
 Everything else — Nextcloud / CalDAV / IMAP / SMTP credentials, service tokens, per-user secrets — is **manifest-derived**. Each skill's `skill.md` frontmatter declares its env vars in the `env:` block; `build_skill_env()` walks the loaded skill index and resolves each `EnvSpec` against the task's `EnvContext`. This replaces the hardcoded credential-injection block in `execute_task` that used to duplicate the same wiring across the executor, the proxy strip-set, and the auth map.
 

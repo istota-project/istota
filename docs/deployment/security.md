@@ -33,9 +33,17 @@ When `sandbox_enabled = true` (default), each Claude Code invocation runs inside
 - Their temp directory (read-write)
 - Extra resource paths
 
-**Hidden from non-admin**: database, other users' directories, `/etc/istota/`, user config files.
+**Hidden from everyone, admin included**: every SQLite database the daemon owns. The framework DB directory and the per-user module-DB root (`module_data_dir`, holding each user's `health.db` / `money.db` / `location.db` / `feeds.db`) are covered by an empty tmpfs, applied as the last mount operations so no earlier bind shows through. Local DB backups and the browser profile live under the same directory and go with them.
 
-**Admin users additionally see**: full Nextcloud mount (read-write), database (read-only by default, writable with `sandbox_admin_db_write`), developer repos.
+A mask hides rather than revokes: `kernel.unprivileged_userns_clone` is on (bwrap needs it), so a sandboxed process can enter a nested user namespace and unmount a tmpfs to reveal whatever was bound underneath. `--disable-userns` is passed where bwrap supports it (0.8+), and in the shipped default nothing is bound underneath, so there is nothing to reveal. Both of those are reasons to keep `sandbox_ro_paths` narrow rather than to rely on the mask to make a broad entry safe.
+
+**Also hidden from non-admin**: other users' directories, `/etc/istota/`, user config files.
+
+**Admin users additionally see**: full Nextcloud mount (read-write), developer repos.
+
+The masks are unconditional rather than a matter of not binding the files, because not binding them was the previous design and it did not hold. `module_data_dir` defaults under the framework DB's directory, the reference deployment puts that under `istota_home`, and `sandbox_ro_paths` defaulted to the `/srv/app` containing it — so one RO bind that named no database exposed all of them, to every task. `sandbox_ro_paths` now defaults to `[]` and is honoured from config (it was previously never parsed), but the masks are what makes the property hold regardless.
+
+Reads and writes reach the databases only through skill CLIs, which the credential proxy runs **outside** the sandbox and which scope their queries by `ISTOTA_USER_ID`. That scoping, not the filesystem, is the per-user boundary; the sandbox is defence in depth behind it.
 
 Linux-only and merged-usr compatible for Debian 13+. See [Supported deployment](#supported-deployment) above for the policy on non-Linux / no-bwrap configurations.
 
@@ -132,10 +140,10 @@ Handlers and the shared envelope helper (`_load_deferred_json`) live in `schedul
 ```toml
 [security]
 sandbox_enabled = true
-sandbox_admin_db_write = false
-skill_proxy_enabled = true
+skill_proxy_enabled = true   # required wherever sandbox_enabled is true
 skill_proxy_timeout = 300
 passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+sandbox_ro_paths = []        # extra RO binds for co-located services; keep narrow
 
 [security.network]
 enabled = true
