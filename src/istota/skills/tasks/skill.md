@@ -22,7 +22,7 @@ If none of these covers what you need, say what's missing. Do not build a substi
 
 ## There is no database file to open
 
-Not a prohibition you have to take on trust: the directories holding the framework database and the per-user module databases are covered by an empty tmpfs inside the sandbox, so `sqlite3`, Python's `sqlite3` and `immutable=1` all have nothing to point at. Time spent hunting for a path is time spent finding an empty directory.
+Not a prohibition you have to take on trust: the directories holding the framework database and the per-user module databases are covered by an empty, read-only tmpfs inside the sandbox, so `sqlite3`, Python's `sqlite3` and `immutable=1` all have nothing to point at. What you get back is `unable to open database file`, which means exactly what it says — the file is not in this namespace, and no path you try next will be either. Those directories are read-only, so you cannot create one there and mistake it for the real thing later.
 
 The skill CLIs are the read path. They run outside the sandbox, where the files are, and scope every query to you — which is also why they work the same for admin and non-admin tasks.
 
