@@ -3,6 +3,7 @@
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +49,42 @@ class TestNetworkProxyLifecycle:
         with NetworkProxy(proxy_sock, set()):
             mode = proxy_sock.stat().st_mode & 0o777
         assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+
+    def test_stop_returns_promptly(self, proxy_sock):
+        """The accept loop must be woken, not polled out.
+
+        It used to sit in ``accept()`` on a 1s socket timeout, so every
+        teardown — one per task, and one per executor test — paid a full
+        second waiting for the loop to notice the stop event.
+        """
+        proxy = NetworkProxy(proxy_sock, set())
+        proxy.start()
+        started = time.monotonic()
+        proxy.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.25, f"stop() took {elapsed:.2f}s"
+
+    def test_double_stop_is_safe(self, proxy_sock):
+        proxy = NetworkProxy(proxy_sock, set())
+        proxy.start()
+        proxy.stop()
+        proxy.stop()  # Should not raise
+
+    def test_restart_after_stop_serves_again(self, proxy_sock):
+        """start() must clear the stop state, or the second run is silently deaf."""
+        proxy = NetworkProxy(proxy_sock, set())
+        proxy.start()
+        proxy.stop()
+        proxy.start()
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(str(proxy_sock))
+            sock.sendall(b"CONNECT blocked.example.com:443 HTTP/1.1\r\n\r\n")
+            assert b"403" in sock.recv(1024)
+            sock.close()
+        finally:
+            proxy.stop()
 
 
 class TestNetworkProxyBlocking:
