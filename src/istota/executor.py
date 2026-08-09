@@ -1254,6 +1254,21 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     return resolved
 
 
+def custom_system_prompt_path(config: Config) -> Path | None:
+    """Absolute path of the operator's ``config/system-prompt.md``, or None.
+
+    Absolute via ``abspath`` (not ``resolve``) so a relative ``skills_dir``
+    still yields a path a child process with its own ``--chdir`` can open,
+    without rewriting a symlinked deployment root to a name nothing else uses.
+    """
+    if not config.custom_system_prompt:
+        return None
+    path = config.skills_dir.parent / "system-prompt.md"
+    if path.is_absolute():
+        return path
+    return Path(os.path.abspath(path))
+
+
 def _is_relative_to(path: Path, other: Path) -> bool:
     try:
         path.relative_to(other)
@@ -1348,6 +1363,23 @@ def build_bwrap_cmd(
         venv_path = istota_src / ".venv"
     _ro_bind(venv_path)
     _ro_bind(istota_src)
+
+    # --- Custom system prompt (RO, this one file) ---
+    # The config directory is not in the sandbox and should not be: it holds
+    # config.toml. Everything else in it — emissaries, persona, guidelines,
+    # skill bodies — reaches the model as content the daemon read and put in
+    # the prompt. `system-prompt.md` is the exception, because the CLI opens
+    # the path itself, inside the namespace. Binding the file rather than its
+    # directory keeps config.toml out; bwrap creates the parent as a mount
+    # point and nothing else in it is visible.
+    #
+    # This dependency was met until now only by `sandbox_ro_paths =
+    # ["/srv/app"]`, the same default that exposed the databases; narrowing it
+    # to [] made every task on a custom_system_prompt install exit with
+    # "System prompt file not found".
+    sp_path = custom_system_prompt_path(config)
+    if sp_path is not None:
+        _ro_bind(sp_path)
 
     # Mask other users' config files
     users_config_dir = istota_src / "config" / "users"
@@ -3927,10 +3959,9 @@ def execute_task(
                 return []
 
         # Custom system prompt path (claude_code-only knob; brain ignores
-        # if the file is missing)
-        sp_path: Path | None = None
-        if config.custom_system_prompt:
-            sp_path = config.skills_dir.parent / "system-prompt.md"
+        # if the file is missing). `build_bwrap_cmd` binds this one file into
+        # the sandbox — the CLI opens it there.
+        sp_path = custom_system_prompt_path(config)
 
         from .brain import BrainRequest, resolve_brain_kind
         # Per-source-type brain routing (gradual rollout): an operator can

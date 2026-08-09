@@ -11,6 +11,7 @@ from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, 
 from istota.executor import (
     _build_network_allowlist,
     build_bwrap_cmd,
+    custom_system_prompt_path,
     native_fs_confinement_active,
     native_fs_roots,
 )
@@ -427,6 +428,82 @@ class TestBuildBwrapCmdPathResolution:
                 i += 3
             else:
                 i += 1
+
+
+class TestCustomSystemPromptBind:
+    """`--system-prompt-file` is the one config-dir file the CLI opens itself.
+
+    Everything else in the config directory (emissaries, persona, guidelines,
+    skill bodies) reaches the model as content the daemon read, so only this
+    one needs to exist in the namespace. It used to arrive via the
+    `sandbox_ro_paths = ["/srv/app"]` default; when that became `[]` every task
+    on a custom_system_prompt install failed with "System prompt file not
+    found". The file is bound, never its directory — config.toml is beside it.
+    """
+
+    def _write_prompt(self, config):
+        path = config.skills_dir.parent / "system-prompt.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("custom prompt")
+        return path
+
+    def test_bound_ro_at_its_own_path(self, sandbox_config, make_sandbox_task):
+        sandbox_config.custom_system_prompt = True
+        sp = self._write_prompt(sandbox_config)
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+
+        assert (str(sp.resolve()), str(sp)) in _get_bind_pairs(result, "--ro-bind")
+
+    def test_not_bound_when_disabled(self, sandbox_config, make_sandbox_task):
+        sandbox_config.custom_system_prompt = False
+        sp = self._write_prompt(sandbox_config)
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+
+        assert str(sp) not in result
+
+    def test_config_dir_itself_not_bound(self, sandbox_config, make_sandbox_task):
+        """config.toml is its neighbour and must stay out of the sandbox."""
+        sandbox_config.custom_system_prompt = True
+        sp = self._write_prompt(sandbox_config)
+        (sp.parent / "config.toml").write_text("nc_pass = 'hunter2'")
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+
+        config_dir = str(sp.parent.resolve())
+        for src, dest in _get_bind_pairs(result, "--ro-bind") + _get_bind_pairs(result):
+            assert src != config_dir and dest != config_dir
+
+    def test_missing_file_binds_nothing(self, sandbox_config, make_sandbox_task):
+        sandbox_config.custom_system_prompt = True
+        expected = sandbox_config.skills_dir.parent / "system-prompt.md"
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+
+        assert str(expected) not in result
+
+    def test_relative_skills_dir_gives_an_absolute_path(self, sandbox_config, make_sandbox_task, monkeypatch, tmp_path):
+        """A relative skills_dir must still produce an absolute bind + flag.
+
+        The CLI runs with its own --chdir, so a relative path would not open.
+        """
+        monkeypatch.chdir(tmp_path)
+        sandbox_config.custom_system_prompt = True
+        sandbox_config.skills_dir = Path("config/skills")
+        sp = tmp_path / "config" / "system-prompt.md"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text("custom prompt")
+
+        resolved = custom_system_prompt_path(sandbox_config)
+        assert resolved is not None and resolved.is_absolute()
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        assert str(resolved) in result
+
+    def test_path_is_none_when_disabled(self, sandbox_config):
+        sandbox_config.custom_system_prompt = False
+        assert custom_system_prompt_path(sandbox_config) is None
 
 
 class TestSecurityConfigSandboxFields:

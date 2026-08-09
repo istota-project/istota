@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
 
+### Fixed
+
+- Tasks failed outright on installs that use a custom system prompt. Narrowing what the sandbox can read also took away the prompt file itself, so the model exited immediately with "System prompt file not found". That one file is now made available directly; the configuration file sitting next to it still is not.
+
 ### Changed
 
 - The `smart` model tier and the bare `opus` shortcut now resolve to Opus 5 instead of Opus 4.8. A deployment that pins its own model under `[models.aliases]` is unaffected.
