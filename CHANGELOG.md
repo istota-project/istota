@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- You now choose which parts of your Google account the bot gets. Settings → Google Workspace lists Drive, Gmail, Calendar, Sheets, Docs and Chat, each set to no access, read-only, or read and write, and the connect flow asks Google for exactly that. The operator's scope list becomes the maximum any user may pick rather than what everyone is asked for, so a service outside it is shown as not offered instead of failing later at Google.
+
+- The Google Workspace card shows what you actually granted. It reads the scopes back out of your stored connection, groups them per service with a read-only or read-and-write badge, and marks a service you granted only part of. It also says when your grant no longer matches what is being asked for — the state behind "the bot can't see my calendar" — and tells you a reconnect will fix it.
+
 - An operator can configure an advisor model that consults on a task without paying for it on every call. The cheap default model runs as usual, and only at the strategic moments Claude Code's own advisor tool decides matter does the stronger model weigh in. A task carrying its own model pin skips the advisor, since a pinned model that doesn't support the advisor tool at all would otherwise fail the whole task. Anthropic-backed brains only.
 
 - Web chat can reply to a specific message. Hover a turn and pick Reply; the composer shows what you are answering, the sent message renders a quote above it that clicks back to the original, and the model is told which message the reply responds to instead of having to guess from an ordered history. A reply into a Nextcloud Talk-bound room lands there as a real Talk reply, and a reply sent from Talk shows as one in web chat.

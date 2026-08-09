@@ -43,6 +43,11 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
         # OAuth flow lives at /istota/google/connect — the UI shows a
         # Connect button instead of writable fields when this is set.
         "oauth": True,
+        # custom_ui: the card outgrew the generic OAuth branch (ISSUE-240).
+        # It renders the granted scopes and a per-service read-only/full
+        # picker bounded by the operator's ceiling, fed by its own
+        # /api/google/status endpoint — the GarminCard shape.
+        "custom_ui": True,
         "fields": [],
     },
     "garmin": {

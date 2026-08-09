@@ -13,7 +13,12 @@ Interact with Google Workspace services using the `gws` CLI, accessed through th
 
 Credentials are injected automatically via the skill proxy. Do not hardcode tokens or attempt to read credential files.
 
-If the command fails with an auth error, the user has not connected their Google account. Tell them to connect via the web dashboard.
+Two different failures look alike, and telling them apart is the difference between useful advice and wrong advice:
+
+- **No token at all** — the user has never connected their Google account, or disconnected it. Tell them to connect it at Settings → Google Workspace.
+- **Insufficient scope** — they are connected, but did not grant this service, or granted it read-only and the command writes. Google says so explicitly: `insufficientPermissions`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`, or a 403 mentioning scope. Tell them which service and level the command needs, and that Settings → Google Workspace shows what they granted and lets them change it. A change requires reconnecting — Google has to ask them again.
+
+Read-only is the conservative default on most instances, so **assume nothing about write access**. The write verbs below (`gmail +send` / `+reply`, `sheets +append`, `drive +upload`, `calendar +insert`, `docs documents create`, `chat spaces.messages create`) all need the read-and-write level for their service. An instance can also decline to offer a service at all, in which case no amount of reconnecting will help and the operator has to enable the API.
 
 ## Commands
 

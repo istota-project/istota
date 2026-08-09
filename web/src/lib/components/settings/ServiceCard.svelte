@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, ConfirmDialog } from '$lib/components/ui';
+  import { ConfirmDialog } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SecretField from './SecretField.svelte';
@@ -7,15 +7,9 @@
   interface Props {
     service: ServiceCardData;
     onChanged?: () => void;
-    // OAuth services (google_workspace) hide the secret form and show a
-    // Connect/Disconnect button. The host page wires the click handlers
-    // since the routes are app-specific.
-    onConnect?: () => void;
-    onDisconnect?: () => void;
-    oauthBusy?: boolean;
   }
 
-  let { service, onChanged, onConnect, onDisconnect, oauthBusy = false }: Props = $props();
+  let { service, onChanged }: Props = $props();
 
   function statusLabel(s: ServiceCardData['status']): string {
     switch (s) {
@@ -29,8 +23,6 @@
         return 'Not enabled';
     }
   }
-
-  let oauthConnected = $derived(service.oauth && service.connected === true);
 
   let pending: Record<string, string> = $state({});
   let saving = $state(false);
@@ -95,28 +87,20 @@
   }
 
   // The credential fields are part of the page's state, not a form of their
-  // own, so they save from the app bar with everything else. An OAuth service
-  // has no fields to write — it withdraws and leaves the button to the rest of
-  // the page. Clearing a stored secret stays an immediate, separately
-  // confirmed action: it is a deletion, not an edit awaiting a save.
-  useSettingsSave(() =>
-    !service.oauth && service.fields.length > 0 ? { dirty, saving, save: saveAll } : null,
-  );
+  // own, so they save from the app bar with everything else. A service with no
+  // writable fields withdraws and leaves the button to the rest of the page.
+  // Clearing a stored secret stays an immediate, separately confirmed action:
+  // it is a deletion, not an edit awaiting a save.
+  useSettingsSave(() => (service.fields.length > 0 ? { dirty, saving, save: saveAll } : null));
 </script>
 
 <section class="card" data-status={service.status}>
   <header class="section-header">
     <div class="title">
       <h2>{service.label}</h2>
-      {#if service.oauth}
-        <span class="status-pill status-{oauthConnected ? 'configured' : 'missing'}">
-          {oauthConnected ? 'Connected' : 'Not connected'}
-        </span>
-      {:else}
-        <span class="status-pill status-{service.status}">
-          {statusLabel(service.status)}
-        </span>
-      {/if}
+      <span class="status-pill status-{service.status}">
+        {statusLabel(service.status)}
+      </span>
     </div>
     <div class="header-actions">
       {#if service.last_updated}
@@ -141,22 +125,14 @@
     </p>
   {/if}
 
-  {#if service.oauth}
-    {#if service.enabled === false}
-      <p class="empty">Google Workspace OAuth is not configured on this Istota instance.</p>
-    {:else if oauthConnected}
-      <div class="oauth-actions">
-        <Button variant="secondary" size="sm" onclick={onDisconnect} disabled={oauthBusy}>
-          {oauthBusy ? 'Disconnecting…' : 'Disconnect'}
-        </Button>
-      </div>
-    {:else}
-      <div class="oauth-actions">
-        <Button variant="primary" size="sm" onclick={onConnect} disabled={oauthBusy}>
-          {oauthBusy ? 'Connecting…' : 'Connect'}
-        </Button>
-      </div>
-    {/if}
+  <!--
+    This card is the writable-fields shape. A service whose auth is a flow
+    rather than a set of fields declares `custom_ui` and gets its own component
+    (GarminCard, GoogleWorkspaceCard) — the generic Connect/Disconnect branch
+    that used to live here served exactly one service, which outgrew it.
+  -->
+  {#if service.fields.length === 0}
+    <p class="empty">No settings for this service.</p>
   {:else}
     {#each service.fields as f (f.key)}
       <SecretField
@@ -207,11 +183,6 @@
     border-radius: var(--radius-sm);
     font-size: 0.9em;
     color: var(--text-muted);
-  }
-
-  .oauth-actions {
-    display: flex;
-    gap: var(--space-2);
   }
 
   .saved-flash {

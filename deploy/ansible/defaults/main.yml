@@ -752,11 +752,36 @@ istota_secret_key: ""
 istota_google_workspace_enabled: false
 istota_google_workspace_client_id: ""
 istota_google_workspace_client_secret: ""
-# Read-only by default. For full read/write access, remove .readonly suffixes:
-#   drive.readonly -> drive, gmail.readonly -> gmail.modify,
-#   calendar.readonly -> calendar, spreadsheets.readonly -> spreadsheets,
-#   documents.readonly -> documents
-# Changing scopes requires users to disconnect and reconnect their Google account.
+# This list is a CEILING, not a request: each user picks their own subset of it
+# at Settings -> Google Workspace, and the connect redirect asks Google only for
+# what that user chose. So it is the maximum any user may grant, and there is no
+# cost to listing a service here that most users leave switched off.
+#
+# It is a maximum rather than advice because the OAuth client belongs to a
+# Google Cloud project whose enabled APIs you control: a scope for an API the
+# project has not enabled fails at Google's end with an error the user can do
+# nothing about. List a service only once its API is enabled in the project.
+#
+# Read-only by default. To offer read/write, swap the .readonly variant for its
+# full counterpart — the pair per service is:
+#   drive.readonly        -> drive
+#   gmail.readonly        -> gmail.modify
+#   calendar.readonly     -> calendar
+#   spreadsheets.readonly -> spreadsheets
+#   documents.readonly    -> documents
+#   chat.spaces.readonly + chat.messages.readonly -> chat.spaces + chat.messages
+# Listing the full scope does not force it on anyone: it adds a "Read and write"
+# option to that service's picker. Chat is offered by no default scope, so the
+# skill's documented `chat spaces` verbs need it added here first.
+#
+# A scope outside those pairs (a narrow one like drive.file / gmail.send, or
+# openid) gets no picker row, so no user can decline it — which is why it is
+# requested unconditionally on top of whatever they did choose, and named on the
+# card as something this instance always asks for.
+#
+# Changing this list never rewrites an existing grant — nothing revalidates one
+# at startup. A user keeps whatever they consented to until they reconnect, and
+# the settings card shows the difference.
 istota_google_workspace_scopes:
   - "https://www.googleapis.com/auth/drive.readonly"
   - "https://www.googleapis.com/auth/gmail.readonly"

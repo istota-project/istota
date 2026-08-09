@@ -1,6 +1,8 @@
 """Tests for istota.web_app — authenticated web interface."""
 
+import json
 import re
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -307,6 +309,435 @@ class TestGoogleConnectRoute:
         resp = await client.get("/istota/google/connect", follow_redirects=False)
         assert resp.status_code == 302
         assert resp.headers["location"] == "/istota/login"
+
+
+DRIVE_RO = "https://www.googleapis.com/auth/drive.readonly"
+DRIVE_FULL = "https://www.googleapis.com/auth/drive"
+GMAIL_RO = "https://www.googleapis.com/auth/gmail.readonly"
+CAL_RO = "https://www.googleapis.com/auth/calendar.readonly"
+
+
+@_needs_web_deps
+class TestGoogleScopeSelection:
+    """Per-user scope selection (ISSUE-240).
+
+    The instance ``[google_workspace] scopes`` list is a *ceiling*, not a
+    request: it names what the operator's Google Cloud project has enabled.
+    Each user picks a subset of that, and the connect redirect carries the
+    resolved set per request rather than the registered client default.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _db(self, tmp_path, monkeypatch):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _cfg(self, tmp_path, ceiling=None):
+        from istota.config import GoogleWorkspaceConfig
+
+        cfg = _make_config(tmp_path)
+        cfg.db_path = self._db_path
+        cfg.google_workspace = GoogleWorkspaceConfig(
+            enabled=True,
+            client_id="cid",
+            scopes=list(ceiling if ceiling is not None else [DRIVE_RO, GMAIL_RO, CAL_RO]),
+        )
+        return cfg
+
+    async def _login(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def _connect(self, client, app):
+        import istota.web_app as mod
+        from fastapi.responses import RedirectResponse
+
+        mod._oauth.google.authorize_redirect = AsyncMock(
+            return_value=RedirectResponse(url="https://accounts.google.com/o/oauth2/auth")
+        )
+        resp = await client.get("/istota/google/connect", follow_redirects=False)
+        return resp, mod._oauth.google.authorize_redirect
+
+    def _store_selection(self, selection):
+        from istota import user_profiles
+        user_profiles.ensure_profile(self._db_path, "alice")
+        user_profiles.update_profile(self._db_path, "alice", google_scopes=selection)
+
+    # -- connect ---------------------------------------------------------
+
+    async def test_unset_selection_requests_the_whole_ceiling(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        await self._login(client, app)
+        _, redirect = await self._connect(client, app)
+        assert redirect.call_args.kwargs["scope"] == f"{DRIVE_RO} {GMAIL_RO} {CAL_RO}"
+
+    async def test_stored_selection_narrows_the_request(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        await self._login(client, app)
+        self._store_selection({"drive": "readonly", "gmail": "off", "calendar": "off"})
+        _, redirect = await self._connect(client, app)
+        assert redirect.call_args.kwargs["scope"] == DRIVE_RO
+
+    async def test_selection_is_clamped_to_the_operator_ceiling(self, tmp_path, client, app):
+        """A scope the Cloud project has not enabled fails at Google's end, so
+        asking for more than the ceiling is never sent."""
+        _patch_app(self._cfg(tmp_path, ceiling=[DRIVE_RO]))
+        await self._login(client, app)
+        self._store_selection({"drive": "full"})
+        _, redirect = await self._connect(client, app)
+        assert redirect.call_args.kwargs["scope"] == DRIVE_RO
+
+    async def test_offline_and_reconsent_survive_the_scope_param(self, tmp_path, client, app):
+        """Changing the selection means re-consent; the refresh token must
+        still be issued on that reconnect."""
+        _patch_app(self._cfg(tmp_path))
+        await self._login(client, app)
+        _, redirect = await self._connect(client, app)
+        kwargs = redirect.call_args.kwargs
+        assert kwargs["access_type"] == "offline"
+        assert kwargs["prompt"] == "consent"
+        assert redirect.call_args.args[1] == "https://example.com/istota/google/callback"
+
+    async def test_empty_selection_never_reaches_google(self, tmp_path, client, app):
+        """An empty scope string would send the user to a consent screen for
+        nothing; bounce with a cause instead."""
+        _patch_app(self._cfg(tmp_path))
+        await self._login(client, app)
+        self._store_selection({"drive": "off", "gmail": "off", "calendar": "off"})
+        resp, redirect = await self._connect(client, app)
+        assert resp.status_code == 302
+        assert "google=no_scopes" in resp.headers["location"]
+        redirect.assert_not_called()
+
+    async def test_empty_ceiling_never_reaches_google(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path, ceiling=[]))
+        await self._login(client, app)
+        resp, redirect = await self._connect(client, app)
+        assert resp.status_code == 302
+        assert "google=no_scopes" in resp.headers["location"]
+        redirect.assert_not_called()
+
+    async def test_a_ceiling_of_only_unmapped_scopes_still_connects(
+        self, tmp_path, client, app,
+    ):
+        """An operator running narrow scopes (drive.file, gmail.send) has no
+        picker row for any of them; dropping them would take connect away
+        entirely rather than narrowing it."""
+        narrow = [
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/drive.file",
+        ]
+        _patch_app(self._cfg(tmp_path, ceiling=narrow))
+        await self._login(client, app)
+        resp, redirect = await self._connect(client, app)
+        assert resp.status_code in (302, 307)
+        assert redirect.call_args.kwargs["scope"] == " ".join(narrow)
+
+    async def test_unmapped_ceiling_scopes_survive_a_narrowing_selection(
+        self, tmp_path, client, app,
+    ):
+        """No picker row can turn one off, so its absence is not a choice."""
+        ceiling = [DRIVE_RO, "https://www.googleapis.com/auth/gmail.send"]
+        _patch_app(self._cfg(tmp_path, ceiling=ceiling))
+        await self._login(client, app)
+        self._store_selection({"drive": "off"})
+        _, redirect = await self._connect(client, app)
+        assert (
+            redirect.call_args.kwargs["scope"]
+            == "https://www.googleapis.com/auth/gmail.send"
+        )
+
+    # -- status ----------------------------------------------------------
+
+    async def test_status_reports_the_offered_ceiling(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        resp = await client.get("/istota/api/google/status", cookies=cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["enabled"] is True
+        assert body["connected"] is False
+        offered = {o["service"]: o["max_level"] for o in body["offered"]}
+        assert offered["drive"] == "readonly"
+        # Not in the ceiling: "this instance does not offer it", which the UI
+        # must render differently from "you have not granted it".
+        assert offered["chat"] == "off"
+
+    async def test_status_shows_granted_scopes_grouped_by_service(self, tmp_path, client, app):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_FULL, CAL_RO]),
+            )
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["connected"] is True
+        granted = {g["service"]: g for g in body["granted"]}
+        assert granted["drive"]["level"] == "full"
+        assert granted["calendar"]["level"] == "readonly"
+        assert "gmail" not in granted
+
+    async def test_status_flags_a_grant_narrower_than_the_current_request(
+        self, tmp_path, client, app,
+    ):
+        """The state that produces confusing task failures: the config moved,
+        the grant did not."""
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_RO]),
+            )
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["missing_scopes"] == [GMAIL_RO, CAL_RO]
+
+    async def test_status_reports_no_shortfall_when_the_grant_matches(
+        self, tmp_path, client, app,
+    ):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_RO, GMAIL_RO, CAL_RO]),
+            )
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["missing_scopes"] == []
+
+    async def test_status_surfaces_an_unrecognised_granted_scope(self, tmp_path, client, app):
+        """The map lags a hand-edited config; a granted scope is never hidden."""
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_RO, "https://www.googleapis.com/auth/tasks"]),
+            )
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["unrecognized_scopes"] == ["https://www.googleapis.com/auth/tasks"]
+
+    async def test_status_survives_a_rotated_secret_key(self, tmp_path, client, app, monkeypatch):
+        """The scope read is decryption-free by design — a stale key must not
+        blank the display on a row that still exists."""
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_RO]),
+            )
+        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["connected"] is True
+        assert [g["service"] for g in body["granted"]] == ["drive"]
+
+    async def test_status_when_the_instance_has_google_disabled(self, tmp_path, client, app):
+        cfg = self._cfg(tmp_path)
+        cfg.google_workspace.enabled = False
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["enabled"] is False
+        assert body["connected"] is False
+        assert body["offered"] == []
+
+    async def test_status_names_the_scopes_no_picker_row_covers(
+        self, tmp_path, client, app,
+    ):
+        ceiling = [DRIVE_RO, "https://www.googleapis.com/auth/gmail.send"]
+        _patch_app(self._cfg(tmp_path, ceiling=ceiling))
+        cookies = await self._login(client, app)
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["unoffered_scopes"] == ["https://www.googleapis.com/auth/gmail.send"]
+
+    async def test_status_ignores_google_boilerplate_in_the_grant(
+        self, tmp_path, client, app,
+    ):
+        """openid/userinfo ride along on any OIDC-discovered grant and are
+        never requested back, so counting them as "extra" would pin a
+        reconnect banner that reconnecting cannot clear."""
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_RO, GMAIL_RO, CAL_RO, "openid",
+                            "https://www.googleapis.com/auth/userinfo.email"]),
+            )
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["extra_scopes"] == []
+        assert body["unrecognized_scopes"] == []
+
+    async def test_status_clamps_a_selection_the_ceiling_no_longer_allows(
+        self, tmp_path, client, app,
+    ):
+        """The picker's option list is truncated at the ceiling, so reporting
+        the raw stored level would hand the control a value it cannot show."""
+        _patch_app(self._cfg(tmp_path, ceiling=[DRIVE_RO]))
+        cookies = await self._login(client, app)
+        self._store_selection({"drive": "full"})
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["selection"]["drive"] == "readonly"
+        # …and the stored value is left alone, so re-widening the ceiling
+        # restores the user's original intent rather than their clamped one.
+        from istota import user_profiles
+        assert user_profiles.get_profile(self._db_path, "alice").google_scopes == {
+            "drive": "full",
+        }
+
+    async def test_status_surfaces_a_db_failure_rather_than_reporting_disconnected(
+        self, tmp_path, client, app,
+    ):
+        """A transient read failure used to render as "Not connected", which
+        invites the user to redo a consent flow they do not need."""
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with patch("istota.db.get_google_scopes", side_effect=sqlite3.OperationalError("locked")):
+            with pytest.raises(sqlite3.OperationalError):
+                await client.get("/istota/api/google/status", cookies=cookies)
+
+    async def test_status_requires_auth(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        resp = await client.get("/istota/api/google/status")
+        assert resp.status_code == 401
+
+    async def test_status_selection_defaults_to_the_ceiling(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["selection_set"] is False
+        assert body["selection"] == {
+            "drive": "readonly", "gmail": "readonly", "calendar": "readonly",
+            "sheets": "off", "docs": "off", "chat": "off",
+        }
+
+    # -- saving the selection --------------------------------------------
+
+    async def test_put_scopes_stores_the_selection(self, tmp_path, client, app):
+        from istota import user_profiles
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {"drive": "readonly", "gmail": "off", "calendar": "off"}},
+            cookies=cookies,
+            headers={"Origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        stored = user_profiles.get_profile(self._db_path, "alice").google_scopes
+        assert stored == {"drive": "readonly", "gmail": "off", "calendar": "off"}
+
+    async def test_put_scopes_drops_unknown_services(self, tmp_path, client, app):
+        from istota import user_profiles
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {"drive": "full", "dropbox": "full", "gmail": "sideways"}},
+            cookies=cookies,
+            headers={"Origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert user_profiles.get_profile(self._db_path, "alice").google_scopes == {
+            "drive": "full",
+        }
+
+    async def test_put_scopes_reports_the_resolved_request(self, tmp_path, client, app):
+        """The response tells the card what a reconnect would now ask for."""
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {"drive": "full", "gmail": "off", "calendar": "off"}},
+            cookies=cookies,
+            headers={"Origin": "https://example.com"},
+        )
+        # Clamped: the ceiling only offers read-only Drive.
+        assert resp.json()["requested_scopes"] == [DRIVE_RO]
+
+    async def test_put_scopes_rejects_a_non_object_selection(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": ["drive"]},
+            cookies=cookies,
+            headers={"Origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_put_scopes_refuses_when_the_instance_has_google_off(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._cfg(tmp_path)
+        cfg.google_workspace.enabled = False
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {"drive": "readonly"}},
+            cookies=cookies,
+            headers={"Origin": "https://example.com"},
+        )
+        assert resp.status_code == 409
+
+    async def test_put_scopes_requires_auth(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {}},
+            headers={"Origin": "https://example.com"},
+        )
+        assert resp.status_code == 401
+
+    async def test_put_scopes_rejects_a_cross_origin_write(self, tmp_path, client, app):
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {"drive": "readonly"}},
+            cookies=cookies,
+            headers={"Origin": "https://evil.example"},
+        )
+        assert resp.status_code == 403
+
+    async def test_saving_does_not_disturb_an_existing_grant(self, tmp_path, client, app):
+        """Changing the selection needs a reconnect — it must not silently
+        revoke or rewrite what the user already granted."""
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        cookies = await self._login(client, app)
+        with db.get_db(self._db_path) as conn:
+            db.upsert_google_token(
+                conn, "alice", "a", "r", "2099-01-01T00:00:00+00:00",
+                json.dumps([DRIVE_RO, GMAIL_RO, CAL_RO]),
+            )
+        await client.put(
+            "/istota/api/google/scopes",
+            json={"selection": {"drive": "readonly", "gmail": "off", "calendar": "off"}},
+            cookies=cookies,
+            headers={"Origin": "https://example.com"},
+        )
+        body = (await client.get("/istota/api/google/status", cookies=cookies)).json()
+        assert body["connected"] is True
+        assert {g["service"] for g in body["granted"]} == {"drive", "gmail", "calendar"}
+        # …but the card can now say the grant is wider than the request.
+        assert body["extra_scopes"] == [GMAIL_RO, CAL_RO]
 
 
 @_needs_web_deps
@@ -1635,6 +2066,22 @@ class TestSettingsEndpoints:
         # though it's a connected service (the per-user key knob did less
         # than it looked like; operator-provisioned via `istota secret`).
         assert "native_brain" not in services
+
+    async def test_google_card_is_bespoke_and_carries_its_own_state(
+        self, tmp_path, client, app,
+    ):
+        """The Google card outgrew the generic OAuth branch (ISSUE-240): it
+        renders a scope picker, so it declares custom_ui like Garmin and reads
+        the rest from /api/google/status."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        google = {s["service"]: s for s in resp.json()["services"]}["google_workspace"]
+        assert google["oauth"] is True
+        assert google["custom_ui"] is True
+        assert google["connected"] is False
+        assert "enabled" in google
 
     async def test_native_brain_is_cli_only_but_still_known(self, tmp_path, client, app):
         # The web surface is gone, but CLI/runtime validation must still

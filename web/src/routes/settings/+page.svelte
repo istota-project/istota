@@ -21,11 +21,13 @@
     Select,
     type SelectOption,
   } from '$lib/components/ui';
+  import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import {
     ServiceCard,
     GarminCard,
+    GoogleWorkspaceCard,
     HeaderSave,
     SettingsLayout,
     SettingsCard,
@@ -38,7 +40,6 @@
   let loading = $state(true);
   let error = $state('');
   let info = $state('');
-  let oauthBusy = $state(false);
   // null = operator hasn't enabled encrypted token storage → no card.
   let ncToken: NextcloudTokenStatus | null = $state(null);
   let ncTokenBusy = $state(false);
@@ -194,27 +195,6 @@
     }
   }
 
-  function connectGoogle() {
-    oauthBusy = true;
-    // Full-page nav — the OAuth callback redirects back to /istota/.
-    window.location.href = `${base}/google/connect`;
-  }
-
-  async function disconnectGoogle() {
-    oauthBusy = true;
-    try {
-      await fetch(`${base}/api/google/disconnect`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      await reloadServices();
-    } catch (e) {
-      error = (e as Error).message || 'Disconnect failed';
-    } finally {
-      oauthBusy = false;
-    }
-  }
-
   function profileListString(values: string[]): string {
     return values.join(', ');
   }
@@ -263,7 +243,36 @@
     }
   }
 
+  // The Google connect flow is a full-page round trip that lands back here
+  // with its outcome in the query string. Nothing read that parameter before,
+  // so a refused connect returned the user to a page that looked exactly as
+  // they left it — the failure was reported to no one.
+  const GOOGLE_OUTCOMES: Record<string, { message: string; notify: typeof notifyInfo }> = {
+    connected: { message: 'Google account connected.', notify: notifySuccess },
+    error: {
+      message: 'Google did not complete the connection. Try connecting again.',
+      notify: notifyError,
+    },
+    no_scopes: {
+      message:
+        'Nothing was requested, so there was nothing to connect. Choose at least one Google service first.',
+      notify: notifyWarning,
+    },
+  };
+
+  function reportGoogleOutcome() {
+    const outcome = new URLSearchParams(window.location.search).get('google');
+    if (!outcome) return;
+    const entry = GOOGLE_OUTCOMES[outcome];
+    if (entry) entry.notify(entry.message, { key: 'settings:google-connect' });
+    // Drop the parameter so a reload does not re-announce a stale outcome.
+    const url = new URL(window.location.href);
+    url.searchParams.delete('google');
+    history.replaceState(history.state, '', url);
+  }
+
   onMount(() => {
+    reportGoogleOutcome();
     void refresh();
   });
 
@@ -282,12 +291,13 @@
   // now only OAuth services with the global flag off can land there.
   //
   // OAuth cards sort to the top so they sit with the Nextcloud card rendered
-  // just above this list, which is a connect flow too — the three-line
-  // connect/disconnect cards group together instead of being split by the
-  // credential-field cards. Today that puts Google Workspace directly under
-  // Nextcloud; a future OAuth service joins the group on its own. The sort is
-  // stable, so everything else keeps the API's order, and it runs on filter()'s
-  // fresh array rather than mutating `services`.
+  // just above this list, which is a connect flow too — the account
+  // connections group together instead of being split by the credential-field
+  // cards. (They were all three-line connect/disconnect cards when this was
+  // written; the Google one is now the tallest card on the page, which changes
+  // how the grouping looks but not what it is for.) The sort is stable, so
+  // everything else keeps the API's order, and it runs on filter()'s fresh
+  // array rather than mutating `services`.
   let activeServices = $derived(
     services
       .filter((s) => s.status !== 'unavailable')
@@ -535,14 +545,10 @@
     {#each activeServices as svc (svc.service)}
       {#if svc.custom_ui && svc.service === 'garmin'}
         <GarminCard />
+      {:else if svc.custom_ui && svc.service === 'google_workspace'}
+        <GoogleWorkspaceCard onChanged={reloadServices} />
       {:else}
-        <ServiceCard
-          service={svc}
-          onChanged={reloadServices}
-          onConnect={connectGoogle}
-          onDisconnect={disconnectGoogle}
-          {oauthBusy}
-        />
+        <ServiceCard service={svc} onChanged={reloadServices} />
       {/if}
     {/each}
   </SettingsLayout>
@@ -553,8 +559,7 @@
 	   web/src/lib/styles/settings.css (imported by app.css). Only page-specific
 	   layout (module toggles, connected-service rows) stays here. */
 
-  /* Mirrors ServiceCard's Connect/Disconnect row so the Nextcloud card and
-	   the OAuth service cards below it line up. */
+  /* The Nextcloud card's Disconnect row. */
   .oauth-actions {
     display: flex;
     gap: var(--space-2);
