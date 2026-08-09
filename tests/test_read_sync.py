@@ -356,7 +356,7 @@ class TestRoomMaxTalkSyncedMessageId:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r", "alice", origin="web")
             assert db.room_max_talk_synced_message_id(conn, "r") == 0
-            m1 = db.add_message(
+            db.add_message(
                 conn, "r", role="user", body="a", origin_surface="web",
                 external_ids={"talk": "100"},
             )
@@ -364,7 +364,7 @@ class TestRoomMaxTalkSyncedMessageId:
                 conn, "r", role="assistant", body="b", origin_surface="web",
                 external_ids={"talk": "101"},
             )
-            m3 = db.add_message(
+            db.add_message(
                 conn, "r", role="system", body="c", origin_surface="web",
             )
             _ = db.add_message(

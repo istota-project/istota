@@ -3,14 +3,12 @@
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from istota.skills.whisper.cli import (
     build_parser,
-    cmd_download,
     cmd_models,
     cmd_transcribe,
     main,
@@ -187,11 +185,11 @@ class TestDownloadModel:
             result = models_mod.download_model("tiny")
             # It will try to import faster_whisper — mock it
         # Re-test with direct mock
-        with patch("istota.skills.whisper.models.WhisperModel", create=True) as mock_wm:
-            # Patch the import inside the function
-            import istota.skills.whisper.models as m
+        with patch("istota.skills.whisper.models.WhisperModel", create=True):
+            # Patch the import inside the function. Imported for the side
+            # effect of loading the module under the patch, not for a name.
+            import istota.skills.whisper.models as m  # noqa: F401
 
-            original = m.download_model
 
             def patched_download(name):
                 if name not in MODEL_REQUIREMENTS:
@@ -245,10 +243,10 @@ class TestTranscribeAudio:
         audio = tmp_path / "test.wav"
         audio.write_bytes(b"fake audio")
         with patch.dict("sys.modules", {"faster_whisper": None}):
-            # Force ImportError
-            import istota.skills.whisper.transcribe as t_mod
+            # Force ImportError. Imported for the side effect of loading the
+            # module with faster_whisper masked out, not for a name.
+            import istota.skills.whisper.transcribe as t_mod  # noqa: F401
 
-            original_transcribe = t_mod.transcribe_audio
 
             def failing_import_transcribe(path, model="auto", language=None):
                 audio_path = Path(path)
@@ -324,7 +322,7 @@ class TestTranscribeAudio:
         mock_fw = MagicMock()
         mock_fw.WhisperModel = mock_wm_cls
         with patch.dict("sys.modules", {"faster_whisper": mock_fw}):
-            result = transcribe_audio(str(audio), language="de")
+            transcribe_audio(str(audio), language="de")
 
         mock_model.transcribe.assert_called_once()
         call_kwargs = mock_model.transcribe.call_args

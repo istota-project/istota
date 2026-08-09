@@ -178,7 +178,7 @@ class TestReply:
         args = MagicMock(id="5", body="ok", body_file=None, html=False,
                          attach=None, all=True, scope="all", command="reply")
         with patch("istota.skills.email.read_email", return_value=orig), \
-             patch("istota.skills.email.send_email", return_value="<new@x>") as se, \
+             patch("istota.skills.email.send_email", return_value="<new@x>"), \
              patch("istota.skills.email._write_deferred_sent_email"):
             res = cmd_reply(args)
         cc = res["cc"]

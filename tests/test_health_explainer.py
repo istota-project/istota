@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from istota.health import db as health_db
 from istota.health import explainer as health_explainer
 from istota.health._migrate import ensure_initialised
 from istota.health.models import HealthContext

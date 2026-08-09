@@ -9,10 +9,14 @@ import sys
 import tempfile
 import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    import sqlite3
 
 from . import db
 from . import email_support
@@ -107,8 +111,9 @@ def _resolve_user_tz(
 
 # API error detection / retry policy moved into brain.claude_code; re-exported
 # here for backward compatibility with callers (scheduler.py) and tests that
-# import these symbols from istota.executor.
-from .brain.claude_code import (  # noqa: E402  (kept after module docstring)
+# import these symbols from istota.executor. Unused *here* by construction —
+# that is what a re-export is — so F401 is silenced rather than obeyed.
+from .brain.claude_code import (  # noqa: E402,F401  (kept after module docstring)
     API_ERROR_PATTERN,
     API_RETRY_DELAY_SECONDS,
     API_RETRY_MAX_ATTEMPTS,

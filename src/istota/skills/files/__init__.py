@@ -177,7 +177,6 @@ def rclone_list(remote: str, path: str) -> list[dict]:
     if result.returncode != 0:
         raise RuntimeError(f"rclone list failed: {result.stderr}")
 
-    import json
     items = json.loads(result.stdout)
     return [
         {

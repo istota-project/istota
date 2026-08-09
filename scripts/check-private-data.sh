@@ -125,46 +125,98 @@ esac
 
 # --- scan -------------------------------------------------------------------
 
-# Materialize the target's content: the staged blob in staged mode, the worktree
-# file otherwise. Writing to a file rather than a shell variable is what lets
-# grep -I recognize (and skip) binary content instead of choking on null bytes.
-tmp_content="$(mktemp)"
+# Scanning is two phases: resolve every target to a readable content file, then
+# one batched grep to find which of them match anything at all. Only that last,
+# usually empty, set pays for the per-pattern attribution loop.
+#
+# The batching is the difference between a scan that forks four processes per
+# file and one that forks a handful in total — on a ~1200-file tree, 12s of
+# mostly fork overhead against well under a second. The hook runs on every
+# commit, so that cost is paid constantly.
+
+tmp_dir="$(mktemp -d)"
 tmp_patterns="$(mktemp)"
-trap 'rm -f "$tmp_content" "$tmp_patterns"' EXIT
+trap 'rm -rf "$tmp_dir" "$tmp_patterns"' EXIT
 printf '%s\n' "${patterns[@]}" > "$tmp_patterns"
 
 found=0
 scanned=0
 
+# Parallel arrays: what a hit is reported as, and where its content actually
+# lives. They differ only in staged mode, where content is the index blob
+# rather than the worktree file.
+display_paths=()
+content_paths=()
+blob_seq=0
+
 for file in "${files[@]}"; do
   [ -n "$file" ] || continue
-  printf '%s' "$file" | grep -qE "$SKIP_RE" && continue
+  [[ "$file" =~ $SKIP_RE ]] && continue
   # Skip the pattern files themselves; a pattern is not an occurrence.
   case "$file" in
     "$PATTERN_FILE"|"$LOCAL_PATTERN_FILE"|"$LOCAL_PATTERN_FILE.example") continue ;;
   esac
 
   if [ "$mode" = "staged" ]; then
-    git show ":$file" > "$tmp_content" 2>/dev/null || continue
+    # Materialize the index blob. Writing to a file rather than a shell
+    # variable is what lets grep -I recognize (and skip) binary content
+    # instead of choking on null bytes.
+    content="$tmp_dir/$blob_seq"
+    git show ":$file" > "$content" 2>/dev/null || continue
+    blob_seq=$((blob_seq + 1))
   else
     [ -f "$file" ] || continue
-    cat -- "$file" > "$tmp_content" 2>/dev/null || continue
+    # Stands in for the old `cat` failing: an unreadable file was skipped
+    # rather than counted as scanned.
+    [ -r "$file" ] || continue
+    content="$file"
   fi
-  [ -s "$tmp_content" ] || continue
+  [ -s "$content" ] || continue
+
   scanned=$((scanned + 1))
+  display_paths+=("$file")
+  content_paths+=("$content")
+done
 
-  # Fast path: one pass over the file with every pattern at once. Only a file
-  # that matches something pays for the per-pattern attribution loop below.
-  grep -qIEf "$tmp_patterns" "$tmp_content" 2>/dev/null || continue
+# Fast path, batched: one pass over every target with every pattern at once.
+# `grep -l` reports matches by name, so a newline in a path would corrupt the
+# result — those go one at a time instead. (`git ls-files` quotes such paths,
+# so in --all mode they never survive the `-f` test above; a caller can still
+# name one on argv.)
+declare -A has_match=()
+batch=()
+for i in "${!content_paths[@]}"; do
+  content="${content_paths[$i]}"
+  case "$content" in
+    *$'\n'*)
+      if grep -qIEf "$tmp_patterns" -- "$content" 2>/dev/null; then
+        has_match["$content"]=1
+      fi
+      ;;
+    *) batch+=("$content") ;;
+  esac
+done
 
-  for i in "${!patterns[@]}"; do
-    hits="$(grep -nIE -- "${patterns[$i]}" "$tmp_content" 2>/dev/null \
+if [ "${#batch[@]}" -gt 0 ]; then
+  while IFS= read -r hit_path; do
+    [ -n "$hit_path" ] && has_match["$hit_path"]=1
+  done < <(printf '%s\0' "${batch[@]}" \
+    | xargs -0 grep -lIEf "$tmp_patterns" -- 2>/dev/null || true)
+fi
+
+for i in "${!display_paths[@]}"; do
+  file="${display_paths[$i]}"
+  content="${content_paths[$i]}"
+  [ -n "${has_match[$content]:-}" ] || continue
+
+  for j in "${!patterns[@]}"; do
+    hits="$(grep -nIE -- "${patterns[$j]}" "$content" 2>/dev/null \
       | grep -vF -- "$EXEMPT_MARKER" \
       | grep -vE -- "$PLACEHOLDER_RE" || true)"
     [ -n "$hits" ] || continue
     while IFS= read -r hit; do
       [ -n "$hit" ] || continue
-      printf '  %s:%s  [%s]\n' "$file" "${hit%%:*}" "${pattern_labels[$i]}"
+      printf '  %s:%s  [%s]\n' "$file" "${hit%%:*}" "${pattern_labels[$j]}"
       found=$((found + 1))
     done <<< "$hits"
   done

@@ -162,7 +162,7 @@ def report(ledger_path: Path, report_type: str, year: int | None = None) -> dict
             ORDER BY year, month, account
         """
     elif report_type == "balance-sheet":
-        bql = f"""
+        bql = """
             SELECT account, sum(position)
             WHERE account ~ '^(Assets|Liabilities|Equity):'
             GROUP BY account

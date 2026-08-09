@@ -9,7 +9,6 @@ wall-clock deadline.
 """
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 from istota.brain import BrainRequest
 from istota.brain import native as native_mod

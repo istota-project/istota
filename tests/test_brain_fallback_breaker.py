@@ -1,6 +1,5 @@
 """PrimaryAvailabilityBreaker unit tests (brain-fallback spec, Stage 4)."""
 
-import pytest
 
 from istota.brain._fallback import (
     COOLDOWN_STOP_REASONS,

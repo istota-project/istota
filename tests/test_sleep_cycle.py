@@ -1,8 +1,7 @@
 """Configuration loading for istota.sleep_cycle module."""
 
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,7 +22,6 @@ from istota.memory.sleep_cycle import (
     curate_user_memory,
     NO_NEW_MEMORIES,
     MAX_DAY_DATA_CHARS,
-    INTERACTIVE_SOURCE_TYPES,
     SUGGESTED_PREDICATES,
 )
 
@@ -830,7 +828,7 @@ class TestCheckSleepCycles:
         with db.get_db(db_path) as conn:
             db.set_sleep_cycle_last_run(conn, "alice", None)
 
-            result = check_sleep_cycles(conn, mount_config)
+            check_sleep_cycles(conn, mount_config)
 
         # Whether it ran depends on current time, but mock verifies no unexpected calls
         # The important thing is no exception is raised

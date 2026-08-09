@@ -107,7 +107,7 @@ class TestRepairingSemantics:
     def test_exclude_source_types_honored(self, conn):
         db.register_room(conn, "r", "u", origin="talk")
         t1 = _add_task(conn, "r", "q1", "a1", source_type="talk")
-        sched = _add_task(conn, "r", "cron", "ran", source_type="scheduled")
+        _add_task(conn, "r", "cron", "ran", source_type="scheduled")
         db.backfill_room_messages_from_tasks(conn, "r")
         hist = db.get_conversation_history(
             conn, "r", limit=10, exclude_source_types=["scheduled", "briefing"]

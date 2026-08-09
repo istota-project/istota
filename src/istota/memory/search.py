@@ -11,7 +11,6 @@ import sqlite3
 import struct
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from pathlib import Path
 
 logger = logging.getLogger("istota.memory_search")
 

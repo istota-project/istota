@@ -18,11 +18,6 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
-
 from istota.money.core.models import QuarterlyTaxEstimate, TaxConfig
 from istota.money.core.tax_data import (
     DEFAULT_INSTALLMENT_SCHEDULE,

@@ -2,7 +2,6 @@
 
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from istota.config import Config, NextcloudConfig, UserConfig
 from istota.nextcloud_api import (

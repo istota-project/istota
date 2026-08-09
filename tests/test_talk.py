@@ -57,7 +57,7 @@ class TestTalkClient:
         mock_http.post = AsyncMock(return_value=mock_response)
 
         with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
-            result = await client.send_message("room1", "Reply!", reply_to=10)
+            await client.send_message("room1", "Reply!", reply_to=10)
 
         call_kwargs = mock_http.post.call_args
         assert call_kwargs.kwargs["json"] == {"message": "Reply!", "replyTo": 10}
@@ -70,7 +70,7 @@ class TestTalkClient:
         mock_http.put = AsyncMock(return_value=mock_response)
 
         with patch("istota.talk.httpx.AsyncClient", return_value=mock_http):
-            result = await client.edit_message("room1", 42, "Updated text")
+            await client.edit_message("room1", 42, "Updated text")
 
         mock_http.put.assert_called_once()
         call_kwargs = mock_http.put.call_args

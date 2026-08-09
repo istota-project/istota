@@ -374,7 +374,6 @@ class TestDispatcherIteratesFullIndex:
         # Monkey-patch a fake skill's setup_env. We use the real ``ntfy``
         # module because it lives at a stable import path; we replace
         # its setup_env and clean up afterwards.
-        import importlib
         import istota.skills.ntfy as ntfy_mod
 
         def fake_setup_env(_ctx):

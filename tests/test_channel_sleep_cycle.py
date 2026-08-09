@@ -1,8 +1,7 @@
 """Tests for channel sleep cycle functionality in istota.memory.sleep_cycle."""
 
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -457,7 +456,7 @@ class TestCheckChannelSleepCycles:
             # Use a specific hour cron
             mount_config.channel_sleep_cycle.cron = "0 3 * * *"
 
-            with patch("istota.memory.sleep_cycle.process_channel_sleep_cycle") as mock_process:
+            with patch("istota.memory.sleep_cycle.process_channel_sleep_cycle"):
                 check_channel_sleep_cycles(conn, mount_config)
 
             # Whether it ran depends on current time, but no error raised

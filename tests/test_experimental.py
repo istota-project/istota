@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
-from unittest.mock import patch
 
 import click
-import pytest
 from click.testing import CliRunner
 
 from istota.config import Config, ExperimentalConfig, load_config

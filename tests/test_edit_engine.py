@@ -8,7 +8,6 @@ from istota.session.tools.edit_engine import (
     apply_edits_to_normalized_content,
     detect_line_ending,
     fuzzy_find_text,
-    normalize_for_fuzzy_match,
     normalize_to_lf,
     restore_line_endings,
     strip_bom,

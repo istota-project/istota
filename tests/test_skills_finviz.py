@@ -1,6 +1,5 @@
 """Tests for skills/finviz.py — FinViz market data scraping."""
 
-from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest

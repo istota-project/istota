@@ -10,8 +10,6 @@ The CSV format mirrors the spreadsheet people keep offline:
 
 from __future__ import annotations
 
-import io
-from pathlib import Path
 
 import pytest
 
@@ -263,7 +261,6 @@ class TestExportCsv:
 
         from istota import health as health_pkg
         from istota import scheduler_deferred
-        from istota.health import _loader as health_loader
 
         src = tmp_path / "bw.csv"
         src.write_text(SAMPLE_CSV)

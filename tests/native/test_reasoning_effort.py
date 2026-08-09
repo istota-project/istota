@@ -11,7 +11,6 @@ Three sub-changes:
   ``ThinkingContent`` block that never leaks into ``result_text``.
 """
 
-from pathlib import Path
 
 from istota.brain.native import NativeBrain
 from istota.config import NativeBrainConfig

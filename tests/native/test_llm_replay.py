@@ -103,7 +103,7 @@ class TestRecordingProvider:
         assert events[-1].message.text == "Hello world"
 
         # Fixture holds the raw SSE lines, and replaying it reproduces events.
-        recorded = [json.loads(l) for l in fx.read_text().splitlines() if l]
+        recorded = [json.loads(line) for line in fx.read_text().splitlines() if line]
         assert recorded == _TEXT_SSE
         replayed = await _collect(ReplayProvider(fx))
         assert replayed[-1].message.text == "Hello world"

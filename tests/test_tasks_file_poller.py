@@ -1,17 +1,14 @@
 """Tests for TASKS.md file polling and task creation."""
 
-import hashlib
 import sqlite3
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from istota.config import Config, EmailConfig, UserConfig
-from istota.db import Task, IstotaFileTask, init_db
+from istota.db import Task, init_db
 from istota.tasks_file_poller import (
     TASKS_FILE_PATTERN,
-    ParsedTask,
     compute_content_hash,
     discover_tasks_files,
     handle_tasks_file_completion,
@@ -382,7 +379,7 @@ class TestHandleTasksFileCompletion:
         task = self._setup_task_and_istota_entry(config)
         mock_read.return_value = "- [~] Send email..."
 
-        with patch("istota.tasks_file_poller.send_email", create=True) as mock_send, \
+        with patch("istota.tasks_file_poller.send_email", create=True), \
              patch("istota.skills.email.send_email") as mock_skill_send:
             # The function imports send_email inside the try block
             handle_tasks_file_completion(config, task, success=True, result="Done")

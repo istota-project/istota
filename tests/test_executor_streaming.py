@@ -1,15 +1,13 @@
 """Tests for executor streaming (Popen + stream-json parsing) and simple execution."""
 
 import json
-import os
-import subprocess
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from contextlib import ExitStack
 
-from istota.config import Config, SchedulerConfig, SleepCycleConfig, UserConfig
+from istota.config import Config, SleepCycleConfig, UserConfig
 from istota.executor import execute_task, get_user_temp_dir
 from istota.events import EventWriter
 from istota import db
@@ -370,7 +368,6 @@ class TestStreamingExecution:
         ]
 
         mock_process = self._make_mock_process(stream_lines)
-        progress = []
 
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
@@ -429,7 +426,6 @@ class TestStreamingExecution:
         ]
 
         mock_process = self._make_mock_process(stream_lines, returncode=1)
-        progress = []
 
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
@@ -1645,7 +1641,6 @@ class TestTmuxFallback:
     same attempt once through claude_code — no new task, no attempt increment."""
 
     def _fake_brain(self, kind, result):
-        from istota.brain._types import BrainResult
 
         class _FakeBrain:
             model_namespace = "anthropic"

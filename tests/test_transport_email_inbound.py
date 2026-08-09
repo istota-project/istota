@@ -4,8 +4,6 @@ helpers it depends on (``istota.email_support``: subject normalization, thread
 id, config adapter, IMAP cleanup)."""
 
 import json
-import sqlite3
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

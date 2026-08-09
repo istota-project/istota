@@ -6,7 +6,6 @@ one-time migration that folds the legacy `web_chat_rooms` / `web_chat_messages`
 tables plus distinct Talk `conversation_token`s into the new model.
 """
 
-import json
 
 import pytest
 

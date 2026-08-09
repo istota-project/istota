@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import io
 from contextlib import redirect_stdout, redirect_stderr
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest

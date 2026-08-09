@@ -6,14 +6,12 @@ functions for backward compatibility with CLI, API, and tests.
 
 from __future__ import annotations
 
-import csv
 import json
 import re
 import shutil
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
-import tomli
 
 from .dedup import compute_transaction_hash, parse_ledger_transactions
 from .ids import new_txn_id
@@ -908,7 +906,7 @@ def sync_monarch(
     if recategorized_entries:
         recat_file = imports_dir / f"monarch_recategorize_{timestamp}.beancount"
         header = f"; Recategorizations from Monarch Money on {datetime.now().isoformat()}\n"
-        header += f"; These transactions had their business tag removed in Monarch\n"
+        header += "; These transactions had their business tag removed in Monarch\n"
         header += f"; Recategorization count: {len(recategorized_entries)}\n"
         header += f"; Target account: {config.sync.recategorize_account}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
@@ -919,7 +917,7 @@ def sync_monarch(
     if category_change_entries:
         cat_change_file = imports_dir / f"monarch_category_change_{timestamp}.beancount"
         header = f"; Category changes from Monarch Money on {datetime.now().isoformat()}\n"
-        header += f"; These transactions were recategorized in Monarch\n"
+        header += "; These transactions were recategorized in Monarch\n"
         header += f"; Category change count: {len(category_change_entries)}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
         cat_change_file.write_text(header + "\n\n".join(category_change_entries) + "\n")

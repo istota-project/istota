@@ -5,11 +5,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from istota import db_relocate
 from istota.config import Config, UserConfig
-from istota.storage import get_user_bot_path
 
 
 def _config(tmp_path: Path) -> Config:
@@ -100,7 +98,7 @@ class TestRelocateModule:
 
         cfg = _config(tmp_path)
         _make_legacy_delete_db(cfg, "alice", "location")  # source has marker row 42
-        new = cfg.module_db_path(cfg_user := "alice", "location")
+        new = cfg.module_db_path(_cfg_user := "alice", "location")
         loc_init(new)  # empty schema-only DB, as a prematurely-started service would create
         assert db_relocate._data_row_count(new) == 0
 

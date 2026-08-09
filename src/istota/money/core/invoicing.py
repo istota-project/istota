@@ -15,7 +15,6 @@ import re
 from datetime import date, timedelta
 from pathlib import Path
 
-import tomli
 
 from .ids import new_txn_id
 from .models import (
@@ -518,7 +517,6 @@ def check_scheduled_invoices(
     generation has been recorded for the current month in the database.
     """
     import calendar
-    import sqlite3
 
     from istota.money.db import get_invoice_schedule_state
 

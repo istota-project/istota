@@ -1,7 +1,6 @@
 """Tests for skill proxy server, client, and executor credential splitting."""
 
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -18,7 +17,6 @@ from istota.executor import (
     _split_credential_env,
     derive_authorized_skills,
     derive_credential_set,
-    derive_skill_credential_map,
 )
 from istota.skills._env import EnvContext
 from istota.skills._types import EnvSpec, SkillMeta
@@ -574,7 +572,7 @@ class TestSkillProxyLifecycle:
         assert not sock_path.exists()
 
     def test_context_manager(self, sock_path):
-        with SkillProxy(sock_path, {}, {}) as proxy:
+        with SkillProxy(sock_path, {}, {}):
             assert sock_path.exists()
         assert not sock_path.exists()
 
@@ -854,7 +852,7 @@ class TestSkillClientDirect:
 
         def serve():
             conn, _ = server.accept()
-            data = conn.recv(65536)
+            conn.recv(65536)
             response = json.dumps({"stdout": "ok\n", "stderr": "", "returncode": 0})
             conn.sendall((response + "\n").encode())
             conn.close()

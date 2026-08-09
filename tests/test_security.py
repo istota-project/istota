@@ -4,19 +4,14 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from istota import db
 from istota.config import (
     Config,
-    DeveloperConfig,
-    EmailConfig,
-    NextcloudConfig,
     SecurityConfig,
     load_config,
 )
 from istota.executor import (
-    _CREDENTIAL_ENV_PATTERNS,
     _PROXY_LOOKUP_BLOCKED,
     _split_credential_env,
     build_allowed_tools,

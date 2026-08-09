@@ -11,7 +11,6 @@ import importlib.util
 import tomllib
 from pathlib import Path
 
-import pytest
 
 from istota.briefings import normalize_block_specs
 from istota.config import _parse_user_data

@@ -247,7 +247,7 @@ def _user_md_size_bytes(user_id: str) -> int | None:
 def cmd_facts(args) -> dict:
     """Query knowledge graph facts."""
     from istota.memory.knowledge_graph import (
-        ensure_table, get_current_facts, get_facts_as_of, format_facts_for_prompt,
+        ensure_table, get_current_facts, get_facts_as_of,
     )
 
     conn = _get_conn()

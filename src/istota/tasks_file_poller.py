@@ -124,7 +124,6 @@ def parse_tasks_file(content: str) -> list[ParsedTask]:
     tasks = []
 
     for match in TASK_PATTERN.finditer(content):
-        indent = match.group(1)
         marker = match.group(2)
         task_content = match.group(3).strip()
         original_line = match.group(0)

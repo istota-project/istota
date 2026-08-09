@@ -4,8 +4,12 @@ import logging
 import os
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import tomli
+
+if TYPE_CHECKING:
+    import sqlite3
 
 logger = logging.getLogger("istota.config")
 

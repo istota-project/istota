@@ -312,7 +312,7 @@ class TestCmdCronShowsModel:
                    VALUES (?, ?, ?, ?, 1, ?)""",
                 ("alice", "feed-digest", "0 9 * * *", "t", "claude-sonnet-4-6"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(CommandContext(
                 config=config, conn=conn, user_id="alice",
                 conversation_token="room1", args=""))
@@ -331,7 +331,7 @@ class TestCmdCronShowsModel:
                    VALUES (?, ?, ?, ?, 1)""",
                 ("alice", "default-job", "0 9 * * *", "t"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(CommandContext(
                 config=config, conn=conn, user_id="alice",
                 conversation_token="room1", args=""))
@@ -556,7 +556,7 @@ class TestCmdCronShowsEffort:
                    VALUES (?, ?, ?, ?, 1, ?)""",
                 ("alice", "j", "0 9 * * *", "t", "low"),
             )
-            client = AsyncMock()
+            AsyncMock()
             result = await cmd_cron(CommandContext(
                 config=config, conn=conn, user_id="alice",
                 conversation_token="room1", args=""))

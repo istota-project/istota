@@ -1,12 +1,9 @@
 """Configuration loading for istota.heartbeat module."""
 
-import sqlite3
 import subprocess
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from istota.heartbeat import (
     HeartbeatSettings,

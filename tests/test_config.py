@@ -9,19 +9,14 @@ from istota.config import (
     BriefingConfig,
     ChannelSleepCycleConfig,
     Config,
-    ConversationConfig,
     DeveloperConfig,
     EmailConfig,
-    LoggingConfig,
     MemorySearchConfig,
     NextcloudConfig,
     ResourceConfig,
-    SchedulerConfig,
     SiteConfig,
     SleepCycleConfig,
-    TalkConfig,
     UserConfig,
-    load_admin_users,
     load_config,
 )
 
@@ -2024,7 +2019,6 @@ class TestConfigAuthoredBriefingBlocks:
         # get_briefings_for_user returns briefings verbatim (no component
         # expansion); config-authored blocks pass through untouched.
         from istota.config import (
-            BriefingConfig,
             Config,
             UserConfig,
         )

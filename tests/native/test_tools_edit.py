@@ -45,7 +45,7 @@ class TestLegacySingleEdit:
         # The shim coerces "true" → True (bypassing the generic coercion layer).
         f = tmp_path / "a.py"
         f.write_text("x x x")
-        r = await _run(
+        await _run(
             make_edit_tool(_env(tmp_path)),
             {"file_path": str(f), "old_string": "x", "new_string": "y", "replace_all": "true"},
         )
@@ -91,7 +91,7 @@ class TestEditsArray:
         # When edits is present, old_string/new_string are ignored.
         f = tmp_path / "a.py"
         f.write_text("keep me\ntarget\n")
-        r = await _run(
+        await _run(
             make_edit_tool(_env(tmp_path)),
             {
                 "file_path": str(f),

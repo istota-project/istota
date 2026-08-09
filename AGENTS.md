@@ -135,7 +135,9 @@ Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-jo
 
 ## Code Style
 
-Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces (ruff-managed), everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
+Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces, everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
+
+Python is **linted but not formatted**. `ruff check` runs clean over `src/` and `tests/` and is part of `.claude/verify.sh`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
 
 ## Committing
 

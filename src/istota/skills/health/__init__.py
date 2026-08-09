@@ -81,8 +81,6 @@ def _db_path() -> str:
 
 
 def _connect() -> sqlite3.Connection:
-    from istota.health import db as health_db
-
     path = Path(_db_path())
     # In sandbox mode the file is read-only via bwrap, but we still need to
     # *read* it. Writes go through the deferred-op file.
@@ -750,7 +748,6 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
         return
 
     from istota.health import csv_io
-    from istota.health import db as health_db
 
     csv_text = path.read_text(encoding="utf-8-sig", errors="replace")
     conn = _connect()

@@ -30,7 +30,6 @@ import io
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator
 
 from istota.health import db as health_db
 from istota.health.units import (

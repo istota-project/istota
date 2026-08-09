@@ -3,7 +3,6 @@
 import json
 import sys
 from datetime import datetime, timezone
-from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -311,7 +310,6 @@ class TestCmdQuote:
     def test_outputs_json(self, capsys):
         mock_yf = _make_mock_yf({"AAPL": (195.0, 190.0)})
         with patch.dict(sys.modules, {"yfinance": mock_yf}):
-            from istota.skills.markets import get_quotes  # noqa: F811
             parser = build_parser()
             args = parser.parse_args(["quote", "AAPL"])
             cmd_quote(args)

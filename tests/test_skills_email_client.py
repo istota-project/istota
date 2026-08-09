@@ -32,7 +32,6 @@ from istota.skills.email import (
     cmd_list,
     cmd_newsletters,
     cmd_read,
-    cmd_search,
     cmd_thread,
     list_emails,
     search_emails,

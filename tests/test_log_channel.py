@@ -115,8 +115,8 @@ class TestFormatLogChannelBody:
         assert "Skills: calendar, email, files" in body
         # Skills line should come before tool descriptions
         lines = body.split("\n")
-        skills_idx = next(i for i, l in enumerate(lines) if "Skills:" in l)
-        tool_idx = next(i for i, l in enumerate(lines) if "Reading file.txt" in l)
+        skills_idx = next(i for i, line in enumerate(lines) if "Skills:" in line)
+        tool_idx = next(i for i, line in enumerate(lines) if "Reading file.txt" in line)
         assert skills_idx < tool_idx
 
     def test_no_skills_line_when_none(self):

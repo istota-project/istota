@@ -5,7 +5,6 @@ import logging
 import re
 import sqlite3
 
-import pytest
 
 from istota import db
 from istota.config import (

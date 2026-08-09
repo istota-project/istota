@@ -17,7 +17,6 @@ from istota.money.core.ledger import (
     report,
     lots,
     detect_wash_sales,
-    wash_sales,
 )
 from istota.money.core.models import PurchaseTransaction, SaleTransaction
 

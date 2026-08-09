@@ -10,7 +10,6 @@ Per-user split: every helper takes a path to the per-user
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 

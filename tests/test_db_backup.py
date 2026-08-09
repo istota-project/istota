@@ -7,7 +7,6 @@ import stat
 import sys
 from pathlib import Path
 
-import pytest
 
 from istota import db, db_backup
 from istota.config import (

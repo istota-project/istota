@@ -124,7 +124,7 @@ class TestBreakpointPolicy:
 
     def test_rolling_moves_to_latest_message_each_turn(self):
         msgs_turn1 = [_user("first")]
-        body1 = _provider(True)._build_chat_completion_request(
+        _provider(True)._build_chat_completion_request(
             "sys", msgs_turn1, [], "m", 100
         )
         # Turn 2 appends an assistant + a new user message; the rolling

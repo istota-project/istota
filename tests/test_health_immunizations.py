@@ -2,7 +2,6 @@
 
 from datetime import date
 
-import pytest
 
 from istota.health import db as health_db
 from istota.health._migrate import (

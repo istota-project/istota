@@ -1,7 +1,6 @@
 """Tests for briefing trigger file processing."""
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from istota.config import BriefingConfig, Config, UserConfig
