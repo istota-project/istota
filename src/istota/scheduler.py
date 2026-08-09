@@ -1406,9 +1406,19 @@ def _execute_command_task(
     from .executor import build_stripped_env, get_user_temp_dir
     from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
     from .skills._loader import load_skill_index
+    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    user_temp_dir.mkdir(parents=True, exist_ok=True)
+
     env = build_stripped_env()
     env["ISTOTA_TASK_ID"] = str(task.id)
     env["ISTOTA_USER_ID"] = task.user_id
+    # Both sibling paths (``_execute_skill_task``, ``executor.execute_task``)
+    # export this, and every skill CLI keys its deferred writes off it. Without
+    # it a CRON ``command:`` row invoking a skill CLI silently lost whatever
+    # the CLI had no direct-write fallback for — notably the email skill's
+    # ``sent_emails`` record, so a correspondent's reply had nothing to thread
+    # back against (ISSUE-233).
+    env["ISTOTA_DEFERRED_DIR"] = str(user_temp_dir)
     env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
     # Propagate the config path so module skills (feeds, money) loading
     # istota config from a fresh subprocess find the same file the daemon
@@ -1429,8 +1439,6 @@ def _execute_command_task(
     # operator's command may invoke any istota-skill CLI, so we expose
     # the union over the full skill_index. CalDAV vars are gated on
     # discovered calendars to mirror the LLM path.
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
-    user_temp_dir.mkdir(parents=True, exist_ok=True)
     with db.get_db(config.db_path) as conn:
         user_resources = db.get_user_resources(conn, task.user_id)
     skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)

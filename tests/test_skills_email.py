@@ -555,6 +555,185 @@ class TestWriteDeferredSentEmail:
         assert data[0]["message_id"] == "<msg@x>"
 
 
+class TestWriteSentEmailDirectFallback:
+    """ISSUE-233: every other deferred-op writer falls back to a direct DB
+    write when no deferred dir is configured. This one returned silently, so a
+    send from an unsandboxed context recorded nothing and the correspondent's
+    reply had no ``sent_emails`` row to thread back against."""
+
+    @pytest.fixture
+    def task_db(self, tmp_path):
+        from istota import db
+
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            task_id = db.create_task(
+                conn,
+                prompt="send the invoice",
+                user_id="alice",
+                source_type="scheduled",
+                conversation_token="room7",
+            )
+        return path, task_id
+
+    def _rows(self, path):
+        from istota import db
+
+        with db.get_db(path) as conn:
+            return conn.execute(
+                'SELECT user_id, message_id, to_addr, subject, task_id, '
+                'conversation_token, origin_target FROM sent_emails'
+            ).fetchall()
+
+    def test_direct_write_when_no_deferred_dir(self, task_db):
+        path, task_id = task_db
+        env = {
+            "ISTOTA_TASK_ID": str(task_id),
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+
+        rows = self._rows(path)
+        assert len(rows) == 1
+        assert rows[0]["message_id"] == "<msg@x>"
+        assert rows[0]["to_addr"] == "vendor@example.com"
+        assert rows[0]["subject"] == "Invoice"
+
+    def test_direct_write_carries_task_identity(self, task_db):
+        """The row must be attributed the same way the deferred replay would —
+        every identity field read off the task row, not off the env."""
+        path, task_id = task_db
+        env = {
+            "ISTOTA_TASK_ID": str(task_id),
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+
+        row = self._rows(path)[0]
+        assert row["user_id"] == "alice"
+        assert row["task_id"] == task_id
+        assert row["conversation_token"] == "room7"
+        assert row["origin_target"]
+
+    def test_refuses_when_env_user_is_not_the_tasks_user(self, task_db):
+        """The task row is the identity, but the env chose which row. A
+        disagreement means the env is not describing this task, so the send
+        must not be attributed to another user's conversation."""
+        path, task_id = task_db
+        env = {
+            "ISTOTA_TASK_ID": str(task_id),
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "mallory",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+        assert self._rows(path) == []
+
+    def test_reply_threads_back_against_the_direct_row(self, task_db):
+        """The point of the row: an inbound reply quoting the Message-ID must
+        resolve to the originating task."""
+        from istota import db
+
+        path, task_id = task_db
+        env = {
+            "ISTOTA_TASK_ID": str(task_id),
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+
+        with db.get_db(path) as conn:
+            found = db.find_sent_email_by_references(conn, ["<msg@x>"])
+        assert found is not None
+        assert found.task_id == task_id
+
+    def test_deferred_dir_still_wins(self, task_db, tmp_path):
+        """When a deferred dir is configured the file is the only writer — a
+        direct write as well would double-record on replay."""
+        path, task_id = task_db
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {
+            "ISTOTA_TASK_ID": str(task_id),
+            "ISTOTA_DEFERRED_DIR": str(deferred),
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+
+        assert (deferred / f"task_{task_id}_sent_emails.json").exists()
+        assert self._rows(path) == []
+
+    def test_no_task_id_is_still_a_noop(self, task_db):
+        """An ad-hoc CLI send outside any task has nothing to attribute the row
+        to, so it stays untracked — unchanged behaviour."""
+        path, _ = task_db
+        with patch.dict("os.environ", {"ISTOTA_DB_PATH": str(path)}, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+        assert self._rows(path) == []
+
+    def test_no_db_path_is_a_noop(self):
+        with patch.dict("os.environ", {"ISTOTA_TASK_ID": "1"}, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+
+    def test_db_failure_does_not_raise(self, tmp_path):
+        """The mail is already gone by the time this runs — a DB problem must
+        not turn a delivered send into a failed task."""
+        broken = tmp_path / "istota.db"
+        broken.write_text("this is not a sqlite file")
+        env = {
+            "ISTOTA_TASK_ID": "1",
+            "ISTOTA_DB_PATH": str(broken),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+
+    def test_missing_db_file_is_not_created(self, tmp_path):
+        """A path pointing at no file is a misconfiguration. Connecting would
+        create an empty DB as a side effect of a function that only records."""
+        missing = tmp_path / "istota.db"
+        env = {
+            "ISTOTA_TASK_ID": "1",
+            "ISTOTA_DB_PATH": str(missing),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+        assert not missing.exists()
+
+    def test_non_numeric_task_id_does_not_raise(self, task_db):
+        path, _ = task_db
+        env = {
+            "ISTOTA_TASK_ID": "not-a-number",
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+        assert self._rows(path) == []
+
+    def test_unknown_task_id_is_a_noop(self, task_db):
+        """A task id with no row cannot be attributed; recording it under the
+        env's user id would let an unsandboxed caller forge attribution."""
+        path, _ = task_db
+        env = {
+            "ISTOTA_TASK_ID": "99999",
+            "ISTOTA_DB_PATH": str(path),
+            "ISTOTA_USER_ID": "alice",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            _write_deferred_sent_email("<msg@x>", "vendor@example.com", "Invoice")
+        assert self._rows(path) == []
+
+
 # --- _sanitize_header tests ---
 
 
