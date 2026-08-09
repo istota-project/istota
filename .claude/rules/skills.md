@@ -200,7 +200,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `email` | — | email, mail, send, inbox, reply, message | — | email |
 | `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | — | briefing |
 | `todos` | — | todo, task, checklist, reminder, done, complete | — | — |
-| `tasks` | — | subtask, queue, background, later | — | — | admin_only |
+| `tasks` (admin_only, cli) | — | subtask, queue, background, later, task status | — | — |
 | `markets` | — | market, stock, stocks, ticker, index, indices, futures, ... | — | briefing |
 | `reminders` | — | remind, reminder, remind me, alert me, notify me, don't forget, ... | — | — |
 | `schedules` | — | schedule, recurring, cron, daily, weekly, ... | — | — |
@@ -244,6 +244,19 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Subcommands**: `get NAMESPACE KEY`, `set NAMESPACE KEY '<json>'`, `list NAMESPACE`, `delete NAMESPACE KEY`, `namespaces`, `set-contains NS KEY MEMBER`, `set-size NS KEY`, `set-members NS KEY [--limit N] [--offset N]`, `set-add NS KEY MEMBER [MEMBER...]`, `set-remove NS KEY MEMBER [MEMBER...]`
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_TASK_ID`
 **Note**: `always_include` core skill. Persistent per-user, namespaced JSON store. Writes go through deferred-DB pattern under sandbox. Set ops (`set-add`/`set-remove`/`set-contains`/`set-size`/`set-members`) operate on a JSON-array value at `<ns>/<key>` with plain-string members — added so membership-tracking patterns (seen IDs, processed hashes) don't have to round-trip the full array through `get`. Deferred `set-add`/`set-remove` carry only the member list; the scheduler re-reads the current value at apply time so concurrent ops compose correctly.
+
+### `tasks/` - Task state read surface
+**Subcommands**: `status <id> [--max-chars N]`, `recent [--since 30m|2h|7d|<UTC ts>] [--parent ID] [--status S] [--source-type S] [--limit N]`
+**Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`
+**Note**: `admin_only` + `cli`. Answers "what happened to the subtask / scheduled run I handed off" (ISSUE-237) — before this the skill was write-only (deferred subtask creation), so an agent needing the answer hand-rolled a poll against the SQLite file and got `unable to open database file` for the whole Bash timeout. Backed by `db.get_task_state_for_user` / `db.list_recent_tasks_for_user`, both of which take `user_id` as a **mandatory ownership predicate** rather than an optional filter, and return `not_found` identically for "no such task" and "not yours" so the surface is no existence oracle for task ids. That scope is the boundary. The read-only mount is **not** — it blocks a raw read only in some sidecar states and not at all on the standalone install, so treating it as one would be correct by coincidence (see `.claude/rules/executor.md`, "Raw DB reads from the sandbox"). `status` carries `result` (capped, with `result_truncated`/`result_chars`) and an untrusted-content `notice`, since a result body routinely quotes email/web/feed text — hence `companion_skills: [untrusted_input]`; `recent` is an index with a `prompt_excerpt` (160 chars), no result bodies, and an echo of the filters it applied. `--since` is parsed rather than shape-matched (`2026-13-45` would otherwise compare as a string and silently match nothing) and bounded, so an oversized window can't raise `OverflowError` past the `ValueError` handler. `--status` is a `choices=` set; `--source-type` stays free-form and is echoed back instead. Rows carry `conversation_token`: the scope is the user, not the room, so a caller has to be able to see that a result came from elsewhere. The skill body also carries the out-of-sandbox doctrine (skill CLI → devbox → handoff) and the poll-loop rules (never `2>/dev/null` the probe, abort after two non-zero exits, cap the wait).
+
+**`admin_only` does not gate execution.** It filters eager selection, companion expansion, the menu and `skills show` — all documentation surfaces. Three paths reach a CLI without consulting it:
+
+1. The skill proxy's `allowed_skills` is *every* `cli: true` skill in the index (`executor.py:3336-3338`) — deliberately wide, so a menu-pulled skill works without a re-plumb.
+2. `format_cli_skills` built the prompt's "Skill CLI tools" list off `meta.cli` alone, so the first `admin_only: true` + `cli: true` skill would have been advertised to every non-admin *and* executable. Fixed: `format_cli_skills(skill_index, *, is_admin)` takes the flag keyword-only with no default.
+3. A CRON.md `command: istota-skill tasks recent …` row is promoted to a skill-task by `cron_loader._parse_skill_command` and run by `scheduler._execute_skill_task`, which is explicitly not admin-gated and sets `ISTOTA_DB_PATH` unconditionally (`scheduler.py:1443`). A non-admin reaches the CLI this way.
+
+So `admin_only` is a documentation gate, and a CLI that needs a real boundary must carry its own. `tasks` scopes every query by `ISTOTA_USER_ID`, which holds on all three paths — path 3 in particular leaves no cross-user leak, only a non-admin reading their own tasks.
 
 ### `email/` - IMAP/SMTP (two-way client)
 **Read subcommands**: `list` (+`--since`/`--from`/`--unread`, snippet + has_attachments), `read` (headers, plain **and** html, attachment manifest), `search` (raw IMAP SEARCH string, verbatim — errors, never silent subject-match), `thread` (real References/In-Reply-To walk), `attachments <id> --dest`, `from-senders --senders` (server-side SEARCH, no 100-truncation — the digest/batching path), `newsletters --sources` (required). Every read verb takes `--scope {mine,shared,all}` (default `all`).

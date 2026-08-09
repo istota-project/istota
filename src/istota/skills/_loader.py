@@ -560,17 +560,24 @@ def select_skills(
     return result
 
 
-def format_cli_skills(skill_index: dict[str, SkillMeta]) -> str:
+def format_cli_skills(skill_index: dict[str, SkillMeta], *, is_admin: bool) -> str:
     """Generate a prompt-ready list of skills that have CLI tools.
 
     Returns a formatted string listing each CLI skill with its command
     and description, suitable for inclusion in the tools section of a prompt.
     Returns empty string if no CLI skills exist.
+
+    ``is_admin`` is keyword-only and has no default on purpose. This list is
+    built straight off ``meta.cli``, and the skill proxy's ``allowed_skills``
+    is likewise every ``cli: true`` skill — so an ``admin_only`` CLI omitted
+    here is simply never mentioned to a non-admin, while one left in would be
+    both advertised and executable. The other ``admin_only`` gates (eager
+    selection, companion expansion, the on-demand menu) don't cover this path.
     """
     lines = []
     for name in sorted(skill_index):
         meta = skill_index[name]
-        if meta.cli:
+        if meta.cli and (is_admin or not meta.admin_only):
             lines.append(f"  - `istota-skill {name}` — {meta.description}")
     if not lines:
         return ""

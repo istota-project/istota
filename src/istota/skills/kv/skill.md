@@ -83,7 +83,7 @@ istota-skill kv shared-status   # can I write shared KV on this deployment?
 
 ## Sandbox constraints
 
-- **Reads** (`get`, `list`, `namespaces`, `set-contains`, `set-size`, `set-members`) work directly — the DB is read-only accessible. `--shared` reads work the same way.
+- **Reads** (`get`, `list`, `namespaces`, `set-contains`, `set-size`, `set-members`) return a value on the spot, `--shared` reads included — on an instance where you have access to the framework database. On a multi-user instance that is admin tasks only, and a read from a non-admin task returns an error saying so rather than an empty result. Reads never fall back to opening the database file yourself: do not point `sqlite3` or Python's `sqlite3` at it. Depending on the deployment that fails in a way that looks like a broken command, or succeeds and returns every user's rows — neither is a supported read.
 - **Writes** (`set`, `delete`, `set-add`, `set-remove`) are deferred when running in the sandbox: the CLI writes a JSON file to `$ISTOTA_DEFERRED_DIR` and the scheduler processes it after task completion. A `--shared` write carries the shared scope in the deferred op; the scheduler applies it only if your task's identity is an admin (fail-closed).
 
 The CLI handles this automatically — use the write commands normally and they will be deferred transparently when `ISTOTA_DEFERRED_DIR` is set.

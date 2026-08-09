@@ -1284,6 +1284,102 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
     return _row_to_task(row)
 
 
+# Lifecycle columns for the narrow, user-scoped task read surface behind
+# `istota-skill tasks` (ISSUE-237). Deliberately NOT `_TASK_COLUMNS`: that list
+# exists to rebuild a full `Task` and omits `started_at` / `completed_at`, which
+# are the two fields a caller waiting on an out-of-band job actually needs. It
+# also carries `prompt`, `attachments` and the whole reply/delivery block, none
+# of which belong in an answer handed back to a sandboxed agent.
+#
+# ``conversation_token`` is included so a caller can see which room a task
+# belongs to. The scope here is the user, not the room — a scheduled job's run
+# and the chat asking about it are in different rooms, so a room predicate
+# would break the main use — but that makes it the reader's job to notice when
+# a result came from somewhere else, and it can only notice if we say.
+_TASK_STATE_COLUMNS = (
+    "id, status, source_type, user_id, queue, conversation_token, "
+    "created_at, updated_at, started_at, completed_at, "
+    "attempt_count, max_attempts, "
+    "parent_task_id, scheduled_job_id, briefing_name"
+)
+
+# Prompt text is echoed back only as an identifying excerpt — enough to tell
+# two of your own queued jobs apart, not a way to page prompts back out.
+_TASK_PROMPT_EXCERPT_CHARS = 160
+
+
+def get_task_state_for_user(
+    conn: sqlite3.Connection, task_id: int, user_id: str,
+) -> dict | None:
+    """Read one task's lifecycle state and result, scoped to its owner.
+
+    ``user_id`` is a mandatory ownership predicate, not an optional filter:
+    this backs a read surface reachable from a task, so a caller must never be
+    able to name another user's task id and learn anything about it. Returns
+    ``None`` both when the task does not exist and when it belongs to someone
+    else, so the surface is not an existence oracle for task ids.
+
+    Returns a plain dict rather than a ``Task`` because the two most useful
+    fields here (``started_at`` / ``completed_at``) are not on the dataclass.
+    """
+    cursor = conn.execute(
+        f"SELECT {_TASK_STATE_COLUMNS}, result, error, "
+        f"substr(prompt, 1, {_TASK_PROMPT_EXCERPT_CHARS}) AS prompt_excerpt "
+        "FROM tasks WHERE id = ? AND user_id = ?",
+        (task_id, user_id),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def list_recent_tasks_for_user(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    since: str | None = None,
+    parent_task_id: int | None = None,
+    status: str | None = None,
+    source_type: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """List a user's own recent tasks, newest first.
+
+    The index view for the read surface above: it answers "did the subtask /
+    scheduled run I kicked off finish yet", so it carries no ``result`` column
+    — a caller reads one result with ``get_task_state_for_user``. Returning
+    them here would page every stored result body back through a single
+    response.
+
+    ``since`` is compared against ``created_at``, which SQLite writes as a UTC
+    ``YYYY-MM-DD HH:MM:SS`` string; pass the same shape.
+    """
+    query = f"SELECT {_TASK_STATE_COLUMNS}, " \
+            f"substr(prompt, 1, {_TASK_PROMPT_EXCERPT_CHARS}) AS prompt_excerpt " \
+            "FROM tasks WHERE user_id = ?"
+    params: list = [user_id]
+
+    if since:
+        query += " AND created_at >= ?"
+        params.append(since)
+    if parent_task_id is not None:
+        query += " AND parent_task_id = ?"
+        params.append(parent_task_id)
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    if source_type:
+        query += " AND source_type = ?"
+        params.append(source_type)
+
+    # id DESC, not created_at DESC: created_at has one-second granularity, so
+    # two tasks queued in the same second (a parent and its subtask) would come
+    # back in arbitrary order.
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
 _SUBTASK_DEPTH_HARD_CAP = 100
 
 
