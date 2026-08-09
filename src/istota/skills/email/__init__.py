@@ -1258,12 +1258,82 @@ def cmd_output(args):
     return {"status": "ok", "file": str(out_path)}
 
 
+def _record_sent_email_direct(
+    task_id: str, message_id: str, to_addr: str, subject: str,
+) -> None:
+    """Record the sent email straight into the framework DB.
+
+    The fallback for an unsandboxed caller with no deferred dir. The other
+    skill-CLI DB-write deferrers (``kv``, ``health``, ``memory_search``) all
+    return False so their caller writes directly; this one just returned, so a
+    send from such a context recorded nothing while still reporting success,
+    and the correspondent's reply had no ``sent_emails`` row to thread against
+    (ISSUE-233).
+
+    Identity comes from the task row, never from the env — the same rule the
+    deferred replay follows. No task row means no attribution, so nothing is
+    written. Best-effort: the mail is already gone by the time this runs, so a
+    DB problem must not turn a delivered send into a failed task.
+    """
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    # An absent file is a misconfigured path, not an empty DB — connecting
+    # would create a 0-byte one as a side effect of a function that is only
+    # supposed to record.
+    if not db_path or not Path(db_path).exists():
+        return
+
+    try:
+        from ... import db
+        from ...transport import routing
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, int(task_id))
+            if task is None:
+                logger.warning(
+                    "sent-email tracking: task %s not found, not recording %s",
+                    task_id, message_id,
+                )
+                return
+            # The task row is the identity, but the env chose which row. They
+            # always agree on every daemon path; a disagreement means the env
+            # is not describing this task, so refuse rather than attribute a
+            # send to someone else's conversation.
+            env_user = os.environ.get("ISTOTA_USER_ID", "")
+            if env_user and env_user != task.user_id:
+                logger.warning(
+                    "sent-email tracking: task %s belongs to another user, "
+                    "not recording %s", task_id, message_id,
+                )
+                return
+            db.record_sent_email(
+                conn,
+                user_id=task.user_id,
+                message_id=message_id,
+                to_addr=to_addr,
+                subject=subject,
+                task_id=task.id,
+                conversation_token=task.conversation_token,
+                talk_delivery_token=task.talk_delivery_token,
+                origin_target=routing.origin_descriptor(task),
+            )
+    except Exception as e:  # noqa: BLE001 — the send already happened
+        logger.warning("sent-email tracking: direct write failed: %s", e)
+
+
 def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> None:
-    """Write a deferred file so the scheduler can record the sent email."""
+    """Record a sent email so a reply can be threaded back to its task.
+
+    Prefers the deferred file (the only route out of the sandbox, where the
+    framework DB is read-only) and falls back to a direct DB write when no
+    deferred dir is configured.
+    """
     task_id = os.environ.get("ISTOTA_TASK_ID", "")
     deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
-    if not task_id or not deferred_dir:
-        return  # Not running inside a task — skip tracking
+    if not task_id:
+        return  # Not running inside a task — nothing to attribute the row to
+    if not deferred_dir:
+        _record_sent_email_direct(task_id, message_id, to_addr, subject)
+        return
 
     conversation_token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "") or None
     user_id = os.environ.get("ISTOTA_USER_ID", "") or None
