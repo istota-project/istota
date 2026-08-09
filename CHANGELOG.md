@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The elevation profile has moved in behind "Show details", under the day's stops and trips. It was taking vertical space under the map on every visit for a reading that is supplementary. The day's elevation spread now sits in the stats bar beside the ping and stop counts, so you can see there is a profile to look at without opening the panel.
 
+- The `sandbox_ro_paths` setting now does something. It has always been documented as the way to expose a co-located service's files to tasks, but nothing ever read it from your config, so every install silently ran the built-in default — which happened to point at the directory tree holding the databases. If you have a value set for it, that value takes effect on this upgrade, so check it is as narrow as you meant it to be. The built-in default is now empty, and a malformed value is refused rather than guessed at.
+
+- `sandbox_admin_db_write` is gone, and the skill proxy is now required wherever the sandbox is on. The first let admin tasks write the database from inside the sandbox, which no longer has a database to write. The second is how a skill command reaches one at all, so turning it off while the sandbox is on leaves those commands with nothing to read — that combination now warns at startup. A leftover `sandbox_admin_db_write` in your config is ignored with a warning rather than failing the load.
+
 - The chat sidebar is ordered by latest activity, with the room you last heard from at the top. It used to be fixed in creation order, so a busy room sat wherever it happened to have been made and a long list had to be read to find it. A room moves the moment a message lands in it, whoever sent it and whichever surface it came from; a room nobody has spoken in yet sorts by when it was created, so a new one still appears near the top.
 
 ### Added
@@ -32,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Istota's databases are no longer reachable from inside the sandbox a task runs in. Every task could previously read the framework database and, on a standard install, every user's health, money, location and feeds data too — not through the admin-only mount that looked like the exposure, but through a read-only path added years ago for a co-located service that no longer exists and which happened to contain the data directory. Stored credentials stayed encrypted throughout, so what was exposed was other people's records rather than a way in. The directories are now blanked out unconditionally, as the last thing the sandbox does, so no future mount can quietly re-open them. Reads and writes go through the skill commands as before, which run outside the sandbox and return only your own rows.
+
+- The skill command that indexes a file so it can be found by search was reading whatever path it was handed, using the bot's own filesystem access rather than the task's. Since anything indexed can be read back out through search, that was a way to reach files a task is not meant to see, the configuration file among them. It is now limited to your own workspace, the channel a task is running in, and the task's own scratch directory.
 
 - The helper that decides which older messages of a conversation are still worth including now runs with only the credential it needs to reach the model. It was being started with the whole of Istota's own environment — the key your stored secrets are encrypted with, your Nextcloud password, every connected-service token — on a prompt assembled from conversation history. No known path read them back out, but that limit rested on the command-line tool's own defaults rather than on anything Istota enforced.
 
