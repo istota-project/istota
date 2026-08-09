@@ -47,6 +47,8 @@ bot_name = "Istota"
 
 # Use config/system-prompt.md instead of Claude Code's default system prompt.
 # The custom prompt is minimal, focused on tool usage and working practices.
+# The CLI opens that file from inside the sandbox, so it is bind-mounted there
+# read-only — the only file in this directory that is (config.toml is not).
 # custom_system_prompt = true
 
 # Database path (relative to working directory or absolute)

@@ -82,7 +82,9 @@ istota_models_aliases:
       model: "{{ istota_brain_native_model }}"
       effort: "high"
 
-# Use config/system-prompt.md instead of Claude Code's default system prompt
+# Use config/system-prompt.md instead of Claude Code's default system prompt.
+# The CLI reads that file from inside the sandbox, so build_bwrap_cmd binds it
+# read-only — it needs no entry in istota_security_sandbox_ro_paths below.
 istota_custom_system_prompt: true
 
 # Brain — selects the model-invocation backend:
