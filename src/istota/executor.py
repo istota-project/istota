@@ -974,6 +974,7 @@ def derive_authorized_skills(
     selected_skills: list[str],
     skill_index: dict,
     ctx: object,
+    hook_env: dict[str, str] | None = None,
 ) -> list[str]:
     """Skills authorized for credential access this task.
 
@@ -999,6 +1000,20 @@ def derive_authorized_skills(
       and would otherwise auto-authorize every user, defeating the
       per-user privacy posture. Resolution passes
       ``fallbacks_disabled=True``.
+
+    ``hook_env`` is the merged output of ``dispatch_setup_env_hooks``. It
+    is the auto-auth signal for a ``source="setup_env"`` credential, which
+    ``_resolve_env_spec`` deliberately resolves to ``None`` — the manifest
+    declares only the var name and the hook owns the value. Without it
+    such a skill can never auto-authorize, so its credential is stripped
+    from Claude's env (it is sensitive) and then never injected back by
+    the proxy (it is in no authorized skill's credential map), leaving the
+    CLI to run unauthenticated. ``google_workspace`` is the live case: it
+    has no eager selector, so it is only ever reached via the on-demand
+    menu, and selection is the only other route to authorization. Unlike
+    an EnvironmentFile fallback, a hook value is per-user (here, derived
+    from that user's stored OAuth token), so it is a sound auto-auth
+    signal.
     """
     from .skills._env import _resolve_env_spec  # noqa: PLC0415
 
@@ -1009,11 +1024,16 @@ def derive_authorized_skills(
         sensitive_specs = [s for s in meta.env_specs if s.sensitive]
         if not sensitive_specs:
             continue
-        if any(
-            _resolve_env_spec(s, ctx, fallbacks_disabled=True)
-            for s in sensitive_specs
-        ):
-            authorized.add(name)
+        for spec in sensitive_specs:
+            if spec.source == "setup_env":
+                # The hook self-gates; a produced value means the user has
+                # this credential configured.
+                resolved = (hook_env or {}).get(spec.var)
+            else:
+                resolved = _resolve_env_spec(spec, ctx, fallbacks_disabled=True)
+            if resolved:
+                authorized.add(name)
+                break
     return sorted(authorized)
 
 
@@ -3256,8 +3276,13 @@ def execute_task(
         # operator-set EnvironmentFile fallbacks cannot fan out to per-
         # user auto-authorization. Resolution itself (below) honors
         # fallbacks for the value path.
+        # setup_env hooks self-gate; the dispatcher iterates the full
+        # skill_index regardless of the argument it's given. Dispatched
+        # *before* authorization because a hook-sourced credential is the
+        # only auto-auth signal a ``source="setup_env"`` skill has.
+        hook_env = dispatch_setup_env_hooks(selected_skills, skill_index, env_ctx)
         authorized_skills = derive_authorized_skills(
-            selected_skills, skill_index, env_ctx,
+            selected_skills, skill_index, env_ctx, hook_env=hook_env,
         )
         skill_env = build_skill_env(authorized_skills, skill_index, env_ctx)
         # A menu-loaded skill (the model self-selects it at runtime via
@@ -3274,9 +3299,6 @@ def execute_task(
         for k, v in skill_env.items():
             if k not in env:
                 env[k] = v
-        # setup_env hooks self-gate; the dispatcher iterates the full
-        # skill_index regardless of the argument it's given.
-        hook_env = dispatch_setup_env_hooks(authorized_skills, skill_index, env_ctx)
         for k, v in hook_env.items():
             if k not in env:
                 env[k] = v

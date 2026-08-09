@@ -190,6 +190,76 @@ class TestDeriveAuthorizedSkillsCore:
         ]
 
 
+class TestDeriveAuthorizedSkillsSetupEnv:
+    """A skill whose only credential comes from its ``setup_env`` hook must
+    auto-authorize off the hook's output.
+
+    ``_resolve_env_spec`` returns ``None`` for ``source="setup_env"`` by
+    design (the manifest declares the var name; the hook owns the value),
+    so such a skill could never satisfy the resolve-based auto-auth test.
+    ``google_workspace`` is the live case: it has no eager selector, so it
+    is only ever reached via the on-demand menu, and its OAuth token is
+    hook-sourced. Unauthorized, it is absent from the per-skill credential
+    map and the proxy runs ``gws`` with no token at all.
+    """
+
+    def _idx(self):
+        return {
+            "google_workspace": SkillMeta(
+                name="google_workspace", description="", cli=True,
+                env_specs=[
+                    EnvSpec(var="GOOGLE_WORKSPACE_CLI_TOKEN",
+                            source="setup_env", sensitive=True),
+                    EnvSpec(var="GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
+                            source="setup_env", sensitive=False),
+                ],
+            ),
+        }
+
+    def test_hook_produced_credential_authorizes(self):
+        ctx = _ctx()
+        hook_env = {
+            "GOOGLE_WORKSPACE_CLI_TOKEN": "ya29.token",
+            "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/tmp/gws_cache",
+        }
+        assert derive_authorized_skills(
+            [], self._idx(), ctx, hook_env=hook_env,
+        ) == ["google_workspace"]
+
+    def test_no_hook_output_does_not_authorize(self):
+        """User never connected Google — the hook returns nothing."""
+        assert derive_authorized_skills([], self._idx(), _ctx(), hook_env={}) == []
+
+    def test_empty_hook_value_does_not_authorize(self):
+        assert derive_authorized_skills(
+            [], self._idx(), _ctx(),
+            hook_env={"GOOGLE_WORKSPACE_CLI_TOKEN": ""},
+        ) == []
+
+    def test_non_sensitive_hook_var_alone_does_not_authorize(self):
+        """The config-dir var is hook-sourced but not a credential; on its
+        own it must not unlock the skill's credential scope."""
+        assert derive_authorized_skills(
+            [], self._idx(), _ctx(),
+            hook_env={"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": "/tmp/gws_cache"},
+        ) == []
+
+    def test_omitted_hook_env_is_backward_compatible(self):
+        assert derive_authorized_skills([], self._idx(), _ctx()) == []
+
+    def test_authorized_skill_gets_its_credential_mapped(self):
+        """End-to-end of the reported bug: authorization is what puts the
+        token into the per-skill map the proxy injects from."""
+        idx = self._idx()
+        auth = derive_authorized_skills(
+            [], idx, _ctx(),
+            hook_env={"GOOGLE_WORKSPACE_CLI_TOKEN": "ya29.token"},
+        )
+        assert derive_skill_credential_map(auth, idx) == {
+            "google_workspace": {"GOOGLE_WORKSPACE_CLI_TOKEN"},
+        }
+
+
 class TestDeriveAuthorizedSkillsFallbackVar:
     """``fallback_var`` must NOT contribute to authorization — operator
     EnvironmentFile fallbacks are instance-wide signals."""
