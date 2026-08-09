@@ -124,7 +124,7 @@ bot_email = "istota@example.com"
 
 SMTP credentials fall back to IMAP credentials if not set.
 
-Polling interval is controlled by `email_poll_interval` in `[scheduler]` (default 60s). Old processed emails are cleaned after `email_retention_days` (default 7).
+Polling interval is controlled by `email_poll_interval` in `[scheduler]` (default 60s). Mail is deleted from the IMAP folder after `email_retention_days` (default 7) via a server-side date search, so the sweep keeps working on a busy mailbox. The record of which messages have already been processed is pruned separately after `processed_email_retention_days` (default 90) — always at least as long as the mail itself, so a message still in the folder can't lose its record and be ingested a second time.
 
 ### Per-user email settings
 

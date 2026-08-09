@@ -139,6 +139,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `worker_stuck_minutes` | `10` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
 | `task_retention_days` | `7` | Delete old completed tasks |
 | `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
+| `processed_email_retention_days` | `90` | Prune the processed-email dedup ledger (0 = disable). Never applied below `email_retention_days` |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |
 | `scheduled_job_max_consecutive_failures` | `5` | Auto-disable threshold |
 | `cron_max_staleness_minutes` | `60` | Skip cron-driven catch-up fires older than this (jobs + briefings). After a long daemon outage, fires missed by more than N minutes are skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. 0 = legacy unconditional catch-up. |

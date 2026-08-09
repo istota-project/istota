@@ -53,7 +53,7 @@ from .skills.briefing import (
     parse_briefing_json,
     strip_briefing_preamble,
 )
-from .config import Config, load_config
+from .config import Config, SchedulerConfig, load_config
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
     detect_malformed_result,
@@ -3694,6 +3694,36 @@ def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
         )
 
 
+def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
+    """How long a ``processed_emails`` row is kept, in days.
+
+    The configured window with the IMAP retention window as a floor. The two
+    are coupled: a row is the only thing stopping a message that is still
+    physically in ``poll_folder`` from being re-ingested as a fresh task, and
+    ``email_id`` is a bare IMAP UID with no ``UIDVALIDITY`` and no folder
+    qualifier, so a re-ingest is indistinguishable from new mail. Pruning
+    inside the mail's own lifetime would therefore trade unbounded growth for
+    duplicate tasks — a worse failure.
+
+    Only a floor, never a cap: an operator who wants the ledger kept far longer
+    than the mailbox gets exactly that. ``email_retention_days = 0`` (never
+    delete from IMAP) imposes no floor either — there is no finite lifetime to
+    respect, and clamping to "forever" would silently disable the prune.
+    """
+    configured = sched.processed_email_retention_days
+    if configured <= 0:
+        return 0
+    if sched.email_retention_days > configured:
+        logger.warning(
+            "processed_email_retention_days (%d) is below email_retention_days "
+            "(%d); using %d so a message still in the mailbox can't lose its "
+            "dedup row and be re-ingested as a new task",
+            configured, sched.email_retention_days, sched.email_retention_days,
+        )
+        return sched.email_retention_days
+    return configured
+
+
 def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
@@ -3784,6 +3814,15 @@ def run_cleanup_checks(config: Config) -> None:
         deleted_count = db.cleanup_old_tasks(conn, sched.task_retention_days)
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
+
+        # 4a. Prune the processed-email dedup ledger (ISSUE-231). One row per
+        # polled message, including the ones that produce nothing, and until
+        # now nothing ever deleted from it.
+        email_rows = db.cleanup_old_processed_emails(
+            conn, _effective_processed_email_retention(sched),
+        )
+        if email_rows > 0:
+            logger.info(f"Pruned {email_rows} processed-email row(s)")
 
         # 4b. Age out the per-message deletion ledger. It exists only to tell a
         # live client what vanished; one further behind than this reloaded from

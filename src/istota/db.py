@@ -5297,6 +5297,35 @@ def recover_orphaned_tasks(
     return recovered
 
 
+def cleanup_old_processed_emails(
+    conn: sqlite3.Connection, retention_days: int,
+) -> int:
+    """Prune the ``processed_emails`` dedup ledger (ISSUE-231).
+
+    One row is written per *polled message*, not per task — bot self-mail,
+    unroutable mail and quiet-sender mail all get one and produce nothing else
+    — so an internet-facing address grows the table forever. Nothing else
+    deletes from it: ``cleanup_old_tasks`` touches only tasks and their logs.
+
+    Keyed on ``processed_at``, not on whether the row's task still exists. The
+    FK is unenforced (``PRAGMA foreign_keys`` is never set) and tasks are
+    pruned at a far shorter window, so after a week most rows hold a dangling
+    ``task_id`` and exist purely as a dedup key — which is the job they still
+    have to do. ``retention_days <= 0`` disables the prune.
+    """
+    if retention_days <= 0:
+        return 0
+
+    cursor = conn.execute(
+        """
+        DELETE FROM processed_emails
+        WHERE processed_at < datetime('now', '-' || ? || ' days')
+        """,
+        (retention_days,),
+    )
+    return cursor.rowcount
+
+
 def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
     """
     Delete old completed/failed/cancelled tasks and their logs.

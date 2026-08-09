@@ -221,11 +221,13 @@ After successful task completion (not confirmation, not failure), the scheduler 
 
 All deferred-op handlers now live in `scheduler_deferred.py` (`_KNOWN_DEFERRED_SUFFIXES`, `_load_deferred_json`, per-handler functions, `_purge_deferred_files_for_retry`, `_warn_unconsumed_deferred_files`). `scheduler.py` calls into it as a thin orchestrator.
 
-**Retry replay safety (ISSUE-074)**: deferred-op producers append to per-task files keyed only by `task.id`. `set_task_pending_retry` keeps the same id, so `_purge_deferred_files_for_retry()` clears the slate in the retry-eligible failure branch — eventual success replays only the final attempt's writes (matters most for non-idempotent KG `invalidate`/`delete`).
+**Retry replay safety (ISSUE-074)**: deferred-op producers append to per-task files keyed only by `task.id`, and every requeue keeps that id — so without a purge, eventual success replays the failed attempt's ops alongside the successful one's (matters most for non-idempotent KG `invalidate`/`delete`, duplicate subtasks, duplicate `sent_emails` rows). The purge is **claim-time**: `process_one_task` calls `_purge_deferred_files_for_retry()` right after the claim whenever `task.attempt_count > 0`, before execution. That covers all four requeue paths at once — its own retry branch, `db.fail_stuck_locked_running_tasks` (the periodic reclaim), `db.recover_orphaned_tasks` (startup recovery), and `db.claim_task`'s inline copy of the stuck-running release, which offers no scheduler-side hook to wire a purge into at all. The retry branch and the shutdown-collateral branch still purge at requeue too: the first to free disk for a task that never comes back, the second because `release_task_for_restart` charges no attempt, so `attempt_count` stays 0 and the claim-time guard would not fire. `attempt_count == 0` is otherwise untouched — a confirmation re-run (same id, attempt unchanged) relies on the narrower stale-`email_output` cleanup instead, which is what stops a double-send.
 
 **Unconsumed-file warnings (ISSUE-073)**: after the drain phase, `_warn_unconsumed_deferred_files()` scans the user temp dir and logs WARN for files missing the `task_` prefix or carrying an unknown suffix. The misnamed file is left on disk for inspection.
 
 **Why deferred**: With bubblewrap sandbox, DB is RO inside the sandbox. Claude and skill CLIs write JSON to the always-RW temp dir; the scheduler (unsandboxed) processes them.
+
+**Encoding**: every deferred-file read and write names `encoding="utf-8"` explicitly, and `_load_deferred_json` catches `UnicodeDecodeError` alongside `JSONDecodeError`/`OSError`. The producer is a task subprocess whose env was rebuilt from scratch (`build_stripped_env`) while the consumer is the daemon under systemd's, so nothing guarantees the two agree on `locale.getencoding()`. The catch is the load-bearing half: `_drain_deferred_ops` calls its handlers in sequence with no guard between them, so a decode error escaping the first one silently skips the eight after it.
 
 ## WorkerPool
 ```python
@@ -282,7 +284,8 @@ When `playbooks.enabled`, `process_user_sleep_cycle` also distills **learned pla
 2. Log warnings for stale pending tasks
 3. Fail ancient pending tasks → notify user **only for user-submitted source types**. The notice ("A task you submitted was cancelled…") is suppressed for `_AUTOMATED_SOURCE_TYPES` (`scheduled`/`briefing`/`heartbeat`/`subtask`): those pile up on their own when the queue wedges, so notifying their output channel turns one stuck worker into a per-minute "task cancelled" flood (and the message isn't true for them).
 4. Clean old completed tasks (`task_retention_days`)
-5. Clean old emails from IMAP (`email_retention_days`)
+4a. Prune the `processed_emails` dedup ledger (`_effective_processed_email_retention`)
+5. Clean old emails from IMAP (`email_retention_days`), via one server-side `BEFORE` search
 6. Clean old temp files (`temp_file_retention_days`)
 
 ## Memory Search Integration
@@ -319,6 +322,8 @@ After task completion, if enabled + `auto_index_conversations`:
 | `max_retry_age_minutes` | 60 | Max age for retry |
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
+| `email_retention_days` | 7 | IMAP retention. `email_support.cleanup_old_emails` issues one `skills.email.delete_emails_before` sweep — an IMAP `BEFORE <date>` search plus a batched bulk delete on a single connection — so the work is proportional to what has actually expired. It used to paginate the *newest* 100 envelopes and delete whichever had aged out, which above roughly `100 / days` messages a day deletes nothing on every run while reporting a clean sweep (ISSUE-230). Ages on the IMAP internal date (arrival), not the sender-supplied `Date:`; `BEFORE` is date-granular, so a message is kept up to one extra day rather than deleted early. 0 = disable |
+| `processed_email_retention_days` | 90 | `processed_emails` prune (ISSUE-231). One row is written per *polled message* — bot self-mail, `discarded` and quiet-sender mail included — and nothing deleted from the table before this. Keyed on `processed_at`, not on whether the row's task still exists: the FK is unenforced and tasks are pruned at `task_retention_days`, so most rows hold a dangling `task_id` and survive purely as the dedup key. `_effective_processed_email_retention` floors the window at `email_retention_days` (one WARNING when it applies) — the row is what stops a message still physically in `poll_folder` from being re-ingested as a fresh task, and `email_id` is a bare IMAP UID with no `UIDVALIDITY` or folder qualifier, so a re-ingest is indistinguishable from new mail. Floor only, never a cap; `email_retention_days = 0` imposes none (no finite mail lifetime to respect). 0 = disable |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
 | `cron_max_staleness_minutes` | 60 | Insertion-time staleness gate for `check_scheduled_jobs` + `check_briefings`. When `now - next_run > N`, skip the queue insert and bump `last_run_at` to now so the schedule resumes from the next future fire. Suppresses thundering-herd catch-up after a long outage. 0 = legacy unconditional catch-up. |
 | `max_subtasks_per_task` | 10 | Deferred subtasks created per parent task |

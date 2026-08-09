@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Email retention works on a busy mailbox again. The cleanup only ever looked at the hundred newest messages and deleted whichever of those had aged out — which on anything above a dozen messages a day is none of them, so the mailbox grew without bound while every run reported success. It now asks the mail server for the expired messages directly and deletes those.
+
+- The record Istota keeps of every email it has already seen is now pruned. It gained a row per polled message and nothing ever removed one, so it grew forever, and most of those rows had long outlived the task they pointed at. Rows are kept for 90 days by default, always for at least as long as the mail itself, so a message still sitting in the mailbox can't lose its record and arrive a second time as new.
+
+- A task that gets picked up again after a crash or a restart no longer repeats work its first run had queued up. Where a run leaves database writes for Istota to apply once it succeeds, an interrupted attempt used to leave those behind for the next one to apply alongside its own — a subtask created twice, an email recorded twice. Only three of the four ways a task comes back were clearing them; the clean-up now happens as the retry starts, whichever way it got there.
+
 - A reply to mail a scheduled job sent now threads back to the conversation that sent it. Mail sent from a scheduled shell command went out fine and the job reported success, but nothing recorded it, so when the recipient replied there was no thread to attach the answer to and it arrived as a new conversation. A note such a job writes is also now coordinated against the nightly memory pass, so the two can no longer overwrite each other, and a job can hand follow-up work to the assistant the same way the other kinds of job can.
 
   If you write your own scheduled shell commands, two things change for them. What a command saves — a stored value, a health entry — is now kept only if the command finishes successfully, where before it was kept regardless; put the save last if a later step can fail. And a value saved earlier in a command is not readable back later in that same command, since it is filed once the command is done.

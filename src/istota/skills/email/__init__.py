@@ -752,6 +752,44 @@ def delete_email(
         return False
 
 
+def delete_emails_before(
+    before: _date,
+    folder: str = "INBOX",
+    config: EmailConfig | None = None,
+    batch_size: int = 200,
+) -> int:
+    """Delete every message in ``folder`` whose IMAP internal date precedes
+    ``before``. Returns the number of UIDs handed to the server.
+
+    The retention primitive (ISSUE-230). The search runs server-side, so the
+    work is proportional to what has actually expired rather than to a fixed
+    window at the newest end of the mailbox — which is what a paginated
+    ``list_emails`` sweep gives you, and it looks at exactly the wrong end.
+
+    Two deliberate differences from the per-message ``delete_email``: one
+    connection for the whole sweep instead of one per message, and the IMAP
+    **internal date** (arrival) as the age, not the sender-supplied ``Date:``
+    header. ``BEFORE`` is date-granular, so a message is kept for up to one
+    extra day rather than deleted early.
+    """
+    if config is None:
+        raise ValueError("config is required")
+
+    _require_imap_tools()
+    deleted = 0
+    with _get_mailbox(config) as mailbox:
+        mailbox.login(config.imap_user, config.imap_password)
+        mailbox.folder.set(folder)
+
+        uids = list(mailbox.uids(AND(date_lt=before)))
+        for start in range(0, len(uids), batch_size):
+            batch = uids[start:start + batch_size]
+            mailbox.delete(batch)
+            deleted += len(batch)
+
+    return deleted
+
+
 def _config_from_env() -> EmailConfig:
     """Build EmailConfig from environment variables."""
     smtp_host = os.environ.get("SMTP_HOST", "")

@@ -162,7 +162,8 @@ Runs every `briefing_check_interval`:
 - Log warnings for tasks pending longer than 30 min
 - Auto-fail tasks pending longer than `stale_pending_fail_hours` (2)
 - Delete completed tasks older than `task_retention_days` (7)
-- Delete processed emails from IMAP older than `email_retention_days` (7)
+- Delete processed emails from IMAP older than `email_retention_days` (7), via one server-side `BEFORE` search
+- Prune `processed_emails` rows older than `processed_email_retention_days` (90, floored at `email_retention_days`)
 - Delete old temp files
 
 ## Poller intervals
