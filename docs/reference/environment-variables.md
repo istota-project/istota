@@ -14,6 +14,8 @@ Set for every task:
 | `ISTOTA_CONVERSATION_TOKEN` | Talk room token (if set) |
 | `ISTOTA_DEFERRED_DIR` | Temp directory for deferred JSON writes |
 | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
+| `ISTOTA_SANDBOXED` | `1` when the task is really running under bwrap (sandbox and skill proxy both enabled *and* bwrap present), otherwise unset. `istota-skill` reads it to fail closed instead of running a skill module in-process: inside the sandbox the databases are masked out, so a direct run would report a missing table rather than the misconfiguration it is |
+| `ISTOTA_BOT_DIR_NAME` | `config.bot_dir_name` — the per-user bot directory (`Users/<user>/<bot_dir_name>/`) skills write into |
 | `ISTOTA_CONFIG_PATH` | Config file path (propagated to subprocess children so module-skill jobs find the config) |
 | `ISTOTA_EXPERIMENTAL_FEATURES` | CSV of enabled experimental features (`config.experimental.features`). Injected by every subprocess builder so `@requires_feature`-gated CLI subcommands and gated skills see the same gate as the LLM path |
 

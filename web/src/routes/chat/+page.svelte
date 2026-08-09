@@ -25,6 +25,7 @@
   import { REPLY_EXCERPT_CHARS, type MessageReply } from '$lib/stores/segments';
   import { notifyError } from '$lib/stores/notices';
   import { dropDraft } from '$lib/stores/drafts';
+  import { isImeComposing } from '$lib/platform/input';
   import { getMe, type ChatAttachment, type ChatRoom, type ChatView } from '$lib/api';
 
   const session = getChatSession();
@@ -687,7 +688,10 @@
             placeholder="Room name…"
             autofocus
             onkeydown={(e) => {
-              if (e.key === 'Enter') createRoom();
+              // Not the Enter that commits an input-method candidate — this is
+              // a free-form name field, so that is exactly where someone types
+              // CJK and would get a room named after a half-finished word.
+              if (e.key === 'Enter' && !isImeComposing(e)) createRoom();
               if (e.key === 'Escape') {
                 creatingRoom = false;
                 newRoomName = '';

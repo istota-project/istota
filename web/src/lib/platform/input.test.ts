@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { installKeyboardDismiss, usesSoftKeyboard } from './input';
+import { installKeyboardDismiss, usesSoftKeyboard, isImeComposing } from './input';
 
 let stop: (() => void) | undefined;
 
@@ -83,6 +83,18 @@ describe('usesSoftKeyboard', () => {
     expect(usesSoftKeyboard()).toBe(true);
     setPointer('fine');
     expect(usesSoftKeyboard()).toBe(false);
+  });
+});
+
+describe('isImeComposing', () => {
+  it('reads both shapes an input method reports a keydown with', () => {
+    // `isComposing` is the modern flag; `keyCode === 229` is what some IMEs
+    // still send instead, which is why both are tested rather than either.
+    expect(isImeComposing(new KeyboardEvent('keydown', { key: 'Enter' }))).toBe(false);
+    expect(isImeComposing(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true }))).toBe(
+      true,
+    );
+    expect(isImeComposing(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 229 }))).toBe(true);
   });
 });
 

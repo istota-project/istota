@@ -327,7 +327,7 @@ class TestKvSkillSetContains:
         monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
         kv_main(["set-contains", "ns", "set", "b"])
         out = json.loads(capsys.readouterr().out)
-        assert out == {"status": "ok", "contains": True}
+        assert out == {"status": "ok", "contains": True, "batched": False}
 
     def test_contains_missing_member(self, db_path, capsys, monkeypatch):
         self._seed(db_path, ["a", "b"])
@@ -336,7 +336,7 @@ class TestKvSkillSetContains:
         monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
         kv_main(["set-contains", "ns", "set", "z"])
         out = json.loads(capsys.readouterr().out)
-        assert out == {"status": "ok", "contains": False}
+        assert out == {"status": "ok", "contains": False, "batched": False}
 
     def test_contains_missing_key_returns_false(self, db_path, capsys, monkeypatch):
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
@@ -344,7 +344,7 @@ class TestKvSkillSetContains:
         monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
         kv_main(["set-contains", "ns", "missing", "x"])
         out = json.loads(capsys.readouterr().out)
-        assert out == {"status": "ok", "contains": False}
+        assert out == {"status": "ok", "contains": False, "batched": False}
 
     def test_contains_non_array_value_errors(self, db_path, capsys, monkeypatch):
         import pytest

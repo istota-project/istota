@@ -143,7 +143,10 @@ Every `kv` subcommand takes a required `-u`/`--user`; the ones that address a si
 ```bash
 istota kv get NAMESPACE KEY -u USER          # Get value
 istota kv set NAMESPACE KEY VALUE -u USER    # Set value (JSON)
+istota kv set NAMESPACE KEY -u USER --value-file PATH   # Set from a file
 istota kv list NAMESPACE -u USER             # List entries in a namespace
+istota kv list NAMESPACE -u USER --keys-only # Keys and value sizes, no values
+istota kv list NAMESPACE -u USER --max-value-chars 500   # Preview long values
 istota kv delete NAMESPACE KEY -u USER       # Delete key
 istota kv namespaces -u USER                 # List namespaces
 istota kv shared-status -u USER              # Report whether this user may write shared KV
@@ -154,12 +157,19 @@ Add `--shared` to `get`/`set`/`list`/`delete`/`namespaces` to operate on the cro
 The skill proxy client also exposes set operations for membership-tracking patterns (seen IDs, processed hashes). These operate on a JSON-array value and avoid round-tripping large blobs:
 
 ```bash
-istota-skill kv set-contains <ns> <key> <member>              # Check membership
+istota-skill kv set-contains <ns> <key> <member> [<member>...]    # Check membership, batched
 istota-skill kv set-size     <ns> <key>                       # Count members
 istota-skill kv set-members  <ns> <key> [--limit N] [--offset N]  # Paginated slice
 istota-skill kv set-add      <ns> <key> <member> [<member>...]    # Add members (deferred)
 istota-skill kv set-remove   <ns> <key> <member> [<member>...]    # Remove members (deferred)
+istota-skill kv set-trim     <ns> <key> --keep-newest N           # Cap the collection (deferred)
 ```
+
+`set-contains` returns `{"contains": bool}` for one member and a per-member map for several, with a `batched` flag saying which; a run checking many items against a stored set costs one call rather than one each.
+
+A value passed as a command argument is capped at 128 KiB by the kernel, not by the store — `execve` refuses a longer argument, so an oversized `kv set` fails before any code runs. Use `--value-file` for a large whole value, and the set operations above for a collection that grows.
+
+The two `--value-file` flags differ in scope, because the two commands run as different principals. `istota kv set --value-file` reads any path you can read: it runs in your shell, as you. `istota-skill kv set --value-file` runs host-side on behalf of a task, so its path must resolve under that task's deferred directory, its user's own workspace, or the conversation's channel directory — the same subtrees the sandbox binds. Outside a task neither of those roots exists, so the skill form refuses every path; use the operator form there.
 
 ### Web chat maintenance
 
