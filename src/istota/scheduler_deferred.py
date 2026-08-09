@@ -74,14 +74,21 @@ def _load_deferred_json(
 
     ``expected_type`` is checked with ``isinstance``; mismatches are treated
     as malformed (warned and unlinked).
+
+    The read names UTF-8 explicitly. The producer is a task subprocess (a skill
+    CLI, or the model's own shell heredoc for the subtask idiom) whose env was
+    rebuilt from scratch, so it may not share the daemon's locale — and an
+    undecodable file must land here as a warning, not as an exception escaping
+    into ``_drain_deferred_ops``, which runs its handlers in sequence with no
+    guard between them and would silently skip every one after this.
     """
     path = user_temp_dir / f"task_{task_id}_{suffix}.json"
     if not path.exists():
         return None
 
     try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         logger.warning("Bad deferred %s file for task %d: %s", suffix, task_id, e)
         path.unlink(missing_ok=True)
         return None
@@ -1101,13 +1108,14 @@ def _process_deferred_health_ops(
             existing: list[Any] = []
             if failure_path.exists():
                 try:
-                    existing = json.loads(failure_path.read_text())
+                    existing = json.loads(failure_path.read_text(encoding="utf-8"))
                     if not isinstance(existing, list):
                         existing = []
-                except (OSError, json.JSONDecodeError):
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                     existing = []
             failure_path.write_text(
                 json.dumps(existing + failures, indent=2),
+                encoding="utf-8",
             )
         except OSError as e:
             logger.error(

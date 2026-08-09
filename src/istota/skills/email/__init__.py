@@ -1253,7 +1253,7 @@ def cmd_output(args):
 
     out_path = Path(deferred_dir) / f"task_{task_id}_email_output.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(data, ensure_ascii=False))
+    out_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     return {"status": "ok", "file": str(out_path)}
 
@@ -1351,12 +1351,12 @@ def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> N
     existing = []
     if path.exists():
         try:
-            existing = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             existing = []
     existing.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(existing, ensure_ascii=False))
+    path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
 
 
 def _read_body(args) -> str:
