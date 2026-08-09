@@ -1182,7 +1182,35 @@ def cmd_kv_get(args):
 
 
 def cmd_kv_set(args):
-    """Set a value in the KV store."""
+    """Set a value in the KV store.
+
+    `--value-file` is the operator's way past the same 128 KiB argv cap the
+    skill CLI documents. There is no host-path allowlist here: this runs as the
+    operator in their own shell, reading a file they can already read, so
+    scoping it would only be theatre.
+    """
+    value_file = getattr(args, "value_file", None)
+    if args.value is not None and value_file:
+        print(json.dumps({
+            "status": "error",
+            "message": "pass either a positional value or --value-file, not both",
+        }))
+        sys.exit(1)
+    if args.value is None and not value_file:
+        print(json.dumps({
+            "status": "error",
+            "message": "no value given: pass a JSON value or --value-file <path>",
+        }))
+        sys.exit(1)
+    if value_file:
+        try:
+            args.value = Path(value_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            print(json.dumps({
+                "status": "error", "message": f"could not read --value-file: {e}",
+            }))
+            sys.exit(1)
+
     try:
         json.loads(args.value)
     except json.JSONDecodeError:
@@ -1200,19 +1228,38 @@ def cmd_kv_set(args):
 
 
 def cmd_kv_list(args):
-    """List all entries in a namespace."""
+    """List all entries in a namespace.
+
+    Unlike the skill CLI, this defaults to whole values: an operator piping to
+    jq wants the entry, not a preview. `--keys-only` / `--max-value-chars` are
+    here for the same orienting case, opt-in.
+    """
+    from istota.skills.kv import render_list_entries
+
+    max_value_chars = getattr(args, "max_value_chars", 0)
+    if max_value_chars < 0:
+        print(json.dumps({
+            "status": "error",
+            "error": "--max-value-chars must be >= 0 (0 disables truncation)",
+        }))
+        sys.exit(1)
+
     with _get_kv_conn(args) as conn:
         if getattr(args, "shared", False):
             entries = db.shared_kv_list(conn, args.namespace)
         else:
             entries = db.kv_list(conn, args.user, args.namespace)
-    # Parse JSON values for output
-    for entry in entries:
-        try:
-            entry["value"] = json.loads(entry["value"])
-        except json.JSONDecodeError:
-            pass
-    print(json.dumps({"status": "ok", "count": len(entries), "entries": entries}))
+    truncated = render_list_entries(
+        entries,
+        keys_only=getattr(args, "keys_only", False),
+        max_value_chars=max_value_chars,
+    )
+    print(json.dumps({
+        "status": "ok",
+        "count": len(entries),
+        "truncated_count": truncated,
+        "entries": entries,
+    }))
 
 
 def cmd_kv_delete(args):
@@ -1742,7 +1789,13 @@ def main():
     kv_set_parser = kv_subparsers.add_parser("set", help="Set a value (JSON)")
     kv_set_parser.add_argument("namespace", help="Namespace")
     kv_set_parser.add_argument("key", help="Key")
-    kv_set_parser.add_argument("value", help="JSON-encoded value")
+    kv_set_parser.add_argument(
+        "value", nargs="?", help="JSON-encoded value (max 128 KiB as an argument)",
+    )
+    kv_set_parser.add_argument(
+        "--value-file",
+        help="Read the JSON value from this file instead of the argument",
+    )
     kv_set_parser.add_argument("-u", "--user", required=True, help="User ID")
     kv_set_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
@@ -1750,6 +1803,14 @@ def main():
     kv_list_parser = kv_subparsers.add_parser("list", help="List entries in a namespace")
     kv_list_parser.add_argument("namespace", help="Namespace")
     kv_list_parser.add_argument("-u", "--user", required=True, help="User ID")
+    kv_list_parser.add_argument(
+        "--keys-only", action="store_true",
+        help="Return keys and value sizes without the values themselves",
+    )
+    kv_list_parser.add_argument(
+        "--max-value-chars", type=int, default=0,
+        help="Truncate each value to N characters (default 0 = whole values)",
+    )
     kv_list_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
     # kv delete

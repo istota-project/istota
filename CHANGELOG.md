@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Istota can check on work it handed off. Having queued a background task or a one-off scheduled job, it can now ask how that run went and read the result back, rather than having no sanctioned way to find out. It only ever sees your own tasks, and the surface is limited to admin users.
 
+- Istota's key-value store handles large and long-lived collections properly. A stored value can now be written from a file instead of the command line, which is what a big one used to die on; a collection that only needs recent history can be capped to its newest N entries; and checking many items against a stored set is one call rather than one per item, which is a large speedup for jobs that dedupe against thousands of seen ids.
+
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
 
 ### Fixed
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tasks failed outright on installs that use a custom system prompt. Narrowing what the sandbox can read also took away the prompt file itself, so the model exited immediately with "System prompt file not found". That one file is now made available directly; the configuration file sitting next to it still is not.
 
 ### Changed
+
+- Listing a key-value namespace previews long values instead of printing them whole. Asking what keys exist used to dump every value in full, which for a large stored collection crowded out the rest of what Istota was working on. Each value is now shortened with its real size reported alongside, and the whole values are still one flag or one `get` away. The operator command still prints values in full; it gains the same two flags as options.
 
 - The `smart` model tier and the bare `opus` shortcut now resolve to Opus 5 instead of Opus 4.8. A deployment that pins its own model under `[models.aliases]` is unaffected.
 
