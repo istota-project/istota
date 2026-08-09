@@ -206,11 +206,16 @@ features = []
 
 # [security]
 # sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
-# sandbox_admin_db_write = false   # allow admin DB writes inside sandbox
-# skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation)
+# skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation).
+#                                  # Required wherever sandbox_enabled is true: the databases are
+#                                  # masked out of the sandbox, so a skill CLI that can't reach the
+#                                  # proxy has nothing to read and refuses rather than guessing.
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds)
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
-# sandbox_ro_paths = ["/srv/app"]  # extra RO bind-mounts in sandbox
+# sandbox_ro_paths = []            # extra RO bind-mounts in sandbox, for co-located services the
+#                                  # agent needs to read. Keep entries narrow — a broad path sweeps
+#                                  # in whatever lives under it. (The DB directories are masked
+#                                  # after this list is applied, so they stay unreachable either way.)
 
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)

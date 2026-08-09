@@ -833,11 +833,14 @@ def cmd_import_garmin_tracks(args):
       scheduler daemon). The importer decrypts the Garmin token blob and
       runs inline; the JSON result is printed.
     * **Delegated** — the key isn't present (sandboxed LLM Bash call from
-      web chat / Talk). location.db is writable in the sandbox, but the
-      master key needed to decrypt the Garmin tokens is stripped, so the
-      command writes a deferred op (``task_<id>_garmin_import.json``) that
-      the scheduler runs post-task in the daemon process, where the key
-      lives. The user gets a notification with the result.
+      web chat / Talk). The master key needed to decrypt the Garmin tokens
+      is stripped, so the command writes a deferred op
+      (``task_<id>_garmin_import.json``) that the scheduler runs post-task in
+      the daemon process, where the key lives. The user gets a notification
+      with the result. (This branch is now only reachable from a genuinely
+      unsandboxed caller that lacks the key: a sandboxed task's
+      ``istota-skill`` call runs host-side through the proxy, and location.db
+      is not in the sandbox at all.)
     """
     from istota import secrets_store
 

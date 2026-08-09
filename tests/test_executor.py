@@ -1413,22 +1413,17 @@ class TestAdminPromptIsolation:
         task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
         return db.get_task(conn, task_id)
 
-    def test_admin_prompt_has_db_path(self, tmp_path):
-        config = self._make_config(tmp_path)
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_prompt_never_states_the_db_path(self, tmp_path, is_admin):
+        """Naming a file that has been masked out of the sandbox is worse than
+        saying nothing: a failed open reads as a broken command, not a boundary."""
+        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=True)
-        assert f"Database path: {config.db_path}" in prompt
-
-    def test_non_admin_prompt_has_restricted_db(self, tmp_path):
-        config = self._make_config(tmp_path, admin_users={"bob"})
-        db.init_db(config.db_path)
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-        prompt = build_prompt(task, [], config, is_admin=False)
-        assert "Database path: (restricted)" in prompt
+        prompt = build_prompt(task, [], config, is_admin=is_admin)
         assert str(config.db_path) not in prompt
+        assert "Database: reachable only through skill CLIs" in prompt
 
     def test_admin_prompt_states_admin_privileges(self, tmp_path):
         config = self._make_config(tmp_path)

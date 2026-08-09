@@ -17,7 +17,7 @@ The prompt is built in a specific order, each section adding context for Claude:
 9. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
 10. **Learned playbooks**: `_recall_playbooks()` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated / `skip_memory` tasks)
 11. **Confirmation context**: previous bot output for confirmed actions
-12. **Tools**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
+12. **Tools**: available tools documentation (file access, browser, CalDAV, email). No `sqlite3` bullet — the databases are masked out of the sandbox and reached only through skill CLIs
 13. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
 14. **Conversation context**: previous messages (selected by the context module)
 15. **Request**: the actual prompt text + file attachments

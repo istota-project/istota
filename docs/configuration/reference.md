@@ -150,10 +150,12 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | Setting | Default | Description |
 |---|---|---|
 | `sandbox_enabled` | `true` | Bubblewrap filesystem isolation (Linux only) |
-| `sandbox_admin_db_write` | `false` | Allow admin DB writes in sandbox |
-| `skill_proxy_enabled` | `true` | Credential proxy via Unix socket |
+| `skill_proxy_enabled` | `true` | Credential proxy via Unix socket. Required wherever `sandbox_enabled` is true — the databases are masked out of the sandbox, so a skill CLI that can't reach the proxy refuses rather than reading nothing |
 | `skill_proxy_timeout` | `300` | Proxy command timeout (seconds) |
 | `passthrough_env_vars` | `["LANG", "LC_ALL", "LC_CTYPE", "TZ"]` | Extra env vars for subprocess |
+| `sandbox_ro_paths` | `[]` | Extra RO bind-mounts in the sandbox, for co-located services. Keep entries narrow — a broad path sweeps in whatever lives under it. The DB directories are masked after this list either way |
+
+`sandbox_admin_db_write` was removed: the framework DB is no longer bound into the sandbox for anyone, so there is no bind left to widen. A stale key logs a warning and is ignored.
 
 ### `[security.network]`
 

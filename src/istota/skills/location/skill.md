@@ -33,7 +33,7 @@ The web UI surfaces "discovered clusters" — recurring locations that aren't ye
 
 Run `istota-skill location --help` (or `istota-skill location <subcommand> --help`) to see the live argument list.
 
-All commands output JSON. `LOCATION_DB_PATH` (the user's per-user `location.db`) is set automatically by the skill's `setup_env` hook. The `reverse-geocode` and `day-summary` subcommands also read `ISTOTA_DB_PATH` (the framework DB) for the cross-user reverse-geocode cache.
+All commands output JSON. The CLI resolves its own databases — `LOCATION_DB_PATH` (your per-user location database, set by the skill's `setup_env` hook) and, for `reverse-geocode` and `day-summary`, `ISTOTA_DB_PATH` for the shared reverse-geocode cache. Both are handed to the CLI, not to you: the files live on local disk outside your sandbox, so this CLI is the only way to reach them.
 
 ```bash
 # Current location + place/visit info

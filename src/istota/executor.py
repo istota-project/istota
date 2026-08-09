@@ -2588,15 +2588,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # UTC anchor for unambiguous elapsed-time arithmetic (ISSUE-091).
     utc_now_str = user_now.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Build admin-sensitive sections
-    # The path is still stated for admins (operator tooling refers to it), but
-    # never bare: an unqualified "Database path: …" line three lines above the
-    # rules reads as an affordance, and is what invited the hand-rolled DB poll
-    # in ISSUE-237. The constraint travels with the fact.
-    db_path_line = (
-        f"Database path: {config.db_path} (skill CLIs only — never open this file)"
-        if is_admin else "Database path: (restricted)"
-    )
+    # No database path, for anyone. It used to be stated for admins because
+    # operator tooling refers to it, hedged with "skill CLIs only" because an
+    # unqualified "Database path: …" three lines above the rules reads as an
+    # affordance (that hedge was ISSUE-237's fix). The file is now masked out of
+    # the sandbox entirely, so a path would name something that isn't there —
+    # worse than useless, since a failed open reads as a broken command rather
+    # than as a boundary. What replaces it is the rule below.
+    db_path_line = "Database: reachable only through skill CLIs (no file access)"
 
     # Explicit privileges line so admin-gated capabilities (subtasks, shared-KV
     # writes, DB access) don't have to be inferred from indirect signals or
@@ -2613,7 +2612,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
-3. Never open the SQLite database file directly — not to write, and not to read (no sqlite3 CLI, no Python sqlite3 module, no `immutable=1`). Depending on the deployment an attempted open may fail outright, may fail in a way that reads as a broken command rather than a refusal, or may succeed and hand you every user's rows; none of those is a licence to use it. Whether it happens to open is not the question. Every read goes through a skill CLI (e.g. `istota-skill kv get`, `istota-skill tasks status`), which returns only your own data; every write goes through one, or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
+3. The databases are not on your filesystem — the directories that hold them are empty here, so there is nothing for `sqlite3` or Python's `sqlite3` to open and no path worth hunting for. Every read goes through a skill CLI (e.g. `istota-skill kv get`, `istota-skill tasks status`), which runs outside this sandbox and returns only your own data; every write goes through one, or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
 3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs, subtasks or file polling; subtasks and jobs are handoffs and never return a value to you. If nothing covers it, say what is missing instead of improvising.
 3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
@@ -2633,7 +2632,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
-3. Never open the SQLite database file directly — not to write, and not to read. Whether an open happens to succeed is not the question; that file holds every user's data and none of it is yours to read this way. All database access, read and write, goes through the skill CLI commands, which return only your own data, or through the bot's scheduler.
+3. The databases are not on your filesystem — the directories that hold them are empty here, so there is nothing for `sqlite3` or Python's `sqlite3` to open. All database access, read and write, goes through the skill CLI commands, which run outside this sandbox and return only your own data, or through the bot's scheduler.
 3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs or file polling; a scheduled job is a handoff and never returns a value to you. If nothing covers it, say what is missing instead of improvising.
 3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.

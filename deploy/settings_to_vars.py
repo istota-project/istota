@@ -212,7 +212,6 @@ _SECTION_PREFIX_MAP = {
 # Security section has nested structure
 _SECURITY_KEYS = {
     "sandbox_enabled": "istota_security_sandbox_enabled",
-    "sandbox_admin_db_write": "istota_security_sandbox_admin_db_write",
     "skill_proxy_enabled": "istota_security_skill_proxy_enabled",
     "skill_proxy_timeout": "istota_security_skill_proxy_timeout",
     "network_enabled": "istota_security_network_enabled",
