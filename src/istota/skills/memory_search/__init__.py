@@ -105,6 +105,30 @@ def cmd_index_conversation(args) -> dict:
     return {"status": "ok", "task_id": args.task_id, "chunks_inserted": n}
 
 
+def _indexable_roots(user_id: str) -> list[Path]:
+    """Directories `index file` may read from: this user's own data, only.
+
+    The CLI runs host-side under the skill proxy, so the path argument is
+    evaluated with the daemon's filesystem access rather than the sandbox's —
+    an unbounded read here would let a task index the config file (or another
+    user's workspace) and then retrieve the contents through `search`, walking
+    straight past both the sandbox masks and the credential proxy. The scoping
+    that makes the other subcommands safe is in their SQL; a filesystem
+    argument needs its own.
+    """
+    roots: list[Path] = []
+    mount = os.environ.get("NEXTCLOUD_MOUNT_PATH", "")
+    if mount:
+        roots.append(Path(mount) / "Users" / user_id)
+    token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "")
+    if mount and token:
+        roots.append(Path(mount) / "Channels" / token)
+    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    if deferred:
+        roots.append(Path(deferred))
+    return [r.resolve() for r in roots]
+
+
 def cmd_index_file(args) -> dict:
     """Index a file."""
     from istota.memory.search import index_file
@@ -113,11 +137,28 @@ def cmd_index_file(args) -> dict:
     user_id = _get_user_id()
 
     path = Path(args.path)
-    if not path.is_file():
+    # Resolve before comparing: the check is worthless against `../` or a
+    # symlink planted in the workspace otherwise.
+    resolved = path.resolve()
+    roots = _indexable_roots(user_id)
+    if not roots or not any(
+        resolved == root or resolved.is_relative_to(root) for root in roots
+    ):
+        conn.close()
+        return {
+            "status": "error",
+            "error": (
+                f"Refusing to index {path}: it is outside your own workspace. "
+                "index file reads with the daemon's filesystem access, so it is "
+                "restricted to your user directory, the current channel "
+                "directory, and the task's working directory."
+            ),
+        }
+    if not resolved.is_file():
         conn.close()
         return {"status": "error", "error": f"File not found: {path}"}
 
-    content = path.read_text()
+    content = resolved.read_text()
     source_type = args.source_type or "memory_file"
     n = index_file(conn, user_id, str(path), content, source_type)
     conn.close()

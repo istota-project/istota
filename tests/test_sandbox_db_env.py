@@ -176,10 +176,42 @@ class TestSandboxMarker:
             claude_env, _ = _run_task(env_config)
         assert claude_env["ISTOTA_SANDBOXED"] == "1"
 
-    def test_absent_when_sandbox_inactive(self, env_config):
+    def test_absent_when_sandbox_disabled(self, env_config):
+        """Patch bwrap available, so this tests the config half of the `and`.
+
+        Without the patch `_bwrap_available()` is already False off Linux and
+        the assertion holds for the wrong reason on every dev machine.
+        """
         env_config.security.sandbox_enabled = False
-        claude_env, _ = _run_task(env_config)
+        with patch("istota.executor._bwrap_available", return_value=True):
+            claude_env, _ = _run_task(env_config)
         assert "ISTOTA_SANDBOXED" not in claude_env
+
+    def test_absent_when_bwrap_unavailable(self, env_config):
+        """The Docker-without-CAP_SYS_ADMIN shape: configured on, not in effect."""
+        env_config.security.sandbox_enabled = True
+        with patch("istota.executor._bwrap_available", return_value=False):
+            claude_env, _ = _run_task(env_config)
+        assert "ISTOTA_SANDBOXED" not in claude_env
+
+    def test_absent_when_proxy_disabled(self, env_config):
+        """With no proxy there is no socket, so the marker would break every
+        skill CLI — including the many that never open a database."""
+        env_config.security.skill_proxy_enabled = False
+        with patch("istota.executor._bwrap_available", return_value=True):
+            claude_env, _ = _run_task(env_config)
+        assert "ISTOTA_SANDBOXED" not in claude_env
+
+
+class TestDbPathWithheldWithoutProxy:
+    """Turning the proxy off makes skill CLIs unreachable, not the path safe."""
+
+    def test_db_path_not_in_claude_env(self, env_config):
+        env_config.security.skill_proxy_enabled = False
+        claude_env, proxy_call = _run_task(env_config)
+        assert proxy_call is None
+        assert "ISTOTA_DB_PATH" not in claude_env
+        assert "WIDGET_DB_PATH" not in claude_env
 
     def test_absent_from_proxy_base_env(self, env_config):
         """The proxy runs skills on the host; they are not sandboxed."""

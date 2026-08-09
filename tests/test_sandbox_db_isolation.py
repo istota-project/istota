@@ -127,9 +127,14 @@ class TestModuleDbsUnreachable:
         masked = _tmpfs_paths(argv)
         root = str(iso_config.module_db_root().resolve())
         db_dir = str(iso_config.db_path.parent.resolve())
-        # Either the module root is masked directly, or it sits under the
-        # masked DB directory (the default layout).
-        assert root in masked or root.startswith(db_dir + "/")
+        # In the default layout the module root sits under the DB directory, so
+        # masking that covers it. Assert the covering mask is really in argv —
+        # an `or root.startswith(db_dir)` disjunct would be a statement about
+        # two strings and would hold with the mask block deleted entirely.
+        if root.startswith(db_dir + "/"):
+            assert db_dir in masked
+        else:
+            assert root in masked
 
     def test_module_root_masked_when_relocated(self, iso_config, iso_task, tmp_path):
         """A module_data_dir outside the DB directory gets its own mask."""
@@ -162,6 +167,200 @@ class TestRoPathsCannotReExpose:
     def test_ro_paths_default_is_empty(self):
         """Nothing is exposed by default; /srv/app was for a service now gone."""
         assert Config().security.sandbox_ro_paths == []
+
+    def test_symlinked_root_is_masked_at_the_name_the_bind_used(
+        self, iso_config, iso_task, tmp_path,
+    ):
+        """A resolved-only mask misses the path the model would actually use.
+
+        `_ro_bind` keeps the *unresolved* string as its sandbox destination, so
+        with `/srv -> /realstore` the bind lands at `/srv/app` while a resolved
+        mask lands at `/realstore/app/...` — a path not in the namespace, and
+        the databases stay readable under the symlinked name.
+        """
+        real = tmp_path / "realstore"
+        real.mkdir()
+        (tmp_path / "link").symlink_to(real, target_is_directory=True)
+        data = real / "data"
+        data.mkdir()
+        db_file = data / "istota.db"
+        db_file.touch()
+
+        # db_path as written goes through the symlink.
+        iso_config.db_path = tmp_path / "link" / "data" / "istota.db"
+        iso_config.module_data_dir = tmp_path / "link" / "data" / "modules"
+        iso_config.security.sandbox_ro_paths = [str(tmp_path / "link")]
+
+        argv = _bwrap(iso_config, iso_task, True)
+        masked = _tmpfs_paths(argv)
+        assert str(tmp_path / "link" / "data") in masked, (
+            "the symlinked name — the one the RO bind exposes — must be masked"
+        )
+        assert str(data.resolve()) in masked
+
+
+class TestMaskDoesNotShadowNeededPaths:
+    """A mask above the workspace would be an outage, not a hardening."""
+
+    def test_db_dir_containing_the_workspace_is_refused(
+        self, iso_config, iso_task, tmp_path, caplog,
+    ):
+        """The standalone layout puts db_path beside the workspace root."""
+        workspace = tmp_path / "standalone"
+        (workspace / "Users" / "alice").mkdir(parents=True)
+        iso_config.nextcloud_mount_path = workspace
+        iso_config.db_path = workspace / "istota.db"
+        iso_config.module_data_dir = workspace / "modules"
+
+        with caplog.at_level("ERROR"):
+            argv = _bwrap(iso_config, iso_task, True)
+
+        assert str(workspace.resolve()) not in _tmpfs_paths(argv), (
+            "masking the mount root would hide the user's own workspace"
+        )
+        assert any("Not masking" in r.message for r in caplog.records), (
+            "refusing to mask leaves databases exposed; it must be loud"
+        )
+
+    def test_user_temp_dir_is_never_masked(self, iso_config, iso_task, tmp_path):
+        """The prompt and result files live here; masking it breaks the task."""
+        iso_config.db_path = iso_config.temp_dir / "istota.db"
+        iso_config.module_data_dir = iso_config.temp_dir / "modules"
+        argv = _bwrap(iso_config, iso_task, True)
+        user_temp = (iso_config.temp_dir / "alice").resolve()
+        for masked in _tmpfs_paths(argv):
+            assert not user_temp.is_relative_to(masked), (
+                f"{masked} shadows the user temp dir"
+            )
+
+
+class TestMisconfiguredModuleRoot:
+    """A bad module_data_dir must not take every task down with it."""
+
+    def test_sandbox_still_builds(self, iso_config, iso_task, caplog):
+        """module_db_root() raises for a root under the mount; masking is not
+        the place that failure should surface — it would turn one broken module
+        into "no task runs at all"."""
+        iso_config.module_data_dir = iso_config.nextcloud_mount_path / "modules"
+        with caplog.at_level("WARNING"):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert argv[0] == "bwrap"
+        # The framework DB is still masked even though the module root isn't.
+        assert str(iso_config.db_path.parent.resolve()) in _tmpfs_paths(argv)
+        assert any("module_data_dir" in r.message for r in caplog.records)
+
+    def test_module_resolution_still_raises(self, iso_config):
+        """The misconfiguration keeps failing loudly where it matters."""
+        iso_config.module_data_dir = iso_config.nextcloud_mount_path / "modules"
+        with pytest.raises(ValueError, match="local disk"):
+            iso_config.module_db_path("alice", "health")
+
+
+class TestDisableUserns:
+    """A tmpfs can be unmounted from a nested user namespace."""
+
+    def test_flag_passed_when_bwrap_supports_it(self, iso_config, iso_task):
+        with patch("istota.executor._bwrap_supports_disable_userns", return_value=True):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert "--disable-userns" in argv
+        assert argv.index("--disable-userns") < argv.index("--")
+
+    def test_flag_omitted_when_unsupported(self, iso_config, iso_task):
+        """Passing an unknown flag makes bwrap exit non-zero — that would fail
+        every task on a host with bwrap older than 0.8."""
+        with patch("istota.executor._bwrap_supports_disable_userns", return_value=False):
+            argv = _bwrap(iso_config, iso_task, True)
+        assert "--disable-userns" not in argv
+
+
+class TestMasksComeLast:
+    """The whole design rests on argv ordering."""
+
+    def test_no_mount_operation_follows_the_masks(self, iso_config, iso_task):
+        iso_config.security.sandbox_ro_paths = [str(iso_config.db_path.parents[2])]
+        argv = _bwrap(iso_config, iso_task, True)
+
+        mount_ops = {
+            "--bind", "--ro-bind", "--bind-try", "--ro-bind-try",
+            "--dev-bind", "--symlink", "--tmpfs", "--proc", "--dev",
+            "--overlay", "--ro-overlay",
+        }
+        last_mask = max(
+            i for i, tok in enumerate(argv)
+            if tok == "--tmpfs" and argv[i + 1] in (
+                str(iso_config.db_path.parent.resolve()),
+                str(iso_config.module_db_root()),
+            )
+        )
+        trailing = [tok for tok in argv[last_mask + 2:] if tok in mount_ops]
+        assert not trailing, (
+            f"mount operations after the DB masks would undo them: {trailing}"
+        )
+
+
+class TestSandboxRoPathsValidation:
+    """The key went from inert to live, so a malformed value now has teeth."""
+
+    def _load(self, tmp_path, body):
+        from istota.config import load_config
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(f"[security]\n{body}\n", encoding="utf-8")
+        return load_config(cfg)
+
+    def test_bare_string_is_rejected(self, tmp_path, caplog):
+        """`for p in "/srv/app"` iterates characters and ro-binds `/`."""
+        with caplog.at_level("ERROR"):
+            config = self._load(tmp_path, 'sandbox_ro_paths = "/srv/app"')
+        assert config.security.sandbox_ro_paths == []
+        assert any("must be a list" in r.message for r in caplog.records)
+
+    def test_host_root_is_rejected(self, tmp_path, caplog):
+        with caplog.at_level("ERROR"):
+            config = self._load(tmp_path, 'sandbox_ro_paths = ["/", "/opt/svc"]')
+        assert config.security.sandbox_ro_paths == ["/opt/svc"]
+        assert any("host root" in r.message for r in caplog.records)
+
+    def test_non_string_entries_dropped(self, tmp_path):
+        config = self._load(tmp_path, 'sandbox_ro_paths = ["/opt/svc", 42, ""]')
+        assert config.security.sandbox_ro_paths == ["/opt/svc"]
+
+    def test_valid_list_passes_through(self, tmp_path):
+        config = self._load(tmp_path, 'sandbox_ro_paths = ["/opt/svc"]')
+        assert config.security.sandbox_ro_paths == ["/opt/svc"]
+
+
+class TestSandboxWithoutProxyWarns:
+    """A combination that leaves every skill CLI unable to reach a database."""
+
+    def test_warns(self, tmp_path, caplog):
+        from istota.config import load_config
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[security]\nsandbox_enabled = true\nskill_proxy_enabled = false\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level("WARNING"):
+            load_config(cfg)
+        assert any(
+            "skill_proxy_enabled = false" in r.message for r in caplog.records
+        )
+
+    def test_quiet_when_both_off(self, tmp_path, caplog):
+        """The standalone install's trusted single-user posture."""
+        from istota.config import load_config
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[security]\nsandbox_enabled = false\nskill_proxy_enabled = false\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level("WARNING"):
+            load_config(cfg)
+        assert not any(
+            "skill_proxy_enabled = false" in r.message for r in caplog.records
+        )
 
 
 class TestNativeFsRootsExcludeDb:

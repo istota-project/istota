@@ -435,7 +435,18 @@ env:
 Available `from:` sources: `config` (dotted config path with `when` guard),
 `secret` (per-user encrypted secret), `setup_env` (skill-defined hook in
 `__init__.py:setup_env(ctx)`), `template_file` (auto-create from template),
-`user_id` (literal task user_id). The resource-backed sources (`resource`,
+`user_id` (literal task user_id).
+
+Two flags decide who sees the resolved value. `sensitive: true` marks a
+credential: stripped from Claude's env, injected by the proxy only for the
+skills whose manifests declare it, fetchable via `credential-fetch`, and an
+auto-authorization signal. `proxy_only: true` also withholds the var from
+Claude and hands it to the proxy, but carries none of that machinery — it is
+for non-secret values the model still must not hold, which today means paths
+to SQLite files (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`; the framework
+`ISTOTA_DB_PATH` gets the same treatment from `_EXECUTOR_PROXY_ONLY_VARS`,
+since it belongs to no manifest). Don't set both: the credential split runs
+first, so the var routes as a credential and the `proxy_only` flag is inert. The resource-backed sources (`resource`,
 `resource_json`, `user_resource_config`) were removed in the Resources sunset
 — no bundled skill used them.
 

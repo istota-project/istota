@@ -1692,6 +1692,47 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     )
 
 
+def _validate_sandbox_ro_paths(raw: object) -> list[str]:
+    """Coerce ``[security] sandbox_ro_paths`` to a safe list of absolute paths.
+
+    This key went from inert to live (nothing read it from TOML before), so a
+    value that used to be harmless now becomes bind mounts. The failure mode
+    that matters is a bare string: ``sandbox_ro_paths = "/srv/app"`` is a
+    plausible typo, and ``for p in "/srv/app"`` iterates *characters*, so
+    ``build_bwrap_cmd`` would ro-bind ``/`` — the entire host, including the
+    config file and every other user's data — into the sandbox. Reject rather
+    than guess: silently wrapping a string would also mean silently accepting
+    the next malformed shape.
+
+    ``/`` is refused outright for the same reason; a mount that broad defeats
+    every other bind decision in the function.
+    """
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        logger.error(
+            "[security] sandbox_ro_paths must be a list of paths, got %s — "
+            "ignoring it. A bare string would be iterated character by "
+            "character and bind-mount the host root.",
+            type(raw).__name__,
+        )
+        return []
+    cleaned: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            logger.error(
+                "[security] sandbox_ro_paths: ignoring non-path entry %r", entry,
+            )
+            continue
+        resolved = Path(entry).resolve()
+        if resolved == Path("/"):
+            logger.error(
+                "[security] sandbox_ro_paths: refusing to bind the host root "
+                "(%r) into the sandbox", entry,
+            )
+            continue
+        cleaned.append(entry)
+    return cleaned
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
@@ -2403,9 +2444,21 @@ def load_config(config_path: Path | None = None) -> Config:
             # load_config dropped the key on the floor, so every deployment ran
             # the hardcoded default and no operator could narrow it.
             **({
-                "sandbox_ro_paths": sec["sandbox_ro_paths"]
+                "sandbox_ro_paths": _validate_sandbox_ro_paths(
+                    sec["sandbox_ro_paths"],
+                )
             } if "sandbox_ro_paths" in sec else {}),
         )
+        if (
+            config.security.sandbox_enabled
+            and not config.security.skill_proxy_enabled
+        ):
+            logger.warning(
+                "[security] sandbox_enabled with skill_proxy_enabled = false: "
+                "skill CLIs will run inside the sandbox, where the databases "
+                "they read are masked out. Enable the skill proxy, or disable "
+                "the sandbox for a trusted single-user install."
+            )
 
     config.admin_users = load_admin_users()
 

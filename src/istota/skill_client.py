@@ -1,8 +1,11 @@
 """Thin client for the skill proxy.
 
 Console script entry point ``istota-skill``. When ``ISTOTA_SKILL_PROXY_SOCK``
-is set, connects to the proxy socket and delegates execution. Otherwise falls
-back to running the skill module directly via subprocess.
+is set, connects to the proxy socket and delegates execution — the skill then
+runs host-side, where the databases are. Otherwise it runs the skill module
+directly via subprocess, which is right for the unsandboxed daemon callers
+(cron ``command:`` rows, heartbeat shell-commands, an operator shell) and
+refused inside the sandbox, where the databases are masked out.
 
 Usage::
 

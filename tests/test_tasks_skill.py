@@ -286,10 +286,14 @@ class TestTasksStatusCommand:
         assert exc.value.code == 1
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "error"
-        # Names the condition (path unavailable) and the likely cause, rather
-        # than asserting a cause that isn't always the true one.
+        # Names the condition (path unavailable) and where it normally comes
+        # from. It must NOT blame the admin gate any more: the executor sets
+        # this for every user now and routes it to the skill proxy, so a task
+        # reaching here has a caller that built an env without it (a heartbeat
+        # shell-command), not insufficient privileges.
         assert "database path is not available" in out["error"]
-        assert "admin" in out["error"].lower()
+        assert "admin" not in out["error"].lower()
+        assert "skill proxy" in out["error"]
 
     def test_missing_user_id_errors(self, db_path, monkeypatch, capsys):
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))

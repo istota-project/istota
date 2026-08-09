@@ -1425,6 +1425,36 @@ class TestAdminPromptIsolation:
         assert str(config.db_path) not in prompt
         assert "Database: reachable only through skill CLIs" in prompt
 
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_absence_claim_only_when_sandbox_is_in_effect(self, tmp_path, is_admin):
+        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
+        config.security.sandbox_enabled = True
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        with patch("istota.executor._bwrap_available", return_value=True):
+            prompt = build_prompt(task, [], config, is_admin=is_admin)
+        assert "the directories that hold them are empty here" in prompt
+
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_prohibition_kept_where_there_is_no_sandbox(self, tmp_path, is_admin):
+        """Docker without CAP_SYS_ADMIN, and the standalone install.
+
+        The databases really are on the model's filesystem on those shapes, so
+        claiming they aren't would be a false boundary — the exact failure this
+        change set exists to correct. The older prohibition wording covers it.
+        """
+        config = self._make_config(tmp_path, admin_users=None if is_admin else {"bob"})
+        config.security.sandbox_enabled = True
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        with patch("istota.executor._bwrap_available", return_value=False):
+            prompt = build_prompt(task, [], config, is_admin=is_admin)
+        assert "the directories that hold them are empty here" not in prompt
+        assert "Never open a database file directly" in prompt
+        assert "no filesystem sandbox" in prompt
+
     def test_admin_prompt_states_admin_privileges(self, tmp_path):
         config = self._make_config(tmp_path)
         db.init_db(config.db_path)

@@ -766,6 +766,47 @@ def _bwrap_available() -> bool:
     return _bwrap_checked
 
 
+_userns_checked: bool | None = None
+
+
+def _bwrap_supports_disable_userns() -> bool:
+    """Whether this bwrap accepts ``--disable-userns`` (added in 0.8).
+
+    Matters because the deployment enables ``kernel.unprivileged_userns_clone``
+    — bwrap needs it — which also lets the sandboxed process `unshare -Urm`
+    into a nested namespace where it holds CAP_SYS_ADMIN and can `umount` one
+    of our masks, revealing whatever was bound underneath. With nothing bound
+    under the database directories that reveals nothing, but the masks exist
+    precisely to survive a future broad ``sandbox_ro_paths`` entry, and that is
+    the case where lifting them would matter. ``--disable-userns`` blocks the
+    nested namespace outright.
+
+    Probed rather than assumed: passing an unsupported flag makes bwrap exit
+    non-zero, which would fail every task on an older host.
+    """
+    global _userns_checked
+    if _userns_checked is not None:
+        return _userns_checked
+    if not _bwrap_available():
+        _userns_checked = False
+        return False
+
+    try:
+        result = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--disable-userns", "--", "true"],
+            capture_output=True, timeout=5,
+        )
+        _userns_checked = result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        _userns_checked = False
+    if not _userns_checked:
+        logger.info(
+            "bwrap does not support --disable-userns; sandbox masks can be "
+            "lifted from a nested user namespace. Keep sandbox_ro_paths narrow."
+        )
+    return _userns_checked
+
+
 def build_clean_env(config: Config) -> dict[str, str]:
     """Build minimal environment for Claude subprocess.
 
@@ -1155,12 +1196,13 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     bwrap-host ``--workspace cwd`` case is the security-relevant one; Mac/Docker
     have no bwrap and degrade to running in cwd directly.
 
-    The database entries matter because the workspace bind is applied *before*
-    build_bwrap_cmd's masks and is read-write: without them, pointing
-    ``istota repl --workspace`` at the data directory would hand back RW access
-    to exactly the files the masks exist to remove. In the default layout the
-    source-tree entry covers them incidentally; a relocated ``db_path`` or
-    ``module_data_dir`` is the case that needs naming.
+    The database entries are not what stops the *bwrap* path — the masks run
+    last there, so a tmpfs at or under the workspace shadows the bind whatever
+    it was. They are load-bearing for ``native_fs_roots``, which threads this
+    same validated workspace into the native brain's in-process file tools and
+    has no masks at all. In the default layout the source-tree entry covers the
+    databases incidentally; a relocated ``db_path`` or ``module_data_dir`` is
+    the case that needs naming.
 
     Raises ValueError when the path is forbidden. Returns the resolved path.
     """
@@ -1176,8 +1218,12 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     # Nextcloud mount root (other users' data live under here).
     if config.nextcloud_mount_path:
         forbidden.append(Path(config.nextcloud_mount_path).resolve())
-    # The framework DB directory and the per-user module-DB root.
-    if config.db_path:
+    # The framework DB directory and the per-user module-DB root. Skipped when
+    # db_path is relative (the `data/istota.db` default): it would resolve
+    # against the *current* cwd, so `istota repl --workspace ~/proj` launched
+    # from inside ~/proj would be refused for overlapping a `<cwd>/data` that
+    # need not even exist.
+    if config.db_path and Path(config.db_path).is_absolute():
         forbidden.append(Path(config.db_path).parent.resolve())
     try:
         forbidden.append(config.module_db_root())
@@ -1446,12 +1492,77 @@ def build_bwrap_cmd(
     # contains it — so one RO bind that mentions no database exposed the
     # framework DB, its live -wal/-shm, every user's health/money/location/
     # feeds DB, the local DB backups and the browser profile. An empty tmpfs
-    # over the directories holds regardless of what earlier binds did, because
+    # over the directories shadows whatever earlier binds put there, because
     # bwrap applies operations in argv order and these are last. Keep them last.
-    _tmpfs(config.db_path.parent)
-    module_root = config.module_db_root()
-    if not module_root.is_relative_to(config.db_path.parent.resolve()):
-        _tmpfs(module_root)
+    #
+    # It is a mask, not a revocation: with `kernel.unprivileged_userns_clone`
+    # on (bwrap needs it) a process can `unshare -Urm` and umount a tmpfs to
+    # reveal what was underneath, which is why `--disable-userns` is passed
+    # where bwrap supports it and why `sandbox_ro_paths` should stay narrow.
+    # With nothing bound underneath — the shipped default — there is nothing to
+    # reveal either way.
+    #
+    # Paths the sandbox must keep. A mask at or above any of these would
+    # shadow something the task needs (its own workspace, the source tree it
+    # runs from), turning a security measure into an outage; the standalone
+    # layout puts db_path beside the workspace, so this is reachable by
+    # configuration rather than only by mistake.
+    _mask_protected: list[Path] = [user_temp_dir.resolve(), istota_src, venv_path]
+    if workspace_resolved is not None:
+        _mask_protected.append(workspace_resolved)
+    if mount:
+        _mask_protected.append(mount)
+
+    def _mask_dir(target: Path) -> None:
+        """Cover ``target`` with an empty tmpfs, at every name it answers to.
+
+        Both the resolved path and the path as written: `_ro_bind` uses the
+        *unresolved* string as its sandbox destination, so under a symlinked
+        deployment root (`/srv` -> `/realstore`) a bind lands at `/srv/app`
+        while a resolved-only mask lands at `/realstore/app/...` — a path not
+        in the namespace at all, leaving the databases readable at the name the
+        model would actually use.
+        """
+        candidates: list[Path] = []
+        for candidate in (target, target.resolve()):
+            if candidate not in candidates:
+                candidates.append(candidate)
+        for candidate in candidates:
+            shadowed = [
+                p for p in _mask_protected
+                if p == candidate or p.is_relative_to(candidate)
+            ]
+            if shadowed:
+                logger.error(
+                    "Not masking %s: it contains paths the sandbox needs (%s). "
+                    "Move db_path/module_data_dir out from above the workspace "
+                    "and the source tree — the databases are exposed until you do.",
+                    candidate, ", ".join(str(p) for p in shadowed),
+                )
+                continue
+            args.extend(["--tmpfs", str(candidate)])
+
+    if config.db_path:
+        db_dir = Path(config.db_path).parent
+        _mask_dir(db_dir)
+        try:
+            module_root = config.module_db_root()
+        except ValueError:
+            # module_data_dir is under the Nextcloud mount — a misconfiguration
+            # module resolution fails loudly on. Refusing to build the sandbox
+            # would turn it into "every task fails", so mask what we can and
+            # let the module path own the error. The mount root is bound only
+            # per-user, so the misplaced root isn't broadly reachable anyway.
+            logger.warning(
+                "module_data_dir is under the Nextcloud mount; skipping its "
+                "sandbox mask (module resolution will raise on use)",
+            )
+        else:
+            if not module_root.is_relative_to(db_dir.resolve()):
+                _mask_dir(module_root)
+
+    if _bwrap_supports_disable_userns():
+        args.append("--disable-userns")
 
     # --- Lifecycle ---
     chdir_target = workspace_resolved or user_temp_dir.resolve()
@@ -1517,7 +1628,8 @@ def native_fs_roots(
     which are irrelevant to the file tools) so the native file tools reach
     exactly what the claude_code path's bwrap would allow — no more, no less.
     Writable roots are the RW binds; read roots additionally include the RO
-    binds (Talk attachments, read-only resources, the admin DB when RO).
+    binds (Talk attachments, read-only resources). No database root of any
+    kind — build_bwrap_cmd masks those, and these tools have no masks.
     """
     write: list[Path] = []
     read_only: list[Path] = []
@@ -2591,11 +2703,56 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # No database path, for anyone. It used to be stated for admins because
     # operator tooling refers to it, hedged with "skill CLIs only" because an
     # unqualified "Database path: …" three lines above the rules reads as an
-    # affordance (that hedge was ISSUE-237's fix). The file is now masked out of
-    # the sandbox entirely, so a path would name something that isn't there —
-    # worse than useless, since a failed open reads as a broken command rather
-    # than as a boundary. What replaces it is the rule below.
+    # affordance (that hedge was ISSUE-237's fix). The file is masked out of
+    # the sandbox, so a path would name something that isn't there — worse than
+    # useless, since a failed open reads as a broken command rather than as a
+    # boundary. What replaces it is the rule below.
     db_path_line = "Database: reachable only through skill CLIs (no file access)"
+
+    # Whether the masks are actually in place. Two shapes run the model with
+    # the daemon's own filesystem access: a container where the bwrap probe
+    # fails (no CAP_SYS_ADMIN — and that one is multi-user), and the standalone
+    # install, which ships sandbox_enabled = false. Telling the model there is
+    # nothing to open would be false there, and a false boundary claim is worse
+    # than none — it is the thing this whole change set is correcting. So the
+    # rule keeps the older prohibition-without-mechanism wording instead.
+    db_masked = config.security.sandbox_enabled and _bwrap_available()
+    if db_masked:
+        db_rule_admin = (
+            "3. Istota's databases are not on your filesystem — the directories "
+            "that hold them are empty here, so there is nothing for `sqlite3` or "
+            "Python's `sqlite3` to open and no path worth hunting for. Every "
+            "read goes through a skill CLI (e.g. `istota-skill kv get`, "
+            "`istota-skill tasks status`), which runs outside this sandbox and "
+            "returns only your own data; every write goes through one, or via "
+            "deferred JSON files in $ISTOTA_DEFERRED_DIR."
+        )
+        db_rule_user = (
+            "3. Istota's databases are not on your filesystem — the directories "
+            "that hold them are empty here, so there is nothing for `sqlite3` or "
+            "Python's `sqlite3` to open. All database access, read and write, "
+            "goes through the skill CLI commands, which run outside this "
+            "sandbox and return only your own data, or through the bot's "
+            "scheduler."
+        )
+    else:
+        db_rule_admin = (
+            "3. Never open a database file directly — not to write, and not to "
+            "read. This deployment has no filesystem sandbox, so an attempt may "
+            "well succeed and hand you every user's rows; that it works is not "
+            "permission. Every read goes through a skill CLI (e.g. "
+            "`istota-skill kv get`, `istota-skill tasks status`), which returns "
+            "only your own data; every write goes through one, or via deferred "
+            "JSON files in $ISTOTA_DEFERRED_DIR."
+        )
+        db_rule_user = (
+            "3. Never open a database file directly — not to write, and not to "
+            "read. This deployment has no filesystem sandbox, so an attempt may "
+            "well succeed; those files hold every user's data and none of it is "
+            "yours to read this way. All database access, read and write, goes "
+            "through the skill CLI commands, which return only your own data, "
+            "or through the bot's scheduler."
+        )
 
     # Explicit privileges line so admin-gated capabilities (subtasks, shared-KV
     # writes, DB access) don't have to be inferred from indirect signals or
@@ -2612,7 +2769,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
-3. The databases are not on your filesystem — the directories that hold them are empty here, so there is nothing for `sqlite3` or Python's `sqlite3` to open and no path worth hunting for. Every read goes through a skill CLI (e.g. `istota-skill kv get`, `istota-skill tasks status`), which runs outside this sandbox and returns only your own data; every write goes through one, or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
+{db_rule_admin}
 3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs, subtasks or file polling; subtasks and jobs are handoffs and never return a value to you. If nothing covers it, say what is missing instead of improvising.
 3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
@@ -2632,7 +2789,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
-3. The databases are not on your filesystem — the directories that hold them are empty here, so there is nothing for `sqlite3` or Python's `sqlite3` to open. All database access, read and write, goes through the skill CLI commands, which run outside this sandbox and return only your own data, or through the bot's scheduler.
+{db_rule_user}
 3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs or file polling; a scheduled job is a handoff and never returns a value to you. If nothing covers it, say what is missing instead of improvising.
 3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
@@ -3366,6 +3523,14 @@ def execute_task(
         # and run skill CLIs through a Unix socket proxy that injects them.
         _proxy_ctx = None
         _proxy_sock = None
+        # Third bucket alongside credentials and the clean env: non-secret
+        # values (database paths) that belong to the host-side CLI and not to
+        # the model. Split *outside* the proxy branch — an operator who turns
+        # the proxy off has made skill CLIs unreachable, not made it acceptable
+        # to hand the model a path to every user's data.
+        proxy_only_env, env = _split_credential_env(
+            env, derive_proxy_only_set(skill_index),
+        )
         if config.security.skill_proxy_enabled:
             from .skill_proxy import SkillProxy
             # Phase 3: credential set is derived from the loaded skill
@@ -3373,11 +3538,6 @@ def execute_task(
             # credential map and the lookup-endpoint allowlist.
             credential_set = derive_credential_set(skill_index)
             credential_env, env = _split_credential_env(env, credential_set)
-            # Third bucket: non-secret values (database paths) that belong to
-            # the host-side CLI and not to the model.
-            proxy_only_env, env = _split_credential_env(
-                env, derive_proxy_only_set(skill_index),
-            )
             # Started unconditionally. This used to be gated on
             # ``if credential_env:``, so a task whose authorized skills declared
             # no secret got no socket — and `istota-skill` then silently fell
@@ -3430,10 +3590,21 @@ def execute_task(
         # Marks the env as one that will run under bwrap, so `istota-skill`
         # refuses to execute a skill module in-process rather than silently
         # doing it against databases that aren't there. Set after the proxy's
-        # base env is snapshotted, and only when the sandbox is really in
+        # base env is snapshotted (the proxy runs skills on the host, where the
+        # marker would be a lie), and only when the sandbox is really in
         # effect — on macOS / a container without CAP_SYS_ADMIN,
         # build_bwrap_cmd returns the command unwrapped.
-        if config.security.sandbox_enabled and _bwrap_available():
+        #
+        # Gated on the proxy too. The marker means "the socket is how you run a
+        # skill"; with the proxy off there is no socket, and setting it anyway
+        # would turn a supported (if now discouraged) configuration into one
+        # where every skill CLI fails — including the many that never open a
+        # database. That combination gets a loud warning at config load instead.
+        if (
+            config.security.sandbox_enabled
+            and config.security.skill_proxy_enabled
+            and _bwrap_available()
+        ):
             env["ISTOTA_SANDBOXED"] = "1"
 
         # Network isolation via CONNECT proxy: outbound traffic restricted

@@ -214,6 +214,7 @@ _SECURITY_KEYS = {
     "sandbox_enabled": "istota_security_sandbox_enabled",
     "skill_proxy_enabled": "istota_security_skill_proxy_enabled",
     "skill_proxy_timeout": "istota_security_skill_proxy_timeout",
+    "sandbox_ro_paths": "istota_security_sandbox_ro_paths",
     "network_enabled": "istota_security_network_enabled",
     "network_allow_pypi": "istota_security_network_allow_pypi",
     "network_extra_hosts": "istota_security_network_extra_hosts",
