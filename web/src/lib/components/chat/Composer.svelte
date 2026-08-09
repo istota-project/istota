@@ -725,33 +725,55 @@
     if (CARET_KEYS.has(e.key)) syncAc();
   }
 
+  // An Enter still being fed to an input method is not a send — committing a
+  // candidate is the same key from the DOM's point of view, so acting on it
+  // posts a half-typed word for anyone composing Japanese, Korean or Chinese.
+  // `keyCode === 229` is the older shape of the same signal, which some IMEs
+  // still report with `isComposing` unset.
+  function isComposing(e: KeyboardEvent): boolean {
+    return e.isComposing || e.keyCode === 229;
+  }
+
   function onKeydown(e: KeyboardEvent) {
-    // Return writes a newline; sending is Cmd/Ctrl+Enter or the button. Enter
-    // used to submit, which made a paragraph break impossible to type — every
-    // one of them sent the message instead. Shift+Enter is left alone rather
-    // than repurposed as the send chord: it means newline everywhere else, and
-    // this field is not the place to teach someone otherwise.
+    // Sending is Enter, Cmd/Ctrl+Enter, or the button; a newline is
+    // Shift+Enter. Nearly every message is one line, so the unmodified key
+    // belongs to the common case — the chord stays because it was the send key
+    // for long enough to be in people's hands, and it costs one branch.
     //
-    // Ahead of the autocomplete, which takes a bare Enter to accept a
-    // completion. That is the right owner of the unmodified key, but the chord
-    // is unambiguous — with the popover open it still means send, not "accept
-    // the row and stay put".
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    // The chord is checked ahead of the autocomplete, which takes a bare Enter
+    // to accept a completion. That is the right owner of the unmodified key
+    // while the popover is open, but the chord is unambiguous — it still means
+    // send, not "accept the row and stay put".
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isComposing(e)) {
       e.preventDefault();
       // Only when the button would have sent. The chord was the one path into
       // a send that did not consult the mode, so holding it started a second
       // turn in a room that already had one — and two overlapping turns share
       // one echo buffer, whose drain then releases the first turn's frames
       // before its task id exists. Silently doing nothing rather than being
-      // repurposed as Stop: a chord that cancels work is not what it looks
-      // like it does.
+      // repurposed as Stop: a key that cancels work is not what it looks like
+      // it does. The bare key below inherits the same gate.
       if (!showStop) submit();
       return;
     }
     // The engine consumes Arrow/Tab/Enter/Escape only while the popover is
-    // open; when closed it returns false and the key does what it says.
+    // open; when closed it returns false and the key does what it says. Ahead
+    // of the bare-Enter send, so accepting a completion is what Enter does
+    // while the popover is up — the accept closes it, and the next Enter sends.
     if (ac.onKeydown(e)) {
       e.preventDefault();
+      return;
+    }
+    // Bare Enter, and only on a device that types with a hardware keyboard.
+    // On a phone there is no cheap Shift to reach for and the send button is
+    // already under the thumb, so the return key keeps inserting a newline —
+    // which is also what this field's `enterkeyhint` promises, and the label is
+    // the only part of this rule the user can see before pressing the key.
+    // Any other modifier (Shift, Alt) leaves the key to the browser, whose
+    // default action is what writes the newline.
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !isComposing(e) && !usesSoftKeyboard()) {
+      e.preventDefault();
+      if (!showStop) submit();
       return;
     }
     // Escape reaches the chip only once every open menu has declined it. The
@@ -933,10 +955,11 @@
           onhover={(i) => ac.setActive(i)}
         />
       {/if}
-      <!-- `enterkeyhint` is `enter`, not `send`: the return key inserts a
-           newline, and on a phone the send button is the send affordance —
-           there is no modifier key to press with Enter there. Labelling it
-           "send" would promise the opposite of what it does. -->
+      <!-- `enterkeyhint` is `enter`, not `send`. Only a soft keyboard reads it,
+           and that is exactly where the return key still inserts a newline: no
+           cheap Shift to reach for, and the send button already under the
+           thumb. Labelling it "send" would promise the opposite of what it does
+           on the one device that can see the label. -->
       <textarea
         bind:this={textarea}
         bind:value={text}

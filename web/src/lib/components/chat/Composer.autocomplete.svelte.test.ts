@@ -92,6 +92,20 @@ describe('Composer autocomplete', () => {
     expect(container.querySelector('[role="listbox"]')).toBeNull();
   });
 
+  it('the Enter after an accept sends, now the popover has closed', async () => {
+    // The popover owns the unmodified key only while it is open. Accepting
+    // closes it, so the next Enter is an ordinary send — the accept costs one
+    // extra keystroke rather than swallowing the send key for the turn.
+    const { textarea, onSend } = mount();
+    await type(textarea, '!mo');
+    key(textarea, 'Enter'); // accept → '!models '
+    await tick();
+    expect(onSend).not.toHaveBeenCalled();
+    key(textarea, 'Enter');
+    await tick();
+    expect(onSend).toHaveBeenCalledWith('!models', [], null);
+  });
+
   it('Tab accepts the highlighted command', async () => {
     const { textarea } = mount();
     await type(textarea, '!mo'); // first row = !models

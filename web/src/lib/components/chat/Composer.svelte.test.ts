@@ -137,6 +137,11 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  // `softKeyboard(on)` replaces `window.matchMedia` outright and nothing put it
+  // back, so every test after one that asked for a coarse pointer inherited it.
+  // That was inert while nothing but the post-send blur read the modality; the
+  // Enter-to-send rule reads it too, so the default has to be stated.
+  softKeyboard(false);
   resetCommandCatalogue();
   (fetchChatCommands as ReturnType<typeof vi.fn>).mockReset();
   (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -436,27 +441,27 @@ describe('Composer send control', () => {
   });
 
   it('leaves the return key labelled as a return key', () => {
-    // It inserts a newline, so it must not be labelled "send" — the label was
-    // right back when Enter submitted, and is now the opposite of the truth.
+    // The hint is only read by a soft keyboard, and there the return key still
+    // inserts a newline — Enter-to-send is the hardware-keyboard rule. Labelling
+    // it "send" would promise the opposite of what it does on the one device
+    // that can see the label.
     const { textarea } = mount();
     expect(textarea.getAttribute('enterkeyhint')).not.toBe('send');
   });
 
-  it('inserts a newline on a bare Enter instead of sending', async () => {
-    // A paragraph break used to submit the message, so anything longer than one
-    // line could not be typed straight through.
+  it('sends on a bare Enter', async () => {
     const onSend = vi.fn();
     const { textarea } = mount({ onSend });
-    await type(textarea, 'first line');
+    await type(textarea, 'hi');
 
     const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
 
-    expect(onSend).not.toHaveBeenCalled();
-    // Left to the browser — the default action is what inserts the newline.
-    expect(notPrevented).toBe(true);
+    expect(onSend).toHaveBeenCalledWith('hi', [], null);
+    // The newline must not also be inserted.
+    expect(notPrevented).toBe(false);
   });
 
-  it('leaves Shift+Enter a newline as well', async () => {
+  it('leaves Shift+Enter a newline', async () => {
     const onSend = vi.fn();
     const { textarea } = mount({ onSend });
     await type(textarea, 'first line');
@@ -464,7 +469,73 @@ describe('Composer send control', () => {
     const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
 
     expect(onSend).not.toHaveBeenCalled();
+    // Left to the browser — the default action is what inserts the newline.
     expect(notPrevented).toBe(true);
+  });
+
+  it('leaves Alt+Enter a newline too', async () => {
+    // Only Shift is the documented newline chord, but a modified Enter is never
+    // a plain send: the send path takes the unmodified key and the Cmd/Ctrl one.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'first line');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter', altKey: true });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('leaves a bare Enter a newline on a soft keyboard', async () => {
+    // There is no cheap Shift on a phone, and the send button is right there —
+    // so the return key keeps inserting a newline, which is also what the
+    // `enterkeyhint` above promises.
+    softKeyboard(true);
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'first line');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('does not send on the Enter that closes an IME composition', async () => {
+    // Committing a candidate is an Enter like any other from the DOM's point of
+    // view, so sending on it would post a half-typed word for anyone typing
+    // Japanese, Korean or Chinese.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'にほん');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter', isComposing: true });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('does not send on the legacy 229 composition keydown either', async () => {
+    // Some IMEs report the composing keydown as keyCode 229 with `isComposing`
+    // unset, which is the shape the flag was introduced to replace.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'にほん');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 229 });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('refuses a bare Enter while a turn is running', async () => {
+    // Same rule the chord follows: a key that sends must consult the send/stop
+    // mode, or holding it starts a second turn in a room that already has one.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend, busy: true, onCancel: () => {} });
+    await type(textarea, 'let me in');
+    await fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it('sends on Cmd+Enter', async () => {
