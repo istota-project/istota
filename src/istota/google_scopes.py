@@ -178,6 +178,23 @@ def offered_services(ceiling_scopes: Iterable[str]) -> list[dict]:
     ]
 
 
+def unoffered_scopes(ceiling_scopes: Iterable[str]) -> list[str]:
+    """Ceiling scopes this map does not know, in the operator's own order.
+
+    No picker row can express these, so they are requested unconditionally
+    rather than dropped — see :func:`resolve_selection`. Surfaced separately so
+    the UI can name what it is asking for on the user's behalf.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for scope in ceiling_scopes or ():
+        if scope in _SCOPE_INDEX or scope in seen:
+            continue
+        out.append(scope)
+        seen.add(scope)
+    return out
+
+
 def default_selection(ceiling_scopes: Iterable[str]) -> dict[str, str]:
     """The selection an unconfigured user gets: everything the operator allows.
 
@@ -222,8 +239,19 @@ def resolve_selection(
     A non-empty selection is authoritative: a service it does not name is
     off, so widening the ceiling later never silently widens an existing
     user's request — they re-consent or they don't.
+
+    **A ceiling scope this map does not know is requested unconditionally**,
+    appended verbatim after the mapped ones. Dropping it would be wrong twice
+    over: no picker row can turn it off, so its absence is not a user choice;
+    and an operator running a perfectly ordinary list of narrow scopes
+    (``drive.file``, ``gmail.send``, ``calendar.events``) would find every user
+    silently downgraded to nothing, with connect refusing outright once the
+    resolution came back empty. It is also what keeps ``openid`` in the request
+    on an instance that lists it — authlib mints the OIDC nonce only when the
+    resolved scope carries it.
     """
-    ceiling = levels_from_scopes(ceiling_scopes)
+    ceiling_list = list(ceiling_scopes or ())
+    ceiling = levels_from_scopes(ceiling_list)
     chosen = normalize_selection(selection)
     unset = not chosen
 
@@ -236,6 +264,8 @@ def resolve_selection(
         if _LEVEL_RANK[want] > _LEVEL_RANK[max_level]:
             want = max_level
         scopes.extend(svc.scopes_for(want))
+
+    scopes.extend(unoffered_scopes(ceiling_list))
     return scopes
 
 
@@ -249,7 +279,11 @@ def summarize_granted(granted_scopes: Sequence[str]) -> dict:
 
     An unrecognised scope is surfaced verbatim rather than dropped — the map
     will lag a hand-edited config, and silently hiding a granted scope is the
-    failure this display exists to end.
+    failure this display exists to end. ``also`` is the same rule applied
+    within a service: a scope belonging to a level *below* the one reported
+    (Chat granted at ``chat.spaces`` + ``chat.messages.readonly``) is in the
+    map, so it never reaches ``unrecognized``, and it is not in the reported
+    level's tuple, so it would otherwise appear nowhere at all.
     """
     granted = list(granted_scopes or [])
     granted_set = set(granted)
@@ -268,6 +302,10 @@ def summarize_granted(granted_scopes: Sequence[str]) -> dict:
             "level": level,
             "scopes": held,
             "complete": len(held) == len(wanted),
+            "also": [
+                s for s in granted
+                if s not in wanted and _SCOPE_INDEX.get(s, (None, None))[0] == svc.key
+            ],
         })
 
     unrecognized = [
@@ -284,9 +322,15 @@ def missing_scopes(
     """Requested scopes the grant does not cover, in ``requested`` order.
 
     A full grant satisfies a read-only request (Google hands back the broader
-    scope and the narrower one never appears), so the comparison is by level,
-    not by string equality. Unrecognised requested scopes fall back to exact
-    matching — there is nothing else to compare them by.
+    scope and the narrower one never appears), so an exact match is not the
+    only way to be covered. But only a *strictly higher* granted level counts
+    as cover: at the same level the scope has to be there by name, or a
+    partially granted multi-scope service reads as satisfied — Chat granted
+    ``chat.spaces`` alone would report ``chat.messages`` as covered, silencing
+    the reconnect warning for exactly the case it exists to catch.
+
+    Unrecognised requested scopes fall back to exact matching — there is
+    nothing else to compare them by.
     """
     granted_set = set(granted or [])
     granted_levels = levels_from_scopes(granted or [])
@@ -301,6 +345,6 @@ def missing_scopes(
             continue
         key, level = owner
         have = granted_levels.get(key, LEVEL_OFF)
-        if _LEVEL_RANK[have] < _LEVEL_RANK[level]:
+        if _LEVEL_RANK[have] <= _LEVEL_RANK[level]:
             missing.append(scope)
     return missing

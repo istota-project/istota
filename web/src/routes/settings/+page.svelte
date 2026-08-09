@@ -21,6 +21,7 @@
     Select,
     type SelectOption,
   } from '$lib/components/ui';
+  import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import {
@@ -242,7 +243,36 @@
     }
   }
 
+  // The Google connect flow is a full-page round trip that lands back here
+  // with its outcome in the query string. Nothing read that parameter before,
+  // so a refused connect returned the user to a page that looked exactly as
+  // they left it — the failure was reported to no one.
+  const GOOGLE_OUTCOMES: Record<string, { message: string; notify: typeof notifyInfo }> = {
+    connected: { message: 'Google account connected.', notify: notifySuccess },
+    error: {
+      message: 'Google did not complete the connection. Try connecting again.',
+      notify: notifyError,
+    },
+    no_scopes: {
+      message:
+        'Nothing was requested, so there was nothing to connect. Choose at least one Google service first.',
+      notify: notifyWarning,
+    },
+  };
+
+  function reportGoogleOutcome() {
+    const outcome = new URLSearchParams(window.location.search).get('google');
+    if (!outcome) return;
+    const entry = GOOGLE_OUTCOMES[outcome];
+    if (entry) entry.notify(entry.message, { key: 'settings:google-connect' });
+    // Drop the parameter so a reload does not re-announce a stale outcome.
+    const url = new URL(window.location.href);
+    url.searchParams.delete('google');
+    history.replaceState(history.state, '', url);
+  }
+
   onMount(() => {
+    reportGoogleOutcome();
     void refresh();
   });
 
@@ -261,12 +291,13 @@
   // now only OAuth services with the global flag off can land there.
   //
   // OAuth cards sort to the top so they sit with the Nextcloud card rendered
-  // just above this list, which is a connect flow too — the three-line
-  // connect/disconnect cards group together instead of being split by the
-  // credential-field cards. Today that puts Google Workspace directly under
-  // Nextcloud; a future OAuth service joins the group on its own. The sort is
-  // stable, so everything else keeps the API's order, and it runs on filter()'s
-  // fresh array rather than mutating `services`.
+  // just above this list, which is a connect flow too — the account
+  // connections group together instead of being split by the credential-field
+  // cards. (They were all three-line connect/disconnect cards when this was
+  // written; the Google one is now the tallest card on the page, which changes
+  // how the grouping looks but not what it is for.) The sort is stable, so
+  // everything else keeps the API's order, and it runs on filter()'s fresh
+  // array rather than mutating `services`.
   let activeServices = $derived(
     services
       .filter((s) => s.status !== 'unavailable')

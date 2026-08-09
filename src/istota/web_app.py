@@ -944,7 +944,7 @@ async def google_callback(request: Request):
         token = await _oauth.google.authorize_access_token(request)
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e)
-        return RedirectResponse(url="/istota/?google=error", status_code=302)
+        return RedirectResponse(url="/istota/settings?google=error", status_code=302)
 
     access_token = token.get("access_token", "")
     refresh_token = token.get("refresh_token", "")
@@ -954,7 +954,7 @@ async def google_callback(request: Request):
     if not access_token or not refresh_token:
         logger.error("Google OAuth: missing tokens (access=%s, refresh=%s)",
                       bool(access_token), bool(refresh_token))
-        return RedirectResponse(url="/istota/?google=error", status_code=302)
+        return RedirectResponse(url="/istota/settings?google=error", status_code=302)
 
     import json
     expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
@@ -966,7 +966,7 @@ async def google_callback(request: Request):
             conn, user["username"], access_token, refresh_token, expiry, scopes_json,
         )
     logger.info("Google account connected for user %s", user["username"])
-    return RedirectResponse(url="/istota/?google=connected", status_code=302)
+    return RedirectResponse(url="/istota/settings?google=connected", status_code=302)
 
 
 # ============================================================================
@@ -1030,15 +1030,18 @@ def _google_granted_scopes(username: str) -> list[str] | None:
 
     Decryption-free (``db.get_google_scopes``): the display must survive a
     rotated ``ISTOTA_SECRET_KEY`` on a row that is still present.
+
+    Deliberately **not** wrapped in a swallow, unlike ``_has_google_token``.
+    ``None`` here means "no row", and the caller turns that into "Not
+    connected" — so folding a transient DB failure into the same value would
+    invite the user to redo a consent flow they do not need. A read failure
+    is a 500 the card reports as a failure to load, which is what happened.
     """
     if not _config:
         return None
-    try:
-        from . import db
-        with db.get_db(_config.db_path) as conn:
-            return db.get_google_scopes(conn, username)
-    except Exception:
-        return None
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        return db.get_google_scopes(conn, username)
 
 
 def _google_scope_selection(username: str) -> dict[str, str]:
@@ -5040,6 +5043,7 @@ def _google_status_payload(username: str) -> dict:
             "offered": [],
             "granted": [],
             "unrecognized_scopes": [],
+            "unoffered_scopes": [],
             "selection": {},
             "selection_set": False,
             "requested_scopes": [],
@@ -5053,13 +5057,32 @@ def _google_status_payload(username: str) -> dict:
     requested = google_scopes.resolve_selection(stored, ceiling)
     summary = google_scopes.summarize_granted(granted or [])
 
+    # Report the selection clamped to the current ceiling rather than as
+    # stored. An operator who narrows the ceiling after a user picked "full"
+    # leaves a stored value nothing will ever honour, and rendering it puts a
+    # level in the picker that its own option list no longer contains. The
+    # stored value is left alone — it is only overwritten if the user saves.
+    effective = google_scopes.normalize_selection(
+        stored or google_scopes.default_selection(ceiling),
+    )
+    offered = google_scopes.offered_services(ceiling)
+    max_levels = {o["service"]: o["max_level"] for o in offered}
+    for key, level in list(effective.items()):
+        ceiling_level = max_levels.get(key, google_scopes.LEVEL_OFF)
+        if google_scopes.LEVELS.index(level) > google_scopes.LEVELS.index(ceiling_level):
+            effective[key] = ceiling_level
+
     return {
         "enabled": True,
         "connected": granted is not None,
-        "offered": google_scopes.offered_services(ceiling),
+        "offered": offered,
         "granted": summary["services"],
         "unrecognized_scopes": summary["unrecognized"],
-        "selection": stored or google_scopes.default_selection(ceiling),
+        # Ceiling scopes with no service row. They are requested regardless —
+        # no picker can turn one off — so the card names them rather than
+        # asking for something it never mentioned.
+        "unoffered_scopes": google_scopes.unoffered_scopes(ceiling),
+        "selection": effective,
         "selection_set": bool(stored),
         "requested_scopes": requested,
         # Only meaningful once connected: comparing a request against an
@@ -5067,8 +5090,15 @@ def _google_status_payload(username: str) -> dict:
         "missing_scopes": (
             google_scopes.missing_scopes(requested, granted) if granted is not None else []
         ),
+        # The boilerplate Google appends to any OIDC-discovered grant is never
+        # in `requested`, so without excluding it here every such user carries
+        # a permanent "your grant is wider" banner that reconnecting can't clear.
         "extra_scopes": (
-            google_scopes.missing_scopes(granted, requested) if granted is not None else []
+            [
+                s for s in google_scopes.missing_scopes(granted, requested)
+                if s not in google_scopes.BOILERPLATE_SCOPES
+            ]
+            if granted is not None else []
         ),
     }
 
@@ -5098,6 +5128,13 @@ async def google_set_scopes(
 
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
+    if not _config.google_workspace.enabled:
+        # Nothing would ever read the value: connect is unreachable and the
+        # card renders the "not configured" state. Refuse rather than store a
+        # selection against a service this instance does not have.
+        raise HTTPException(
+            status_code=409, detail="Google Workspace is not enabled on this instance",
+        )
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
     raw = payload.get("selection")
@@ -5123,7 +5160,17 @@ async def google_set_scopes(
     requested = google_scopes.resolve_selection(
         selection, _config.google_workspace.scopes,
     )
-    granted = _google_granted_scopes(username)
+    # Advisory only, and the write has already committed — so a read failure
+    # here must not turn a successful save into a 500. (The status endpoint
+    # makes the opposite call: there the grant *is* the answer.)
+    try:
+        granted = _google_granted_scopes(username)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "google_workspace: could not read the grant for %s after saving the "
+            "selection; reporting no reconnect requirement", username, exc_info=True,
+        )
+        granted = None
     return {
         "ok": True,
         "selection": selection,

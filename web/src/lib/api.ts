@@ -746,6 +746,10 @@ export interface GoogleGrantedService {
   /** False when the grant holds only part of what that level needs — Google's
    *  consent screen lets a user deselect individual boxes. */
   complete: boolean;
+  /** Granted scopes of this service below the reported level. In the map, so
+   *  never "unrecognised"; outside the reported level's set, so they would
+   *  otherwise appear nowhere. */
+  also: string[];
 }
 
 export interface GoogleStatus {
@@ -754,6 +758,11 @@ export interface GoogleStatus {
   offered: GoogleOfferedService[];
   granted: GoogleGrantedService[];
   unrecognized_scopes: string[];
+  /** Ceiling scopes with no service row. Requested unconditionally — no picker
+   *  row can turn one off — so the card names them. */
+  unoffered_scopes: string[];
+  /** Clamped to the current ceiling, so it never names a level the picker's
+   *  own option list no longer offers. The stored value is left untouched. */
   selection: Record<string, GoogleScopeLevel>;
   /** False when the user never chose — `selection` is then the whole ceiling. */
   selection_set: boolean;

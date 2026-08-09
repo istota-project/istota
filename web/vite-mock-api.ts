@@ -1832,6 +1832,12 @@ const GOOGLE_SCOPES: Record<string, { readonly: string[]; full: string[] }> = {
 
 const LEVEL_RANK: Record<string, number> = { off: 0, readonly: 1, full: 2 };
 
+const GOOGLE_SCOPE_OWNER: Record<string, string> = Object.fromEntries(
+  Object.entries(GOOGLE_SCOPES).flatMap(([svc, m]) =>
+    [...m.readonly, ...m.full].map((scope) => [scope, svc]),
+  ),
+);
+
 // The user's stored selection ({} = unset = the whole ceiling), and the scopes
 // Google "granted" — seeded narrower than the ceiling so the reconnect-needed
 // banner is reachable without touching anything.
@@ -1867,6 +1873,9 @@ function googleLevels(scopes: string[]): Record<string, string> {
   return levels;
 }
 
+// Mirrors google_scopes.missing_scopes: only a STRICTLY higher granted level
+// counts as cover, so a partly granted multi-scope service (Chat) still
+// reports its shortfall instead of reading as satisfied.
 function googleMissing(requested: string[], granted: string[]): string[] {
   const levels = googleLevels(granted);
   return requested.filter((scope) => {
@@ -1874,9 +1883,9 @@ function googleMissing(requested: string[], granted: string[]): string[] {
     for (const svc of GOOGLE_SERVICES) {
       const map = GOOGLE_SCOPES[svc.service];
       if (map.readonly.includes(scope))
-        return LEVEL_RANK[levels[svc.service] ?? 'off'] < LEVEL_RANK.readonly;
+        return LEVEL_RANK[levels[svc.service] ?? 'off'] <= LEVEL_RANK.readonly;
       if (map.full.includes(scope))
-        return LEVEL_RANK[levels[svc.service] ?? 'off'] < LEVEL_RANK.full;
+        return LEVEL_RANK[levels[svc.service] ?? 'off'] <= LEVEL_RANK.full;
     }
     return true;
   });
@@ -1902,9 +1911,15 @@ function mockGoogleStatus() {
         level,
         scopes: held,
         complete: held.length === wanted.length,
+        also: (granted ?? []).filter(
+          (x) => !wanted.includes(x) && GOOGLE_SCOPE_OWNER[x] === s.service,
+        ),
       };
     }),
     unrecognized_scopes: (granted ?? []).filter((s) => !known.has(s)),
+    // The mock's ceiling is fully mapped, so this is always empty here; it is
+    // emitted anyway so the client renders the same shape either way.
+    unoffered_scopes: [],
     selection: Object.keys(selection).length ? selection : googleDefaultSelection(),
     selection_set: Object.keys(selection).length > 0,
     requested_scopes: requested,

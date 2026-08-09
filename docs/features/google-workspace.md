@@ -129,4 +129,4 @@ Prefix every scope with `https://www.googleapis.com`. Gmail's write level is `gm
 
 Chat needs both a spaces scope and a messages scope at each level, and appears in no default configuration — the skill documents `chat spaces` verbs that need it added to `scopes` (and the Chat API enabled in the Cloud project) before they work.
 
-A scope outside this table still works if you put it in `scopes`: it is simply not offered in the picker, and a grant carrying one is displayed verbatim under "not recognised as a service".
+A scope outside this table still works if you put it in `scopes`. It gets no picker row, so no user can decline it — which is exactly why it is **requested unconditionally**, on top of whatever they did choose, and named on the card as something the instance always asks for. That is what keeps narrow scopes (`drive.file`, `gmail.send`, `calendar.events`) working, and it is why an entirely unmapped `scopes` list still connects. A grant carrying an unmapped scope is displayed verbatim under "not recognised as a service".

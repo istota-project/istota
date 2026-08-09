@@ -179,10 +179,52 @@ class TestResolveSelection:
         ceiling = [DOCS_RO, DRIVE_RO, GMAIL_RO]
         assert gs.resolve_selection({}, ceiling) == [DRIVE_RO, GMAIL_RO, DOCS_RO]
 
-    def test_unrecognised_ceiling_scopes_are_dropped(self):
-        """The map is the authority for what a picker can request."""
+    def test_unrecognised_ceiling_scopes_are_requested_verbatim(self):
+        """No picker row can turn one off, so its absence is not a choice."""
         resolved = gs.resolve_selection({}, [DRIVE_RO, "https://example.test/x"])
-        assert resolved == [DRIVE_RO]
+        assert resolved == [DRIVE_RO, "https://example.test/x"]
+
+    def test_unrecognised_ceiling_scopes_survive_a_narrowing_selection(self):
+        resolved = gs.resolve_selection(
+            {"drive": "off"}, [DRIVE_RO, "https://example.test/x"],
+        )
+        assert resolved == ["https://example.test/x"]
+
+    def test_an_entirely_unmapped_ceiling_still_resolves(self):
+        """An operator running narrow scopes must not lose connect outright."""
+        ceiling = [
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/drive.file",
+        ]
+        assert gs.resolve_selection({}, ceiling) == ceiling
+
+    def test_openid_in_the_ceiling_survives(self):
+        """authlib mints the OIDC nonce only when the resolved scope has it."""
+        assert "openid" in gs.resolve_selection({}, [DRIVE_RO, "openid"])
+
+    def test_unrecognised_scopes_are_deduplicated(self):
+        resolved = gs.resolve_selection({}, ["https://example.test/x"] * 2)
+        assert resolved == ["https://example.test/x"]
+
+    def test_a_mapped_scope_is_never_double_counted(self):
+        """The passthrough must not re-append something the picker emitted."""
+        assert gs.resolve_selection({}, [DRIVE_RO, DRIVE_RO]) == [DRIVE_RO]
+
+
+class TestUnofferedScopes:
+    def test_lists_ceiling_scopes_the_map_does_not_know(self):
+        assert gs.unoffered_scopes([DRIVE_RO, "https://example.test/x"]) == [
+            "https://example.test/x",
+        ]
+
+    def test_keeps_the_operator_order(self):
+        assert gs.unoffered_scopes(["b://2", DRIVE_RO, "a://1"]) == ["b://2", "a://1"]
+
+    def test_deduplicates(self):
+        assert gs.unoffered_scopes(["x://1", "x://1"]) == ["x://1"]
+
+    def test_empty_when_the_ceiling_is_fully_mapped(self):
+        assert gs.unoffered_scopes(READONLY_FIVE) == []
 
     def test_multi_scope_level_expands(self):
         chat = gs.service("chat")
@@ -226,6 +268,19 @@ class TestSummarizeGranted:
         summary = gs.summarize_granted(list(chat.readonly))
         assert summary["services"][0]["complete"] is True
 
+    def test_a_lower_level_scope_of_the_same_service_is_still_shown(self):
+        """It is in the map, so it never reaches `unrecognized`, and it is not
+        in the reported level's tuple — without `also` it appears nowhere."""
+        chat = gs.service("chat")
+        summary = gs.summarize_granted([chat.full[0], chat.readonly[1]])
+        row = summary["services"][0]
+        assert row["level"] == "full"
+        assert row["also"] == [chat.readonly[1]]
+        assert summary["unrecognized"] == []
+
+    def test_also_is_empty_for_a_clean_grant(self):
+        assert gs.summarize_granted([DRIVE_RO])["services"][0]["also"] == []
+
     def test_empty_grant(self):
         assert gs.summarize_granted([]) == {"services": [], "unrecognized": []}
 
@@ -251,6 +306,20 @@ class TestMissingScopes:
 
     def test_readonly_grant_does_not_satisfy_a_full_request(self):
         assert gs.missing_scopes([DRIVE_FULL], [DRIVE_RO]) == [DRIVE_FULL]
+
+    def test_a_partial_multi_scope_grant_reports_the_shortfall(self):
+        """Only a strictly higher granted level counts as cover; at the same
+        level the scope has to be there by name."""
+        chat = gs.service("chat")
+        assert gs.missing_scopes(list(chat.full), [chat.full[0]]) == [chat.full[1]]
+
+    def test_a_full_grant_still_covers_a_multi_scope_readonly_request(self):
+        chat = gs.service("chat")
+        assert gs.missing_scopes(list(chat.readonly), list(chat.full)) == []
+
+    def test_a_complete_multi_scope_grant_reports_nothing(self):
+        chat = gs.service("chat")
+        assert gs.missing_scopes(list(chat.full), list(chat.full)) == []
 
     def test_nothing_missing(self):
         assert gs.missing_scopes(READONLY_FIVE, READONLY_FIVE) == []

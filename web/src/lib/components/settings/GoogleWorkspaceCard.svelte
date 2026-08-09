@@ -88,6 +88,14 @@
     () => new Map((status?.granted ?? []).map((g) => [g.service, g])),
   );
 
+  // Connecting with an empty request sends the user to a consent screen that
+  // grants nothing; the server declines it, so the button should too. Derived
+  // from the *saved* request, since that is what a connect would carry — an
+  // unsaved pick has not reached the server.
+  let nothingRequested = $derived.by(
+    () => !!status?.enabled && status.requested_scopes.length === 0,
+  );
+
   function setLevel(service: string, level: string) {
     pending = { ...pending, [service]: level as GoogleScopeLevel };
   }
@@ -175,6 +183,15 @@
               {#if !g.complete}
                 <span class="caption">partial — some boxes were deselected at consent</span>
               {/if}
+              {#if g.also.length > 0}
+                <!-- A scope of the same service below the level reported: in
+                     the map, so never "unrecognised", and not in the reported
+                     level's set, so it would otherwise show nowhere. -->
+                <span class="caption">
+                  also: {#each g.also as s, i (s)}{#if i > 0},
+                    {/if}<code>{s}</code>{/each}
+                </span>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -205,6 +222,16 @@
     {/if}
 
     <h3 class="micro-label">What to ask for</h3>
+    {#if status.unoffered_scopes.length > 0}
+      <!-- Ceiling scopes with no service row. They are requested regardless —
+           no picker row can turn one off — so naming them is the difference
+           between an informed consent and a surprise on Google's screen. -->
+      <p class="caption">
+        This instance also always requests, with no per-service control:
+        {#each status.unoffered_scopes as s, i (s)}{#if i > 0},
+          {/if}<code>{s}</code>{/each}
+      </p>
+    {/if}
     {#each status.offered as svc (svc.service)}
       {@const held = grantedByService.get(svc.service)}
       <SettingsField
@@ -230,16 +257,24 @@
 
     <div class="actions">
       {#if status.connected}
-        <Button variant="secondary" onclick={connect} disabled={busy}>Reconnect</Button>
+        <Button variant="secondary" onclick={connect} disabled={busy || nothingRequested}>
+          Reconnect
+        </Button>
         <Button variant="ghost" onclick={() => (confirmingDisconnect = true)} disabled={busy}>
           Disconnect
         </Button>
       {:else}
-        <Button variant="primary" onclick={connect} disabled={busy || !status.enabled}>
+        <Button variant="primary" onclick={connect} disabled={busy || nothingRequested}>
           {busy ? 'Connecting…' : 'Connect'}
         </Button>
       {/if}
     </div>
+    {#if nothingRequested}
+      <!-- The server refuses this connect too, but it refuses it after a
+           full-page round trip; saying so here is the difference between a
+           disabled button and a page that appears to have done nothing. -->
+      <p class="caption">Choose at least one service before connecting.</p>
+    {/if}
   {/if}
 
   {#if error}

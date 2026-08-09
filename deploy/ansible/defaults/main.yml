@@ -774,6 +774,11 @@ istota_google_workspace_client_secret: ""
 # option to that service's picker. Chat is offered by no default scope, so the
 # skill's documented `chat spaces` verbs need it added here first.
 #
+# A scope outside those pairs (a narrow one like drive.file / gmail.send, or
+# openid) gets no picker row, so no user can decline it — which is why it is
+# requested unconditionally on top of whatever they did choose, and named on the
+# card as something this instance always asks for.
+#
 # Changing this list never rewrites an existing grant — nothing revalidates one
 # at startup. A user keeps whatever they consented to until they reconnect, and
 # the settings card shows the difference.

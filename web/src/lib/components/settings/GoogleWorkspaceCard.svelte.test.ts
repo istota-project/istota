@@ -5,8 +5,10 @@
  * longer matches what a reconnect would ask for.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import type { GoogleStatus } from '$lib/api';
+import { settingsSave } from '$lib/stores/settingsSave.svelte';
 
 const api = vi.hoisted(() => ({
   getGoogleStatus: vi.fn(),
@@ -31,9 +33,10 @@ function status(over: Partial<GoogleStatus> = {}): GoogleStatus {
     ],
     granted: [],
     unrecognized_scopes: [],
+    unoffered_scopes: [],
     selection: { drive: 'full', gmail: 'readonly', chat: 'off' },
     selection_set: false,
-    requested_scopes: [],
+    requested_scopes: [DRIVE_RO],
     missing_scopes: [],
     extra_scopes: [],
     ...over,
@@ -77,6 +80,7 @@ describe('GoogleWorkspaceCard', () => {
             level: 'readonly',
             scopes: [DRIVE_RO],
             complete: true,
+            also: [],
           },
         ],
       }),
@@ -90,7 +94,14 @@ describe('GoogleWorkspaceCard', () => {
       status({
         connected: true,
         granted: [
-          { service: 'chat', label: 'Chat', level: 'readonly', scopes: [], complete: false },
+          {
+            service: 'chat',
+            label: 'Chat',
+            level: 'readonly',
+            scopes: [],
+            complete: false,
+            also: [],
+          },
         ],
       }),
     );
@@ -157,5 +168,119 @@ describe('GoogleWorkspaceCard', () => {
     api.getGoogleStatus.mockRejectedValue(new Error('boom'));
     render(GoogleWorkspaceCard, {});
     expect(await screen.findByText('boom')).toBeInTheDocument();
+  });
+
+  it('shows a granted scope of a lower level rather than hiding it', async () => {
+    await mount(
+      status({
+        connected: true,
+        granted: [
+          {
+            service: 'chat',
+            label: 'Chat',
+            level: 'full',
+            scopes: ['https://www.googleapis.com/auth/chat.spaces'],
+            complete: false,
+            also: ['https://www.googleapis.com/auth/chat.messages.readonly'],
+          },
+        ],
+      }),
+    );
+    expect(
+      await screen.findByText('https://www.googleapis.com/auth/chat.messages.readonly'),
+    ).toBeInTheDocument();
+  });
+
+  it('names the ceiling scopes no picker row covers', async () => {
+    await mount(status({ unoffered_scopes: ['https://www.googleapis.com/auth/gmail.send'] }));
+    expect(
+      await screen.findByText('https://www.googleapis.com/auth/gmail.send'),
+    ).toBeInTheDocument();
+  });
+
+  it('withholds Connect when the saved selection would request nothing', async () => {
+    await mount(status({ requested_scopes: [] }));
+    expect(await screen.findByRole('button', { name: 'Connect' })).toBeDisabled();
+    expect(screen.getByText('Choose at least one service before connecting.')).toBeInTheDocument();
+  });
+
+  it('withholds Reconnect on the same grounds', async () => {
+    await mount(status({ connected: true, requested_scopes: [] }));
+    expect(await screen.findByRole('button', { name: 'Reconnect' })).toBeDisabled();
+  });
+
+  describe('saving the selection', () => {
+    /**
+     * The card owns no button — it registers with the app bar's shared Save,
+     * which asks only the contributors holding edits. So a save test has to
+     * make the picker dirty first, through the control the user uses.
+     */
+    async function pickLevel(field: string, optionLabel: string) {
+      const trigger = await screen.findByLabelText(field);
+      await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+      await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+      await fireEvent.click(trigger);
+      const option = await screen.findByRole('option', { name: optionLabel });
+      await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
+      await fireEvent.click(option);
+    }
+
+    async function headerSave() {
+      const aggregate = get(settingsSave);
+      expect(aggregate).not.toBeNull();
+      await aggregate!.save();
+    }
+
+    it('is not dirty until a level actually changes', async () => {
+      await mount(status());
+      expect(get(settingsSave)?.dirty).toBe(false);
+    });
+
+    it('goes dirty once a level changes', async () => {
+      await mount(status());
+      await pickLevel('Drive access level', 'Read-only');
+      await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
+    });
+
+    it('writes the pending selection and reports a needed reconnect', async () => {
+      await mount(status({ connected: true }));
+      api.saveGoogleScopes.mockResolvedValue({
+        ok: true,
+        selection: { drive: 'readonly', gmail: 'readonly', chat: 'off' },
+        requested_scopes: [DRIVE_RO],
+        reconnect_required: true,
+      });
+      await pickLevel('Drive access level', 'Read-only');
+      await headerSave();
+      expect(api.saveGoogleScopes).toHaveBeenCalledWith({
+        drive: 'readonly',
+        gmail: 'readonly',
+        chat: 'off',
+      });
+      expect(
+        await screen.findByText(/Reconnect your Google account to grant the new access/i),
+      ).toBeInTheDocument();
+    });
+
+    it('says only "Saved." when the existing grant already covers it', async () => {
+      await mount(status({ connected: true }));
+      api.saveGoogleScopes.mockResolvedValue({
+        ok: true,
+        selection: { drive: 'readonly', gmail: 'readonly', chat: 'off' },
+        requested_scopes: [DRIVE_RO],
+        reconnect_required: false,
+      });
+      await pickLevel('Drive access level', 'Read-only');
+      await headerSave();
+      expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    });
+
+    it('reports a save failure against the card', async () => {
+      await mount(status());
+      api.saveGoogleScopes.mockRejectedValue(new Error('nope'));
+      await pickLevel('Drive access level', 'Read-only');
+      await headerSave();
+      expect(await screen.findByText('nope')).toBeInTheDocument();
+    });
   });
 });
