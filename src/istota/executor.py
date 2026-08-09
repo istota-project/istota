@@ -2548,7 +2548,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     utc_now_str = user_now.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Build admin-sensitive sections
-    db_path_line = f"Database path: {config.db_path}" if is_admin else "Database path: (restricted)"
+    # The path is still stated for admins (operator tooling refers to it), but
+    # never bare: an unqualified "Database path: …" line three lines above the
+    # rules reads as an affordance, and is what invited the hand-rolled DB poll
+    # in ISSUE-237. The constraint travels with the fact.
+    db_path_line = (
+        f"Database path: {config.db_path} (skill CLIs only — never open this file)"
+        if is_admin else "Database path: (restricted)"
+    )
 
     # Explicit privileges line so admin-gated capabilities (subtasks, shared-KV
     # writes, DB access) don't have to be inferred from indirect signals or
@@ -2565,7 +2572,9 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
-3. Do NOT write to the SQLite database directly (e.g. via sqlite3 CLI or Python sqlite3 module). The database is read-only in your environment. All database modifications are handled by the skill CLI commands (e.g. `istota-skill memory_search`) or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
+3. Never open the SQLite database file directly — not to write, and not to read (no sqlite3 CLI, no Python sqlite3 module, no `immutable=1`). Depending on the deployment an attempted open may fail outright, may fail in a way that reads as a broken command rather than a refusal, or may succeed and hand you every user's rows; none of those is a licence to use it. Whether it happens to open is not the question. Every read goes through a skill CLI (e.g. `istota-skill kv get`, `istota-skill tasks status`), which returns only your own data; every write goes through one, or via deferred JSON files in $ISTOTA_DEFERRED_DIR.
+3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs, subtasks or file polling; subtasks and jobs are handoffs and never return a value to you. If nothing covers it, say what is missing instead of improvising.
+3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 5. Never edit or create files in your own source directory.
 6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
@@ -2583,7 +2592,9 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
    - Emails to the user's own addresses ({', '.join(user_email_addresses) if user_email_addresses else 'none configured'}) do NOT need confirmation
    - Emails to external addresses DO need confirmation
    - Modifying calendars, deleting files, sharing externally need confirmation
-3. Do NOT write to the SQLite database directly. All database modifications are handled by the skill CLI commands or the bot's scheduler.
+3. Never open the SQLite database file directly — not to write, and not to read. Whether an open happens to succeed is not the question; that file holds every user's data and none of it is yours to read this way. All database access, read and write, goes through the skill CLI commands, which return only your own data, or through the bot's scheduler.
+3a. When you need something your environment can't do — a credentialed request, a network call the allowlist blocks, a read of system state — the answer is a skill CLI subcommand. `istota-skill` runs with credentials and network access this task does not have, and hands you the value synchronously. Check `istota-skill <name> --help` for one before building a workaround out of scheduled jobs or file polling; a scheduled job is a handoff and never returns a value to you. If nothing covers it, say what is missing instead of improvising.
+3b. Only wait on out-of-band work when it plausibly finishes within about two minutes — you hold a worker slot for the whole wait, and a scheduled job cannot start before the next minute boundary. When you do wait, never redirect the probe's stderr: `2>/dev/null` makes a broken command indistinguishable from "not ready yet" and runs the loop to its full length. Abort after two consecutive non-zero exits, and cap the total wait. If the work might take longer, hand off and answer in a later turn.
 4. After creating or writing a file, verify it exists on the filesystem (e.g. check with ls or Read). Do not assume a write succeeded.
 5. Never edit or create files in your own source directory.
 6. Respond directly with your answer — your final output will be sent to the user. While you're working (between tool calls), keep commentary minimal — brief status notes are fine, but save substantive analysis and detailed results for your final response. Intermediate text may be shown to the user as progress updates.
@@ -3147,7 +3158,7 @@ def execute_task(
 
     # Build CLI skills list from skill index
     from .skills._loader import format_cli_skills
-    cli_skills_text = format_cli_skills(skill_index)
+    cli_skills_text = format_cli_skills(skill_index, is_admin=is_admin)
 
     # Build prompt
     # Detect confirmed tasks — pass their previous output as confirmation context

@@ -11,6 +11,7 @@ from istota.skills._loader import (
     compute_skills_fingerprint,
     eligible_skill_names,
     expand_companions,
+    format_cli_skills,
     get_skill_availability,
     load_skill_index,
     load_skills,
@@ -1897,3 +1898,40 @@ class TestExpandCompanions:
         # A name with no entry in the index contributes no companions.
         result = expand_companions(["nonexistent"], self._index())
         assert result == []
+
+
+class TestFormatCliSkills:
+    def _index(self) -> dict[str, SkillMeta]:
+        return {
+            "kv": SkillMeta(name="kv", description="Key-value store", cli=True),
+            "notes": SkillMeta(name="notes", description="Notes"),
+            "tasks": SkillMeta(
+                name="tasks", description="Task state", cli=True, admin_only=True,
+            ),
+        }
+
+    def test_lists_cli_skills_only(self):
+        text = format_cli_skills(self._index(), is_admin=True)
+        assert "istota-skill kv" in text
+        assert "istota-skill notes" not in text
+
+    def test_admin_only_cli_skill_hidden_from_non_admin(self):
+        # `admin_only` gates eager selection, companion expansion and the menu,
+        # but this list is built straight off `meta.cli` — so without the gate
+        # an admin-only CLI is advertised in every non-admin's prompt, and the
+        # skill proxy's allowed_skills (every cli:true skill) would run it.
+        text = format_cli_skills(self._index(), is_admin=False)
+        assert "istota-skill tasks" not in text
+        assert "istota-skill kv" in text
+
+    def test_admin_sees_admin_only_cli_skill(self):
+        text = format_cli_skills(self._index(), is_admin=True)
+        assert "istota-skill tasks" in text
+
+    def test_empty_when_no_visible_cli_skills(self):
+        index = {
+            "tasks": SkillMeta(
+                name="tasks", description="Task state", cli=True, admin_only=True,
+            ),
+        }
+        assert format_cli_skills(index, is_admin=False) == ""

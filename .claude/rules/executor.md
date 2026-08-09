@@ -89,7 +89,19 @@ def build_prompt(
 |---|---|---|
 | Core | `ISTOTA_TASK_ID` | `str(task.id)` |
 | Core | `ISTOTA_USER_ID` | `task.user_id` |
-| Core | `ISTOTA_DB_PATH` | `str(config.db_path)` |
+| Core | `ISTOTA_DB_PATH` | `str(config.db_path)` — **admin tasks only** on the LLM path (`executor.py:3237`); `scheduler._execute_command_task` / `_execute_skill_task` set it unconditionally. It is also the base env the skill proxy hands a skill CLI, so every framework-DB-reading CLI (`kv` reads, `memory_search`, `tasks`) errors for a non-admin LLM task. **Do not treat the sandbox as a read barrier** — see below. |
+
+**Raw DB reads from the sandbox: not blocked, and never were.** ISSUE-237 was filed on the belief that the framework DB is unreadable from inside the sandbox. It is not reliably so, and no code decides that it should be. `build_bwrap_cmd` `--ro-bind`s the DB for admins (`executor.py:1365-1380`) and `--ro-bind-try`s the `-wal`/`-shm` sidecars, so the read outcome depends on which sidecars existed at bwrap-build time:
+
+| sidecar state at task start | in-sandbox read |
+|---|---|
+| `-wal` **and** `-shm` both present | **succeeds — returns live rows** |
+| `-wal` present, `-shm` absent | fails `unable to open database file` |
+| both absent (checkpointed) | fails `attempt to write a readonly database` |
+
+State 1 is the common one on a live daemon: the 0.5s dispatch scan, worker heartbeats and the web unit all hold the DB open. On top of that, `security.sandbox_admin_db_write` (operator opt-in, default off) makes the bind read-write, and the standalone local install (`setup_wizard.py`) ships `sandbox_enabled = false` + `skill_proxy_enabled = false`, so there is no sandbox and no proxy at all. `?immutable=1` opens it in every shape.
+
+Consequences for anything written into the prompt: the "you cannot read the DB" framing is **falsifiable in one command**, and the raw read it invites is scoped to nobody — it returns every user's rows and the `secrets` table, which is exactly what the per-user skill surfaces exist to prevent. The prompt rules therefore state the prohibition without the mechanism (`build_prompt` rule 3), and the sandbox is treated as defence in depth rather than the boundary. The boundary is that reads go through skill CLIs that scope by `ISTOTA_USER_ID`.
 | Core | `ISTOTA_CONVERSATION_TOKEN` | `task.conversation_token` |
 | Core | `ISTOTA_DEFERRED_DIR` | `str(user_temp_dir)` — always set, for deferred DB writes |
 | Core | `ISTOTA_EXPERIMENTAL_FEATURES` | CSV of `config.experimental.features`. Read by `experimental.enabled_features_from_env()` and `@requires_feature`. Propagated by every subprocess builder: `executor.execute_task` (LLM path), `scheduler._execute_skill_task`, `scheduler._execute_command_task`, `heartbeat._check_shell_command`. Not credential-flavored — passes through the skill proxy and `build_stripped_env` untouched. |
