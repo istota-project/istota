@@ -19,8 +19,6 @@ import logging
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from istota.config import Config, EmailConfig as AppEmailConfig
 from istota.email_support import cleanup_old_emails
 from istota.skills.email import (
@@ -28,16 +26,6 @@ from istota.skills.email import (
     EmailConfig,
     delete_emails_before,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_warning_latch():
-    """The fallback warning is latched per process; tests must not inherit it."""
-    from istota.skills import email as email_skill
-
-    email_skill._expunge_warned_hosts.clear()
-    yield
-    email_skill._expunge_warned_hosts.clear()
 
 
 def _cfg(**kw):
@@ -50,14 +38,26 @@ def _cfg(**kw):
     return EmailConfig(**base)
 
 
-def _mailbox(uids, *, uidplus: bool):
+def _mailbox(uids, *, uidplus: bool, pre_auth_only: bool = False):
+    """A mailbox double.
+
+    ``pre_auth_only`` models the shape that actually ships: the capability
+    tuple ``imaplib`` cached from the greeting lacks UIDPLUS, and only a live
+    ``CAPABILITY`` command reports it. See ``TestCapabilityAcquisition``.
+    """
     mailbox = MagicMock()
     mailbox.__enter__ = MagicMock(return_value=mailbox)
     mailbox.__exit__ = MagicMock(return_value=False)
     mailbox.uids.return_value = list(uids)
-    mailbox.client.capabilities = (
-        ("IMAP4REV1", "UIDPLUS") if uidplus else ("IMAP4REV1", "IDLE")
-    )
+
+    advertised = ("IMAP4REV1", "UIDPLUS") if uidplus else ("IMAP4REV1", "IDLE")
+    if pre_auth_only:
+        mailbox.client.capabilities = ("IMAP4REV1",)
+        mailbox.client.capability.return_value = ("OK", [" ".join(advertised).encode()])
+    else:
+        mailbox.client.capabilities = advertised
+        mailbox.client.capability.return_value = ("NO", [b"not now"])
+
     mailbox.client.uid.return_value = ("OK", [b""])
     return mailbox
 
@@ -68,6 +68,62 @@ def _uid_calls(mailbox, command):
         call for call in mailbox.client.uid.call_args_list
         if call[0][0].upper() == command
     ]
+
+
+class TestCapabilityAcquisition:
+    """UIDPLUS has to be read from the *post-authentication* capability list.
+
+    ``imaplib`` fills ``client.capabilities`` once, from the greeting, and
+    nothing refreshes it: ``imaplib.login`` does not, and imap-tools' ``login``
+    bypasses ``imaplib.login`` entirely (``_simple_command('LOGIN', …)`` plus a
+    hand-set ``client.state``). RFC 3501 §7.2.1 lets the list change on
+    authentication, and Dovecot and Gmail both use that — their pre-auth set
+    has no UIDPLUS in it. Reading only the cached tuple therefore answers "no
+    UIDPLUS" for most servers that have it, silently reverting every delete to
+    a folder-wide EXPUNGE.
+    """
+
+    def test_uidplus_advertised_only_after_login_is_still_found(self):
+        from istota.skills.email import _supports_uid_expunge
+
+        mailbox = _mailbox([], uidplus=True, pre_auth_only=True)
+        assert "UIDPLUS" not in mailbox.client.capabilities, "precondition"
+
+        assert _supports_uid_expunge(mailbox, _cfg()) is True
+        mailbox.client.capability.assert_called()
+
+    def test_a_post_auth_only_server_gets_the_targeted_sweep(self):
+        mailbox = _mailbox(["1", "2"], uidplus=True, pre_auth_only=True)
+
+        with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+            assert delete_emails_before(date(2026, 1, 1), config=_cfg()) == 2
+
+        assert len(_uid_calls(mailbox, "EXPUNGE")) == 1
+        mailbox.delete.assert_not_called()
+
+    def test_a_server_advertising_it_only_pre_auth_is_believed(self):
+        """The cached tuple is a promise the server already made."""
+        from istota.skills.email import _supports_uid_expunge
+
+        mailbox = _mailbox([], uidplus=False, pre_auth_only=False)
+        mailbox.client.capabilities = ("IMAP4REV1", "UIDPLUS")
+
+        assert _supports_uid_expunge(mailbox, _cfg()) is True
+
+    def test_neither_list_naming_it_falls_back(self):
+        from istota.skills.email import _supports_uid_expunge
+
+        mailbox = _mailbox([], uidplus=False, pre_auth_only=True)
+        assert _supports_uid_expunge(mailbox, _cfg()) is False
+
+    def test_an_unreadable_capability_response_is_not_a_crash(self):
+        from istota.skills.email import _supports_uid_expunge
+
+        mailbox = _mailbox([], uidplus=False)
+        mailbox.client.capabilities = None
+        mailbox.client.capability.side_effect = OSError("connection reset")
+
+        assert _supports_uid_expunge(mailbox, _cfg()) is False
 
 
 class TestTargetedExpunge:
@@ -167,6 +223,115 @@ class TestFolderWideFallback:
         mailbox.expunge.assert_not_called()
         mailbox.delete.assert_not_called()
 
+    def test_the_warning_is_not_logged_when_there_is_nothing_to_delete(self, caplog):
+        """Every install would otherwise report a fallback it never took."""
+        mailbox = _mailbox([], uidplus=False)
+
+        with caplog.at_level(logging.WARNING, logger="istota.skills.email"):
+            with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+                assert delete_emails_before(date(2026, 1, 1), config=_cfg()) == 0
+
+        assert not [r for r in caplog.records if "UIDPLUS" in r.getMessage()]
+
+
+class TestDeletedFlagRollback:
+    """A refused expunge has to be a genuine no-op, not a hidden mailbox."""
+
+    def _store_ok_expunge_refused(self, mailbox):
+        seen = []
+
+        def _uid(cmd, *args):
+            seen.append((cmd.upper(), args))
+            if cmd.upper() == "EXPUNGE":
+                return ("NO", [b"denied"])
+            return ("OK", [b""])
+
+        mailbox.client.uid.side_effect = _uid
+        return seen
+
+    def test_the_deleted_flag_is_rolled_back_when_the_expunge_is_refused(self):
+        """The STORE already landed; leaving it hides the mail in most clients
+        and arms it for the next plain EXPUNGE any client sends."""
+        mailbox = _mailbox(["7", "8"], uidplus=True)
+        seen = self._store_ok_expunge_refused(mailbox)
+
+        with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+            assert delete_emails_before(date(2026, 1, 1), config=_cfg()) == 0
+
+        stores = [call for call in seen if call[0] == "STORE"]
+        assert len(stores) == 2, "one to flag, one to roll back"
+        assert stores[0][1] == ("7,8", "+FLAGS", r"(\Deleted)")
+        assert stores[1][1] == ("7,8", "-FLAGS", r"(\Deleted)")
+
+    def test_rollback_also_runs_for_the_single_message_delete(self):
+        from istota.skills.email import delete_email
+
+        mailbox = _mailbox([], uidplus=True)
+        seen = self._store_ok_expunge_refused(mailbox)
+
+        with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+            assert delete_email("42", config=_cfg()) is False
+
+        stores = [call for call in seen if call[0] == "STORE"]
+        assert [c[1][1] for c in stores] == ["+FLAGS", "-FLAGS"]
+
+    def test_a_failed_rollback_is_logged_and_the_original_error_wins(self, caplog):
+        mailbox = _mailbox(["7"], uidplus=True)
+
+        def _uid(cmd, *args):
+            if cmd.upper() == "EXPUNGE":
+                return ("NO", [b"denied"])
+            if args[1] == "-FLAGS":
+                raise OSError("connection reset")
+            return ("OK", [b""])
+
+        mailbox.client.uid.side_effect = _uid
+
+        with caplog.at_level(logging.DEBUG, logger="istota.skills.email"):
+            with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+                assert delete_emails_before(date(2026, 1, 1), config=_cfg()) == 0
+
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "could not be rolled back" in messages
+
+
+class TestUidValidation:
+    """The raw path lost the shape check `mailbox.delete` gave it for free."""
+
+    def test_a_uid_carrying_crlf_is_refused_before_it_reaches_the_wire(self):
+        """`imaplib` concatenates str args into the command with no escaping,
+        so an embedded CRLF would be a second IMAP command."""
+        from istota.skills.email import delete_email
+
+        mailbox = _mailbox([], uidplus=True)
+
+        with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+            assert delete_email("1\r\nX LOGOUT", config=_cfg()) is False
+
+        assert _uid_calls(mailbox, "STORE") == []
+        assert _uid_calls(mailbox, "EXPUNGE") == []
+
+    def test_a_non_numeric_uid_is_refused(self):
+        from istota.skills.email import delete_email
+
+        mailbox = _mailbox([], uidplus=True)
+
+        with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+            assert delete_email("../../etc/passwd", config=_cfg()) is False
+
+        assert _uid_calls(mailbox, "STORE") == []
+
+    def test_an_empty_batch_sends_no_command(self):
+        """`UID STORE  +FLAGS (\\Deleted)` with an empty set is a BAD reply."""
+        from istota.skills.email import _delete_uid_batch
+
+        mailbox = _mailbox([], uidplus=True)
+        _delete_uid_batch(mailbox, [], targeted=True)
+        _delete_uid_batch(mailbox, [], targeted=False)
+
+        assert mailbox.client.uid.call_args_list == []
+        mailbox.delete.assert_not_called()
+
 
 class TestSingleMessageDelete:
     """``delete_email`` is the agent-reachable verb and shares the hazard."""
@@ -224,6 +389,22 @@ class TestBoundedSweep:
         for call in _uid_calls(mailbox, "EXPUNGE"):
             touched.extend(call[0][1].split(","))
         assert touched == uids[:2000], "SEARCH returns ascending UIDs; oldest first"
+
+    def test_the_bound_takes_the_oldest_even_if_search_returns_unsorted(self):
+        """RFC 3501 does not specify SEARCH result ordering, and the UIDs are
+        strings — so a plain `sorted()` would order "10" before "9"."""
+        mailbox = _mailbox(["30", "4", "100", "9", "21"], uidplus=True)
+
+        with patch("istota.skills.email._get_mailbox", return_value=mailbox):
+            deleted = delete_emails_before(
+                date(2026, 1, 1), config=_cfg(), max_deletes=3,
+            )
+
+        assert deleted == 3
+        touched = []
+        for call in _uid_calls(mailbox, "EXPUNGE"):
+            touched.extend(call[0][1].split(","))
+        assert touched == ["4", "9", "21"]
 
     def test_bound_of_zero_sweeps_everything(self):
         uids = [str(i) for i in range(5000)]

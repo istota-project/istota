@@ -29,13 +29,15 @@ logger = logging.getLogger("istota.skills.email")
 _DEFAULT_FOLDER = "INBOX"
 _SCOPES = ("mine", "shared", "all")
 
-# Most messages one retention sweep will remove. The whole sweep runs under a
-# single IMAP socket timeout, so an unbounded pass over a first-run backlog
-# trips it and logs a failure on every cleanup tick until it converges. Bounded,
-# a tick does work it can finish and the next one continues — and since cleanup
-# runs on `briefing_check_interval` (60s), even a six-figure backlog drains in
-# under a day. Fixed rather than a config knob: it only governs how fast a
-# one-time backlog clears, and the steady state never reaches it.
+# Most messages one retention sweep will remove. `run_cleanup_checks` calls the
+# sweep synchronously on the scheduler's dispatch loop, so its wall clock is
+# time no room's tasks are being dispatched and the stall watchdog is counting
+# against. An unbounded first-run backlog is an unbounded pass there. Bounded, a
+# tick costs a predictable ~20 IMAP round trips and the next one continues —
+# and since cleanup runs on `briefing_check_interval` (60s), even a six-figure
+# backlog drains in under a day. Fixed rather than a config knob: it only
+# governs how fast a one-time backlog clears, and the steady state never
+# reaches it.
 _MAX_DELETES_PER_SWEEP = 2000
 
 # Hosts already warned about for a missing UIDPLUS capability. A static fact
@@ -51,6 +53,10 @@ _UNTRUSTED_NOTICE = (
 
 try:
     from imap_tools import AND, OR, MailBox, MailboxLoginError, MailBoxStartTls, MailMessageFlags
+    # The uid shape validator imap-tools applies inside `mailbox.delete`. The
+    # raw `UID STORE`/`UID EXPUNGE` path bypasses that call, so it has to apply
+    # the same check itself — see `_delete_uid_batch`.
+    from imap_tools.utils import clean_uids
 except ImportError:
     AND = None
     OR = None
@@ -58,6 +64,7 @@ except ImportError:
     MailBoxStartTls = None
     MailboxLoginError = None
     MailMessageFlags = None
+    clean_uids = None
 
 
 @dataclass
@@ -773,6 +780,44 @@ def delete_email(
         return False
 
 
+def _server_capabilities(mailbox) -> tuple[str, ...]:
+    """Everything the server advertises, pre- *and* post-authentication.
+
+    ``imaplib`` fills ``client.capabilities`` exactly once, from the greeting,
+    and nothing on the login path refreshes it — not ``imaplib.login``, and not
+    imap-tools' hand-rolled ``LOGIN`` (which issues ``_simple_command`` and
+    sets ``client.state`` itself, bypassing ``imaplib.login`` entirely).
+
+    RFC 3501 §7.2.1 lets the list change on authentication, and the servers
+    that matter use that: Dovecot and Gmail both advertise a reduced pre-auth
+    set with no UIDPLUS in it. So reading the cached tuple alone answers "no
+    UIDPLUS" for most servers that in fact have it — backwards for a capability
+    used only to *narrow* a destructive operation.
+
+    Both are read and unioned: the cached one is a promise the server already
+    made, the live ``CAPABILITY`` is the authoritative post-auth answer, and
+    either naming UIDPLUS is enough to take the narrower path.
+    """
+    tokens: list[str] = []
+
+    try:
+        tokens.extend(str(c) for c in (getattr(mailbox.client, "capabilities", None) or ()))
+    except TypeError:
+        pass
+
+    try:
+        typ, data = mailbox.client.capability()
+        if typ == "OK":
+            for part in data or ():
+                if isinstance(part, bytes):
+                    part = part.decode("ascii", "replace")
+                tokens.extend(str(part).split())
+    except Exception:  # noqa: BLE001 -- an unreadable list just means "assume not"
+        pass
+
+    return tuple(tokens)
+
+
 def _supports_uid_expunge(mailbox, config: EmailConfig) -> bool:
     """True when the server advertises UIDPLUS (RFC 4315), i.e. ``UID EXPUNGE``.
 
@@ -784,26 +829,18 @@ def _supports_uid_expunge(mailbox, config: EmailConfig) -> bool:
     now the sweep reaches the whole expired set on every tick.
 
     A missing capability is a static fact about the server, so it is warned
-    about once per host rather than on every cleanup tick.
+    about once per host rather than on every call.
     """
-    # A live imaplib fills `capabilities` at greeting/login. Anything
-    # unexpected there means "assume we can't", never "expunge the folder
-    # without saying so".
-    try:
-        capabilities = tuple(getattr(mailbox.client, "capabilities", None) or ())
-    except TypeError:
-        capabilities = ()
-
-    if any(str(c).upper() == "UIDPLUS" for c in capabilities):
+    if any(c.upper() == "UIDPLUS" for c in _server_capabilities(mailbox)):
         return True
 
     host = config.imap_host or "?"
     if host not in _expunge_warned_hosts:
         _expunge_warned_hosts.add(host)
         logger.warning(
-            "IMAP server %s does not advertise UIDPLUS, so retention has to fall "
-            "back to a folder-wide EXPUNGE — which also permanently removes any "
-            "message another client has flagged \\Deleted but not yet expunged",
+            "IMAP server %s does not advertise UIDPLUS, so deleting mail has to "
+            "fall back to a folder-wide EXPUNGE — which also permanently removes "
+            "any message another client has flagged \\Deleted but not yet expunged",
             host,
         )
     return False
@@ -828,15 +865,40 @@ def _delete_uid_batch(mailbox, uids: list[str], *, targeted: bool) -> None:
     note that ``mailbox.flag`` expunges too, so there is no imap-tools call
     that flags without one.
     """
+    if not uids:
+        # `mailbox.delete([])` is a documented no-op; the raw path would send
+        # `UID STORE  +FLAGS (\Deleted)` with an empty set and get BAD back.
+        return
+
     if not targeted:
         mailbox.delete(uids)
         return
 
-    uid_set = ",".join(uids)
+    # imap-tools ran every uid through `clean_uids` before it reached the wire;
+    # going raw drops that, and `imaplib` concatenates str args into the command
+    # line with no escaping at all, so an embedded CRLF would be a second
+    # command. `delete_email` is a public entry point taking an agent-supplied
+    # id, so the shape check has to live here rather than at a call site.
+    uid_set = ",".join(clean_uids(uids))
     _uid_command(mailbox, "STORE", uid_set, "+FLAGS", r"(\Deleted)")
-    # Deliberately no fallback if this refuses: a folder-wide expunge here
-    # would delete precisely what the targeted path exists to protect.
-    _uid_command(mailbox, "EXPUNGE", uid_set)
+    try:
+        # Deliberately no folder-wide fallback if this refuses: that would
+        # delete precisely what the targeted path exists to protect.
+        _uid_command(mailbox, "EXPUNGE", uid_set)
+    except Exception:
+        # The STORE already landed. Leaving the batch flagged would hide the
+        # user's mail in most clients while both callers report failure, and
+        # would arm it for the next plain EXPUNGE any client happens to send.
+        # Best-effort un-flag so a refusal is a genuine no-op.
+        try:
+            _uid_command(mailbox, "STORE", uid_set, "-FLAGS", r"(\Deleted)")
+        except Exception:  # noqa: BLE001 -- the original failure is the one to report
+            logger.error(
+                "IMAP: UID EXPUNGE failed and the \\Deleted flag could not be "
+                "rolled back for %d message(s); they are flagged but present",
+                len(uids),
+            )
+        raise
 
 
 def delete_emails_before(
@@ -870,13 +932,14 @@ def delete_emails_before(
     Removal is scoped to the swept UIDs where the server allows it — see
     ``_supports_uid_expunge`` for what a server without UIDPLUS costs.
 
-    ``max_deletes`` bounds one sweep (0 = unbounded). The whole sweep runs
-    under a single IMAP socket timeout, so an unbounded pass over a large
-    backlog trips it and reports a failure on *every* cleanup tick while it
-    slowly converges. A bound turns that into a planned incremental drain: each
-    tick does an amount of work it can finish, says how much is left, and the
-    next tick (a minute later) continues. UIDs come back from ``SEARCH`` in
-    ascending order, so the bound takes the oldest first.
+    ``max_deletes`` bounds one sweep (0 = unbounded). The caller runs this
+    synchronously on the scheduler's dispatch loop, so an unbounded pass over a
+    first-run backlog is unbounded time with no task dispatch happening. A
+    bound turns it into a planned incremental drain: each tick does a
+    predictable amount of work, says how much is left, and the next tick (a
+    minute later) continues. The oldest go first — ``SEARCH`` results are
+    sorted numerically here rather than trusted to arrive that way, since
+    RFC 3501 §7.2.5 does not specify an order and the UIDs are strings.
 
     A failure part-way through returns the count deleted so far rather than
     unwinding it — reporting zero after removing hundreds is worse than
@@ -895,33 +958,43 @@ def delete_emails_before(
 
         uids = list(mailbox.uids(AND(date_lt=before)))
         expired = len(uids)
+        if all(u.isdigit() for u in uids):
+            # Oldest first, so a bounded sweep drains the end that has been
+            # expired longest. Numeric because these are strings ("10" < "9").
+            uids.sort(key=int)
         if max_deletes > 0 and expired > max_deletes:
             uids = uids[:max_deletes]
 
-        if uids:
-            logger.info(
-                "IMAP retention: %d message(s) in %s predate %s; "
-                "deleting %d this sweep",
-                expired, folder, before.isoformat(), len(uids),
-            )
+        if not uids:
+            return 0
+
+        logger.info(
+            "IMAP retention: %d message(s) in %s predate %s; deleting %d this sweep",
+            expired, folder, before.isoformat(), len(uids),
+        )
 
         targeted = _supports_uid_expunge(mailbox, config)
+        target = len(uids)
         stopped = False
-        for start in range(0, len(uids), batch_size):
+        for start in range(0, target, batch_size):
             batch = uids[start:start + batch_size]
             try:
                 _delete_uid_batch(mailbox, batch, targeted=targeted)
             except Exception as e:
+                # Counted against this sweep's target, not the whole expired
+                # set — "stopped after 200 of 100000" would misreport a sweep
+                # that only ever intended 2000.
                 if deleted:
                     logger.warning(
-                        "IMAP retention stopped after %d of %d message(s): %s; "
-                        "the next sweep re-finds the remainder",
-                        deleted, expired, e,
+                        "IMAP retention stopped after %d of %d message(s) this "
+                        "sweep: %s; the next sweep re-finds the remainder",
+                        deleted, target, e,
                     )
                 else:
                     logger.error(
-                        "IMAP retention deleted none of %d expired message(s): %s",
-                        expired, e,
+                        "IMAP retention deleted none of the %d message(s) it "
+                        "attempted this sweep: %s",
+                        target, e,
                     )
                 stopped = True
                 break

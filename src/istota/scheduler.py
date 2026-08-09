@@ -3542,11 +3542,18 @@ class LoopWatchdog:
     gone silent for longer than ``stall_seconds``. It re-arms once the loop
     recovers, so a transient stall pages once rather than on every check.
 
-    The loop has no known-long synchronous checks left, so the watchdog now has
-    full coverage: the DB-health sweep, the DB-backup snapshot (ISSUE-144 Tier 1)
-    and the nightly sleep cycles (Tier 2) all run on background threads via
-    ``_spawn_background_check``, and none of them suspends the watchdog. There
-    are no ``suspended()`` call sites in ``run_daemon``.
+    The three checks ISSUE-144 moved — the DB-health sweep, the DB-backup
+    snapshot (Tier 1) and the nightly sleep cycles (Tier 2) — all run on
+    background threads via ``_spawn_background_check``, and none of them
+    suspends the watchdog. There are no ``suspended()`` call sites in
+    ``run_daemon``.
+
+    One synchronous network check remains on the loop thread:
+    ``run_cleanup_checks`` step 5, the IMAP retention sweep. Its cost is bounded
+    (``skills.email._MAX_DELETES_PER_SWEEP``, ~20 round trips) rather than
+    proportional to the mailbox, so it does not normally approach
+    ``stall_seconds`` — but a pathologically slow IMAP host can still page here,
+    and moving it to ``_spawn_background_check`` is the fix if it ever does.
 
     ``suspended()`` is kept as the escape hatch for any future check that must
     run on the loop thread and is *known* to block for minutes — without it such
@@ -3736,6 +3743,14 @@ def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
 
     A floor only, never a cap: an operator who wants the ledger kept far longer
     than the mailbox gets exactly that.
+
+    One residual the floor does *not* model: the IMAP sweep is bounded per run
+    (``skills.email._MAX_DELETES_PER_SWEEP``), so while a backlog is draining a
+    message's real lifetime is ``email_retention_days`` plus however many ticks
+    it waits its turn, not exactly ``email_retention_days``. The default 90-day
+    window sits far above the 8-day floor, so this only bites an operator who
+    has tuned the ledger window down to the floor *and* is draining a backlog.
+    Worth knowing before treating the +1 as a tight bound.
     """
     configured = sched.processed_email_retention_days
     if configured <= 0:
