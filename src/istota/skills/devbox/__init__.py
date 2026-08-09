@@ -40,6 +40,8 @@ import sys
 import time
 from pathlib import Path
 
+from istota.skill_host_paths import resolve_host_path, validate_host_path
+
 DEFAULT_TIMEOUT = 300
 DEFAULT_MAX_OUTPUT_BYTES = 102_400
 MAX_COMMAND_BYTES = 32 * 1024  # bash -c argv length cap
@@ -151,63 +153,23 @@ def _check_owned(container: str) -> str | None:
     return None
 
 
-def _allowed_host_roots() -> list[Path]:
-    """Host paths the skill is willing to read from / write to.
-
-    cp-in source must be under one of these; cp-out destination must too.
-    """
-    roots: list[Path] = []
-    for var in ("ISTOTA_DEFERRED_DIR", "NEXTCLOUD_MOUNT_PATH"):
-        val = os.environ.get(var, "").strip()
-        if not val:
-            continue
-        try:
-            roots.append(Path(val).resolve())
-        except Exception:
-            continue
-    return roots
-
-
 def _validate_host_path(p: Path, *, must_exist: bool) -> str | None:
     """Reject symlinks; require the path to land under an allowed root.
 
-    Returns None on success, an error string on failure.
+    The rule itself lives in ``istota.skill_host_paths`` — ``kv set
+    --value-file`` needs the identical scoping, and two copies of a boundary
+    check drift. Returns None on success, an error string on failure.
+
+    Prefer `_resolve_host_path`, which hands back the approved path: acting on
+    the caller-supplied one re-walks its symlinks and reopens the window.
     """
-    roots = _allowed_host_roots()
-    if not roots:
-        # No allowlist configured (CLI smoke test outside the executor).
-        # Don't silently widen the boundary — refuse the operation.
-        return (
-            "No allowed host roots configured (ISTOTA_DEFERRED_DIR / "
-            "NEXTCLOUD_MOUNT_PATH unset). cp-in/cp-out refused."
-        )
-    try:
-        if must_exist:
-            if p.is_symlink():
-                return f"Refusing host-side symlink: {p}"
-            if not p.exists():
-                return f"Source not found: {p}"
-            resolved = p.resolve(strict=True)
-        else:
-            # For destinations, the path may not exist yet; resolve against
-            # the parent (which we'll create if missing).
-            parent = p.parent
-            if not parent.exists():
-                parent.mkdir(parents=True, exist_ok=True)
-            if parent.is_symlink():
-                return f"Refusing host-side symlink on dest parent: {parent}"
-            resolved = (parent.resolve(strict=True) / p.name)
-    except OSError as e:
-        return f"Path resolution failed: {e}"
-    for root in roots:
-        try:
-            resolved.relative_to(root)
-            return None
-        except ValueError:
-            continue
-    return (
-        f"Path {resolved} is outside allowed roots "
-        f"({', '.join(str(r) for r in roots)})."
+    return validate_host_path(p, must_exist=must_exist, operation="cp-in/cp-out")
+
+
+def _resolve_host_path(p: Path, *, must_exist: bool) -> tuple[Path | None, str | None]:
+    """`_validate_host_path` plus the approved path to actually operate on."""
+    return resolve_host_path(
+        p, writable=not must_exist, operation="cp-in/cp-out",
     )
 
 
@@ -289,8 +251,7 @@ def cmd_exec_file(args) -> dict:
     container = _container_name()
     if not container:
         return _err("No devbox configured.")
-    local = Path(args.path)
-    path_err = _validate_host_path(local, must_exist=True)
+    local, path_err = _resolve_host_path(Path(args.path), must_exist=True)
     if path_err:
         return _err(path_err)
     if not local.is_file():
@@ -360,8 +321,7 @@ def cmd_cp_in(args) -> dict:
     container = _container_name()
     if not container:
         return _err("No devbox configured.")
-    src = Path(args.src)
-    path_err = _validate_host_path(src, must_exist=True)
+    src, path_err = _resolve_host_path(Path(args.src), must_exist=True)
     if path_err:
         return _err(path_err)
     ownership_err = _check_owned(container)
@@ -379,8 +339,7 @@ def cmd_cp_out(args) -> dict:
     container = _container_name()
     if not container:
         return _err("No devbox configured.")
-    dest = Path(args.dest)
-    path_err = _validate_host_path(dest, must_exist=False)
+    dest, path_err = _resolve_host_path(Path(args.dest), must_exist=False)
     if path_err:
         return _err(path_err)
     ownership_err = _check_owned(container)

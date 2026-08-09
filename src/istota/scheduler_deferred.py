@@ -314,11 +314,11 @@ def _process_deferred_kv_ops(
 ) -> int:
     """Process deferred KV store operations from JSON file.
 
-    When Claude runs `istota-skill kv set|delete|set-add|set-remove` inside
-    the sandbox, the skill CLI writes operations to a deferred file. The
-    scheduler processes them here. `set-add` / `set-remove` re-read the
-    current value from the DB before applying the diff so concurrent ops
-    across tasks compose correctly.
+    When Claude runs `istota-skill kv set|delete|set-add|set-remove|set-trim`
+    inside the sandbox, the skill CLI writes operations to a deferred file. The
+    scheduler processes them here. The set ops re-read the current value from
+    the DB before applying their change, so concurrent ops across tasks compose
+    correctly.
 
     Returns count of operations processed.
     """
@@ -375,14 +375,31 @@ def _process_deferred_kv_ops(
                 elif op == "delete":
                     db.kv_delete(conn, task.user_id, namespace, key)
                     count += 1
-                elif op in ("set-add", "set-remove"):
+                elif op in ("set-add", "set-remove", "set-trim"):
                     members = entry.get("members") or []
-                    if not isinstance(members, list):
+                    keep_newest = entry.get("keep_newest")
+                    if op == "set-trim":
+                        # bool is an int subclass, and `keep_newest: true`
+                        # would otherwise trim to one member.
+                        if (
+                            not isinstance(keep_newest, int)
+                            or isinstance(keep_newest, bool)
+                            or keep_newest < 0
+                        ):
+                            logger.warning(
+                                "Bad set-trim op for task %d: keep_newest=%r",
+                                task.id, keep_newest,
+                            )
+                            continue
+                    elif not isinstance(members, list):
                         logger.warning(
                             "Bad %s op for task %d: members not a list", op, task.id,
                         )
                         continue
                     row = db.kv_get(conn, task.user_id, namespace, key)
+                    if row is None and op == "set-trim":
+                        # Nothing to trim; don't create the key.
+                        continue
                     current: list = []
                     if row is not None:
                         try:
@@ -407,6 +424,12 @@ def _process_deferred_kv_ops(
                             if m not in seen:
                                 new_members.append(m)
                                 seen.add(m)
+                    elif op == "set-trim":
+                        # Re-read means the trim composes with set-adds queued
+                        # earlier in the same task, and lands on the real size.
+                        # Negative index, not len()-keep: the latter clamps at
+                        # -len when keep > len and silently drops members.
+                        new_members = current[-keep_newest:] if keep_newest else []
                     else:
                         to_remove = set(members)
                         new_members = [m for m in current if m not in to_remove]
