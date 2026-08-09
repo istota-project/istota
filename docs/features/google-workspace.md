@@ -62,6 +62,9 @@ Each user connects their own Google account through the web dashboard:
 
 OAuth tokens are stored per-user in the database and auto-refreshed on each task execution. Users can disconnect at any time from the dashboard.
 
+!!! note
+    The consent screen appears on every connect, not only the first. The authorization request asks for offline access with `prompt=consent`, because Google returns a refresh token only when both are asked for — and without one, a reconnect (after widening `scopes`, or after the user revokes access from their Google account) would store an access token that expires in an hour and cannot be renewed.
+
 ## Usage
 
 Once connected, the bot can use `gws` commands for any task that matches the skill triggers (e.g., "upload this to google drive", "create a spreadsheet", "check my google calendar").
