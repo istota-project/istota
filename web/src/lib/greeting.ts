@@ -73,6 +73,8 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
   { text: '!search looks across everything we have talked about before.' },
   { text: '!status shows what I am working on and what is still queued.' },
   { text: '!retry re-runs a failed task; !resume picks it up where it stopped.' },
+  /* design-lint-allow: "#1234" is a placeholder task id in prose, not a color —
+     the raw-color rule cannot tell a four-digit hex from one. */
   { text: '!more #1234 replays the whole tool trace of a finished task.' },
   { text: '!memory user shows everything I have remembered about you.' },
   { text: '!skills lists what I can actually reach on this deployment.' },
