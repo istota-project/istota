@@ -59,6 +59,17 @@
         {disabled}
         onclick={onRequestClear}>×</IconButton
       >
+    {:else}
+      <!--
+        The button's slot is held open when there is nothing stored to clear.
+        Both rows end at 24rem either way, so without this the *input* absorbed
+        the button's width and an unconfigured field rendered visibly wider
+        than a configured one in the same card — which is how the ntfy card
+        read, its unset access token stretching past every field above it.
+        A mirror of the glyph rather than a measured width, so it cannot drift
+        from what IconButton actually renders.
+      -->
+      <span class="clear-placeholder" aria-hidden="true">×</span>
     {/if}
   </div>
 </Field>
@@ -72,5 +83,13 @@
     gap: var(--space-2);
     align-items: center;
     max-width: 24rem;
+  }
+
+  /* IconButton's `md` padding, and the same glyph at the same inherited font,
+     so it occupies exactly the width the real button would. */
+  .clear-placeholder {
+    flex: none;
+    visibility: hidden;
+    padding: var(--space-1);
   }
 </style>
