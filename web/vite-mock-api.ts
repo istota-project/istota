@@ -647,6 +647,10 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       commands: [
         { name: 'check', help: 'Run Claude Code health check' },
         {
+          name: 'confirm',
+          help: 'Answer a held task: `!confirm`, `!confirm <task-id>`, `!confirm <id> no`',
+        },
+        {
           name: 'cron',
           help: 'List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`',
         },
@@ -673,6 +677,29 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         { alias: 'opus-high', target: 'claude-opus-4-8', effort: 'high' },
         { alias: 'sonnet', target: 'claude-sonnet-4-6', effort: null },
         { alias: 'haiku', target: 'claude-haiku-4-5', effort: null },
+      ],
+    };
+  }
+
+  if (path === '/istota/api/chat/confirmations') {
+    // One held email, so the banner is visible in the mock backend. It belongs
+    // to no room on purpose — that is the case the banner exists for.
+    return {
+      confirmations: [
+        {
+          task_id: 40122,
+          source_type: 'email',
+          created_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+          prompt:
+            'Email from unknown sender scheduling@partner.example\nSubject: Availability next week',
+          summary: 'email from scheduling@partner.example — Availability next week',
+          room_token: null,
+          email: {
+            sender: 'scheduling@partner.example',
+            subject: 'Availability next week',
+            routing_method: 'plus_address',
+          },
+        },
       ],
     };
   }

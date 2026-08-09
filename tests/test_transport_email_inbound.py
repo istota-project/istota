@@ -1255,7 +1255,7 @@ class TestEmailConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=77) as mock_send,
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 77)) as mock_send,
         ):
             task_ids = poll_emails(config)
 
@@ -1453,7 +1453,7 @@ class TestEmailConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=None),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
         ):
             task_ids = poll_emails(config)
 
@@ -1486,7 +1486,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=99) as send,
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 99)) as send,
         ):
             task_ids = poll_emails(config)
 
@@ -1523,7 +1523,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=None),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
             patch("istota.transport.email.inbound.ingest_message", side_effect=_spy),
         ):
             poll_emails(config)
@@ -1571,7 +1571,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=None),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
         ):
             task_ids = poll_emails(config)
 
@@ -1617,7 +1617,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=7) as send,
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 7)) as send,
         ):
             task_ids = poll_emails(config)
 
@@ -1666,7 +1666,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=8) as send,
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 8)) as send,
         ):
             poll_emails(config)
 
@@ -1694,7 +1694,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=11) as send,
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 11)) as send,
         ):
             task_ids = poll_emails(config)
 
@@ -1720,7 +1720,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=None),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
             caplog.at_level("WARNING", logger="istota.transport.email.inbound"),
         ):
             poll_emails(config)
@@ -1740,7 +1740,7 @@ class TestSenderMatchConfirmationGate:
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
             patch("istota.transport.email.inbound.read_email", return_value=email),
             patch("istota.transport.email.inbound.download_attachments", return_value=[]),
-            patch("istota.notifications.send_talk_confirmation", return_value=5),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 5)),
             caplog.at_level("WARNING", logger="istota.transport.email.inbound"),
         ):
             poll_emails(config)

@@ -14,6 +14,7 @@
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
+  import PendingConfirmations from '$lib/components/chat/PendingConfirmations.svelte';
   import {
     isTap,
     nextActivation,
@@ -41,6 +42,7 @@
     scrollTarget,
     sendSettled,
     sendReturned,
+    pendingConfirmations,
   } = session;
 
   // Cross-room views: the transcript pane renders either the active room
@@ -748,6 +750,11 @@
   {/snippet}
 
   <div class="chat-pane" style:--composer-h="{composerH}px">
+    <!-- Above the transcript, not inside it: these questions belong to no room
+         (a gated email's token is a synthetic thread hash), and one of them
+         being unanswered is what holds its task. Rendered in every view for the
+         same reason — an aggregate pane is still where the user is looking. -->
+    <PendingConfirmations items={$pendingConfirmations} onAnswer={session.answerConfirmation} />
     <div class="messages-wrap">
       <div
         class="messages"

@@ -326,14 +326,65 @@ messages are re-polled rather than silently lost.
   scheduler's dispatch loop. Ansible knobs `istota_email_dmarc_canary` /
   `istota_email_dmarc_canary_warn_on_missing`.
 
-  **Three pre-existing interactions the flag makes reachable**, all noted under
-  ISSUE-227 rather than fixed there: a gated task parks its room via
-  `_CLAIM_CHANNEL_GATE_SQL` and only the Talk poller calls
-  `cancel_pending_confirmations`, so a gated reply into a *web* room freezes it
-  until the timeout; `suppress_transcript_mirror` is never undone on approval, so
-  an approved mail leaves an assistant row with no user row above it (the
-  ISSUE-136 defect, re-reached); and `get_pending_confirmation_for_user` answers
-  only the newest, so a burst of gated mail loses all but the last.
+  **Three pre-existing interactions the flag made reachable**, noted under
+  ISSUE-227 and swept with ISSUE-241: a gated task parks its room via
+  `_CLAIM_CHANNEL_GATE_SQL` and only the Talk poller called
+  `cancel_pending_confirmations`, so a gated turn in a *web* room froze it until
+  the timeout — `_chat_create_web_task` now cancels the room's own pending
+  confirmations on a new send, exactly as the Talk poller does, room-scoped so
+  an email gate under its synthetic thread token is untouched;
+  `suppress_transcript_mirror` was never undone on approval, so an approved mail
+  left an assistant row with no user row above it (the ISSUE-136 defect,
+  re-reached) — `confirmations.approve` writes the withheld user row when the
+  token is an existing room, existence-only for the same reason
+  `record_inbound`'s `mirror_only` is; and `get_pending_confirmation_for_user`
+  answers only the newest, so a bare "yes" during a burst landed on the wrong
+  email — Path C now fires only when exactly one question is open and otherwise
+  posts an addressable listing.
+
+  **Answering a gate is surface-agnostic (ISSUE-241).** The prompt goes out
+  through `notifications.send_confirmation_prompt`, which resolves the user's
+  `alert` routing purpose rather than hardwiring Talk — so a user who has
+  pointed alerts at web or ntfy is actually asked, while the ladder's Talk
+  fallback keeps an unconfigured deployment behaving as before. It returns
+  `(delivered, talk_message_id)`: the id still feeds `talk_response_id` (Path A
+  matches a *reply* against it) and the flag is what the undeliverable-prompt
+  WARNING keys on. The prompt names its own task id, because that id is the
+  *address* of the question — `!confirm <id>` / `!confirm <id> no` /
+  **The prompt is delivered after the poll transaction closes**
+  (`_deliver_confirmation_prompts`, beside `_deliver_dmarc_alerts` and for the
+  identical reason): routing by purpose means it can land on the *web* surface,
+  whose delivery opens a second connection to this database, and `poll_emails`
+  holds a write transaction from `create_task` onward — inline, the fix for
+  "the web user is never asked" would have become a busy-timeout stall per
+  gated email that still did not ask them. `talk_response_id` is written back
+  in its own short transaction afterwards; losing it costs Path A alone.
+  `run_cleanup_checks` buffers its expiry notices for the same reason.
+
+  `!confirm <id> trust` work from any surface with a composer
+  (`commands.cmd_confirm`, aliases `!yes` / `!no`), and the verbs themselves
+  live in `istota.confirmations` so the Talk poller, the command and the web
+  endpoints cannot drift. Web chat additionally gets
+  `GET /chat/confirmations` + a banner above the transcript — deliberately not
+  a widening of `_AUX_SOURCE_SCOPE`, since a first-contact email's token is a
+  synthetic thread hash belonging to no room and the aux query renders
+  `tasks.prompt`, i.e. the untrusted body the gate is holding back. The card
+  carries the sender, subject and routing method off `processed_emails`
+  instead.
+
+  **The expiry notice routes by purpose too.** `run_cleanup_checks` used to post
+  to the task's `conversation_token` verbatim, which for an email gate names no
+  room, so the user was never told their mail had been dropped. It now goes
+  through `purpose="alert"` with the token passed only when it really is a Talk
+  channel (`_confirmation_notice_token`), and names the sender and subject
+  (`_expired_confirmation_notice`) so the message can be found again in the
+  mailbox. **A gated email is still marked processed at ingest** — not deferring
+  that is deliberate: `processed_emails` is the only thing stopping the next
+  poll from re-ingesting the same message as a fresh task, and `email_id` is a
+  bare IMAP UID with no `UIDVALIDITY`, so withholding the row turns one
+  unanswered question into one new task and one new prompt per poll cycle.
+  Making the expiry loud and specific is the recoverable version of the same
+  concern.
 
   **Email-reply origin routing.** A thread-matched reply (recipient replies to a
   mail we sent) routes back to the *surface the original send came from*, not

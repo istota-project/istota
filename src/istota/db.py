@@ -1630,25 +1630,30 @@ def get_pending_confirmation(
     return _row_to_task(row)
 
 
-def get_pending_confirmation_for_user(
+def list_pending_confirmations_for_user(
     conn: sqlite3.Connection,
     user_id: str,
-) -> Task | None:
-    """Get the newest pending_confirmation task for a user, any conversation."""
+) -> list[Task]:
+    """Every pending_confirmation task for a user, oldest first.
+
+    Replaced a singular `get_pending_confirmation_for_user` that returned only
+    the newest. That is fine when exactly one question is open and wrong when
+    several are: a bare "yes" then lands on whichever arrived last rather than
+    on the one being answered, which for an untrusted-sender gate approves the
+    wrong email (ISSUE-241). Returning the set is what lets a caller notice the
+    ambiguity and ask which — so the singular form is deliberately gone rather
+    than left around to be reached for again.
+    """
     cursor = conn.execute(
         f"""
         SELECT {_TASK_COLUMNS}
         FROM tasks
         WHERE user_id = ? AND status = 'pending_confirmation'
-        ORDER BY id DESC
-        LIMIT 1
+        ORDER BY id ASC
         """,
         (user_id,),
     )
-    row = cursor.fetchone()
-    if not row:
-        return None
-    return _row_to_task(row)
+    return [_row_to_task(row) for row in cursor.fetchall()]
 
 
 def get_pending_confirmation_by_response_id(
@@ -5190,7 +5195,7 @@ def expire_stale_confirmations(conn: sqlite3.Connection, timeout_minutes: int) -
             updated_at = datetime('now')
         WHERE status = 'pending_confirmation'
         AND updated_at < datetime('now', '-' || ? || ' minutes')
-        RETURNING id, user_id, conversation_token, prompt
+        RETURNING id, user_id, conversation_token, prompt, source_type
         """,
         (timeout_minutes,),
     )
@@ -5200,6 +5205,7 @@ def expire_stale_confirmations(conn: sqlite3.Connection, timeout_minutes: int) -
             "user_id": row["user_id"],
             "conversation_token": row["conversation_token"],
             "prompt": row["prompt"][:100] if row["prompt"] else None,
+            "source_type": row["source_type"],
         }
         for row in cursor.fetchall()
     ]

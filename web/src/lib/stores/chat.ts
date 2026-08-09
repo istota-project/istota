@@ -27,6 +27,8 @@ import {
   getTaskEvents,
   chatRoomStreamUrl,
   type ChatRoomEvent,
+  listPendingConfirmations,
+  type PendingConfirmation,
   markAllRoomsRead,
   markRoomRead,
   sendChatMessage,
@@ -271,6 +273,14 @@ export interface ChatSession {
   cancel: () => Promise<void>;
   confirm: (cid: number, taskId: number) => Promise<void>;
   reject: (cid: number, taskId: number) => Promise<void>;
+  // Questions waiting on the user that no room transcript can render: an
+  // inbound email held by the untrusted-sender gate carries a synthetic thread
+  // token, so it belongs to no room, and its body is withheld by design
+  // (ISSUE-241). The banner above the transcript is the surface for those, and
+  // it is what makes a web-only user able to answer at all.
+  pendingConfirmations: Writable<PendingConfirmation[]>;
+  refreshConfirmations: () => Promise<void>;
+  answerConfirmation: (taskId: number, approve: boolean) => Promise<void>;
   teardown: () => void;
 }
 
@@ -748,10 +758,44 @@ function createSession(): ChatSession {
     });
   }
 
+  // ---- Pending confirmations (the cross-room banner) ----
+
+  const pendingConfirmations = writable<PendingConfirmation[]>([]);
+
+  async function refreshConfirmations() {
+    try {
+      const res = await listPendingConfirmations();
+      pendingConfirmations.set(res.confirmations ?? []);
+    } catch {
+      // Never a notice: the banner is a supplement to whatever surface the
+      // prompt was delivered on, and a failed poll is not a thing the user did.
+      // The next tick retries.
+    }
+  }
+
+  async function answerConfirmation(taskId: number, approve: boolean) {
+    // Pessimistic removal: a card that vanished and came back would read as the
+    // question having been asked twice.
+    try {
+      if (approve) await confirmChatTask(taskId);
+      else await cancelChatTask(taskId);
+    } catch {
+      notifyError('Could not answer that request. Try again.', {
+        key: 'chat:confirmation',
+      });
+      return;
+    }
+    pendingConfirmations.update((list) => list.filter((c) => c.task_id !== taskId));
+    // The approved task starts running in a room the user may be watching; the
+    // room stream carries it from here.
+    void refreshRooms();
+  }
+
   function startRoomsRefresh() {
     if (roomsTimer) return;
     roomsTimer = setInterval(() => {
       void refreshRooms();
+      void refreshConfirmations();
     }, ROOMS_REFRESH_MS);
   }
 
@@ -1652,6 +1696,9 @@ function createSession(): ChatSession {
       // Slow metadata reconciler (see ROOMS_REFRESH_MS) — the stream is the
       // live path.
       startRoomsRefresh();
+      // A gate parked before this tab was open has no stream frame to arrive
+      // on, so the banner is seeded on entry rather than only on the next tick.
+      void refreshConfirmations();
       if (typeof document !== 'undefined') {
         removeVisibilityListener(); // never stack two
         onVisibility = () => {
@@ -2394,6 +2441,9 @@ function createSession(): ChatSession {
     cancel,
     confirm,
     reject,
+    pendingConfirmations,
+    refreshConfirmations,
+    answerConfirmation,
     teardown,
   };
 }

@@ -2488,6 +2488,26 @@ export function getTaskEvents(taskId: number, sinceSeq = 0): Promise<{ events: T
   return apiFetch<{ events: TaskEventDTO[] }>(`/chat/tasks/${taskId}/events?since_seq=${sinceSeq}`);
 }
 
+/** A question the bot has asked and the user has not answered yet.
+ *
+ * Deliberately carries no message body: for a gated inbound email the body is
+ * the untrusted content the gate is holding back, so the card is built from the
+ * bot-composed prompt plus the sender / subject / routing method. Every field
+ * here may be attacker-supplied text — render it, never inject it as markup. */
+export interface PendingConfirmation {
+  task_id: number;
+  source_type: string;
+  created_at: string | null;
+  prompt: string;
+  summary: string;
+  room_token: string | null;
+  email: { sender: string; subject: string | null; routing_method: string | null } | null;
+}
+
+export function listPendingConfirmations(): Promise<{ confirmations: PendingConfirmation[] }> {
+  return apiFetch<{ confirmations: PendingConfirmation[] }>('/chat/confirmations');
+}
+
 export function confirmChatTask(taskId: number): Promise<{ status: string }> {
   return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, { method: 'POST' });
 }

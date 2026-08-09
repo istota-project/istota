@@ -148,9 +148,11 @@ Single-pass `run_scheduler` shares `process_one_task` (which uses `run_coro`), s
 it lazily uses the same persistent runtime; it calls `reset_async_runtime()`
 before returning (as does the `istota run` CLI) so the shared client's `aclose`
 runs a clean shutdown instead of connections being dropped on process exit.
-`run_cleanup_checks` is synchronous — its rare Talk notices go
-through `send_notification` (→ `run_coro`), keeping its blocking DB/IMAP/fs
-cleanup off the persistent loop.
+`run_cleanup_checks` is synchronous — its rare notices (expired-confirmation,
+failed-ancient) go through `send_notification` (→ `run_coro`), keeping its
+blocking DB/IMAP/fs cleanup off the persistent loop. The expiry notices are
+buffered and sent after the DB transaction closes, since one routed to `web`
+writes to the same database.
 
 ### `run_scheduler()`
 ```python
@@ -280,7 +282,7 @@ class UserWorker(threading.Thread):
 When `playbooks.enabled`, `process_user_sleep_cycle` also distills **learned playbooks** (Part B): the extraction prompt gains a `PLAYBOOKS:` section (gated on `playbooks.min_tool_calls` tool calls + success + reusability). The section instructs the model to copy commands/paths *verbatim from the per-task `Tools (N):` line* rather than reconstruct a plausible path, and to write a **thin router** (trigger + exact verified command + one gotcha) instead of re-narrating a single-script trajectory's internals (ISSUE-174 Concern 1/4). `_parse_structured_extraction` returns a 4th `playbooks` list, and `_process_extracted_playbooks` writes each to `{workspace}/Users/<uid>/<bot_dir>/playbooks/<slug>.md` (dedup by slug → update in place), indexing it into `memory_chunks` with `source_type="playbook"`. A file marked `pinned: true` in frontmatter (a human correction) keeps its on-disk content but is **re-indexed from that content** — recall serves `memory_chunks`, not the file, so the correction must reach the index without the sleep cycle clobbering the human edit (`_playbook_is_pinned`; Concern 1 correction path). `cleanup_old_playbooks(conn=…)` age-prunes by `playbooks.retention_days` (default 90; 0 = keep) and **deletes the pruned file's `memory_chunks` too** (`playbook` isn't in `EPHEMERAL_SOURCE_TYPES`, so an unlinked-but-indexed file would otherwise still be recalled). Age is **last-use mtime**: `_recall_playbooks` stamps the file's mtime on every recall hit (Concern 3), so the prune targets idle guidance, not merely un-re-derived guidance; a **grandfather one-shot** (`.retention_initialized` sentinel) refreshes existing files on the first post-upgrade run so nothing is pruned on stale write-mtime, and a `pinned` file is never pruned. Markdown-only, never executed; recalled via `executor._recall_playbooks`.
 
 ## Cleanup (`run_cleanup_checks`)
-1. Expire stale confirmations → notify user via Talk
+1. Expire stale confirmations → notify the user through their `alert` route (ISSUE-241; it used to post to the task's `conversation_token` verbatim, which for an email gate is a synthetic thread hash naming no room). The notice names the sender and subject, and is sent **after** the cleanup transaction closes — an alert routed to `web` opens a second connection to the same DB and would block on the write lock `expire_stale_confirmations` takes.
 2. Log warnings for stale pending tasks
 3. Fail ancient pending tasks → notify user **only for user-submitted source types**. The notice ("A task you submitted was cancelled…") is suppressed for `_AUTOMATED_SOURCE_TYPES` (`scheduled`/`briefing`/`heartbeat`/`subtask`): those pile up on their own when the queue wedges, so notifying their output channel turns one stuck worker into a per-minute "task cancelled" flood (and the message isn't true for them).
 4. Clean old completed tasks (`task_retention_days`)

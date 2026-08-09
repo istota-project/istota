@@ -10,7 +10,7 @@ import logging
 import time
 from pathlib import Path
 
-from ... import db
+from ... import confirmations, db
 from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
@@ -676,9 +676,33 @@ async def handle_confirmation_reply(
     if not pending_task:
         pending_task = db.get_pending_confirmation(conn, conversation_token)
 
-    # Path C: cross-conversation fallback by user_id (email gates)
+    # Path C: cross-conversation fallback by user_id (email gates). Unlike A
+    # and B this one is not bound to a specific question, so it may only fire
+    # when there is exactly one — with a burst of gated mail, a bare "yes"
+    # would otherwise land on whichever arrived last rather than on the one the
+    # user is answering, approving the wrong untrusted email (ISSUE-241). The
+    # ambiguity is *handled*, not passed through: falling back to task creation
+    # would turn "yes" into a prompt.
     if not pending_task:
-        pending_task = db.get_pending_confirmation_for_user(conn, actor_id)
+        open_for_user = confirmations.pending_for_user(conn, actor_id)
+        if len(open_for_user) > 1:
+            listing = confirmations.format_listing(conn, open_for_user)
+            try:
+                client = get_talk_client(config)
+                await client.send_message(
+                    conversation_token,
+                    f"{len(open_for_user)} things are waiting for your "
+                    f"confirmation — say which:\n{listing}\n\n"
+                    "Answer with `!confirm <task-id>` or `!confirm <task-id> no`.",
+                )
+            except Exception:
+                logger.warning(
+                    "Could not post the ambiguous-confirmation listing to %s",
+                    conversation_token, exc_info=True,
+                )
+            return True
+        if open_for_user:
+            pending_task = open_for_user[0]
 
     if not pending_task:
         return False
@@ -688,19 +712,12 @@ async def handle_confirmation_reply(
         return False
 
     if affirmative:
-        # Confirm the task - return to pending status for execution
-        db.confirm_task(conn, pending_task.id)
-        db.log_task(conn, pending_task.id, "info", "User confirmed task")
-
-        # Trust the sender if requested and this is an email task
-        if trust_sender and pending_task.source_type == "email":
+        trusted = confirmations.approve(
+            conn, pending_task, trust_sender=trust_sender,
+        )
+        if trusted:
             email_record = db.get_email_for_task(conn, pending_task.id)
             if email_record:
-                db.add_trusted_sender(conn, actor_id, email_record.sender_email)
-                db.log_task(
-                    conn, pending_task.id, "info",
-                    f"Trusted sender: {email_record.sender_email}",
-                )
                 try:
                     client = get_talk_client(config)
                     await client.send_message(
@@ -710,9 +727,7 @@ async def handle_confirmation_reply(
                 except Exception:
                     pass
     else:
-        # Cancel the task
-        db.cancel_task(conn, pending_task.id)
-        db.log_task(conn, pending_task.id, "info", "User cancelled task")
+        confirmations.decline(conn, pending_task)
 
         # Notify user
         try:

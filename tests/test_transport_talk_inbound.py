@@ -517,9 +517,19 @@ class TestCrossConversationConfirmation:
             assert task.status == "pending"
 
     @pytest.mark.asyncio
-    async def test_multiple_pending_newest_confirmed(self, make_config):
-        """Path C with multiple pending: 'yes' without reply_to confirms newest."""
+    async def test_multiple_pending_refuses_to_guess(self, make_config):
+        """Path C with several pending: an unaddressed 'yes' answers none of them.
+
+        This used to confirm the newest, which is the wrong question whenever a
+        second gate arrived between the prompt the user read and the reply they
+        typed — approving an untrusted email they were never shown (ISSUE-241).
+        Path A (a reply to the prompt message) and Path B (same conversation)
+        are still bound to a specific task and are unaffected; only the
+        cross-conversation fallback is ambiguous, so only it defers.
+        """
         config = make_config()
+        client = MagicMock()
+        client.send_message = AsyncMock(return_value=1)
 
         with db.get_db(config.db_path) as conn:
             t1 = db.create_task(
@@ -534,14 +544,21 @@ class TestCrossConversationConfirmation:
             db.set_task_confirmation(conn, t2, "Confirm newer?")
 
         with db.get_db(config.db_path) as conn:
-            result = await handle_confirmation_reply(
-                conn, config, "alice", "yes", "alerts_room",
-            )
+            with patch(
+                "istota.transport.talk.inbound.get_talk_client", return_value=client,
+            ):
+                result = await handle_confirmation_reply(
+                    conn, config, "alice", "yes", "alerts_room",
+                )
 
+        # Handled, not passed through: falling through would turn "yes" into a
+        # prompt for a new task.
         assert result is True
         with db.get_db(config.db_path) as conn:
-            assert db.get_task(conn, t2).status == "pending"
             assert db.get_task(conn, t1).status == "pending_confirmation"
+            assert db.get_task(conn, t2).status == "pending_confirmation"
+        posted = client.send_message.await_args[0][1]
+        assert f"#{t1}" in posted and f"#{t2}" in posted
 
     @pytest.mark.asyncio
     async def test_reply_to_wrong_message_falls_through(self, make_config):
