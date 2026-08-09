@@ -667,7 +667,7 @@ class TmuxClaudeBrain:
         try:
             workdir.mkdir(parents=True, exist_ok=True)
             config_dir.mkdir(parents=True, exist_ok=True)
-            prompt_file.write_text(req.prompt)
+            prompt_file.write_text(req.prompt, encoding="utf-8")
             self._write_hooks(config_dir, sentinel, started_sentinel)
             self._seed_onboarding(config_dir, base_dir)
 

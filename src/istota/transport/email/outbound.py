@@ -145,10 +145,14 @@ def _load_deferred_email_output(
         return None
 
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         if consume:
             path.unlink(missing_ok=True)
-    except (json.JSONDecodeError, OSError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        # Same encoding contract as scheduler_deferred._load_deferred_json: the
+        # producer (skills/email cmd_output) dumps with ensure_ascii=False, so
+        # this is the one deferred file that reliably holds multi-byte UTF-8,
+        # and UnicodeDecodeError is neither a JSONDecodeError nor an OSError.
         logger.warning("Bad deferred email output file for task %d: %s", task.id, e)
         if consume:
             path.unlink(missing_ok=True)

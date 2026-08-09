@@ -129,8 +129,77 @@ class TestReattemptPurgesPriorDeferredOps:
         assert _subtask_prompts(db_path) == ["held child"]
 
 
+class TestConfirmationRerunIsExempt:
+    """A confirmation re-run is not a re-attempt, whatever ``attempt_count`` says.
+
+    ``_drain_deferred_ops`` is skipped when a task asks for confirmation, so
+    ops written before the question are *designed* to sit on disk until the
+    user answers. ``db.confirm_task`` requeues without resetting
+    ``attempt_count``, so a task that failed once earlier comes back to the
+    claim carrying a charged attempt — and a purge keyed on that alone would
+    discard exactly the writes the confirmation is holding.
+    """
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.execute_task", return_value=(True, "done", None, None))
+    def test_held_ops_survive_a_confirmed_rerun_after_an_earlier_failure(
+        self, mock_exec, mock_arun, db_path, tmp_path,
+    ):
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="parent", user_id="alice", source_type="cli",
+            )
+            # An earlier attempt failed and was retried, charging an attempt.
+            conn.execute(
+                "UPDATE tasks SET attempt_count = 1 WHERE id = ?", (task_id,),
+            )
+            # The next attempt did its work, wrote deferred ops, then asked.
+            db.set_task_confirmation(conn, task_id, "Send this email?")
+        held = _write_stale_subtasks(config, "alice", task_id, "held child")
+
+        with db.get_db(db_path) as conn:
+            db.confirm_task(conn, task_id)
+            confirmed = db.get_task(conn, task_id)
+        assert confirmed.attempt_count == 1, "confirm_task does not reset the count"
+
+        process_one_task(config)
+
+        assert not held.exists(), "drained, not purged"
+        assert _subtask_prompts(db_path) == ["held child"]
+
+
 class TestRequeuePathsReachTheBackstop:
     """The three requeue paths the backstop exists for, driven end to end."""
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    @patch("istota.scheduler.execute_task", return_value=(True, "done", None, None))
+    def test_claim_tasks_own_stuck_running_release(
+        self, mock_exec, mock_arun, db_path, tmp_path,
+    ):
+        """The path with no scheduler-side hook, and the reason the purge sits
+        at claim time rather than at each requeue site: ``claim_task`` releases
+        stuck rows in the same statement batch that claims the next one.
+        """
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="parent", user_id="alice", source_type="cli",
+            )
+            conn.execute(
+                "UPDATE tasks SET status='running', "
+                "started_at=datetime('now','-120 minutes'), "
+                "last_heartbeat=datetime('now','-120 minutes') WHERE id = ?",
+                (task_id,),
+            )
+        stale = _write_stale_subtasks(config, "alice", task_id, "orphaned child")
+
+        # No explicit reclaim call — claim_task's own release runs inline.
+        result = process_one_task(config)
+
+        assert result == (task_id, True)
+        assert not stale.exists()
+        assert _subtask_prompts(db_path) == []
 
     @patch("istota.scheduler.asyncio.run", return_value=None)
     @patch("istota.scheduler.execute_task", return_value=(True, "done", None, None))

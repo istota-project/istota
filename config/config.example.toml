@@ -420,8 +420,12 @@ email_retention_days = 7
 # Prune the processed_emails dedup ledger after N days (default: 90, 0 to
 # disable). One row is written per polled message, including the ones that
 # produce no task, so the table grows forever without this. Never applied
-# below email_retention_days: the row is what stops a message still sitting
-# in the mailbox from being re-ingested as a brand-new task.
+# below email_retention_days + 1: the row is what stops a message still
+# sitting in the mailbox from being re-ingested as a brand-new task. With
+# email_retention_days = 0 (mail never deleted from IMAP) the prune is
+# disabled outright, since the message's lifetime is then unbounded too.
+# A row still referenced by the stored conversation transcript is always
+# kept — it also carries the sender attribution for that turn.
 processed_email_retention_days = 90
 # Max cached talk messages per conversation (default: 200)
 talk_cache_max_per_conversation = 200

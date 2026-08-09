@@ -14,7 +14,7 @@ is email's equivalent of ``istota.talk.TalkClient``.
 import hashlib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .config import Config
 from .skills.email import EmailConfig, delete_emails_before
@@ -114,7 +114,10 @@ def cleanup_old_emails(config: Config, days: int) -> int:
     if not config.email.enabled or days <= 0:
         return 0
 
-    cutoff = (datetime.now() - timedelta(days=days)).date()
+    # UTC, not local: IMAP `BEFORE` is evaluated against the mail server's
+    # calendar date, so a daemon east of the server would otherwise compute a
+    # cutoff a day late and delete a day early.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
 
     try:
         return delete_emails_before(

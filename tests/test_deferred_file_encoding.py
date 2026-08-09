@@ -95,21 +95,29 @@ class TestLoaderDecodeFailures:
         assert json.loads(proc.stdout)[0]["prompt"] == "résumé the café thread"
 
 
-@pytest.mark.parametrize("skill_module,defer_call", [
+@pytest.mark.parametrize("skill_module,defer_call,marker", [
     (
         "istota.skills.kv",
         '_defer_op({"op": "set", "namespace": "n", "key": "k", "value": "café"})',
+        "café",
     ),
     (
         "istota.skills.health",
         '_defer_op({"op": "insert_panel", "lab_name": "Genève"})',
+        "Genève",
     ),
 ])
-def test_skill_defer_op_writes_utf8_under_an_ascii_locale(
-    tmp_path, skill_module, defer_call,
+def test_skill_defer_op_survives_an_ascii_locale(
+    tmp_path, skill_module, defer_call, marker,
 ):
-    """A skill CLI writing a non-ASCII deferred op must not blow up (or write
-    mojibake) because the sandbox handed it a stripped, locale-less env.
+    """A skill CLI writing a non-ASCII deferred op keeps working under a
+    locale-less env, and the value survives the round trip.
+
+    These two producers use bare ``json.dumps``, so ``ensure_ascii=True``
+    escapes everything and the bytes on disk are pure ASCII either way — this
+    is a *round-trip* guard, not a proof of the encoding fix (that is the
+    ``sent_emails`` test below, whose producer passes ``ensure_ascii=False``).
+    It fails the day someone flips that flag here without naming an encoding.
     """
     proc = _run_ascii_locale(f"""
         import os
@@ -122,10 +130,8 @@ def test_skill_defer_op_writes_utf8_under_an_ascii_locale(
     assert proc.returncode == 0, proc.stderr
     written = list(tmp_path.glob("task_9_*.json"))
     assert len(written) == 1
-    # Decodes as UTF-8 and round-trips through the daemon-side loader.
     payload = json.loads(written[0].read_bytes().decode("utf-8"))
-    assert payload[0] == json.loads(json.dumps(payload[0]))
-    assert any("é" in str(v) or "è" in str(v) for v in payload[0].values())
+    assert marker in payload[0].values()
 
 
 def test_sent_email_record_writes_utf8_under_an_ascii_locale(tmp_path):
@@ -152,3 +158,51 @@ def test_sent_email_record_writes_utf8_under_an_ascii_locale(tmp_path):
     loaded = _load_deferred_json(tmp_path, 11, "sent_emails")
     assert loaded is not None
     assert loaded[1][0]["subject"] == "Rechnung über café"
+
+
+class TestDeferredEmailOutput:
+    """``email_output`` is a deferred suffix with its own loader in
+    ``transport/email/outbound.py`` rather than ``_load_deferred_json``, and
+    its producer is the other ``ensure_ascii=False`` writer — so it needs the
+    same contract on both halves."""
+
+    def _config_and_task(self, tmp_path):
+        from istota.config import Config
+        from istota.db import Task
+
+        config = Config(temp_dir=tmp_path / "temp")
+        task = Task(
+            id=12, status="running", source_type="email", user_id="alice",
+            prompt="p",
+        )
+        (tmp_path / "temp" / "alice").mkdir(parents=True, exist_ok=True)
+        return config, task
+
+    def test_non_ascii_body_reads_back(self, tmp_path):
+        from istota.transport.email.outbound import _load_deferred_email_output
+
+        config, task = self._config_and_task(tmp_path)
+        path = tmp_path / "temp" / "alice" / "task_12_email_output.json"
+        path.write_bytes(
+            json.dumps(
+                {"subject": "Rückfrage", "body": "Grüße — café", "format": "plain"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+
+        loaded = _load_deferred_email_output(config, task, consume=False)
+        assert loaded is not None
+        assert loaded["body"] == "Grüße — café"
+
+    def test_undecodable_file_degrades_instead_of_raising(self, tmp_path):
+        """It is read inside ``process_one_task``'s completion block with no
+        enclosing try, so an escaping ``UnicodeDecodeError`` would take the
+        delivery down rather than fall back to the unstructured reply."""
+        from istota.transport.email.outbound import _load_deferred_email_output
+
+        config, task = self._config_and_task(tmp_path)
+        path = tmp_path / "temp" / "alice" / "task_12_email_output.json"
+        path.write_bytes(b'{"body": "caf\xe9", "format": "plain"}')
+
+        assert _load_deferred_email_output(config, task, consume=True) is None
+        assert not path.exists()

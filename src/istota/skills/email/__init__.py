@@ -769,8 +769,22 @@ def delete_emails_before(
     Two deliberate differences from the per-message ``delete_email``: one
     connection for the whole sweep instead of one per message, and the IMAP
     **internal date** (arrival) as the age, not the sender-supplied ``Date:``
-    header. ``BEFORE`` is date-granular, so a message is kept for up to one
-    extra day rather than deleted early.
+    header. ``BEFORE`` is date-granular *and evaluated in the mail server's
+    zone*, so a message is kept for up to an extra day rather than deleted
+    early — which is the direction to err, and why the DB-side ledger prune
+    floors its own window one day above this one.
+
+    Like the old paginated sweep it replaces, this deletes **everything** past
+    the cutoff, not only mail the bot processed. On the first run after the
+    ISSUE-230 fix that is a backlog the broken sweep never touched, so the
+    candidate count is logged before anything is removed.
+
+    A failure part-way through returns the count deleted so far rather than
+    unwinding it — the caller logs the number, and reporting zero after
+    removing hundreds is worse than reporting a partial. The next sweep
+    re-finds the remainder (IMAP ``SEARCH`` does not exclude ``\\Deleted``), so
+    a run that trips the socket timeout on a large backlog converges over
+    several ticks instead of failing permanently.
     """
     if config is None:
         raise ValueError("config is required")
@@ -782,9 +796,21 @@ def delete_emails_before(
         mailbox.folder.set(folder)
 
         uids = list(mailbox.uids(AND(date_lt=before)))
+        if uids:
+            logger.info(
+                "IMAP retention: %d message(s) in %s predate %s; deleting",
+                len(uids), folder, before.isoformat(),
+            )
         for start in range(0, len(uids), batch_size):
             batch = uids[start:start + batch_size]
-            mailbox.delete(batch)
+            try:
+                mailbox.delete(batch)
+            except Exception as e:
+                logger.error(
+                    "IMAP retention stopped after %d of %d message(s): %s",
+                    deleted, len(uids), e,
+                )
+                return deleted
             deleted += len(batch)
 
     return deleted
