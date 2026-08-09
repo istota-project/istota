@@ -14,6 +14,8 @@ Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `
 
 ## Sending a message
 
+**Enter** sends and **Shift+Enter** writes a newline; **Cmd/Ctrl+Enter** still sends, and so does the send button. On a phone or tablet the return key keeps inserting a newline — there is no cheap Shift there and the send button is already under your thumb. The key does nothing while a turn is running, while a voice message is recording, or while an attachment is still uploading, and never sends the Enter that commits an input-method candidate.
+
 A sent message becomes a `source_type="web"` task with `output_target="web"`. It is an interactive task — it loads conversation context, the room's `CHANNEL.md`, and the `guidelines/web.md` channel guidelines. Because `web` is a stream surface, the result and progress are not pushed anywhere; they live in the `task_events` log, which the `/api/chat/tasks/{id}/stream` SSE endpoint tails.
 
 The live view streams:
@@ -26,13 +28,24 @@ If the SSE stream falls back to polling, the client recovers without flashing an
 
 ## Message actions
 
-Hovering a message (or tapping it, on a touch screen) reveals a row of actions under it: **copy**, **star**, **delete**.
+Hovering a message (or tapping it, on a touch screen) reveals a row of actions under it: **copy**, **star**, **reply**, **delete**.
 
 - **Copy** puts the whole message on the clipboard as its original markdown — headings, lists and fenced code come across ready to paste, and the activity chips and tool traces are left out. It is unavailable while a reply is still being written, since half an answer is not an answer.
 - **Star** marks the message so it shows up in the Starred view. Unlike copy it works mid-reply, because it marks the message rather than its text. A starred message keeps its star visible without hovering.
+- **Reply** answers one specific message rather than the room in general — see below. It is absent in the aggregate views (All / Unread), which have no composer for a staged reply to go to.
 - **Delete** asks first, then removes the message for good — from the room, from the aggregate views, and from the conversation the bot remembers. In a room that is also open in Nextcloud Talk the confirmation says so, and the message is removed there too where the server allows it. A turn that is still running can't be deleted until it finishes.
 
 Deletion is not private to you: rooms are shared, so a message you delete is gone for everyone in the room. Anyone with an open tab sees it disappear straight away.
+
+## Replying to a message
+
+**Reply** stages the message you picked as a chip above the composer, showing the first 200 characters of it. Send, and the turn is recorded as a reply: the transcript renders the quoted excerpt above your message, and the bot is given the parent's text as the thing you are responding to — so a bare "yes, do that" lands on the right referent. The quote is read from the stored message server-side; nothing the browser sends can put words in it.
+
+- **The chip is part of the unsent message.** It rides in the draft, so leaving the room and coming back keeps it. Clearing the composer drops it, Escape dismisses it (after any open autocomplete menu has had the key first), and a `!command` clears it on send, since a command returns inline with no turn for a citation to attach to.
+- **The rendered quote is a link back.** Clicking it jumps to the message being replied to, when that message is loaded in the current view.
+- **A deleted parent still reads as a reply** — the quote renders as "Original message deleted" rather than the turn silently becoming an ordinary message.
+- **Replying to a message that is already gone fails the send**, and your text and attachments go back into the composer with the dead citation dropped. This is the one failure that repopulates the box: retrying would only re-send the same missing parent, and a reply delivered without its referent is not the message you wrote.
+- **Talk works both ways.** In a room bound to a Nextcloud Talk conversation, a web reply posts as a real Talk reply (falling back to a plain post if the parent never reached Talk), and a reply made in Talk shows up as a reply in web chat.
 
 ## Commands and model override
 

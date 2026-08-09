@@ -132,6 +132,11 @@ export function createAutocomplete(
         return true;
       case 'Tab':
       case 'Enter':
+        // The unmodified key only. Shift+Enter is the composer's one newline
+        // now that a bare Enter sends, so eating it here would leave the field
+        // with no way to break a line while the popover happens to be open —
+        // and a modified key was never how a row gets accepted.
+        if (e.shiftKey || e.altKey) return false;
         accept();
         return true;
       case 'Escape':

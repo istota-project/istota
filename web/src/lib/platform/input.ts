@@ -19,6 +19,34 @@ export function usesSoftKeyboard(): boolean {
   return window.matchMedia?.('(pointer: coarse)').matches === true;
 }
 
+/**
+ * Is this keydown one an input method is still consuming?
+ *
+ * Committing a candidate is an `Enter` like any other from the DOM's point of
+ * view, so any field that acts on `Enter` — sending a message, creating a room
+ * — posts a half-typed word for anyone composing Japanese, Korean or Chinese
+ * unless it asks. `keyCode === 229` is the older shape of the same signal,
+ * which some IMEs still report with `isComposing` unset.
+ *
+ * This covers the event itself. It does **not** cover the WebKit ordering in
+ * which `compositionend` is dispatched *before* the confirming keydown, which
+ * then arrives with neither mark — a caller that acts on `Enter` needs a short
+ * grace window after `compositionend` as well, since only it can see that
+ * event.
+ */
+export function isImeComposing(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229;
+}
+
+/**
+ * How long after a `compositionend` an `Enter` is still assumed to belong to
+ * the input method rather than to the user.
+ *
+ * Short enough to be invisible between two deliberate keystrokes, long enough
+ * to cover the out-of-order dispatch above.
+ */
+export const IME_COMMIT_GRACE_MS = 50;
+
 /** The composer decides its own keyboard, so taps inside it are left alone. */
 const KEEPS_KEYBOARD = '.composer, [data-keeps-keyboard]';
 

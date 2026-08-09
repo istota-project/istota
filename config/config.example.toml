@@ -40,7 +40,7 @@ bot_name = "Istota"
 # model = "claude-opus-5"
 
 # Effort level: low, medium, high, xhigh, max. Support varies by model.
-# Opus 4.8 defaults to high on all surfaces. Other models may differ.
+# Opus 5 defaults to high on all surfaces. Other models may differ.
 # Read independently of `model` (or set inline via the :effort modifier above).
 # Empty or omitted = model default.
 # effort = "high"
