@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Web chat can reply to a specific message. Hover a turn and pick Reply; the composer shows what you are answering, the sent message renders a quote above it that clicks back to the original, and the model is told which message the reply responds to instead of having to guess from an ordered history. A reply into a Nextcloud Talk-bound room lands there as a real Talk reply, and a reply sent from Talk shows as one in web chat.
 
+- Istota can check on work it handed off. Having queued a background task or a one-off scheduled job, it can now ask how that run went and read the result back, rather than having no sanctioned way to find out. It only ever sees your own tasks, and the surface is limited to admin users.
+
 - Commits are now scanned before they land. A pre-commit hook checks staged content for credentials (via gitleaks) and for private data — a real name, a production hostname, a home directory path, an account number — which has no recognisable shape and so needs a denylist rather than a detector. Enable it per clone with `scripts/setup.sh`. Your own terms go in a gitignored file, because on a public repo a checked-in list of what to redact is itself the leak; documentation placeholders and lines you mark are skipped, and neither scan ever prints the value it found.
 
 ### Changed
@@ -36,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The setting that holds mail arriving from your own address for approval now works. The sender line on an email is unauthenticated, so anyone who knows your address can put it there, and this setting was the one thing meant to catch that — but it could never fire, because the check it made was the very thing that had brought it there. It now holds such mail until you approve it from Talk, whichever way the message was addressed. It stays off by default, since it also holds every message you send yourself and no deployment has had this behaviour until now; if you had already turned it on believing it worked, it takes effect on this upgrade.
 
 ### Fixed
+
+- A task that needs something its sandbox can't do no longer burns its whole time limit waiting for an answer that could never arrive. Reaching for the database directly fails in a way that reads as a broken command rather than a refusal, so a wait loop treated it as "not ready yet" and ran to the end, after which the reply was written from whatever was left. Istota is now told plainly that the database is out of reach, that a skill command is how to get something done outside the sandbox, and how to wait for something without hanging on it.
 
 - Google Workspace commands now use the account you connected. Connecting from the web settings stored and refreshed the credentials correctly, but nothing ever handed them to the tool that runs Drive, Calendar, Gmail and Sheets, so every command ran signed out — and the route out to Google was closed off alongside. Any skill that sets up its own credentials was exposed to this; Google Workspace was the only one that did.
 
