@@ -53,6 +53,17 @@ export interface SearchResultsData {
   text: string;
 }
 
+// The `command_data` payload a bare "yes"/"no" answering a parked confirmation
+// produces (ISSUE-243). Unlike every other inline result this exchange is
+// durable — the server wrote both halves into `messages` — so it carries their
+// canonical ids for the client to stamp onto the rows already on screen. Without
+// that the room stream's own echo of them appends a second copy of each.
+export interface ConfirmationAnsweredData {
+  kind: 'confirmation_answered';
+  user_msg_id: number | null;
+  system_msg_id: number | null;
+}
+
 /**
  * The POST body a Retry replays.
  *

@@ -351,6 +351,108 @@ def _send_web(
     return msg_id is not None
 
 
+# How long the transcript mirror waits for the write lock before giving up. Well
+# under the 30s default, because a caller holding a transaction is a stall on
+# whatever thread it runs on rather than an error anyone sees. See the note in
+# `_mirror_talk_to_room`.
+_MIRROR_LOCK_WAIT_MS = 250
+
+
+def _default_web_room(config: "Config", user_id: str) -> str | None:
+    """The room a bare ``web`` destination lands on. None if the user has none."""
+    from .transport.web import default_web_room_token
+
+    try:
+        return default_web_room_token(config, user_id)
+    except Exception:
+        return None
+
+
+def _canonical_room_token(config: "Config", token: str) -> str:
+    """The canonical room a Talk token belongs to, or the token unchanged.
+
+    A promoted web room keeps its own token and binds the Talk one to it, so
+    the two names for one room only compare equal after this.
+    """
+    from . import db
+
+    if not config.db_path:
+        return token
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=_MIRROR_LOCK_WAIT_MS) as conn:
+            return db.resolve_room_token(conn, "talk", token) or token
+    except Exception:
+        return token
+
+
+def _mirror_talk_to_room(
+    config: "Config", token: str, message: str,
+    *, title: str | None = None, talk_message_id: int | None = None,
+) -> None:
+    """Record a Talk-delivered notification in that room's web transcript.
+
+    A Talk room and its web view are one room with one token, so a post made
+    only to Talk left the web view of the same conversation blank (ISSUE-242).
+    Task turns already cross over (``scheduler._store_room_turn``); this closes
+    the same gap for everything that isn't a task turn — alerts, heartbeat
+    notices, reminders, and the inbound-email confirmation prompt, where the
+    gap is silent mail loss because the task auto-cancels at
+    ``confirmation_timeout_minutes`` unanswered.
+
+    ``role='system'`` is what the ``web`` leg already writes, so it renders
+    identically, rides the live room stream and counts toward unread — no new
+    render path. ``origin_surface='talk'`` is provenance only:
+    ``list_system_messages`` filters on ``role`` alone, so the value does not
+    gate visibility, but it makes the row's origin legible where ``'web'``
+    would not.
+
+    The gate is **room existence**, not surface config — the same rule
+    ``_store_room_turn`` uses. A synthetic email-thread token, or a Talk room
+    never registered, no-ops rather than minting a room. Best-effort
+    throughout: the Talk delivery has already happened, and a failed transcript
+    row must not report the notification as undelivered.
+
+    **The short busy timeout is the load-bearing part.** This opens a *second*
+    connection to a database a caller may already hold a write transaction on —
+    the hazard the ``web`` leg has always had, and which ``_deliver_dmarc_alerts``
+    / ``_deliver_confirmation_prompts`` / ``run_cleanup_checks`` are structured
+    around. Making the ``talk`` leg a writer too extends that hazard to every
+    remaining ``send_notification`` call site, and the ones reached from inside a
+    transaction are not all worth restructuring (the sleep cycle holds one write
+    transaction for a whole nightly pass and calls this from deep inside it). At
+    the default 30s lock wait, such a caller stalls for 30s per notification —
+    on the dispatch thread, where six of them trip the loop-stall watchdog. Failing
+    fast instead turns the worst case into a *dropped mirror*, which is the right
+    trade: the notification itself has already been delivered to Talk, and the
+    mirror is a convenience for the web reader. The confirmation prompt, the one
+    case where the mirror really matters, is delivered outside any transaction.
+    """
+    from . import db
+
+    if not config.db_path:
+        return
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=_MIRROR_LOCK_WAIT_MS) as conn:
+            # A per-surface ref maps to the canonical room: a *promoted* web
+            # room's Talk token is not its own token, so writing the raw one
+            # would silently find no room and drop the mirror.
+            room_token = db.resolve_room_token(conn, "talk", token) or token
+            if db.get_room(conn, room_token) is None:
+                return
+            db.add_message(
+                conn, room_token, role="system", body=message,
+                origin_surface="talk", title=title,
+                external_ids=(
+                    {"talk": str(talk_message_id)} if talk_message_id else None
+                ),
+            )
+            conn.commit()
+    except Exception:
+        logger.warning(
+            "Talk→room transcript mirror failed for %r", token, exc_info=True,
+        )
+
+
 def is_channel_configured(
     config: "Config",
     user_id: str,
@@ -425,14 +527,38 @@ def _dispatch(
 
     sent = False
     talk_message_id: int | None = None
+    # Rooms a `web` destination will write into anyway — a route naming both
+    # legs of one room must not produce two rows for one message. Both sides are
+    # resolved to the *canonical* room before comparing, because neither raw
+    # token is the room: a bare `web` leaf carries no channel at all and lands
+    # on the user's default room, and a promoted room's Talk token differs from
+    # its own. Comparing the raw values missed both.
+    web_rooms = {
+        _canonical_room_token(config, t)
+        for t in (
+            d.channel or _default_web_room(config, user_id)
+            for d in dests if d.surface == "web"
+        )
+        if t
+    }
     for dest in dests:
         if dest.surface == "talk":
-            token = dest.channel or conversation_token
+            # Resolved here, not left to `_send_talk`, because the mirror needs
+            # the token a bare `talk` destination actually lands on.
+            token = (
+                dest.channel or conversation_token
+                or resolve_conversation_token(config, user_id)
+            )
             msg_id = run_coro(_send_talk(config, user_id, message, token))
             if msg_id:
                 sent = True
                 if talk_message_id is None:
                     talk_message_id = msg_id
+                if token and _canonical_room_token(config, token) not in web_rooms:
+                    _mirror_talk_to_room(
+                        config, token, message,
+                        title=title, talk_message_id=msg_id,
+                    )
         elif dest.surface == "email":
             if _send_email(config, user_id, title or "Notification", message):
                 sent = True

@@ -157,3 +157,85 @@ describe('chat store — pending confirmations', () => {
     expect(notices.notifyError).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Answering with a bare "yes" from the composer (ISSUE-243).
+ *
+ * The endpoint runs it inside the request like a `!command` — no task, an
+ * inline result — but unlike a command the exchange is *durable*: the server
+ * writes the answer and the ack into `messages`, so both come back over the
+ * room stream. The ids it returns are what stop that echo appending a second
+ * copy of each.
+ */
+describe('chat store — answering a confirmation from the composer', () => {
+  beforeEach(() => {
+    Object.values(api).forEach((v) => {
+      if (typeof v === 'function' && 'mockReset' in v)
+        (v as unknown as { mockReset(): void }).mockReset();
+    });
+    notices.notifyError.mockReset();
+    api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500 });
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
+    api.markRoomRead.mockResolvedValue({ ok: true, last_read_message_id: 0 });
+    api.getTaskEvents.mockResolvedValue({ events: [], next_seq: 0 });
+    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function answeredSession() {
+    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(40122)] });
+    const s = await freshSession();
+    await s.init();
+    await s.refreshConfirmations();
+    expect(get(s.pendingConfirmations)).toHaveLength(1);
+
+    api.sendChatMessage.mockResolvedValue({
+      ok: true,
+      status: 200,
+      task_id: null,
+      inline_result: 'Confirmed.',
+      command_data: { kind: 'confirmation_answered', user_msg_id: 71, system_msg_id: 72 },
+    });
+    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
+    await s.send('yes');
+    return s;
+  }
+
+  it('renders the ack and stamps both durable ids onto the rows', async () => {
+    const s = await answeredSession();
+
+    const rows = get(s.messages);
+    const user = rows.find((m) => m.role === 'user');
+    const ack = rows.find((m) => m.role === 'system');
+    expect(user?.msgId).toBe(71);
+    expect(ack?.text).toBe('Confirmed.');
+    expect(ack?.msgId).toBe(72);
+  });
+
+  it('clears the banner immediately rather than at the next poll', async () => {
+    const s = await answeredSession();
+    expect(get(s.pendingConfirmations)).toEqual([]);
+  });
+
+  it('an ordinary inline command is untouched by the stamping', async () => {
+    const s = await freshSession();
+    await s.init();
+    api.sendChatMessage.mockResolvedValue({
+      ok: true,
+      status: 200,
+      task_id: null,
+      inline_result: 'pong',
+    });
+
+    await s.send('!ping');
+
+    const ack = get(s.messages).find((m) => m.role === 'system');
+    expect(ack?.text).toBe('pong');
+    expect(ack?.msgId).toBeUndefined();
+  });
+});

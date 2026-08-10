@@ -372,6 +372,26 @@ messages are re-polled rather than silently lost.
   carries the sender, subject and routing method off `processed_emails`
   instead.
 
+  **ISSUE-243 moved the last Talk-private pieces in with the verbs**: the word
+  lists (`confirmations.parse_answer`) and the three-path lookup
+  (`confirmations.resolve`), plus the ack text (`apply_answer`,
+  `ambiguity_listing`). `handle_confirmation_reply` keeps only its Talk half —
+  read the reply's parent id, post the ack, record the exchange — and the web
+  POST intercepts a bare answer before `_chat_create_web_task`, which would
+  otherwise cancel the very question the answer approves. The ownership check
+  moved inside `resolve`, where it belonged: Path C already filters by user, so
+  it only ever mattered for A and B. Talk gained a `"Confirmed."` on a plain
+  approve, which it had never posted. Full reference in
+  `.claude/rules/web-chat.md`.
+
+  **The prompt is mirrored into the room's web transcript** (ISSUE-242).
+  `_dispatch`'s `talk` leg used to write nothing to `messages`, so a prompt
+  delivered to `talk:<token>` was invisible in the web view of that same room —
+  and for the confirmation prompt that is silent mail loss. It now writes a
+  `role='system'` row after a successful Talk post, gated on room existence and
+  stamped with the Talk message id (which is what makes the reply walk-back,
+  Path A, work on web). Best-effort: the Talk delivery has already happened.
+
   **The expiry notice routes by purpose too.** `run_cleanup_checks` used to post
   to the task's `conversation_token` verbatim, which for an email gate names no
   room, so the user was never told their mail had been dropped. It now goes

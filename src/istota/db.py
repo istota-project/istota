@@ -3508,6 +3508,45 @@ def find_send_by_client_msg_id(
     return (int(row["task_id"]), row["user_id"]) if row else None
 
 
+def find_confirmation_exchange(
+    conn: sqlite3.Connection, room_token: str, client_msg_id: str | None,
+) -> tuple[int, int, str] | None:
+    """``(user_msg_id, system_msg_id, ack)`` of an answer already recorded under
+    this key in this room, or None.
+
+    The sibling of :func:`find_send_by_client_msg_id` for the one exchange that
+    is *not* a task. `confirmations.record_exchange` writes a `task_id IS NULL`
+    pair, and that inner join drops a NULL — so the send-durability lookup
+    cannot see this row while the `(room_token, client_msg_id)` unique index
+    can. Without a lookup that spans both, a retried "yes" re-resolves from
+    scratch: with a second gate parked in the meantime it approves a question
+    the user never answered, and with none it takes an `IntegrityError` on the
+    index. Both were found in review; the first is an authorization defect.
+
+    The ack is the `system` row written immediately after the answer in the
+    same transaction, so it is the next system row in the room by id.
+    """
+    if not client_msg_id:
+        return None
+    answer = conn.execute(
+        "SELECT id FROM messages "
+        "WHERE room_token = ? AND client_msg_id = ? AND role = 'user' "
+        "AND task_id IS NULL LIMIT 1",
+        (room_token, client_msg_id),
+    ).fetchone()
+    if answer is None:
+        return None
+    ack = conn.execute(
+        "SELECT id, body FROM messages "
+        "WHERE room_token = ? AND role = 'system' AND id > ? "
+        "ORDER BY id ASC LIMIT 1",
+        (room_token, answer["id"]),
+    ).fetchone()
+    if ack is None:
+        return None
+    return (int(answer["id"]), int(ack["id"]), ack["body"])
+
+
 def get_messages(
     conn: sqlite3.Connection, room_token: str, limit: int | None = None,
 ) -> list[Message]:

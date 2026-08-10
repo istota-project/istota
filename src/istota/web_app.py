@@ -2895,6 +2895,88 @@ def _chat_owned_room(username: str, room_id: int):
     return room
 
 
+def _chat_answer_confirmation(
+    username: str,
+    token: str,
+    text: str,
+    answer,
+    reply_to_msg_id: int | None = None,
+    client_msg_id: str | None = None,
+) -> dict | None:
+    """Answer the held task this reply lands on. None = nothing to answer.
+
+    The web half of ISSUE-243. Returning None rather than a string when nothing
+    is parked is what keeps the fall-through rule intact: "yes" is a perfectly
+    ordinary reply to a question the bot asked in prose, so matching the word
+    must not by itself suppress task creation — only finding a parked question
+    may.
+
+    Path A works here because ISSUE-242's mirror stamps the prompt's Talk id
+    onto the mirrored ``messages`` row, so a cited web reply can be walked back
+    to ``tasks.talk_response_id``. The citation is checked against this room
+    first, so the endpoint does not become an id oracle for another's rooms.
+    """
+    from . import confirmations, db
+
+    with db.get_db(_config.db_path) as conn:
+        # A retry of a send we accepted but never got to report must resolve to
+        # the answer it already gave, not answer again. Re-resolving is not
+        # merely wasteful: the first attempt consumed the question, so a second
+        # gate parked in between would be the single open one and get approved
+        # on a "yes" the user typed at a different question entirely. The
+        # ordinary send path gets this from `_is_own_replay`, which cannot see
+        # this exchange — its lookup inner-joins `tasks` and these rows carry no
+        # task id.
+        prior = db.find_confirmation_exchange(conn, token, client_msg_id)
+        if prior is not None:
+            user_msg_id, system_msg_id, ack = prior
+            return {
+                "ack": ack,
+                "user_msg_id": user_msg_id,
+                "system_msg_id": system_msg_id,
+            }
+
+        talk_response_id: int | None = None
+        if reply_to_msg_id is not None:
+            target = db.get_reply_target(conn, reply_to_msg_id)
+            if target is not None and target[0] == token:
+                external = db.get_message_external_id(conn, reply_to_msg_id, "talk")
+                if external and external.isdecimal():
+                    talk_response_id = int(external)
+
+        res = confirmations.resolve(
+            conn, username, conversation_token=token,
+            talk_response_id=talk_response_id,
+        )
+        if res.ambiguous:
+            # Nothing was decided, so nothing is recorded — the listing is a
+            # "say which", and the `!command` inline-only precedent fits it
+            # where the decision precedent does not. It is also the one branch
+            # that consumes no question, so recording it would let a client
+            # loop append transcript rows without bound (this path returns
+            # before `_chat_create_web_task`, where the rate limit lives).
+            return {
+                "ack": confirmations.ambiguity_listing(conn, res.ambiguous),
+                "user_msg_id": None,
+                "system_msg_id": None,
+            }
+        if res.task is None:
+            return None
+
+        ack = confirmations.apply_answer(conn, res.task, answer)
+        user_msg_id, system_msg_id = confirmations.record_exchange(
+            conn, token, answer_text=text, ack=ack, origin_surface="web",
+            client_msg_id=client_msg_id,
+        )
+        conn.commit()
+
+    return {
+        "ack": ack,
+        "user_msg_id": user_msg_id,
+        "system_msg_id": system_msg_id,
+    }
+
+
 def _chat_mark_room_read(username: str, room_id: int) -> dict | None:
     """Advance the user's web read cursor for a room to its current newest
     message. Returns ``{cursor, advanced, room_token}``, or None if the room
@@ -4811,6 +4893,33 @@ async def chat_send_message(
                     "inline_result": result.text or "",
                     "command_data": result.data,
                 }
+
+    # A bare "yes"/"no" answers a parked confirmation, as it does in Talk
+    # (`transport/talk/inbound.py`, before its own `ingest_message`). The
+    # ordering is not cosmetic: `_chat_create_web_task` cancels this room's
+    # pending confirmations on any new message, so an answer that reached it
+    # would cancel the question it is answering. Attachment-bearing sends are
+    # excluded — the file is the message, whatever the caption says.
+    if not attachments:
+        from . import confirmations
+
+        answer = confirmations.parse_answer(text)
+        if answer is not None:
+            answered = await asyncio.to_thread(
+                _chat_answer_confirmation, username, room.token, text, answer,
+                reply_to_msg_id, client_msg_id,
+            )
+            if answered is not None:
+                return {
+                    "task_id": None,
+                    "inline_result": answered["ack"],
+                    "command_data": {
+                        "kind": "confirmation_answered",
+                        "user_msg_id": answered["user_msg_id"],
+                        "system_msg_id": answered["system_msg_id"],
+                    },
+                }
+            # Nothing was parked — "yes" is just a message. Fall through.
 
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,

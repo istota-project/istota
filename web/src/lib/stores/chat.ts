@@ -51,13 +51,22 @@ import {
   type ToolEntry,
   type SearchResultsData,
   type SearchResultItem,
+  type ConfirmationAnsweredData,
   type MessageReply,
 } from '$lib/stores/segments';
 
 // The message / segment model lives in the pure reducer module so it can be
 // unit-tested without a DOM; re-export here so existing `$lib/stores/chat`
 // importers keep working.
-export type { ChatMessage, Segment, ToolEntry, SearchResultsData, SearchResultItem, MessageReply };
+export type {
+  ChatMessage,
+  Segment,
+  ToolEntry,
+  SearchResultsData,
+  SearchResultItem,
+  ConfirmationAnsweredData,
+  MessageReply,
+};
 
 /** Build an assistant message's `segments` from a finished task's history
  * payload. Tool entries render as neutral "done" chips (history carries no
@@ -2289,7 +2298,8 @@ function createSession(): ChatSession {
     }
     if (res.task_id == null) {
       // !command ran inline — no task, no stream.
-      const cd = res.command_data as SearchResultsData | null | undefined;
+      const cd = res.command_data as
+        SearchResultsData | ConfirmationAnsweredData | null | undefined;
       updateMsg(phCid, (m) => {
         m.role = 'system';
         m.text = res.inline_result || '';
@@ -2299,6 +2309,29 @@ function createSession(): ChatSession {
         m.progress = undefined;
         m.streaming = false;
       });
+      if (cd && cd.kind === 'confirmation_answered') {
+        // Unlike every other inline result, this one is *durable*: the server
+        // wrote the answer and the ack into `messages`, so both echo back over
+        // the room stream. Stamp their ids onto the two rows already on screen
+        // — `appendStreamedRow` drops a frame whose `msg_id` is present — or
+        // the exchange renders twice. This is also what makes the rows
+        // starrable and deletable without a reload.
+        const answered = cd as ConfirmationAnsweredData;
+        if (typeof answered.user_msg_id === 'number') {
+          updateMsg(userCid, (m) => {
+            m.msgId = answered.user_msg_id!;
+          });
+        }
+        if (typeof answered.system_msg_id === 'number') {
+          updateMsg(phCid, (m) => {
+            m.msgId = answered.system_msg_id!;
+          });
+        }
+        // The banner above the transcript holds the same question. Clear it
+        // now rather than at the next 30s tick — an answer that works while
+        // the card lingers reads as the answer not having taken.
+        void refreshConfirmations();
+      }
       status.set('idle');
       return;
     }
