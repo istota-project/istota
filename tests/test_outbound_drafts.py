@@ -832,6 +832,118 @@ class TestCorruptColumns:
         send.assert_not_called()
 
 
+class TestOpenListing:
+    """The listing the web surface reads, which has the opposite strictness
+    requirement to `release`.
+
+    Refusing to send a row we cannot read is right. Refusing to *list* nine
+    readable rows because a tenth is malformed is not — it empties the approval
+    surface for mail that is perfectly answerable.
+    """
+
+    def test_it_carries_sending_rows_as_well_as_pending(self, conn):
+        """A row left `sending` — the process died between the claim and the
+        finalize — is invisible to every `status='pending'` producer, so the one
+        state that needs a human to check the mailbox was the one state the web
+        surface could not show."""
+        pending = _hold(conn)
+        stuck = _hold(conn, subject="Stuck")
+        conn.execute(
+            "UPDATE outbound_drafts SET status = ? WHERE id = ?",
+            (drafts.STATUS_SENDING, stuck),
+        )
+        conn.commit()
+
+        listing = drafts.open_for_user(conn, "alice")
+
+        assert [d.id for d in listing.drafts] == [pending, stuck]
+        assert [d.status for d in listing.drafts] == ["pending", "sending"]
+
+    def test_a_resolved_row_is_not_open(self, conn):
+        draft_id = _hold(conn)
+        drafts.discard(conn, draft_id)
+        assert drafts.open_for_user(conn, "alice").drafts == []
+
+    def test_one_corrupt_row_does_not_take_down_the_others(self, conn):
+        good = _hold(conn, subject="Readable")
+        bad = _hold(conn, subject="Corrupt")
+        conn.execute(
+            "UPDATE outbound_drafts SET to_addrs = ? WHERE id = ?",
+            ("not json at all", bad),
+        )
+        conn.commit()
+
+        listing = drafts.open_for_user(conn, "alice")
+
+        assert [d.id for d in listing.drafts] == [good]
+        # Reported rather than dropped: the user still has held mail, and a row
+        # that silently vanishes is mail they never learn about.
+        assert listing.unreadable == [bad]
+
+    def test_a_clean_listing_reports_nothing_unreadable(self, conn):
+        _hold(conn)
+        assert drafts.open_for_user(conn, "alice").unreadable == []
+
+    def test_it_is_scoped_to_the_owner(self, conn):
+        mine = _hold(conn)
+        _hold(conn, user_id="bob")
+        assert [d.id for d in drafts.open_for_user(conn, "alice").drafts] == [mine]
+
+
+class TestIdentityRead:
+    """Owner and status without parsing anything that can be corrupt.
+
+    The ownership check and the discard guard both need these two columns and
+    nothing else, so making them go through `_row` meant a malformed recipient
+    list denied the user the one action that would clear it.
+    """
+
+    def test_it_reports_owner_and_status(self, conn):
+        draft_id = _hold(conn)
+        assert drafts.identity(conn, draft_id) == ("alice", "pending")
+
+    def test_an_unknown_id_is_none(self, conn):
+        assert drafts.identity(conn, 999) is None
+
+    def test_it_reads_a_row_whose_json_columns_are_corrupt(self, conn):
+        draft_id = _hold(conn)
+        conn.execute(
+            "UPDATE outbound_drafts SET to_addrs = ? WHERE id = ?",
+            ("{}", draft_id),
+        )
+        conn.commit()
+
+        assert drafts.identity(conn, draft_id) == ("alice", "pending")
+
+    def test_a_corrupt_row_can_still_be_discarded(self, conn):
+        """Discarding sends nothing, so nothing about it depends on being able
+        to read the recipient list. Leaving it refused would strand the card
+        with no action that works."""
+        draft_id = _hold(conn)
+        conn.execute(
+            "UPDATE outbound_drafts SET attachments = ? WHERE id = ?",
+            ("[1, 2]", draft_id),
+        )
+        conn.commit()
+
+        drafts.discard(conn, draft_id)
+
+        assert drafts.identity(conn, draft_id) == ("alice", "discarded")
+
+    def test_a_corrupt_row_still_refuses_to_send(self, conn, config):
+        """The other half of the same rule: resilience is for listing and
+        discarding, never for the send."""
+        draft_id = _hold(conn)
+        conn.execute(
+            "UPDATE outbound_drafts SET to_addrs = ? WHERE id = ?",
+            ("not json", draft_id),
+        )
+        conn.commit()
+
+        with pytest.raises(drafts.DraftCorrupt):
+            drafts.release(config, draft_id)
+
+
 class TestAddressNormalization:
     """Stored addresses, the card and the envelope are one list.
 

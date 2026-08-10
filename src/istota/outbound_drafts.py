@@ -130,6 +130,20 @@ class OutboundDraft:
         return [*self.to_addrs, *self.cc_addrs, *self.bcc_addrs]
 
 
+@dataclass
+class DraftListing:
+    """What a listing read found: the rows it could build, and the ids it could not.
+
+    Two fields rather than a bare list because dropping an unreadable row makes
+    held mail vanish without a word, and raising on one makes nine readable
+    drafts unreachable. Neither is acceptable on the surface the user answers
+    from, so the caller gets both and renders each in its own shape.
+    """
+
+    drafts: list[OutboundDraft]
+    unreadable: list[int]
+
+
 def _json_list(value: object, *, column: str) -> list[str]:
     """A JSON array column as a list of strings, raising on anything else.
 
@@ -293,6 +307,62 @@ def pending_for_user(conn: sqlite3.Connection, user_id: str) -> list[OutboundDra
     return [_row(r) for r in rows]
 
 
+def open_for_user(conn: sqlite3.Connection, user_id: str) -> DraftListing:
+    """Every unresolved draft for a user, readable rows and unreadable ids apart.
+
+    Two departures from :func:`pending_for_user`, both for the web surface.
+
+    It carries `sending` as well as `pending`. Every other producer filters on
+    `pending`, so a row left `sending` — the process died between the claim and
+    the finalize, or the bookkeeping after a successful send failed — dropped
+    out of the list and the stream entirely. That state is deliberately terminal
+    and needs a human to check the Sent folder, and the web UI is where that
+    human is, so the one status that most needs saying was the one that could
+    not be shown.
+
+    And it is **row-resilient**: a row whose JSON columns do not parse is
+    reported as an id in ``unreadable`` rather than raising. Strictness is right
+    in :func:`release` — sending to a recipient set we cannot read is exactly
+    the thing to refuse — and wrong in a listing, where one malformed row would
+    500 the whole endpoint and empty the approval surface for the other nine.
+    The id is reported rather than swallowed, so the card can say a draft exists
+    that cannot be read instead of the mail silently disappearing.
+    """
+    rows = conn.execute(
+        "SELECT * FROM outbound_drafts WHERE user_id = ? AND status IN (?, ?) "
+        "ORDER BY id",
+        (user_id, STATUS_PENDING, STATUS_SENDING),
+    ).fetchall()
+    readable: list[OutboundDraft] = []
+    unreadable: list[int] = []
+    for row in rows:
+        try:
+            readable.append(_row(row))
+        except DraftCorrupt:
+            logger.warning(
+                "outbound draft %s has a corrupt column; listing it as "
+                "unreadable", row["id"], exc_info=True,
+            )
+            unreadable.append(row["id"])
+    return DraftListing(drafts=readable, unreadable=unreadable)
+
+
+def identity(conn: sqlite3.Connection, draft_id: int) -> tuple[str, str] | None:
+    """``(user_id, status)`` for a draft, or ``None`` if there is no such row.
+
+    Deliberately reads the two plain columns and parses nothing else. Ownership
+    checks and the discard guard need only these, and routing them through
+    :func:`get` meant a malformed recipient list denied the owner the one action
+    — discarding — that does not depend on reading it.
+    """
+    row = conn.execute(
+        "SELECT user_id, status FROM outbound_drafts WHERE id = ?", (draft_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["user_id"], row["status"] or STATUS_PENDING
+
+
 def pending_for_room(
     conn: sqlite3.Connection, room_token: str,
 ) -> list[OutboundDraft]:
@@ -349,15 +419,22 @@ def edit_body(
 
 
 def discard(conn: sqlite3.Connection, draft_id: int) -> None:
-    """Mark a pending draft discarded. Idempotent on an already-discarded row."""
-    draft = get(conn, draft_id)
-    if draft is None:
+    """Mark a pending draft discarded. Idempotent on an already-discarded row.
+
+    Reads through :func:`identity` rather than :func:`get`, so a row whose
+    stored JSON is malformed can still be binned. Nothing is sent here, so
+    nothing about the decision depends on being able to read the recipient
+    list — and refusing would leave the user a card with no action that works.
+    """
+    current = identity(conn, draft_id)
+    if current is None:
         raise DraftNotFound(f"no draft {draft_id}")
-    if draft.status == STATUS_DISCARDED:
+    _, status = current
+    if status == STATUS_DISCARDED:
         return
-    if draft.status != STATUS_PENDING:
+    if status != STATUS_PENDING:
         raise DraftNotPending(
-            f"draft {draft_id} is {draft.status}, not pending"
+            f"draft {draft_id} is {status}, not pending"
         )
     cursor = conn.execute(
         "UPDATE outbound_drafts SET status = ?, resolved_at = datetime('now') "
