@@ -1573,7 +1573,7 @@ def _record_sent_email_direct(
                 task_id=task.id,
                 conversation_token=task.conversation_token,
                 talk_delivery_token=task.talk_delivery_token,
-                origin_target=routing.origin_descriptor(task),
+                origin_target=routing.origin_descriptor(task, conn),
             )
     except Exception as e:  # noqa: BLE001 — the send already happened
         logger.warning("sent-email tracking: direct write failed: %s", e)

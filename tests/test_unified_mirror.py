@@ -230,6 +230,144 @@ class TestRoomExpansion:
         assert {d.surface for d in after} == {"web", "talk"}
 
 
+class TestOriginDescriptor:
+    """What a send stamps on `sent_emails.origin_target`."""
+
+    def test_a_registered_room_is_named_as_a_room(self, config):
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "web-alice-9", "alice", origin="web")
+            db.add_room_binding(conn, "web-alice-9", "web", "web-alice-9")
+            task = _task(source_type="web", conversation_token="web-alice-9")
+            assert origin_descriptor(task, conn) == "room:web-alice-9"
+
+    def test_a_talk_room_is_named_as_a_room_too(self, config):
+        """Whatever surface the send went out from. Recording the leg is what
+        threw away the fact that the destination was a room at all."""
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "tk9", "alice", origin="talk")
+            db.add_room_binding(conn, "tk9", "talk", "tk9")
+            task = _task(source_type="talk", conversation_token="tk9")
+            assert origin_descriptor(task, conn) == "room:tk9"
+
+    def test_a_promoted_rooms_surface_ref_resolves_to_its_canonical_token(
+        self, config,
+    ):
+        """The Talk binding's ref is not the canonical token, and the stored
+        descriptor has to name the room rather than one of its aliases."""
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "web-alice-10", "alice", origin="web")
+            db.add_room_binding(conn, "web-alice-10", "web", "web-alice-10")
+            db.add_room_binding(conn, "web-alice-10", "talk", "PromotedTok")
+            task = _task(source_type="talk", conversation_token="PromotedTok")
+            assert origin_descriptor(task, conn) == "room:web-alice-10"
+
+    def test_an_email_continuation_finds_a_promoted_rooms_talk_ref(self, config):
+        """The cross-surface case a surface-scoped lookup cannot answer.
+
+        An email continuation's `conversation_token` is whatever the originating
+        send recorded — on a promoted room, the Talk ref — while its own surface
+        is `email`, which owns no bindings at all. Resolving under the task's own
+        surface therefore always misses, and the room reads as unregistered, so
+        the send stamps a single-surface descriptor for a room bound to two.
+        """
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "web-canon", "alice", origin="web")
+            db.add_room_binding(conn, "web-canon", "web", "web-canon")
+            db.add_room_binding(conn, "web-canon", "talk", "TalkRef77")
+            task = _task(source_type="email", conversation_token="TalkRef77")
+            assert origin_descriptor(task, conn) == "room:web-canon"
+
+    def test_a_talk_delivery_token_can_name_the_room(self, config):
+        """A task whose channel is a synthetic email-thread hash can still carry
+        the real room separately; stamping the surface form for it would write
+        exactly the single-leg descriptor this stage stops writing."""
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "tk-real", "alice", origin="talk")
+            db.add_room_binding(conn, "tk-real", "talk", "tk-real")
+            task = _task(
+                source_type="talk", conversation_token="0123456789abcdef",
+                talk_delivery_token="tk-real",
+            )
+            assert origin_descriptor(task, conn) == "room:tk-real"
+
+    def test_an_unregistered_dm_keeps_the_surface_form(self, config):
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            task = _task(source_type="talk", conversation_token="dmtoken")
+            assert origin_descriptor(task, conn) == "talk:dmtoken"
+
+    def test_an_archived_room_keeps_the_surface_form(self, config):
+        from istota.transport.routing import origin_descriptor
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "gone", "alice", origin="talk")
+            db.add_room_binding(conn, "gone", "talk", "gone")
+            conn.execute(
+                "UPDATE rooms SET archived = 1 WHERE token = ?", ("gone",),
+            )
+            task = _task(source_type="talk", conversation_token="gone")
+            assert origin_descriptor(task, conn) == "talk:gone"
+
+    def test_without_a_connection_it_cannot_name_a_room(self, config):
+        """The pre-rooms behaviour, kept so a caller with no connection in scope
+        still stamps something that routes."""
+        from istota.transport.routing import origin_descriptor
+
+        task = _task(source_type="web", conversation_token="web-alice-9")
+        assert origin_descriptor(task) == "web:web-alice-9"
+
+
+class TestExplicitRoomToken:
+    def test_room_with_a_token_expands_that_room_not_the_tasks_own(self, config):
+        """The case the bare `room` form cannot express: an email reply whose
+        own conversation_token is a synthetic thread hash, carrying a stored
+        `room:<token>` descriptor that names where the conversation lives."""
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "rm-elsewhere", "alice", origin="web")
+            db.add_room_binding(conn, "rm-elsewhere", "web", "rm-elsewhere")
+            db.add_room_binding(conn, "rm-elsewhere", "talk", "talk-elsewhere")
+        task = _task(
+            source_type="email", conversation_token="0123456789abcdef",
+            output_target="room:rm-elsewhere,email",
+        )
+        plan = resolve_delivery_plan(config, task, None)
+        surfaces = {(d.surface, d.channel) for d in plan}
+        assert ("talk", "talk-elsewhere") in surfaces
+        assert ("email", None) in surfaces
+
+    def test_naming_a_room_and_one_of_its_legs_delivers_once(self, config):
+        """`resolve_delivery_plan` dedups on (surface, channel) after
+        resolution, which is what stops a double-post here.
+
+        The task's own channel is deliberately *not* the room, so the Talk leg
+        can only reach the plan through the explicit `room:<token>` — otherwise
+        this passes without the token being read at all and pins nothing.
+        """
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "rm-dup", "alice", origin="web")
+            db.add_room_binding(conn, "rm-dup", "web", "rm-dup")
+            db.add_room_binding(conn, "rm-dup", "talk", "tk-dup")
+        task = _task(
+            source_type="email", conversation_token="0123456789abcdef",
+            output_target="room:rm-dup,talk:tk-dup",
+        )
+        plan = resolve_delivery_plan(config, task, None)
+        talk_legs = [d for d in plan if d.surface == "talk"]
+        assert len(talk_legs) == 1
+        assert talk_legs[0].channel == "tk-dup"
+
+
 class TestExternalIdLedger:
     def test_set_and_detect_external_id(self, config):
         with db.get_db(config.db_path) as conn:

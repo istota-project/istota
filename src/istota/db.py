@@ -3561,6 +3561,31 @@ def resolve_room_token(
     return row["room_token"] if row else None
 
 
+def find_room_token_by_ref(
+    conn: sqlite3.Connection, surface_ref: str,
+) -> str | None:
+    """The canonical room token for a surface ref, whichever surface owns it.
+
+    `resolve_room_token` needs to be told which surface's namespace a ref
+    belongs to, which a caller holding a token from *another* surface cannot
+    say. The live case is an email continuation: its `conversation_token` is
+    whatever the originating send recorded — on a promoted room that is the Talk
+    ref — while the task's own surface is `email`, which has no bindings at all,
+    so the surface-scoped lookup always misses and the room reads as
+    unregistered.
+
+    Prefer `resolve_room_token` when the surface is known; refs are only unique
+    *within* a surface, so this orders deterministically rather than pretending
+    the answer cannot be ambiguous.
+    """
+    row = conn.execute(
+        "SELECT room_token FROM room_bindings WHERE surface_ref = ? "
+        "ORDER BY room_token LIMIT 1",
+        (surface_ref,),
+    ).fetchone()
+    return row["room_token"] if row else None
+
+
 def add_message(
     conn: sqlite3.Connection,
     room_token: str,

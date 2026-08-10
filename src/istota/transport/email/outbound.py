@@ -223,7 +223,7 @@ def _record_sent_email(
                 references=references,
                 conversation_token=task.conversation_token,
                 talk_delivery_token=task.talk_delivery_token,
-                origin_target=routing.origin_descriptor(task),
+                origin_target=routing.origin_descriptor(task, conn),
             )
     except Exception as e:
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)

@@ -74,6 +74,12 @@ def parse_output_target(spec: str | None) -> list[Destination]:
     / ``"none"``. Surface validity is **not** checked here — that is the
     registry's job in ``resolve_delivery_plan``. Exact ``(surface, channel)``
     duplicates are collapsed, order preserved.
+
+    ``room`` and ``room:<token>`` parse as an ordinary leaf and need no special
+    case here, but they are not surfaces: ``room`` is a meta-destination that
+    ``_expand_room_destinations`` replaces at resolve time with the room's live
+    bindings. Bare ``room`` means the task's own channel; the token form names
+    the room explicitly, which is what a stored origin descriptor carries.
     """
     if spec is None:
         return []
@@ -115,15 +121,96 @@ def parse_output_target(spec: str | None) -> list[Destination]:
     return out
 
 
-def origin_descriptor(task: "db.Task") -> str | None:
+def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
+    """``room:<canonical_token>`` when this task's channel is a registered live
+    room, else None. Never raises — a descriptor is best-effort, and the
+    surface-qualified fallback still routes.
+
+    Two candidate tokens, tried in order: the task's own ``conversation_token``,
+    then ``talk_delivery_token``. The second is there because a task whose
+    channel is a synthetic email-thread hash can still carry the real Talk room
+    separately, and stamping the surface form for it would leave exactly the
+    single-leg descriptor this stage exists to stop writing. (Stage 4 retires
+    that column; until then it is a real source of a room name.)
+
+    Each candidate is resolved to a canonical token by
+    ``_canonical_room_token``, because a raw ref is not a room id — comparing
+    the two directly is the mistake this whole spec is cleaning up.
+
+    A ``repl`` origin is excluded even when its token names a room. The terminal
+    is gone by reply time, and the room expansion would deliver to it as a
+    stream destination that no client is tailing.
+    """
+    if conn is None or surface == "repl":
+        return None
+    from ..email_support import is_synthetic_email_thread_token
+
+    candidates = [task.conversation_token, task.talk_delivery_token]
+    try:
+        from .. import db
+
+        for token in candidates:
+            if not token or is_synthetic_email_thread_token(token):
+                continue  # an email thread hash names no room
+            canonical = _canonical_room_token(conn, surface, token)
+            if canonical is None:
+                continue
+            room = db.get_room(conn, canonical)
+            if room is None or getattr(room, "archived", 0):
+                continue
+            return f"room:{canonical}"
+        return None
+    except Exception as e:  # pragma: no cover - best-effort, never abort a send
+        logger.warning("room descriptor lookup failed for task %s: %s",
+                       getattr(task, "id", "?"), e)
+        return None
+
+
+def _canonical_room_token(conn, surface: str, token: str) -> str | None:
+    """The canonical room token a raw token names, or None if it names no room.
+
+    Three tries, narrowest first: the token already *is* a canonical token; it
+    is this surface's ref for one; it is *some other* surface's ref for one.
+
+    The third is not hypothetical. An email continuation's
+    ``conversation_token`` is whatever the originating send recorded — on a
+    promoted room, the Talk ref — while the task's own surface is ``email``,
+    which owns no bindings, so a surface-scoped lookup can only ever miss and
+    the room reads as unregistered.
+    """
+    from .. import db
+
+    if db.get_room(conn, token) is not None:
+        return token
+    return (
+        db.resolve_room_token(conn, surface, token)
+        or db.find_room_token_by_ref(conn, token)
+    )
+
+
+def origin_descriptor(task: "db.Task", conn=None) -> str | None:
     """The ``output_target`` descriptor that routes a follow-up back to the
     surface this task came from, stored on ``sent_emails`` at send time and read
     at inbound-reply time with zero re-resolution.
 
-    Resolves the task's primary surface via ``_surface_for_source_type`` and
-    emits ``surface:channel`` (or bare ``surface`` when no durable channel is
-    known — delivery resolves it, e.g. a Talk DM). A ``None`` caller falls back
-    to the legacy ``talk,email`` branch. Never raises — an unexpected
+    **When the origin is a registered room, the descriptor names the room**
+    (``room:<canonical_token>``) rather than one of its views. A room is one
+    conversation that can be bound to several surfaces, so recording the leg the
+    send happened to go out on throws away the fact that it was a room at all —
+    and the reply then reaches that leg alone, leaving the other view of the
+    conversation blank in a room where the user watched the question arrive.
+    ``room`` re-expands by live bindings at delivery, so it also picks up a
+    binding added *after* the send ("Also open in Talk" is exactly that).
+
+    Requires ``conn`` to answer that. Without one it falls back to the
+    surface-qualified form, which is what every caller emitted before rooms
+    existed and is still correct for a destination that is not a room: a Talk DM
+    with no registered room, or a genuine email-only thread.
+
+    Otherwise resolves the task's primary surface via ``_surface_for_source_type``
+    and emits ``surface:channel`` (or bare ``surface`` when no durable channel is
+    known — delivery resolves it). A ``None`` return falls back to the legacy
+    ``talk,email`` branch at the reply site. Never raises — an unexpected
     ``source_type`` resolves to the ``talk`` surface like any other.
 
     An ``email``-source task is the subtle case: it may be a *continuation* of a
@@ -137,6 +224,9 @@ def origin_descriptor(task: "db.Task") -> str | None:
     from .registry import _surface_for_source_type
 
     surface = _surface_for_source_type(task.source_type)
+    room = _room_descriptor(conn, surface, task)
+    if room is not None:
+        return room
     if surface == "web":
         tok = task.conversation_token
         return f"web:{tok}" if tok else "web"
@@ -161,6 +251,53 @@ def origin_descriptor(task: "db.Task") -> str | None:
     return None  # repl: no durable push target
 
 
+def upgrade_legacy_origin(conn, origin: str) -> str | None:
+    """``room:<canonical_token>`` for a stored descriptor that names one *view*
+    of a multi-surface room; None to keep the descriptor exactly as stored.
+
+    Back-compat only. `origin_descriptor` now stamps `room:<token>` itself, so
+    nothing new needs this — but `sent_emails` rows written before that keep the
+    surface-qualified form (`web:<token>`, `talk:<token>`) for the life of the
+    thread, and reading one literally delivers the reply to the leg the original
+    happened to go out on, leaving the other view of the same room blank. That
+    is the defect `6244348e` fixed; deleting the widening along with the
+    function that used to do it would reintroduce it for every thread already in
+    flight at deploy time.
+
+    **Not transitional, despite the name.** Legacy rows do age out — the next
+    send in a thread re-stamps `room:<token>` — but `origin_descriptor` can only
+    name a room it can find from the task, and a send whose room is reachable
+    from neither `conversation_token` nor `talk_delivery_token` still stamps the
+    surface form. Do not delete this on the assumption that it has become dead
+    code; check `_room_descriptor` actually covers every writer first.
+
+    It is deliberately expressed as an *upgrade to the new form* rather than as
+    the old bare ``"room"``, which relied on the task's own
+    `conversation_token` and so could not name a room the task was not already
+    sitting in.
+
+    Three cases keep the descriptor: a bare surface with no channel (nothing to
+    look up), a token naming no live room, and a room with only the descriptor's
+    own binding — where the room form would cost a lookup per delivery and
+    expand to exactly what the descriptor already says.
+    """
+    from .. import db
+
+    surface, _sep, channel = origin.partition(":")
+    if not channel:
+        return None
+    # A promoted room's per-surface ref is not its canonical token, so resolve
+    # the binding before asking whether the room exists.
+    token = db.resolve_room_token(conn, surface, channel) or channel
+    room = db.get_room(conn, token)
+    if room is None or getattr(room, "archived", 0):
+        return None
+    bound = {b.surface for b in db.list_room_bindings(conn, token)}
+    if not bound - {surface}:
+        return None
+    return f"room:{token}"
+
+
 def plan_has_surface(plan: list[Destination], surface: str) -> bool:
     """True if any destination in ``plan`` targets ``surface``. The replacement
     for the old ``target in ("talk", "both", "all")`` string checks."""
@@ -182,45 +319,6 @@ def _infer_default_plan(task: "db.Task") -> list[Destination]:
     if st == "web":
         return [Destination("web", "stream", "stream")]
     return []
-
-
-def room_fanout_descriptor(conn, origin: str) -> str | None:
-    """``"room"`` when a stored origin descriptor names a room reachable on more
-    than one surface; None to keep the descriptor exactly as stored.
-
-    `origin_descriptor` records the one surface a send came from, which is all it
-    can know at send time. A room is one conversation, though, and can be bound
-    to several surfaces — a web room promoted to Talk, a Talk room surfaced in
-    web — so delivering the reply to the recorded leg alone leaves the other view
-    of the same room blank. That is the ISSUE-242 gap reached from the delivery
-    side rather than the transcript side, and it is the more confusing half:
-    ISSUE-242 left a *record* missing from one surface, this leaves the reply
-    itself missing, in a room where the user watched the question arrive.
-
-    Resolved here at reply time rather than baked into the stored descriptor,
-    because a room can gain a binding after the send that stamped it (an "Also
-    open in Talk" promote is exactly that), and `room` re-reads bindings at every
-    delivery anyway. The stored value stays a faithful record of the origin.
-
-    Three cases keep the descriptor: a bare surface with no channel (nothing to
-    look up), a token naming no room, and a room with only the descriptor's own
-    binding — where `room` would cost a lookup per delivery and expand to what
-    the descriptor already says.
-    """
-    from .. import db
-
-    surface, _sep, channel = origin.partition(":")
-    if not channel:
-        return None
-    # A promoted room's per-surface ref is not its canonical token, so resolve
-    # the binding before asking whether the room exists.
-    token = db.resolve_room_token(conn, surface, channel) or channel
-    if db.get_room(conn, token) is None:
-        return None
-    bound = {b.surface for b in db.list_room_bindings(conn, token)}
-    if not bound - {surface}:
-        return None
-    return "room"
 
 
 def _room_view(
@@ -260,6 +358,7 @@ def _room_view(
 def _expand_room_destinations(
     config: "Config", task: "db.Task",
     registry: "TransportRegistry | None" = None,
+    token: str | None = None,
 ) -> list[Destination]:
     """Expand a ``room`` meta-destination by the room's live bindings: the
     origin delivery plus a push mirror to every *non-origin* binding whose view
@@ -278,18 +377,49 @@ def _expand_room_destinations(
     ``_STREAM_SURFACES``, which gave the same answer only because web happens to
     be both the only canonical-transcript room view and the only stream room
     surface.
+
+    ``token`` names the room explicitly — the ``room:<token>`` destination form.
+    It matters when the room is not the task's own channel: an inbound email
+    reply carries a stored ``room:`` origin descriptor while its own
+    ``conversation_token`` may still be the synthetic thread hash. Omitting it
+    falls back to the task's channel, which is the bare ``room`` form, unchanged.
     """
     from .. import db
     from .registry import _surface_for_source_type
 
     dests = list(_infer_default_plan(task))  # origin delivery
-    token = task.conversation_token
+    token = token or task.conversation_token
     if not token or not config.db_path:
         return dests
     origin_surface = _surface_for_source_type(task.source_type)
     try:
         with db.get_db(config.db_path) as conn:
-            bindings = db.list_room_bindings(conn, token)
+            # Resolve through the binding before listing them. A promoted room's
+            # per-surface ref is not its canonical token, and looking bindings up
+            # by the raw value is the mistake this whole spec is cleaning up. A
+            # token that is already canonical resolves to itself.
+            canonical = db.resolve_room_token(conn, origin_surface, token) or token
+            # A room that went away between the send and the reply mirrors
+            # nowhere — the bot has left it, or it never was one. The origin
+            # delivery still stands, which is what keeps a reply from being
+            # dropped because its room was archived underneath it.
+            room = db.get_room(conn, canonical)
+            if room is None:
+                return dests  # names no room; listing bindings would be empty
+            if getattr(room, "archived", 0):
+                # Logged, never silent. `archive_orphaned_talk_rooms` archives
+                # on a single missing conversation-list entry, and only a *Talk*
+                # inbound un-archives — so a transient blip suppresses the
+                # mirror for every web send into the room until someone posts
+                # from Talk. That is recoverable but invisible, and an operator
+                # looking for "why did my replies stop reaching Talk" needs this
+                # line to exist.
+                logger.warning(
+                    "Not mirroring task %s into archived room %s",
+                    getattr(task, "id", "?"), canonical,
+                )
+                return dests
+            bindings = db.list_room_bindings(conn, canonical)
     except Exception as e:  # pragma: no cover - best-effort, never abort delivery
         logger.warning("room binding lookup failed for task %s: %s",
                        getattr(task, "id", "?"), e)
@@ -417,8 +547,8 @@ def resolve_delivery_plan(
         expanded: list[Destination] = []
         for d in plan:
             if d.surface == "room":
-                expanded.extend(
-                    _expand_room_destinations(config, task, registry))
+                expanded.extend(_expand_room_destinations(
+                    config, task, registry, d.channel))
             else:
                 expanded.append(d)
         plan = expanded

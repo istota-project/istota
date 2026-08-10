@@ -423,15 +423,33 @@ messages are re-polled rather than silently lost.
   concern.
 
   **Email-reply origin routing.** A thread-matched reply (recipient replies to a
-  mail we sent) routes back to the *surface the original send came from*, not
-  unconditionally to Talk. At send time `routing.origin_descriptor(task)` stamps
-  `sent_emails.origin_target` — a descriptor (`web:<token>` / `talk:<token>`)
-  recovered from the originating task's surface, or, for an email-*continuation*
-  task, from its `conversation_token` (a `web-`/`repl-`/synthetic token is
-  classified accordingly so multi-round threads keep their origin). On the inbound
+  mail we sent) routes back to the *conversation the original send came from*,
+  not unconditionally to Talk. At send time `routing.origin_descriptor(task,
+  conn)` stamps `sent_emails.origin_target`. **When the origin is a registered
+  live room the descriptor names the room** — `room:<canonical_token>` — rather
+  than one of its views: a room is one conversation bound to several surfaces,
+  and recording the leg the send happened to leave by throws away the fact that
+  it was a room, so the reply reaches that leg alone and the other view stays
+  blank. The room form re-expands by *live* bindings at delivery, so it also
+  picks up a binding added after the send (an "Also open in Talk" promote is
+  exactly that). The candidate token is `conversation_token`, else
+  `talk_delivery_token`, each resolved to canonical through
+  `routing._canonical_room_token` — which tries the token as canonical, then as
+  this surface's ref, then as *any* surface's ref, the last being the promoted-room
+  email continuation whose token belongs to Talk while its own surface owns no
+  bindings. Without a `conn`, or for a destination that is not a live room (a
+  Talk DM, a genuine email-only thread, an archived room), it falls back to the
+  surface-qualified `web:<token>` / `talk:<token>` form as before. Rows stamped
+  before the room form existed are upgraded at read time by
+  `routing.upgrade_legacy_origin` — **which is not merely transitional**: any
+  writer whose room is reachable from neither candidate token still stamps the
+  surface form, so check `_room_descriptor`'s coverage before assuming it has
+  become dead code. It replaced `room_fanout_descriptor`, which widened a
+  descriptor to the bare `room` and so could only ever name the room the task was
+  already sitting in. On the inbound
   reply, `poll_emails` reads that descriptor and applies the per-user
   `Config.email_reply_routing_for(user_id)` policy (`origin+thread` default |
-  `origin` | `thread`) to build `output_target` (e.g. `web:<token>,email`), with
+  `origin` | `thread`) to build `output_target` (e.g. `room:<token>,email`), with
   `conversation_token` set to the origin room so the reply continues that
   conversation. A NULL `origin_target` (pre-migration row, or a non-deliverable
   origin) falls back to the exact legacy `talk,email` behavior + the

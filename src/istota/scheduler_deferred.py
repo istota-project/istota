@@ -295,7 +295,7 @@ def _process_deferred_sent_emails(
                     task_id=task.id,
                     conversation_token=task.conversation_token,
                     talk_delivery_token=task.talk_delivery_token,
-                    origin_target=routing.origin_descriptor(task),
+                    origin_target=routing.origin_descriptor(task, conn),
                 )
                 count += 1
             except Exception as e:
