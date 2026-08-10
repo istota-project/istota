@@ -383,6 +383,21 @@ def _room_view(
     return getattr(transport.capabilities, "room_view", None)
 
 
+def is_canonical_room_view(
+    config: "Config", registry: "TransportRegistry | None", surface: str,
+) -> bool:
+    """True when a surface renders a room *from* the canonical ``messages``
+    store, so writing the row is already that surface's delivery.
+
+    The public form of the ``room_view`` question, for callers outside this
+    module that need to tell "this delivery is the canonical row" from "this
+    delivery is a push". The scheduler asks it to decide whether a web
+    destination aimed at the task's own room means an assistant bubble or an
+    unsolicited ``role='system'`` note.
+    """
+    return _room_view(config, registry, surface) == "canonical"
+
+
 def _expand_room_destinations(
     config: "Config", task: "db.Task",
     registry: "TransportRegistry | None" = None,

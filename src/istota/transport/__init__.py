@@ -23,6 +23,7 @@ from .ingest import display_attachment_names, ingest_message, record_inbound
 from .registry import TransportRegistry, make_registry
 from .routing import (
     Destination,
+    is_canonical_room_view,
     parse_output_target,
     plan_has_surface,
     resolve_delivery_plan,
@@ -42,6 +43,7 @@ __all__ = [
     "ingest_message",
     "record_inbound",
     "Destination",
+    "is_canonical_room_view",
     "parse_output_target",
     "plan_has_surface",
     "resolve_delivery_plan",

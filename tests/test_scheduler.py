@@ -362,6 +362,81 @@ class TestCleanupOldTempFiles:
 # ---------------------------------------------------------------------------
 
 
+class TestRoomTurnBelongsHere:
+    """The predicate that replaced three scattered `_store_room_turn` calls.
+
+    Two rungs: the plan delivering this answer into the room, or the room
+    already holding the question. They are not interchangeable — see the two
+    tests at the bottom, which are the same task shape with opposite answers.
+    """
+
+    def _db(self, tmp_path):
+        path = tmp_path / "rt.db"
+        db.init_db(path)
+        return path
+
+    def _task(self, **kwargs):
+        defaults = dict(
+            id=1, status="pending", source_type="email", user_id="alice",
+            prompt="x", conversation_token="rm", priority=5,
+            attempt_count=0, max_attempts=3,
+        )
+        defaults.update(kwargs)
+        return db.Task(**defaults)
+
+    def test_no_token_never_belongs(self, tmp_path):
+        from istota.scheduler import _room_turn_belongs_here
+
+        with db.get_db(self._db(tmp_path)) as conn:
+            task = self._task(conversation_token=None)
+            assert _room_turn_belongs_here(
+                conn, task, 1, delivering_into_room=True,
+            ) is False
+
+    def test_delivering_into_the_room_is_enough(self, tmp_path):
+        """No question in the room, but the plan says this answer is a turn in
+        it — the ISSUE-164 own-room web push."""
+        from istota.scheduler import _room_turn_belongs_here
+
+        with db.get_db(self._db(tmp_path)) as conn:
+            assert _room_turn_belongs_here(
+                conn, self._task(), 1, delivering_into_room=True,
+            ) is True
+
+    def test_the_question_being_there_is_enough(self, tmp_path):
+        """Nothing delivered into the room at all — the email-only plan a
+        `thread` reply-routing policy produces — but the exchange happened
+        here, so the answer belongs under it (ISSUE-136)."""
+        from istota.scheduler import _room_turn_belongs_here
+
+        path = self._db(tmp_path)
+        with db.get_db(path) as conn:
+            db.register_room(conn, "rm", "alice", origin="web")
+            tid = db.create_task(
+                conn, "q", "alice", source_type="email",
+                conversation_token="rm",
+            )
+            db.add_message(
+                conn, "rm", role="user", body="q",
+                origin_surface="email", task_id=tid,
+            )
+            assert _room_turn_belongs_here(
+                conn, self._task(id=tid), tid, delivering_into_room=False,
+            ) is True
+
+    def test_neither_means_no_answer_only_bubble(self, tmp_path):
+        """A room that never received the question and is not being delivered
+        into. Storing here is ISSUE-136 from the other side."""
+        from istota.scheduler import _room_turn_belongs_here
+
+        path = self._db(tmp_path)
+        with db.get_db(path) as conn:
+            db.register_room(conn, "rm", "alice", origin="web")
+            assert _room_turn_belongs_here(
+                conn, self._task(), 1, delivering_into_room=False,
+            ) is False
+
+
 class TestTalkTargetForDelivery:
     """_talk_target_for_delivery resolves the Talk room for a task's notifications.
 

@@ -52,6 +52,35 @@ class TestParseRoom:
         assert parse_output_target("room") == [Destination("room")]
 
 
+class TestIsCanonicalRoomView:
+    """The public form of the `room_view` question, which the scheduler uses to
+    pick the destinations whose delivery *is* the canonical row."""
+
+    def test_web_is_canonical_and_talk_is_not(self, config):
+        from istota.transport.routing import is_canonical_room_view
+
+        config.talk.enabled = True
+        registry = make_registry(config)
+        assert is_canonical_room_view(config, registry, "web") is True
+        assert is_canonical_room_view(config, registry, "talk") is False
+
+    def test_a_non_room_surface_is_not_canonical(self, config):
+        from istota.transport.routing import is_canonical_room_view
+
+        registry = make_registry(config)
+        assert is_canonical_room_view(config, registry, "ntfy") is False
+        assert is_canonical_room_view(config, registry, "repl") is False
+
+    def test_an_unresolvable_surface_is_not_canonical(self, config):
+        """False, not an exception — and False is the safe answer: it keeps the
+        destination in the push lane rather than silently dropping it on the
+        assumption that writing a row already covered it."""
+        from istota.transport.routing import is_canonical_room_view
+
+        registry = make_registry(config)
+        assert is_canonical_room_view(config, registry, "matrix") is False
+
+
 class TestRoomViewCapability:
     """Every shipped surface declares where its view of a room is stored.
 

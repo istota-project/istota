@@ -82,6 +82,7 @@ from .nextcloud_api import hydrate_user_configs
 from .notifications import effective_log_destinations, send_notification
 from .transport import (
     Destination,
+    is_canonical_room_view,
     make_registry,
     parse_output_target,
     plan_has_surface,
@@ -504,6 +505,54 @@ def _store_room_turn(conn, task, body: str) -> int | None:
         conn, token, role="assistant", body=body,
         task_id=task.id, origin_surface=task.source_type,
     )
+
+
+def _room_turn_belongs_here(
+    conn, task: db.Task, task_id: int, *,
+    delivering_into_room: bool,
+) -> bool:
+    """Whether this task's answer belongs in its room's canonical transcript.
+
+    One decision, reachable two ways. It replaces three `_store_room_turn` calls
+    that each hung off a different delivery branch — the Talk plan, an own-room
+    web push, and the email-only plan the first two missed. Each was added when
+    another routing shape turned up with no answer under its question, and that
+    set was never going to close while the condition was spelled per branch.
+
+    ``delivering_into_room`` is true when the plan actually posts this answer
+    into the room on some surface: Talk, or a surface whose view of the room is
+    the canonical store itself. That is a statement of intent — the answer is a
+    turn in this conversation — and it is what makes an own-room web push an
+    assistant bubble rather than an unsolicited `role='system'` note
+    (ISSUE-164).
+
+    Failing that, the room having the **question** in it is the evidence. This
+    is the case a `thread` reply-routing policy produces: an email-only plan,
+    nothing delivered into the room at all, but the exchange genuinely happened
+    there and `record_inbound` mirrored the question in. Without this the
+    question sits with no answer under it (ISSUE-136).
+
+    Neither holds for a room that never received the question and is not being
+    delivered into — a turn predating the mirror, or a token bound to the room
+    after the fact. Storing there grows an answer-only bubble, which is
+    ISSUE-136 reached from the other side.
+
+    The evidence rung deliberately does **not** re-check ``source_type ==
+    "email"`` the way the branch it replaces did. A ``role='user'`` row keyed to
+    a task id only ever exists for talk, web and email (the three surfaces
+    reaching ``record_inbound``), and talk/web already stored their assistant
+    row on the conversational path above — so widening it only re-attempts a
+    deduped insert. That equivalence leans on the conversational store staying
+    where it is: narrow its `source_type in ("talk", "web")` gate and this rung
+    starts writing `room_body` for those turns, which is a different body from
+    the `result` that path stores.
+    """
+    token = task.conversation_token
+    if not token:
+        return False
+    if delivering_into_room:
+        return True
+    return db.get_turn_message_id(conn, token, task_id, "user") is not None
 
 
 def _talk_result_mirror_body(
@@ -1858,17 +1907,25 @@ def process_one_task(
     # INTO a room — it must be delivered via WebTransport.deliver. An own-origin
     # web task resolves its web leg to a stream no-op (its result event already
     # covers the room over SSE), so it is absent here and never double-posts.
+    # Selected by capability, not by name: any surface whose view of a room is
+    # the canonical store has this property, and `web` is merely the only one
+    # that does today. Naming it here is what would make a second such surface
+    # fall through to the foreign lane and double-render.
     web_push_dests = [
-        d for d in plan if d.surface == "web" and d.kind == "push"
+        d for d in plan
+        if d.kind == "push" and is_canonical_room_view(config, registry, d.surface)
     ]
-    # Split by whether the push target IS the task's own conversation room.
-    # An own-conversation web push is a conversational reply (an assistant turn →
-    # chat bubble), not an out-of-band notice; delivering it via
-    # WebTransport.deliver would write a role='system' row and render it as
-    # cmd-output (ISSUE-164). Those are stored as assistant spine rows instead
-    # and dropped from the system-push lane. Foreign-room pushes stay
-    # notifications (role='system'), the correct use of that lane.
-    web_own_conv_dests = [
+    # Split by whether the push target IS the task's own room. For a canonical
+    # room view, a push at the task's own room *is* the assistant row —
+    # delivering it as well renders the same answer a second time as a
+    # role='system' cmd-output note (ISSUE-164). A different room holds no
+    # question and gets no row of its own, so there a push is the only delivery
+    # and a notice is its right shape.
+    #
+    # An exhaustive partition on one predicate, deliberately: computing the two
+    # lists from *different* tests would let a destination fall into neither and
+    # be silently dropped — neither stored nor pushed.
+    own_room_canonical_dests = [
         d for d in web_push_dests if d.channel == task.conversation_token
     ]
     web_foreign_dests = [
@@ -2069,9 +2126,29 @@ def process_one_task(
                         )
                     else:
                         room_body = delivery_result
+                    # One decision, before any per-surface branch, replacing the
+                    # three calls that each hung off one: the Talk plan, an
+                    # own-room web push, and the email-only plan the first two
+                    # missed. Each was added when another routing shape turned
+                    # up with no answer under its question.
+                    #
+                    # Two other writers of this row remain in this function and
+                    # are *not* subsumed: the conversational store above (talk /
+                    # web, which runs whether or not the task succeeded far
+                    # enough to reach here) and the `heartbeat_silent` branch,
+                    # which stores only what it also posts. Both are idempotent
+                    # against this one — `store_turn_message` dedups on
+                    # `(room, role, task_id)`.
+                    if _room_turn_belongs_here(
+                        conn, task, task_id,
+                        delivering_into_room=bool(
+                            (plan_talk and talk_token)
+                            or own_room_canonical_dests
+                        ),
+                    ):
+                        _store_room_turn(conn, task, room_body)
                     if plan_talk and talk_token:
                         post_talk_message = delivery_result
-                        _store_room_turn(conn, task, room_body)
                         post_talk_mirror_body = _talk_result_mirror_body(
                             conn, task, talk_token, room_body, web_push_dests,
                         )
@@ -2079,36 +2156,10 @@ def process_one_task(
                         post_email = True
                     if plan_ntfy:
                         post_ntfy = True
-                    if web_own_conv_dests:
-                        # Conversational reply into its own web room → assistant
-                        # bubble, not a system cmd-output push (ISSUE-164).
-                        # origin_surface becomes the task's real source type
-                        # (e.g. "email"); renders identically under the
-                        # assistant-any filter.
-                        _store_room_turn(conn, task, room_body)
                     if web_foreign_dests:
                         post_web = True
                     if plan_file:
                         call_file_handler = True
-                    if (
-                        task.source_type == "email"
-                        and task.conversation_token
-                        and db.get_turn_message_id(
-                            conn, task.conversation_token, task_id, "user",
-                        ) is not None
-                    ):
-                        # An email turn continuing a real room stores its user
-                        # row at ingest (ISSUE-136), and the branches above miss
-                        # the email-only plan that a `thread` reply-routing
-                        # policy produces — leaving that question with no answer
-                        # under it. The gate is the mirrored question itself, not
-                        # the source type: storage is a record rather than a
-                        # delivery, but only for the room the exchange actually
-                        # happened in. A reply routed to a *foreign* room is an
-                        # out-of-band notice and stays a role='system' note there
-                        # (ISSUE-164) — it never becomes a bubble in a room that
-                        # holds no question. Dedups against the branches above.
-                        _store_room_turn(conn, task, room_body)
 
                 # Track scheduled job success
                 if task.scheduled_job_id:
@@ -2538,10 +2589,10 @@ def process_one_task(
     if post_web:
         # A foreign task (e.g. an alert or a reply routed into a room it is NOT
         # conversing in) pushed into a web room: deliver as an unsolicited system
-        # message via WebTransport.deliver. Own-conversation web pushes are
-        # excluded here (web_foreign_dests) — they were stored as assistant
-        # bubbles above (ISSUE-164). The own-origin web-source case never reaches
-        # this branch at all (its web leg resolved to stream).
+        # message via WebTransport.deliver. A push into the task's own room is
+        # excluded (`web_foreign_dests`) — that room's answer is the assistant
+        # row written above (ISSUE-164). The own-origin web-source case never
+        # reaches this branch at all (its web leg resolved to stream).
         web_transport = registry.get("web")
         if web_transport is not None:
             if task.source_type == "briefing":

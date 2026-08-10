@@ -231,7 +231,8 @@ class TestEmailReplyMirroring:
         self, mock_run_coro, mock_post_email, db_path, config,
     ):
         """Regression: the default `origin+thread` policy already stored the row
-        via `web_own_conv_dests`. The new store must dedup, not double up."""
+        via `own_room_canonical_dests`. The new store must dedup, not double
+        up."""
         with db.get_db(db_path) as conn:
             db.register_room(conn, "webroom", "testuser", origin="web")
             task_id = db.create_task(
@@ -255,6 +256,52 @@ class TestEmailReplyMirroring:
                 m for m in db.get_messages(conn, "webroom") if m.role == "assistant"
             ]
         assert len(assistant) == 1
+
+    @patch("istota.scheduler.post_result_to_email", return_value=True)
+    @patch("istota.scheduler.run_coro", return_value=True)
+    def test_room_routing_leaves_the_evidence_rung_as_the_only_writer(
+        self, mock_run_coro, mock_post_email, db_path, config,
+    ):
+        """The shape the whole Stage 5 correction rests on.
+
+        `room:<token>` expands by live bindings, and a web binding is skipped
+        because its `room_view` is `"canonical"` — so for a web-only-bound room
+        the plan holds the email leg and nothing else. No Talk destination, no
+        own-room web push: the *question already being in the room* is the only
+        thing that puts the answer under it.
+
+        The spec predicted room routing would make this branch unreachable. It
+        did the opposite, and without a test at `process_one_task` level the
+        branch can be deleted with a green suite.
+        """
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "webroom", "testuser", origin="web")
+            db.add_room_binding(conn, "webroom", "web", "webroom")
+            task_id = db.create_task(
+                conn, prompt=EMAIL_PROMPT, user_id="testuser",
+                source_type="email", conversation_token="webroom",
+                output_target="room:webroom,email",
+            )
+            db.add_message(
+                conn, "webroom", role="user", body=EMAIL_PROMPT,
+                origin_surface="email", task_id=task_id,
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "Answered.", None, None),
+        ):
+            process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            assistant = [
+                m for m in db.get_messages(conn, "webroom") if m.role == "assistant"
+            ]
+            # And no unsolicited system note beside it — the row *is* the
+            # delivery for a canonical room view.
+            notes = db.list_system_messages(conn, "webroom")
+        assert [m.body for m in assistant] == ["Answered."]
+        assert notes == []
 
     @patch("istota.scheduler.post_result_to_email", return_value=True)
     @patch("istota.scheduler.run_coro", return_value=True)
