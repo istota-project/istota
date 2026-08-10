@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When the bot stopped mid-task to ask you something while working on an email, the question reached nobody. It could not be mailed to the outside contact, and the room it would otherwise have gone to was excluded too, so the task simply sat there and was cancelled two hours later without you ever seeing it. The question now goes to the room the conversation belongs to. It is still never mailed to the contact.
+
 - A reply from an outside contact could stop arriving once the conversation had run long enough, with nothing to show it had ever come back — no message, no notification, and no trace beyond the mail sitting read in the mailbox. Long threads eventually carry their reply-tracking headers in an encoded form the poller could not read, so it no longer recognised the reply as belonging to a conversation and quietly filed it as unrelated. Those headers are now decoded, and a second one is consulted as a fallback. A reply already missed this way stays missed — it is on record as handled, so it is not retried; forward it back into the thread to pick the conversation up again.
 
 - Mail from a stranger was held for your approval and then asked about in a room you might never open. If you live in the web dashboard you were never asked at all, and the message was dropped a couple of hours later with no notice anywhere. The question now follows wherever you have routed your alerts, web chat shows any unanswered ones in a banner you can approve or discard from, and `!confirm` answers one from any surface.

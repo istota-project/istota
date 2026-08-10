@@ -24,6 +24,7 @@ from istota.config import (
     Config,
     EmailConfig as AppEmailConfig,
     SiteConfig,
+    TalkConfig,
     UserConfig,
     WebConfig,
 )
@@ -765,3 +766,129 @@ class TestWebRoomUnfreeze:
 
         with db.get_db(mod._config.db_path) as conn:
             assert db.get_task(conn, task_id).status == "pending_confirmation"
+
+
+# ---------------------------------------------------------------------------
+# 8. An email-origin task's own confirmation must reach somebody
+# ---------------------------------------------------------------------------
+#
+# Distinct from sections 1-7, which cover the *inbound* gate (should I act on
+# this stranger's mail?). This is the scheduler's own gate: the model asked a
+# question mid-task and `process_one_task` parked the task on it.
+#
+# For an email-origin task delivering into a Talk-bound room the two halves of
+# that branch disagreed. `_confirmable_surface` counts the mirror Talk leg, so
+# the task parks — but the branch that posts the prompt excluded every mirror
+# leg, and `_expand_room_destinations` marks a non-origin binding `mirror=True`
+# unconditionally. So the question went nowhere and the task sat until
+# `expire_stale_confirmations` cancelled it two hours later.
+
+
+def _confirming_config(make_config):
+    config = make_config(
+        talk=TalkConfig(enabled=True, bot_username="istota"),
+        email=_email_config(),
+        users={"testuser": UserConfig(display_name="Alice")},
+    )
+    db.init_db(config.db_path)
+    return config
+
+
+def _seed_room_task(config, *, source_type):
+    """A task in a room bound to both its own surface and Talk, delivering by
+    the room fan-out — the shape that produces a mirror Talk leg."""
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, "room1", "testuser", origin="web")
+        db.add_room_binding(conn, "room1", "web", "room1")
+        db.add_room_binding(conn, "room1", "talk", "talktok42")
+        return db.create_task(
+            conn, prompt="reply to them", user_id="testuser",
+            source_type=source_type, conversation_token="room1",
+            output_target="room",
+        )
+
+
+_ASKS = "Should I proceed with booking Tuesday at 2pm? Reply yes or no."
+
+
+class TestSchedulerConfirmationOnMirrorLeg:
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_email_origin_confirmation_posts_to_the_mirror_talk_leg(
+        self, mock_run_coro, mock_post_talk, make_config,
+    ):
+        from istota.scheduler import process_one_task
+
+        config = _confirming_config(make_config)
+        task_id = _seed_room_task(config, source_type="email")
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, _ASKS, None, None),
+        ):
+            assert process_one_task(config) is not None
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "pending_confirmation"
+        assert task.confirmation_prompt == _ASKS
+
+        talk_calls = [
+            c for c in mock_post_talk.call_args_list
+            if c.kwargs.get("target_token") == "talktok42"
+        ]
+        assert len(talk_calls) == 1
+        assert talk_calls[0].args[2] == _ASKS
+
+    @patch("istota.scheduler.post_result_to_email")
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_email_origin_confirmation_is_never_mailed_to_the_correspondent(
+        self, mock_run_coro, mock_post_talk, mock_post_email, make_config,
+    ):
+        """The prompt is a question for the principal. Mailing it out would ask
+        the external correspondent to approve the bot's reply to themselves."""
+        from istota.scheduler import process_one_task
+
+        config = _confirming_config(make_config)
+        task_id = _seed_room_task(config, source_type="email")
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, _ASKS, None, None),
+        ):
+            assert process_one_task(config) is not None
+
+        # Stated explicitly: "not mailed" is only the interesting claim while
+        # the task is actually holding a question. Without this the test goes
+        # vacuous the moment anything else drops the email leg.
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+        mock_post_email.assert_not_called()
+
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_web_origin_confirmation_still_stays_off_talk(
+        self, mock_run_coro, mock_post_talk, make_config,
+    ):
+        """Regression guard. A web-origin task's confirmation rides its own SSE
+        stream and is answered by POST /chat/tasks/{id}/confirm, so it must not
+        be cross-posted to the room's Talk leg."""
+        from istota.scheduler import process_one_task
+
+        config = _confirming_config(make_config)
+        task_id = _seed_room_task(config, source_type="web")
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, _ASKS, None, None),
+        ):
+            assert process_one_task(config) is not None
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+
+        assert [
+            c for c in mock_post_talk.call_args_list
+            if c.kwargs.get("target_token") == "talktok42"
+        ] == []
