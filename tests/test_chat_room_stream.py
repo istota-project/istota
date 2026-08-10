@@ -220,6 +220,30 @@ def _post(token, *, role="assistant", body="hello", task_id=None, title=None,
         )
 
 
+def _hold_draft(room_token, *, user_id="alice", subject="Re: Invite"):
+    """An outbound email the approval gate held, rendered in ``room_token``."""
+    from istota import outbound_drafts
+
+    with db.get_db(_db_path()) as conn:
+        return outbound_drafts.hold(
+            conn,
+            user_id=user_id,
+            task_id=None,
+            room_token=room_token,
+            to_addrs=["stranger@example.invalid"],
+            cc_addrs=[],
+            bcc_addrs=[],
+            subject=subject,
+            body="Wednesday at two works.",
+            html=False,
+            in_reply_to=None,
+            references=None,
+            attachments=[],
+            origin_target=None,
+            hold_reason="untrusted_recipient",
+        )
+
+
 @_needs_web_deps
 class TestRoomEventsSnapshot:
     async def test_requires_auth(self, stream_client):
@@ -540,6 +564,74 @@ class TestRoomStreamSSE:
         await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
         buf = await _drain(_FakeRequest(disconnect_after=1))
         assert "event: room" not in buf
+
+    async def test_a_held_draft_is_pushed_as_a_drafts_frame(self, tmp_path):
+        """The "appears live without a reload" half of the approval card.
+
+        A draft is written by the email skill in a different process, so the web
+        tier learns about it the same way it learns about a Talk turn: by
+        polling. It rides the room-check cadence rather than the 1s message
+        poll, since it is a snapshot diff rather than a tail.
+        """
+        room = await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+
+        def on_check(n):
+            if n == 2:
+                _hold_draft(room["token"])
+
+        buf = await _drain(_FakeRequest(disconnect_after=4, on_check=on_check))
+
+        frame = _frame(buf, "drafts")
+        [draft] = frame["drafts"]
+        assert draft["subject"] == "Re: Invite"
+        assert draft["room_token"] == room["token"]
+        # Auxiliary, like `room` and `message_deleted` — an `id:` here would move
+        # EventSource's resume cursor off the message tail.
+        assert "id:" not in buf
+
+    async def test_an_unchanged_draft_set_is_not_re_pushed(self, tmp_path):
+        """The whole set rides each frame, so re-sending an unchanged one would
+        put a full email body on the wire every room-check tick."""
+        room = await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        _hold_draft(room["token"])
+
+        buf = await _drain(_FakeRequest(disconnect_after=4))
+
+        assert buf.count("event: drafts") == 1
+
+    async def test_a_resolved_draft_pushes_the_shrunken_set(self, tmp_path):
+        """Sent and discarded are the transitions an id-ordered cursor cannot
+        carry, and the reason this is a snapshot diff rather than a tail."""
+        from istota import outbound_drafts
+
+        room = await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        draft_id = _hold_draft(room["token"])
+
+        def on_check(n):
+            if n == 2:
+                with db.get_db(_db_path()) as c:
+                    outbound_drafts.discard(c, draft_id)
+
+        buf = await _drain(_FakeRequest(disconnect_after=4, on_check=on_check))
+
+        frames = [
+            json.loads(chunk.split("data: ", 1)[1].split("\n\n", 1)[0])
+            for chunk in buf.split("event: drafts\n")[1:]
+        ]
+        assert frames[0]["drafts"][0]["id"] == draft_id
+        assert frames[-1]["drafts"] == []
+
+    async def test_another_users_draft_is_not_streamed(self, tmp_path):
+        """Rooms are shared. A co-member must not be handed the body and
+        recipients of someone else's held mail."""
+        room = await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        _hold_draft(room["token"], user_id="bob", subject="Bob's private reply")
+
+        buf = await _drain(_FakeRequest(disconnect_after=4))
+
+        assert "Bob's private reply" not in buf
+        if "event: drafts" in buf:
+            assert _frame(buf, "drafts")["drafts"] == []
 
     async def test_connection_gauge_released_on_disconnect(self, tmp_path):
         import istota.web_app as mod
