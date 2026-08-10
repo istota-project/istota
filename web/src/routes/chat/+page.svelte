@@ -47,6 +47,18 @@
     outboundDrafts,
   } = session;
 
+  // Cross-room views: the transcript pane renders either the active room
+  // ('room') or a read-only aggregate stream (all/unread/starred).
+  const inViewMode = $derived($view !== 'room');
+  const VIEW_LABELS: Record<ChatView, string> = {
+    all: 'All messages',
+    unread: 'Unread',
+    starred: 'Starred',
+  };
+  // Client-side total for the sidebar Unread badge (sum of per-room counts;
+  // the active room is already held at 0 by the store).
+  const unreadTotal = $derived($rooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
+
   // Where each held draft's card goes. A draft belongs to the turn that
   // composed it, so it renders under that turn when the turn is on screen —
   // that is where the drafted text and "this task also created a calendar
@@ -74,13 +86,22 @@
     if (message.role !== 'assistant' || message.taskId == null) return [];
     return draftsByTask.get(message.taskId) ?? [];
   }
+  // Gated on `!inViewMode` for exactly the reason `draftsByTask` is. An
+  // aggregate pane renders through the same `messages` store, so its rows carry
+  // task ids too — but the per-turn cards are withheld there (the panes are
+  // read-only and pass no `draftActions`). Without this guard a draft whose
+  // turn happened to be in the All pane was excluded from the fallback list and
+  // drawn by no row either, which is the one outcome the fallback exists to
+  // make impossible.
   const onScreenTaskIds = $derived(
-    new Set(
-      $messages
-        .filter((m) => m.role === 'assistant')
-        .map((m) => m.taskId)
-        .filter((id): id is number => id != null),
-    ),
+    inViewMode
+      ? new Set<number>()
+      : new Set(
+          $messages
+            .filter((m) => m.role === 'assistant')
+            .map((m) => m.taskId)
+            .filter((id): id is number => id != null),
+        ),
   );
   const looseDrafts = $derived(
     $outboundDrafts.filter((d) => d.task_id == null || !onScreenTaskIds.has(d.task_id)),
@@ -91,18 +112,6 @@
     edit: (id: number, body: string) => session.editDraft(id, body),
     refresh: () => void session.refreshDrafts(),
   };
-
-  // Cross-room views: the transcript pane renders either the active room
-  // ('room') or a read-only aggregate stream (all/unread/starred).
-  const inViewMode = $derived($view !== 'room');
-  const VIEW_LABELS: Record<ChatView, string> = {
-    all: 'All messages',
-    unread: 'Unread',
-    starred: 'Starred',
-  };
-  // Client-side total for the sidebar Unread badge (sum of per-room counts;
-  // the active room is already held at 0 by the store).
-  const unreadTotal = $derived($rooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
 
   // The room whose settings modal is open (null = closed).
   let settingsRoom = $state<ChatRoom | null>(null);
@@ -1084,9 +1093,9 @@
     height: calc(var(--composer-h, 0px) + 1rem);
   }
   /* Held drafts with no turn on screen, above the transcript beside the pending
-	   confirmations. Capped in height and scrolled: a card carries a whole email
-	   body, and several of them would otherwise push the transcript off the pane
-	   entirely. */
+     confirmations. Capped in height and scrolled: a card carries a whole email
+     body, and several of them would otherwise push the transcript off the pane
+     entirely. */
   .loose-drafts {
     display: flex;
     flex-direction: column;

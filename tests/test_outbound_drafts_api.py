@@ -946,6 +946,78 @@ class TestStuckAndUnreadableRows:
 
 
 @_needs_web_deps
+class TestConflictState:
+    """A 409 has to say what the row is now, on every route that can raise one.
+
+    The client reads `state` to decide whether the card goes: a settled state
+    means "answered elsewhere", `sending` means "in motion, keep it". A route
+    that omits the key leaves the client to guess, and the wrong guess reports a
+    refused action as a completed one.
+    """
+
+    def _claim(self, db_path, draft_id):
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET status = 'sending' WHERE id = ?",
+                (draft_id,),
+            )
+            conn.commit()
+
+    async def test_a_discard_losing_the_race_reports_sending(
+        self, client, app, db_path,
+    ):
+        """`!drafts send` from Talk, or a second tab, puts the row in `sending`
+        while this card is still on screen. Discard must not report success on
+        mail that is going out."""
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        self._claim(db_path, draft_id)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/discard",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "sending"
+
+    async def test_a_discard_of_an_already_sent_row_names_that_state(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET status = 'sent' WHERE id = ?",
+                (draft_id,),
+            )
+            conn.commit()
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/discard",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "sent"
+
+    async def test_an_approve_losing_the_race_reports_sending(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        self._claim(db_path, draft_id)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/approve",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "sending"
+
+
+@_needs_web_deps
 class TestStreamBudget:
     """The frame carries the whole set on every tick, and a body is capped only
     by the PATCH ceiling (200k each). Past a budget the extra rows ride as stubs
@@ -981,6 +1053,24 @@ class TestStreamBudget:
         # Enough to place the card and go fetch the rest.
         assert drafts_out[second]["room_token"] == "rm1"
         assert drafts_out[second]["status"] == "pending"
+
+    async def test_a_stub_carries_the_field_that_places_its_card(
+        self, client, app, db_path,
+    ):
+        """`task_id` is the placement key. Without it a stub moves its own card
+        out of its turn and into the fallback list, and back again when the full
+        row lands — which destroys the component and any edit in progress."""
+        import istota.web_app as mod
+        _hold(db_path, room_token="rm1", task_id=7, body="x" * 4000)
+        second = _hold(db_path, room_token="rm1", task_id=9, body="y" * 4000)
+        cookies = await _login(client)
+
+        with patch.object(mod, "_DRAFT_FRAME_MAX_BYTES", 3000):
+            resp = await client.get("/istota/api/chat/events", cookies=cookies)
+
+        stub = next(d for d in resp.json()["drafts"] if d["id"] == second)
+        assert stub["truncated"] is True
+        assert stub["task_id"] == 9
 
     async def test_the_full_list_endpoint_is_not_budgeted(
         self, client, app, db_path,

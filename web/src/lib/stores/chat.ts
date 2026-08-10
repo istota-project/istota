@@ -300,6 +300,11 @@ export interface ChatSession {
   // the client places each card by the `room_token` on the draft.
   outboundDrafts: Writable<OutboundDraft[]>;
   refreshDrafts: () => Promise<void>;
+  // The stream and the polling fallback both land here. Exposed because the
+  // `unavailable` guard and the answered-suppression window are the two rules
+  // that decide whether a card stays on screen, and neither is reachable
+  // through the public verbs.
+  applyDraftsSnapshot: (drafts: OutboundDraft[] | undefined, unavailable?: boolean) => void;
   answerDraft: (draftId: number, action: 'approve' | 'discard') => Promise<boolean>;
   editDraft: (draftId: number, body: string) => Promise<boolean>;
   teardown: () => void;
@@ -816,15 +821,66 @@ function createSession(): ChatSession {
 
   const outboundDrafts = writable<OutboundDraft[]>([]);
 
-  async function refreshDrafts() {
-    try {
-      const res = await listOutboundDrafts();
-      outboundDrafts.set(res.drafts ?? []);
-    } catch {
-      // Same rule as the confirmations poll: a failed read is nothing the user
-      // did, and the cards on screen stay until a read succeeds. Clearing them
-      // on a transient failure would read as the mail having gone out.
+  // Ids answered in the last few seconds, and when. A snapshot is computed on a
+  // worker thread on the room-check tick, so one read a moment before `release`
+  // committed its claim arrives *after* the answer and puts the card back —
+  // with a live Send button on mail already going out. Pressing it again is
+  // harmless (`release` short-circuits on a `sent` row and returns the same
+  // Message-ID), but the card reads as the send not having taken, which on an
+  // irreversible action is the one thing this surface must not say. Bounded, so
+  // a misclassified answer cannot hide held mail for longer than the window:
+  // after it, the server's own view wins.
+  const answeredAt = new Map<number, number>();
+  const ANSWERED_SUPPRESS_MS = 20_000;
+
+  function suppressAnswered(list: OutboundDraft[]): OutboundDraft[] {
+    if (answeredAt.size === 0) return list;
+    const now = Date.now();
+    for (const [id, at] of answeredAt) {
+      if (now - at > ANSWERED_SUPPRESS_MS) answeredAt.delete(id);
     }
+    return answeredAt.size === 0 ? list : list.filter((d) => !answeredAt.has(d.id));
+  }
+
+  function dropDraftCard(draftId: number) {
+    outboundDrafts.update((list) => list.filter((d) => d.id !== draftId));
+  }
+
+  /**
+   * Drop a card and hold it down against an in-flight snapshot.
+   *
+   * Only for an answer the server **accepted**. On a refusal the row may still
+   * be held, and suppressing there would hide answerable mail for the length of
+   * the window — so those paths drop the card and let the re-read be the
+   * authority, which is what puts it back if it is still there.
+   */
+  function forgetAnswered(draftId: number) {
+    answeredAt.set(draftId, Date.now());
+    dropDraftCard(draftId);
+  }
+
+  // Coalesces concurrent callers onto one request. A frame that stubs K drafts
+  // makes K cards each ask for the full row, and the endpoint they ask is
+  // deliberately un-budgeted — so without this the byte budget is "saved" by
+  // fetching every body K times over.
+  let draftsInFlight: Promise<void> | null = null;
+
+  function refreshDrafts(): Promise<void> {
+    if (draftsInFlight) return draftsInFlight;
+    draftsInFlight = (async () => {
+      try {
+        const res = await listOutboundDrafts();
+        outboundDrafts.set(suppressAnswered(res.drafts ?? []));
+      } catch {
+        // Same rule as the confirmations poll: a failed read is nothing the
+        // user did, and the cards on screen stay until a read succeeds.
+        // Clearing them on a transient failure would read as the mail having
+        // gone out.
+      } finally {
+        draftsInFlight = null;
+      }
+    })();
+    return draftsInFlight;
   }
 
   /**
@@ -837,7 +893,7 @@ function createSession(): ChatSession {
    */
   function applyDraftsSnapshot(drafts: OutboundDraft[] | undefined, unavailable = false) {
     if (unavailable || !drafts) return;
-    outboundDrafts.set(drafts);
+    outboundDrafts.set(suppressAnswered(drafts));
   }
 
   /**
@@ -847,22 +903,57 @@ function createSession(): ChatSession {
    * failure: this card is the only place the held mail is visible in the web
    * UI, so dropping it on a refused approve would leave the user believing a
    * message went out that did not.
+   *
+   * A 409 is read against the action, not on its own. "Someone discarded this
+   * elsewhere" settles a *discard* and is a refusal of a *send* — dropping the
+   * card silently in the second case gives the user who pressed Send the same
+   * feedback a successful send gives them, for mail that never left.
    */
   async function answerDraft(draftId: number, action: 'approve' | 'discard'): Promise<boolean> {
-    const res =
-      action === 'approve'
-        ? await approveOutboundDraft(draftId)
-        : await discardOutboundDraft(draftId);
+    let res;
+    try {
+      res =
+        action === 'approve'
+          ? await approveOutboundDraft(draftId)
+          : await discardOutboundDraft(draftId);
+    } catch {
+      // An expired session throws `AuthError` out of the fetch wrapper. Without
+      // this the button simply un-busies and nothing is said, on the one
+      // surface where "nothing happened" is indistinguishable from "it worked".
+      notifyError('Could not reach the server. Your message has not been sent.', {
+        key: `chat:draft:${draftId}`,
+      });
+      return false;
+    }
     if (res.ok) {
-      outboundDrafts.update((list) => list.filter((d) => d.id !== draftId));
+      forgetAnswered(draftId);
       return true;
     }
-    if (res.failure === 'gone' || (res.failure === 'conflict' && res.state !== 'sending')) {
-      // Answered from another client or another surface. The decision stands;
-      // only this view was stale, so the card goes without a complaint.
-      outboundDrafts.update((list) => list.filter((d) => d.id !== draftId));
+    const settledElsewhere =
+      res.failure === 'gone' ||
+      (res.failure === 'conflict' && (res.state === 'discarded' || res.state === 'sent'));
+    if (settledElsewhere && action === 'discard') {
+      // The row is already gone or already binned, which is what Discard was
+      // for. Only this view was stale, so the card goes without a complaint.
+      dropDraftCard(draftId);
       void refreshDrafts();
       return true;
+    }
+    if (settledElsewhere) {
+      // The user pressed Send and nothing went out. Saying so is the whole
+      // point: dropping the card silently here gives them exactly the feedback
+      // a successful send gives.
+      notifyError(
+        res.state === 'sent'
+          ? 'That message had already been sent.'
+          : res.state === 'discarded'
+            ? 'That message was discarded elsewhere, so it was not sent.'
+            : 'That draft is no longer there, so nothing was sent.',
+        { key: `chat:draft:${draftId}` },
+      );
+      dropDraftCard(draftId);
+      void refreshDrafts();
+      return false;
     }
     if (res.failure === 'sent_unrecorded') {
       // The mail left. Never a retry — see `DraftFailure`.
@@ -871,6 +962,8 @@ function createSession(): ChatSession {
         { key: `chat:draft:${draftId}` },
       );
     } else if (res.failure === 'conflict') {
+      // Either `sending`, or a 409 that named no state — both mean the row is
+      // in motion and the card must stay.
       notifyError('That message is being sent right now.', {
         key: `chat:draft:${draftId}`,
       });
@@ -886,10 +979,24 @@ function createSession(): ChatSession {
 
   /** Replace a held draft's body. The server returns the re-read row. */
   async function editDraft(draftId: number, body: string): Promise<boolean> {
-    const res = await editOutboundDraft(draftId, body);
-    if (res.ok && res.draft) {
-      const updated = res.draft;
-      outboundDrafts.update((list) => list.map((d) => (d.id === draftId ? updated : d)));
+    let res;
+    try {
+      res = await editOutboundDraft(draftId, body);
+    } catch {
+      notifyError('Could not save that edit.', { key: `chat:draft:${draftId}` });
+      return false;
+    }
+    if (res.ok) {
+      // The edit committed. A 2xx whose body did not parse is still a committed
+      // edit, so it closes the editor and leaves the re-read to settle the
+      // displayed text — reporting a failure there would tell the user their
+      // correction was lost while the server holds it.
+      if (res.draft) {
+        const updated = res.draft;
+        outboundDrafts.update((list) => list.map((d) => (d.id === draftId ? updated : d)));
+      } else {
+        void refreshDrafts();
+      }
       return true;
     }
     notifyError(res.error || 'Could not save that edit.', {
@@ -2605,6 +2712,7 @@ function createSession(): ChatSession {
     answerConfirmation,
     outboundDrafts,
     refreshDrafts,
+    applyDraftsSnapshot,
     answerDraft,
     editDraft,
     teardown,

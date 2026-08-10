@@ -67,13 +67,33 @@
   // in the markup: the block is `white-space: pre-wrap`, so a second expression
   // beside it lets the formatter break the line and turn its indentation into
   // rendered leading whitespace on the message being approved.
-  const shownBody = $derived(expanded || !longBody ? body : `${body.slice(0, PREVIEW_CHARS)}…`);
+  // `slice` cuts on UTF-16 code units, so a cut landing between the halves of a
+  // surrogate pair leaves a lone high surrogate and renders U+FFFD. On a card
+  // whose whole claim is that what you read is what is sent, a replacement
+  // character reads as the message itself being damaged.
+  const preview = $derived(
+    /[\uD800-\uDBFF]$/.test(body.slice(0, PREVIEW_CHARS))
+      ? body.slice(0, PREVIEW_CHARS - 1)
+      : body.slice(0, PREVIEW_CHARS),
+  );
+  const shownBody = $derived(expanded || !longBody ? body : `${preview}…`);
 
   // A stub carries no body, so the card cannot render what is being approved.
-  // Asking once on arrival is what turns it back into a full row.
-  let asked = false;
+  // Asking on arrival is what turns it back into a full row.
+  //
+  // The latch is cleared the moment the row *stops* being truncated, rather
+  // than being a once-per-instance flag. The stream frame is diffed against the
+  // server's own baseline, which the client's refetch does not touch, so the
+  // same draft is stubbed again on the next frame that changes anything — with
+  // a permanent latch the card then sat on "Loading the held message…" forever,
+  // offering no action on mail that was waiting to be answered.
+  let asked = $state(false);
   $effect(() => {
-    if (truncated && !asked) {
+    if (!truncated) {
+      asked = false;
+      return;
+    }
+    if (!asked) {
       asked = true;
       onNeedsFullRow?.();
     }
@@ -127,6 +147,15 @@
         onclick={() => run(() => onDiscard(draft.id))}>Discard</Button
       >
     </div>
+  {:else if truncated}
+    <!-- Ahead of the `sending` branch, not after it: a stub carries a status
+         but no subject, so a stuck row arriving as a stub would render
+         "(no subject)" — asserting the message has none on the very card whose
+         job is to help find it in the Sent folder. -->
+    <div class="draft-head">
+      <span class="micro-label">Held email</span>
+    </div>
+    <p class="draft-note">Loading the held message…</p>
   {:else if sending}
     <div class="draft-head">
       <span class="micro-label">Held email &middot; sending</span>
@@ -136,11 +165,6 @@
       This message was approved and the send did not report back, so it may already have gone out.
       Check your Sent folder before resending it.
     </p>
-  {:else if truncated}
-    <div class="draft-head">
-      <span class="micro-label">Held email</span>
-    </div>
-    <p class="draft-note">Loading the held message…</p>
   {:else}
     <div class="draft-head">
       <span class="micro-label"><Mail size={12} /> Held for approval</span>

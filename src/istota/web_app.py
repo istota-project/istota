@@ -2355,8 +2355,9 @@ def _drafts_snapshot(username: str) -> list[dict]:
 
     Scoped to the draft's own `user_id`, not to the rooms in view. Rooms are
     shared, and a co-member must not be handed the body and recipients of
-    someone else's held mail; the client places each card by `room_token`, and a
-    NULL one renders in the global list.
+    someone else's held mail; the client places each card by `task_id`, under
+    the turn that composed it, and falls back to a list above the transcript
+    for a draft whose turn is not on screen.
 
     **Setting ``room_stream_room_check_seconds = 0`` disables this too**, not
     only the room-metadata diff, because the two share that tick. `GET
@@ -5347,6 +5348,13 @@ def _draft_stub(draft) -> dict:
     """
     return {
         "id": draft.id,
+        # `task_id` is what actually places the card — under the assistant row
+        # of the turn that composed it — so a stub without it would move its own
+        # card from that row into the page's fallback list and back again as the
+        # full row arrives. That is not merely cosmetic: moving a card between
+        # two `{#each}` blocks destroys and recreates the component, which
+        # throws away a correction the user was part-way through typing.
+        "task_id": draft.task_id,
         "room_token": draft.room_token,
         "status": draft.status,
         "created_at": _iso_utc(draft.created_at),
@@ -5358,10 +5366,11 @@ def _unreadable_draft_dict(draft_id: int) -> dict:
     """A held draft whose stored columns do not parse.
 
     Named rather than dropped: the user has mail held that they will otherwise
-    never hear about, and the 24-hour nag reads the same rows this does. Carries
-    no subject, body or recipients — those are the columns the read just failed
-    on, so there is nothing honest to put there. The card offers Discard alone,
-    which is the one action that does not depend on reading the row.
+    never hear about. Carries no subject, body or recipients — those are the
+    columns the read just failed on, so there is nothing honest to put there.
+    The card offers Discard alone, which is the one action that does not depend
+    on reading the row. The 24-hour nag skips such a row rather than naming it
+    (`stale_unnagged`), so this listing is where it is answerable.
     """
     return {"id": draft_id, "unreadable": True}
 
@@ -5371,8 +5380,9 @@ def _chat_pending_drafts(username: str) -> list[dict]:
 
     Global rather than room-scoped, so a draft from a task with no room — a cron
     job mailing an external address under the `all` policy — is still reachable.
-    The client places each card by `room_token`; a NULL one belongs to the list
-    alone.
+    The client places each card by `task_id`, under the turn that composed it,
+    and falls back to a list above the transcript for a draft whose turn is not
+    on screen. `room_token` is provenance rather than placement.
 
     Carries `sending` rows alongside `pending` ones, and unreadable rows as
     stubs — see `outbound_drafts.open_for_user`. Deliberately **not** byte-
@@ -5473,10 +5483,22 @@ async def chat_approve_draft(
         return JSONResponse(
             {"error": str(e), "state": current or "gone"}, status_code=409,
         )
+    except outbound_drafts.DraftCorrupt:
+        # Same rule the PATCH route already writes down: a malformed stored
+        # column is a server-side data fault, logged whole and reported
+        # generically. Newly reachable here — the ownership check used to go
+        # through `get`, so a corrupt row raised before `release` was ever
+        # called, and the parse-free check removed that accidental barrier.
+        logger.error("draft %s has a corrupt column", draft_id, exc_info=True)
+        return JSONResponse(
+            {"error": "this draft could not be read", "sent": False,
+             "retryable": False},
+            status_code=500,
+        )
     except outbound_drafts.DraftError as e:
         # Every remaining DraftError is permanent: email is not configured on
         # this instance, an attachment no longer resolves inside the owner's
-        # workspace, a stored JSON column is corrupt, or a `sent` row records no
+        # workspace, or a `sent` row records no
         # Message-ID. None of them get better by pressing the button again, and
         # `.claude/rules/web-chat.md` sets the rule — "Retry is withheld where it
         # cannot succeed". 500 rather than 502: the fault is local, not the
@@ -5596,7 +5618,19 @@ async def chat_discard_draft(
         # A release claimed the row between the ownership read and the write.
         # The mail is going out; saying "discarded" would be the opposite of
         # what happened.
-        return JSONResponse({"error": str(e)}, status_code=409)
+        #
+        # `state` for the same reason the approve route carries it, and it is
+        # load-bearing rather than symmetric-for-neatness: the client treats a
+        # conflict whose state is anything but `sending` as "answered elsewhere,
+        # the decision stands" and drops the card silently. With the key absent
+        # it defaulted to `gone` and took that branch — so pressing Discard on
+        # mail that was going out reported the discard as having worked.
+        current = await asyncio.to_thread(
+            _chat_draft_owner_status, draft_id, username,
+        )
+        return JSONResponse(
+            {"error": str(e), "state": current or "gone"}, status_code=409,
+        )
     return {"status": "discarded", "draft_id": draft_id}
 
 

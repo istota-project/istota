@@ -890,6 +890,43 @@ class TestOpenListing:
         assert [d.id for d in drafts.open_for_user(conn, "alice").drafts] == [mine]
 
 
+class TestStaleSweepResilience:
+    """One corrupt row must not silence the nag for everyone.
+
+    The sweep is a single global read across every user, so a row that raises
+    here stopped the stale-draft notification for the whole instance, on every
+    tick, indefinitely — a draft nobody can be told about, which is the exact
+    outcome the notification exists to prevent.
+    """
+
+    def _aged(self, conn, **overrides):
+        draft_id = _hold(conn, **overrides)
+        conn.execute(
+            "UPDATE outbound_drafts SET created_at = datetime('now', '-48 hours') "
+            "WHERE id = ?", (draft_id,),
+        )
+        conn.commit()
+        return draft_id
+
+    def test_a_corrupt_row_is_skipped_rather_than_raising(self, conn):
+        good = self._aged(conn, subject="Readable")
+        bad = self._aged(conn, subject="Corrupt")
+        conn.execute(
+            "UPDATE outbound_drafts SET to_addrs = ? WHERE id = ?",
+            ("not json", bad),
+        )
+        conn.commit()
+
+        stale = drafts.stale_unnagged(conn)
+
+        assert [d.id for d in stale] == [good]
+
+    def test_a_clean_sweep_is_unaffected(self, conn):
+        first = self._aged(conn)
+        second = self._aged(conn, subject="Second")
+        assert [d.id for d in drafts.stale_unnagged(conn)] == [first, second]
+
+
 class TestIdentityRead:
     """Owner and status without parsing anything that can be corrupt.
 

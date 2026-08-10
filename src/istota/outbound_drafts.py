@@ -724,6 +724,14 @@ def stale_unnagged(
     ``datetime('now', '--24 hours')`` is not a legal modifier and evaluates to
     NULL, which makes the whole predicate NULL and the sweep silently empty,
     while ``0`` would mean *now* and nag every pending draft at once.
+
+    Row-resilient for the same reason :func:`open_for_user` is, and with a wider
+    blast radius: this is **one global read**, so a single unparseable row
+    raising here silenced the stale-draft notification for every user on the
+    instance, on every tick, indefinitely. A draft nobody can be told about is
+    the exact outcome the notification exists to prevent. The corrupt row is
+    skipped and logged; it is still listed on the web surface, where it can be
+    seen and discarded.
     """
     if older_than_hours <= 0:
         logger.warning(
@@ -736,7 +744,16 @@ def stale_unnagged(
         "AND created_at < datetime('now', ?) ORDER BY id",
         (STATUS_PENDING, f"-{int(older_than_hours)} hours"),
     ).fetchall()
-    return [_row(r) for r in rows]
+    out: list[OutboundDraft] = []
+    for row in rows:
+        try:
+            out.append(_row(row))
+        except DraftCorrupt:
+            logger.warning(
+                "outbound draft %s has a corrupt column; skipping it in the "
+                "stale-draft sweep", row["id"], exc_info=True,
+            )
+    return out
 
 
 def mark_nagged(conn: sqlite3.Connection, draft_id: int) -> None:

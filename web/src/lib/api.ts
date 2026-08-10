@@ -2625,12 +2625,16 @@ async function draftAction(
   const error = typeof data.error === 'string' ? data.error : `error ${resp.status}`;
   if (resp.status === 404) return { ok: false, status: 404, failure: 'gone', error };
   if (resp.status === 409) {
+    // A missing `state` stays undefined rather than defaulting to `gone`. The
+    // caller drops the card silently for a settled state and keeps it for
+    // `sending`, so a default of `gone` turns "we don't know" into the branch
+    // that reports the action as having worked.
     const state = data.state;
     return {
       ok: false,
       status: 409,
       failure: 'conflict',
-      state: typeof state === 'string' ? (state as DraftActionResult['state']) : 'gone',
+      state: typeof state === 'string' ? (state as DraftActionResult['state']) : undefined,
       error,
     };
   }

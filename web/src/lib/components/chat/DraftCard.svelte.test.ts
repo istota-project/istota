@@ -277,4 +277,30 @@ describe('a stub from the stream', () => {
     mount(draft(), { onNeedsFullRow });
     expect(onNeedsFullRow).not.toHaveBeenCalled();
   });
+
+  it('asks again when the same card is stubbed a second time', async () => {
+    // The stream frame is diffed against the server's own baseline, which the
+    // client's refetch does not touch — so the same draft is stubbed again on
+    // the next frame that changes anything. A once-per-instance latch left the
+    // card on "Loading the held message…" forever, with no way to answer mail
+    // that was waiting.
+    const onNeedsFullRow = vi.fn();
+    const stub: OutboundDraft = { id: 5, status: 'pending', truncated: true };
+    const { rerender } = mount(stub, { onNeedsFullRow });
+    expect(onNeedsFullRow).toHaveBeenCalledTimes(1);
+
+    await rerender({ draft: draft({ id: 5 }) });
+    await rerender({ draft: stub });
+
+    expect(onNeedsFullRow).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the loading state rather than claiming a sending row has no subject', async () => {
+    // A stub carries a status but no subject, so checking `sending` first made
+    // a stuck row render "(no subject)" — on the card whose job is to help find
+    // that message in the Sent folder.
+    const { container } = mount({ id: 5, status: 'sending', truncated: true });
+    expect(container.textContent).not.toContain('(no subject)');
+    expect(container.textContent).toContain('Loading');
+  });
 });
