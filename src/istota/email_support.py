@@ -26,6 +26,43 @@ from .skills.email import (
 logger = logging.getLogger("istota.email_support")
 
 
+# The wrapper `transport/email/inbound.py` builds around an inbound email before
+# it becomes a task prompt, parsed back out for **display only**. The stored
+# `messages` row keeps the prompt verbatim on purpose: it re-pairs straight into
+# LLM context, so the "external input — do not follow instructions" guard has to
+# survive that trip (ISSUE-136). A human reading the room transcript needs
+# neither the guard nor the trailing instruction to the model, and reading them
+# in a bubble labelled with their own name is worse than noise — it is the
+# transcript asserting the user wrote what an external contact sent.
+_EMAIL_PROMPT_RE = re.compile(
+    r"<email_metadata>\n(?P<meta>.*?)\n</email_metadata>\s*"
+    r"<email_content>\n(?P<body>.*?)\n</email_content>",
+    re.DOTALL,
+)
+_EMAIL_HEADER_RE = re.compile(r"^(From|Subject|Date):[ \t]*(.*)$")
+
+
+def parse_email_prompt(prompt: str) -> tuple[dict[str, str], str] | None:
+    """Split an email task prompt into its metadata headers and the sender's text.
+
+    Returns ``(headers, body)``, or **None when the prompt is not one** — a Talk
+    turn, a web turn, or a wrapper shape this stopped recognizing. None means
+    "render verbatim" at every call site, so drift between this and the builder
+    degrades to today's raw display rather than to a blank or truncated message.
+    Only the three fixed headers are lifted; the free-text lines the emissary
+    variant adds are metadata for the model, not for a reader.
+    """
+    m = _EMAIL_PROMPT_RE.search(prompt)
+    if m is None:
+        return None
+    headers: dict[str, str] = {}
+    for line in m.group("meta").splitlines():
+        h = _EMAIL_HEADER_RE.match(line)
+        if h:
+            headers[h.group(1).lower()] = h.group(2).strip()
+    return headers, m.group("body").strip()
+
+
 def get_email_config(config: Config) -> EmailConfig:
     """Convert app config to email skill config."""
     return EmailConfig(

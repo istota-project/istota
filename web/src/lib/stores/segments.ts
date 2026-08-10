@@ -183,6 +183,11 @@ export interface ChatMessage {
   searchResults?: SearchResultsData;
   // The message this turn replies to, rendered as a quote above the body.
   replyTo?: MessageReply;
+  // User rows only: who wrote it, when that is not the viewer. A room is
+  // shared and an email turn is mirrored into the room it continues, so a user
+  // bubble is not necessarily the reader's own words. Absent → label with the
+  // viewer's display name, the long-standing behaviour.
+  author?: string;
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

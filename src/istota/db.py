@@ -1965,7 +1965,7 @@ _CONVERSATIONAL_SOURCE_TYPES = ("talk", "web")
 # stores `sender_email`, so this needs no schema change and no second query.
 # A scalar subquery rather than a LEFT JOIN: the join key is not unique, and a
 # duplicate row there would silently multiply the history rows it is attached to.
-_EMAIL_SENDER_SUBQUERY = """(
+EMAIL_SENDER_SUBQUERY = """(
             SELECT pe.sender_email FROM processed_emails pe
             WHERE pe.task_id = {alias}.id ORDER BY pe.id LIMIT 1
         ) AS email_sender"""
@@ -2057,7 +2057,7 @@ def _external_sender_for_row(
 def email_sender_for_task(conn: sqlite3.Connection, task_id: int) -> str | None:
     """The recorded envelope sender for one task, or None if it wasn't email.
 
-    The single-row counterpart to `_EMAIL_SENDER_SUBQUERY`, for callers that
+    The single-row counterpart to `EMAIL_SENDER_SUBQUERY`, for callers that
     build a `ConversationMessage` from an already-fetched `Task`.
     """
     row = conn.execute(
@@ -2121,7 +2121,7 @@ def _conversation_history_from_tasks(
     """Legacy path: reconstruct history from completed `tasks` rows."""
     query = f"""
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
-               {_EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
+               {EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -2185,7 +2185,7 @@ def _conversation_history_from_messages(
         SELECT t.id AS id, mu.body AS prompt, ma.body AS result,
                t.created_at AS created_at, t.actions_taken AS actions_taken,
                t.source_type AS source_type, t.user_id AS user_id,
-               {_EMAIL_SENDER_SUBQUERY.format(alias="t")}
+               {EMAIL_SENDER_SUBQUERY.format(alias="t")}
         FROM messages mu
         JOIN messages ma
           ON ma.room_token = mu.room_token AND ma.task_id = mu.task_id
@@ -2494,7 +2494,7 @@ def get_previous_tasks(
     """
     query = f"""
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
-               {_EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
+               {EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'completed'
@@ -4105,6 +4105,12 @@ _CROSS_ROOM_COLUMNS = (
     "  t.completed_at AS completed_at, t.model_used AS model_used, "
     "  (s.message_id IS NOT NULL) AS starred, "
     "  m.reply_to_message_id AS reply_to_message_id, "
+    # Who actually wrote a `role='user'` row, for the two cases where it is not
+    # the reader: an email turn mirrored into the room carries the *task's* user,
+    # i.e. the person the mail was addressed **to**. Same recovery the LLM-context
+    # readers do (ISSUE-226) — a scalar subquery, never a join, because
+    # `processed_emails.task_id` is not unique and a join would fan the row out.
+    f"  t.user_id AS task_user_id, {EMAIL_SENDER_SUBQUERY.format(alias='t')}, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.
@@ -5502,7 +5508,7 @@ def cleanup_old_processed_emails(
     ``task_id``. Dedup is not the only job left, though — see below.
 
     **A row still referenced by the canonical transcript is never pruned.**
-    ``_EMAIL_SENDER_SUBQUERY`` (`:1855`) recovers an email turn's envelope
+    ``EMAIL_SENDER_SUBQUERY`` (`:1855`) recovers an email turn's envelope
     sender from here, by ``task_id``, and ``messages`` is *not* age-pruned —
     the transcript deliberately outlives the ``tasks`` row it came from. Delete
     the ledger row and ``external_sender`` goes NULL, so ``_speaker_label``

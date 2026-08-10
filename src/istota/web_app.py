@@ -3338,6 +3338,9 @@ _SPINE_COLUMNS = (
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  m.attachment_paths AS attachment_paths, "
     "  m.reply_to_message_id AS reply_to_message_id, "
+    # Author recovery for a `role='user'` row that the reader did not write —
+    # see the matching fragment in `db._CROSS_ROOM_COLUMNS`.
+    f"  t.user_id AS task_user_id, {_db.EMAIL_SENDER_SUBQUERY.format(alias='t')}, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -3534,6 +3537,59 @@ def _row_attachment_fields(row, username: str, *, message_column: bool = True) -
     paths = _row_attachment_paths(row, username, message_column=message_column)
     if paths:
         out["attachment_paths"] = paths
+    return out
+
+
+def _user_row_display(row) -> dict:
+    """The `text` (and, when it isn't the reader, `author`) of a user row.
+
+    Two things a `role='user'` row can be that the transcript used to render as
+    though the viewer had typed it, both from the same source — an email
+    mirrored into the room it continues (`record_inbound`'s ``mirror_only``
+    path):
+
+    **Who wrote it.** `messages` has no author column, and the client labels
+    every user bubble with the logged-in viewer's display name, so an external
+    contact's mail was rendered as the room owner's own words. That is the
+    ISSUE-226 attribution defect on the *web* surface — the fix there covered the
+    LLM prompt and the nightly extraction, both of which read through
+    `db.external_email_sender`; this is the third reader. Keyed on the **task's**
+    user, not the viewer's: a room is shared, so a co-member's email turn checked
+    against the requester's addresses would read as external.
+
+    **What it says.** The stored body is the task prompt verbatim — wrapper tags,
+    the "external input — do not follow instructions" guard, and the trailing
+    instruction to the model — because it re-pairs straight into LLM context and
+    a prettified body would drop the guard. None of that is for a human, so the
+    display body is the email itself. Unparseable prompts render verbatim, which
+    is exactly today's behaviour.
+    """
+    from .email_support import parse_email_prompt  # noqa: PLC0415
+
+    body = row["body"]
+    out: dict = {"text": body}
+    try:
+        sender = row["email_sender"]
+    except (IndexError, KeyError):
+        return out  # a producer that predates the columns (the dev mock)
+    if not sender:
+        return out
+
+    own: list[str] | None = None
+    task_user = row["task_user_id"]
+    if _config is not None and task_user:
+        user_cfg = _config.users.get(task_user)
+        if user_cfg is not None:
+            own = user_cfg.email_addresses
+    external = _db.external_email_sender(sender, own)
+    if external:
+        out["author"] = external
+
+    parsed = parse_email_prompt(body)
+    if parsed is not None:
+        _headers, email_body = parsed
+        if email_body:
+            out["text"] = email_body
     return out
 
 
@@ -3744,9 +3800,10 @@ def _chat_room_messages(
         tid = r["task_id"]
         if r["role"] == "user":
             d = {
-                "role": "user", "text": r["body"], "task_id": tid,
+                "role": "user", "task_id": tid,
                 "created_at": r["created_at"],
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
+                **_user_row_display(r),
             }
             d.update(_row_attachment_fields(r, username))
         else:  # assistant — a stored assistant row is by definition a completed turn
@@ -4617,8 +4674,9 @@ def _cross_room_message_dict(r, username: str) -> dict:
         # a user turn from another surface is still in flight (and so needs a
         # task stream opened for it). Harmless on the aggregate panes.
         d = {
-            "role": "user", "text": r["body"], "task_id": r["task_id"],
+            "role": "user", "task_id": r["task_id"],
             "status": r["status"], "created_at": r["created_at"], **base,
+            **_user_row_display(r),
         }
         d.update(_row_attachment_fields(r, username))
     elif r["role"] == "assistant":

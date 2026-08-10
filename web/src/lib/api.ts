@@ -2093,6 +2093,10 @@ export interface ChatHistoryMessage {
   attachment_paths?: (string | null)[];
   // Present only on a turn that cites a parent.
   reply_to?: ReplyCitation;
+  // Who wrote a user row, when it was not the reader — today, the sender of an
+  // email mirrored into the room it continues. Absent means the viewer, which
+  // is what every user row was assumed to be.
+  author?: string;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */

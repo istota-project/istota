@@ -1392,6 +1392,8 @@ function createSession(): ChatSession {
       starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
       roomToken: m.room_token,
       roomName: m.room_name,
+      // Server-resolved author for a user row the viewer did not write.
+      author: typeof m.author === 'string' && m.author ? m.author : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,

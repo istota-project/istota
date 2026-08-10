@@ -185,6 +185,10 @@
     const prev = $messages[i - 1];
     const cur = $messages[i];
     if (!prev || prev.role !== cur.role || cur.role === 'system') return false;
+    // Same role is not the same author: a user row can be an email mirrored
+    // into the room, and collapsing its header would hide the one thing that
+    // says it wasn't the viewer.
+    if (prev.author !== cur.author) return false;
     // Aggregate views interleave rooms: a room change always starts a fresh
     // group (the header carries the room chip).
     if (prev.roomToken !== cur.roomToken) return false;

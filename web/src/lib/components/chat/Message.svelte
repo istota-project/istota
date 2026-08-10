@@ -81,7 +81,11 @@
 
   const isUser = $derived(message.role === 'user');
   const isSystem = $derived(message.role === 'system');
-  const author = $derived(isUser ? userName : botName);
+  // A user row is not always the viewer's own words — a shared room has other
+  // members, and an email mirrored into the room it continues was written by
+  // whoever sent it. The server names them when it can; `userName` is the
+  // fallback, and stays right for everything the viewer typed here.
+  const author = $derived(isUser ? (message.author ?? userName) : botName);
   const initial = $derived((author.trim()[0] ?? '?').toUpperCase());
 
   // System (!command) output goes through the safe markdown renderer; user text

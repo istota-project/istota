@@ -233,7 +233,7 @@ class TestProcessedEmailPrune:
     def test_row_referenced_by_the_transcript_is_kept(self, db_path):
         """ISSUE-226 attribution outlives the task row. ``messages`` is not
         age-pruned — the transcript deliberately survives the ``tasks`` row it
-        came from — and ``_EMAIL_SENDER_SUBQUERY`` recovers an email turn's
+        came from — and ``EMAIL_SENDER_SUBQUERY`` recovers an email turn's
         envelope sender from this table by ``task_id``. Delete the row and an
         external contact's mail renders in the prompt as the principal's own
         words, which the sleep cycle then writes durably to USER.md and the
