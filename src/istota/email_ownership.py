@@ -15,7 +15,8 @@ forming one edge of a potential loop).
 
 The email object passed to these helpers is duck-typed: it only needs
 ``sender`` (str), ``to`` / ``cc`` (iterables of address strings), and
-``references`` (str | None). Both the imap-tools ``Email`` returned by
+``references`` / ``in_reply_to`` (str | None, both read via ``getattr`` so a
+caller carrying neither still works). Both the imap-tools ``Email`` returned by
 ``skills.email.read_email`` and the enriched ``EmailEnvelope`` satisfy this.
 """
 
@@ -61,23 +62,82 @@ def extract_user_from_recipient(config: Config, email) -> str | None:
     return None
 
 
+# A msg-id as RFC 5322 writes it: angle-bracketed, no whitespace inside. Used to
+# tokenize a References / In-Reply-To chain by its own grammar rather than by
+# whitespace — see `parse_message_ids`.
+_MSG_ID_RE = re.compile(r"<[^>\s]+>")
+
+
+def parse_message_ids(value: str | None) -> list[str]:
+    """The message ids in a References / In-Reply-To chain, in order.
+
+    Splitting on whitespace is the obvious implementation and it is wrong for a
+    header that arrived RFC 2047-encoded. Decoding is required to read one at
+    all (Q-encoding writes a space as ``_``), but decoding *also* discards the
+    linear whitespace between adjacent encoded-words, because RFC 2047 says that
+    whitespace is not part of the value. For an identifier header it is the
+    delimiter, so where the sender folded decides what survives:
+
+    - fold inside an id (what production sent) — the halves rejoin correctly,
+      and only concatenation gets the id back
+    - fold at an id boundary — the two ids glue into ``<a@x><b@y>``, which no
+      whitespace split can separate
+
+    Both are real, so neither "join the chunks" nor "split on whitespace" is
+    right on its own. The angle brackets are the grammar, and reading them is
+    what handles both shapes with one rule.
+
+    Falls back to whitespace splitting when nothing is bracketed, so a
+    non-conforming sender emitting bare ids is no worse off than before.
+    """
+    if not value:
+        return []
+    ids = _MSG_ID_RE.findall(value)
+    return ids if ids else value.split()
+
+
 def match_thread(conn, email) -> "db.SentEmail | None":
     """Return the ``sent_emails`` row this inbound email replies to, or None.
 
-    Checks the References chain (which subsumes In-Reply-To for imap-tools
-    messages): the last reference first (most likely direct parent), then any
-    reference.
+    References first, because it is the fuller chain: the last reference (the
+    most likely direct parent), then any reference. In-Reply-To is then tried on
+    its own.
+
+    That fallback is not redundant. References does **not** subsume In-Reply-To
+    — the two are separate headers written by the sender, and one can arrive
+    unusable while the other names our message exactly. A long thread whose
+    References came back as a run of RFC 2047 encoded-words is the case that
+    forced this: nothing in it could be compared to a message id, while
+    In-Reply-To was clean and pointed straight at the row. Reading only
+    References dropped the reply — no owner resolved means no task and no
+    notification on any surface, which is silent by construction.
+
+    Both headers are sender-controlled and neither is evidence of identity. That
+    is unchanged by widening to the second one: a sender able to put an id in
+    References could always put the same id in In-Reply-To. Everything that
+    guards the thread route still applies — the caller drops a matched row whose
+    ``user_id`` isn't the resolved user, and an untrusted sender still meets the
+    confirmation gate.
     """
-    references = getattr(email, "references", None)
-    if references:
-        ref_ids = references.split()
-        if ref_ids:
-            match = db.find_sent_email_by_message_id(conn, ref_ids[-1])
-            if match:
-                return match
-            match = db.find_sent_email_by_references(conn, ref_ids)
-            if match:
-                return match
+    ref_ids = parse_message_ids(getattr(email, "references", None))
+    if ref_ids:
+        match = db.find_sent_email_by_message_id(conn, ref_ids[-1])
+        if match:
+            return match
+        match = db.find_sent_email_by_references(conn, ref_ids)
+        if match:
+            return match
+
+    # One id per RFC 5322, but a non-conforming sender can emit several, so this
+    # arm takes the `IN (…)` lookup rather than the single-id one. The two arms
+    # therefore tie-break differently on duplicate `sent_emails.message_id` rows
+    # (this one by most recent, the arm above arbitrarily) — deliberate, and
+    # noted because it is the kind of asymmetry a later refactor flattens.
+    irt_ids = parse_message_ids(getattr(email, "in_reply_to", None))
+    if irt_ids:
+        match = db.find_sent_email_by_references(conn, irt_ids)
+        if match:
+            return match
 
     return None
 

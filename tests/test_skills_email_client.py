@@ -19,6 +19,7 @@ from istota.config import UserConfig
 from istota.email_ownership import (
     extract_user_from_recipient,
     owner_in_scope,
+    parse_message_ids,
     resolve_email_owner,
 )
 from istota.skills.email import (
@@ -279,6 +280,111 @@ class TestMapping:
         assert mail.attachment_manifest == [
             {"filename": "a.pdf", "size": 123, "content_type": "application/pdf"}
         ]
+
+    def test_identifier_headers_rfc2047_decoded(self):
+        """A References header that arrives as encoded-words still yields ids.
+
+        `msg.headers` is raw wire text. Once a thread grows long enough some
+        senders emit References as a folded run of RFC 2047 encoded-words, and
+        Q-encoding writes a space as `_` — so splitting the raw value on
+        whitespace recovers no message id at all and the reply threads against
+        nothing. Decoding is what keeps the ids addressable.
+        """
+        raw = (
+            "=?us-ascii?Q?<a1@peer.example>_<sent1@bot.example>?=\r\n"
+            " =?us-ascii?Q?<a2@peer.example>_<sent2@bot.example>?="
+        )
+        msg = _mock_message(headers={"references": (raw,)})
+        mail = _msg_to_email(msg)
+        assert parse_message_ids(mail.references) == [
+            "<a1@peer.example>",
+            "<sent1@bot.example>",
+            "<a2@peer.example>",
+            "<sent2@bot.example>",
+        ]
+
+    def test_encoded_word_fold_inside_an_id(self):
+        """The production shape: the fold splits an id across two words.
+
+        RFC 2047 discards the whitespace between adjacent encoded-words, which
+        is exactly right here — the two halves have to rejoin to give the id
+        back. Any fix that joins the decoded chunks with a separator breaks it.
+        """
+        raw = "=?us-ascii?Q?<a1@peer.example>_<sent1@bot.exam?=\r\n =?us-ascii?Q?ple>?="
+        mail = _msg_to_email(_mock_message(headers={"references": (raw,)}))
+        assert parse_message_ids(mail.references) == [
+            "<a1@peer.example>",
+            "<sent1@bot.example>",
+        ]
+
+    def test_encoded_word_fold_at_an_id_boundary(self):
+        """The other shape: the fold lands between two ids, so they glue.
+
+        The same RFC 2047 rule that rescues the case above destroys the
+        delimiter here — the decoded value is `<a1@peer.example><sent1@…>` with
+        no whitespace in it. Splitting on whitespace yields one junk token and
+        the reply threads against nothing, which is the original defect reached
+        by a different fold placement. Reading the angle brackets covers both.
+        """
+        raw = "=?us-ascii?Q?<a1@peer.example>?=\r\n =?us-ascii?Q?<sent1@bot.example>?="
+        mail = _msg_to_email(_mock_message(headers={"references": (raw,)}))
+        assert mail.references == "<a1@peer.example><sent1@bot.example>"
+        assert mail.references.split() != ["<a1@peer.example>", "<sent1@bot.example>"]
+        assert parse_message_ids(mail.references) == [
+            "<a1@peer.example>",
+            "<sent1@bot.example>",
+        ]
+
+    def test_non_ascii_decode_falls_back_to_raw(self):
+        """A msg-id is ASCII by grammar, so a non-ASCII decode is a bad decode.
+
+        Keeping it would put a real codepoint into a structured header that is
+        emitted verbatim, and serializing the reply then raises
+        `UnicodeEncodeError` inside a blanket `except` — costing the user a
+        reply. The raw wire text survives that path, so we keep it.
+        """
+        raw = "=?utf-8?Q?<a=C3=A9b@peer.example>?="
+        mail = _msg_to_email(_mock_message(headers={"references": (raw,)}))
+        assert mail.references == raw
+
+    def test_encoded_in_reply_to_decoded(self):
+        msg = _mock_message(
+            headers={"in-reply-to": ("=?us-ascii?Q?<sent9@bot.example>?=",)},
+        )
+        assert _msg_to_email(msg).in_reply_to == "<sent9@bot.example>"
+
+    def test_envelope_references_decoded(self):
+        raw = "=?us-ascii?Q?<a1@peer.example>_<sent1@bot.example>?="
+        env = _msg_to_envelope(msg=_mock_message(headers={"references": (raw,)}))
+        assert parse_message_ids(env.references) == [
+            "<a1@peer.example>",
+            "<sent1@bot.example>",
+        ]
+
+    def test_authentication_results_never_decoded(self):
+        """Authentication-Results is read verbatim, encoded-words and all.
+
+        RFC 8601 does not put encoded-words in this header, and decoding it
+        would let a sender smuggle a verdict past the DMARC canary: the wire
+        text reads as an opaque comment, the decoded text reads as `dmarc=pass`.
+        The canary must see what the MTA actually stamped.
+        """
+        raw = "mx.example; =?us-ascii?Q?dmarc=3Dpass?= header.from=peer.example"
+        msg = _mock_message(headers={"authentication-results": (raw,)})
+        assert _msg_to_email(msg).authentication_results == raw
+
+    def test_undecodable_header_falls_back_to_raw(self):
+        """A malformed encoded-word must not cost the poll its message."""
+        raw = "=?bogus-charset?Q?<sent1@bot.example>?="
+        msg = _mock_message(headers={"references": (raw,)})
+        assert _msg_to_email(msg).references == raw
+
+    def test_decoded_header_strips_smuggled_crlf(self):
+        """The whitespace collapse is what removes a Q-encoded CR/LF."""
+        raw = "=?utf-8?Q?<a=40x.com>=0D=0ABcc:_evil=40e.com?="
+        refs = _msg_to_email(_mock_message(headers={"references": (raw,)})).references
+        assert refs is not None
+        assert "\r" not in refs and "\n" not in refs
 
     def test_list_criteria_pushed_down(self):
         cfg = EmailConfig(imap_host="h", imap_port=993, imap_user="u",

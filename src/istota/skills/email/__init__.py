@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date as _date
 from datetime import datetime, timedelta
+from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
@@ -80,6 +81,9 @@ class EmailEnvelope:
     to: tuple[str, ...] = ()
     cc: tuple[str, ...] = ()
     references: str | None = None
+    # Carried for the same reason as `references`: ownership resolution threads
+    # on either, and a sender can emit one unreadable while the other is exact.
+    in_reply_to: str | None = None
 
 
 @dataclass
@@ -160,11 +164,69 @@ def _generate_message_id(domain: str) -> str:
 
 
 def _header_str(msg, name: str) -> str | None:
-    """Read a single header value from an imap-tools message as a string."""
+    """Read a single header value from an imap-tools message as a string.
+
+    Verbatim wire text: ``msg.headers`` is the raw parsed header list, and this
+    performs no RFC 2047 decoding. That is the right read for a header whose
+    grammar has no encoded-words in it — see ``authentication_results`` in
+    ``_msg_to_email`` for one where decoding would be a security defect. Use
+    ``_decoded_header_str`` for the identifier headers.
+    """
     value = msg.headers.get(name)
     if isinstance(value, tuple):
         value = value[0] if value else None
     return value
+
+
+def _decoded_header_str(msg, name: str) -> str | None:
+    """Read a message-identifier header, RFC 2047-decoded and unfolded.
+
+    Message-ID / In-Reply-To / References carry no human text, so they have no
+    business being encoded — but senders encode them anyway once a thread grows
+    long enough that the header has to fold, and what arrives is a run of
+    encoded-words. Read raw, that value yields no message id at all: Q-encoding
+    writes a space as ``_``, so the whole chain splits as one or two tokens that
+    match nothing, and a reply threads against nothing (no owner resolved → no
+    task → no notification). Decoding is what keeps the ids addressable.
+
+    Restricted to these three headers deliberately. Decoding is not a
+    free improvement to apply header-wide: ``Authentication-Results`` is
+    security-relevant and RFC 8601 puts no encoded-words in it, so decoding it
+    would let a sender hide a verdict behind an encoded-word that reads as an
+    opaque comment on the wire and as ``dmarc=pass`` after decoding.
+
+    Never raises. A malformed or unknown-charset encoded-word falls back to the
+    raw value — the same thing the caller had before, and the poll keeps its
+    message rather than losing it to a header it could not parse.
+
+    **A non-ASCII decode is rejected the same way.** A msg-id is ASCII by
+    grammar, so a decode producing anything else is evidence the decode was
+    wrong, not evidence of an exotic id — and the decoded form is the dangerous
+    one to keep: ``References`` / ``In-Reply-To`` are *structured* headers whose
+    folder emits the value verbatim, so a real non-ASCII codepoint raises
+    ``UnicodeEncodeError`` when the reply is serialized. That send sits under a
+    blanket ``except`` in ``transport/email/outbound.py``, so it would cost the
+    user a reply and leave one ERROR line. The raw wire text survives that path
+    (surrogateescape round-trips 8-bit bytes), which is why falling back is
+    strictly safer than keeping what we decoded.
+
+    Note the whitespace collapse below is load-bearing beyond tidiness: it is
+    what removes any CR/LF a Q-encoded ``=0D=0A`` decodes into. Do not
+    "simplify" it to ``.strip()``.
+    """
+    value = _header_str(msg, name)
+    if not value:
+        return value
+    try:
+        decoded = str(make_header(decode_header(value)))
+        decoded.encode("ascii")
+    except Exception as e:  # noqa: BLE001 — a header must not cost us the mail
+        logger.debug("header %s not usable when decoded, using raw value: %s", name, e)
+        return value
+    # Folding whitespace is not part of the value. Collapse it so the value is a
+    # single line; `email_ownership.parse_message_ids` does the tokenizing, by
+    # the msg-id grammar rather than by whitespace.
+    return " ".join(decoded.split())
 
 
 def _snippet_from_msg(msg, limit: int = 200) -> str:
@@ -192,7 +254,8 @@ def _msg_to_envelope(msg) -> EmailEnvelope:
         has_attachments=any(att.filename for att in msg.attachments),
         to=tuple(msg.to) if msg.to else (),
         cc=tuple(msg.cc) if msg.cc else (),
-        references=_header_str(msg, "references"),
+        references=_decoded_header_str(msg, "references"),
+        in_reply_to=_decoded_header_str(msg, "in-reply-to"),
     )
 
 
@@ -262,13 +325,13 @@ def _msg_to_email(msg) -> Email:
         date=msg.date_str or "",
         body=msg.text or msg.html or "",
         attachments=[att.filename for att in msg.attachments if att.filename],
-        message_id=_header_str(msg, "message-id"),
-        references=_header_str(msg, "references"),
+        message_id=_decoded_header_str(msg, "message-id"),
+        references=_decoded_header_str(msg, "references"),
         to=tuple(msg.to) if msg.to else (),
         cc=tuple(msg.cc) if msg.cc else (),
         body_text=msg.text or "",
         body_html=msg.html or "",
-        in_reply_to=_header_str(msg, "in-reply-to"),
+        in_reply_to=_decoded_header_str(msg, "in-reply-to"),
         attachment_manifest=manifest,
         # Security-relevant: take the TOPMOST Authentication-Results and no other.
         # Each hop prepends its own, so the top one is stamped by the final
@@ -1318,14 +1381,20 @@ def _thread_members(root: Email, candidates: list[Email]) -> list[Email]:
     Membership is purely by Message-ID / References linkage (a real thread
     walk) — never by subject+participants, so two unrelated same-subject
     threads are not merged the way ``compute_thread_id`` would.
+
+    Chains are tokenized by ``parse_message_ids`` (the msg-id grammar), not by
+    whitespace: a decoded encoded-word chain can glue two ids together, and a
+    whitespace split would silently drop every id in it. Same rule as
+    ``match_thread`` — a walk that disagrees with the router about what an id is
+    would show the user a different thread than the one that routed their mail.
     """
+    from ...email_ownership import parse_message_ids
+
     thread_ids: set[str] = set()
     if root.message_id:
         thread_ids.add(root.message_id.strip())
-    if root.in_reply_to:
-        thread_ids.add(root.in_reply_to.strip())
-    for ref in (root.references or "").split():
-        thread_ids.add(ref.strip())
+    thread_ids.update(parse_message_ids(root.in_reply_to))
+    thread_ids.update(parse_message_ids(root.references))
 
     root_id = (root.message_id or "").strip()
     members = [root]
@@ -1334,9 +1403,8 @@ def _thread_members(root: Email, candidates: list[Email]) -> list[Email]:
         if m.id in seen_ids:
             continue
         mid = (m.message_id or "").strip()
-        refs = {r.strip() for r in (m.references or "").split()}
-        if m.in_reply_to:
-            refs.add(m.in_reply_to.strip())
+        refs = set(parse_message_ids(m.references))
+        refs.update(parse_message_ids(m.in_reply_to))
         in_thread = (
             (mid and mid in thread_ids)
             or (root_id and root_id in refs)

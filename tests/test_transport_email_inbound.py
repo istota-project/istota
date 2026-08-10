@@ -507,6 +507,123 @@ class TestMatchThread:
             assert match is not None
             assert match.message_id == "<sent2@bot.com>"
 
+    def test_match_by_in_reply_to_when_references_unusable(self, db_path):
+        """In-Reply-To alone is enough to thread a reply.
+
+        References does not subsume In-Reply-To in practice: a sender can emit
+        one unreadable (encoded-words, a truncated chain) while the other names
+        our message exactly. Reading only References dropped such a reply on
+        the floor — no owner resolved, so no task and no notification.
+        """
+        from istota.transport.email.inbound import _match_thread
+
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="carol",
+                message_id="<sent3@bot.com>",
+                to_addr="bob@ext.com",
+                subject="Invite",
+                conversation_token="room3",
+            )
+
+            email = _email(sender="bob@ext.com", subject="Re: Invite")
+            email.references = "<unrelated@peer.com>"
+            email.in_reply_to = "<sent3@bot.com>"
+
+            match = _match_thread(conn, email)
+            assert match is not None
+            assert match.user_id == "carol"
+            assert match.conversation_token == "room3"
+
+    def test_references_still_wins_over_in_reply_to(self, db_path):
+        """References is the more complete chain, so it is consulted first."""
+        from istota.transport.email.inbound import _match_thread
+
+        with db.get_db(db_path) as conn:
+            for mid in ("<refs@bot.com>", "<irt@bot.com>"):
+                db.record_sent_email(
+                    conn, user_id="carol", message_id=mid,
+                    to_addr="bob@ext.com", subject="Invite",
+                )
+
+            email = _email(sender="bob@ext.com", subject="Re: Invite")
+            email.references = "<refs@bot.com>"
+            email.in_reply_to = "<irt@bot.com>"
+
+            match = _match_thread(conn, email)
+            assert match is not None
+            assert match.message_id == "<refs@bot.com>"
+
+    def test_encoded_references_match_through_the_real_mapper(self, db_path):
+        """The seam: `_msg_to_email` decoding + `match_thread`, composed.
+
+        Both halves passing separately is what let the boundary-fold gap
+        survive its first review, so this builds the message the way the poller
+        really does — from raw wire headers — and deliberately carries **no**
+        In-Reply-To, so only the References path can resolve it. Both fold
+        placements are exercised, since they fail in opposite directions.
+        """
+        from unittest.mock import MagicMock
+
+        from istota.skills.email import _msg_to_email
+        from istota.transport.email.inbound import _match_thread
+
+        raws = {
+            # fold inside an id — the halves must rejoin
+            "mid_id": (
+                "=?us-ascii?Q?<peer1@ext.com>_<sent-seam@bot.co?=\r\n"
+                " =?us-ascii?Q?m>?="
+            ),
+            # fold at an id boundary — the ids glue together
+            "boundary": (
+                "=?us-ascii?Q?<peer1@ext.com>?=\r\n"
+                " =?us-ascii?Q?<sent-seam@bot.com>?="
+            ),
+        }
+
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="carol",
+                message_id="<sent-seam@bot.com>",
+                to_addr="bob@ext.com",
+                subject="Invite",
+                conversation_token="room_seam",
+            )
+
+            for shape, raw in raws.items():
+                msg = MagicMock()
+                msg.uid = "1"
+                msg.subject = "Re: Invite"
+                msg.from_ = "bob@ext.com"
+                msg.to = ("bot@test.com",)
+                msg.cc = ()
+                msg.date_str = "Mon, 01 Jan 2026 12:00:00 +0000"
+                msg.text = "Sounds good."
+                msg.html = ""
+                msg.flags = []
+                msg.attachments = []
+                msg.headers = {"references": (raw,)}
+
+                mail = _msg_to_email(msg)
+                assert mail.in_reply_to is None, shape
+
+                match = _match_thread(conn, mail)
+                assert match is not None, f"{shape} fold did not thread"
+                assert match.user_id == "carol", shape
+                assert match.conversation_token == "room_seam", shape
+
+    def test_no_match_with_unknown_in_reply_to(self, db_path):
+        from istota.transport.email.inbound import _match_thread
+
+        with db.get_db(db_path) as conn:
+            email = _email(sender="bob@ext.com", subject="Re: Something")
+            email.references = None
+            email.in_reply_to = "<unknown@other.com>"
+
+            assert _match_thread(conn, email) is None
+
 
 # =============================================================================
 # TestPollEmailsThreadMatching
@@ -560,6 +677,60 @@ class TestPollEmailsThreadMatching:
             assert "Emissary email reply" in task.prompt
             assert "external@proton.me" in task.prompt
             assert "How about Tuesday?" in task.prompt
+
+    def test_reply_with_unusable_references_routes_by_in_reply_to(self, make_config):
+        """The production shape: References unreadable, In-Reply-To exact.
+
+        The reply was marked `discarded` — no owner, so no task, no
+        notification anywhere — while In-Reply-To named our sent message
+        exactly. The mail must route, and route to the sender's user.
+        """
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="carol",
+                message_id="<outbound2@bot.com>",
+                to_addr="external@proton.me",
+                subject="Invite",
+                conversation_token="room_7",
+            )
+
+        envelope = _envelope(id="9", sender="external@proton.me", subject="Re: Invite")
+        email = Email(
+            id="9", subject="Re: Invite", sender="external@proton.me",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Sounds good.", attachments=[],
+            message_id="<reply2@proton.me>",
+            # A run of encoded-words that no whitespace split can turn back
+            # into message ids — exactly what arrived in production.
+            references="=?us-ascii?Q?<a1@proton.me>_<outbound2@bot.com>?=",
+            in_reply_to="<outbound2@bot.com>",
+            to=("bot@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+
+        assert len(task_ids) == 1
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.user_id == "carol"
+            assert task.conversation_token == "room_7"
+            row = conn.execute(
+                "SELECT routing_method, user_id FROM processed_emails WHERE email_id = ?",
+                ("9",),
+            ).fetchone()
+            assert row["routing_method"] == "thread_match"
+            assert row["user_id"] == "carol"
 
     def test_unknown_sender_no_thread_match_discarded(self, make_config):
         """Unknown sender with no thread match is discarded as before."""
