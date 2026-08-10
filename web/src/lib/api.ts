@@ -2040,6 +2040,20 @@ export interface ChatConfig {
   max_attachment_mb: number;
   attachment_extensions: string[];
   client_poll_interval_ms: number;
+  /** How an external-origin turn's body renders. Stage 7 consumes it. */
+  external_turn_display?: 'full' | 'collapsed' | 'hidden';
+  /** The caller's own raw setting, where `''` means "follow the operator". */
+  outbound_approval?: string;
+  /**
+   * False when the stored value is not one the server recognizes — a
+   * hand-edited row. The server resolves such a value to the floor, so a pane
+   * must show it as unrecognized rather than as a live selection.
+   */
+  outbound_approval_valid?: boolean;
+  /** What `outbound_approval` resolves to once the operator floor applies. */
+  outbound_approval_effective?: string;
+  /** The floor the user may tighten past but not loosen below. */
+  outbound_approval_floor?: string;
 }
 
 /**
@@ -2512,6 +2526,149 @@ export function listPendingConfirmations(): Promise<{ confirmations: PendingConf
   return apiFetch<{ confirmations: PendingConfirmation[] }>('/chat/confirmations');
 }
 
+/**
+ * Outbound mail the approval gate is holding for the caller.
+ *
+ * Three shapes in one type, and the card must branch in this order:
+ *
+ * - `unreadable` — a stored column does not parse. Carries an id and nothing
+ *   else, because the columns that would carry content are the ones that failed
+ *   to read. Discard is the only action that works on it.
+ * - `truncated` — the row exists but the stream frame spent its byte budget
+ *   before reaching it. Enough to place a card; the body comes from
+ *   `listOutboundDrafts()`.
+ * - the full row.
+ *
+ * Every text field is model-composed or comes off a stranger's mail. Render it,
+ * never inject it as markup.
+ */
+export interface OutboundDraft {
+  id: number;
+  /** Absent on an unreadable row, which is the only field it does carry. */
+  status?: 'pending' | 'sending';
+  room_token?: string | null;
+  task_id?: number | null;
+  subject?: string;
+  body?: string;
+  html?: boolean;
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  attachments?: string[];
+  hold_reason?: string;
+  created_at?: string | null;
+  /** What else the task that composed this draft did, as rendered strings. */
+  actions_taken?: string[];
+  /** Set when the stream frame carried a stub instead of the row. */
+  truncated?: boolean;
+  /** Set when the stored row could not be parsed. */
+  unreadable?: boolean;
+}
+
+export function listOutboundDrafts(): Promise<{ drafts: OutboundDraft[] }> {
+  return apiFetch<{ drafts: OutboundDraft[] }>('/chat/drafts');
+}
+
+/**
+ * Why an approve, edit or discard did not happen — the card wording turns on
+ * this, and the four cases call for four different sentences.
+ *
+ * `conflict` carries `state`, because "your mail is going out right now" and
+ * "someone already discarded this" are opposite messages behind one 409.
+ * `sent_unrecorded` is the one failure that must never offer a retry: the mail
+ * left the building and only the bookkeeping failed.
+ */
+export type DraftFailure = 'gone' | 'conflict' | 'permanent' | 'transient' | 'sent_unrecorded';
+
+export interface DraftActionResult {
+  ok: boolean;
+  status: number;
+  failure?: DraftFailure;
+  /** On `conflict`: what the row is now. */
+  state?: 'pending' | 'sending' | 'sent' | 'discarded' | 'gone';
+  error?: string;
+  message_id?: string;
+  /** The re-read row a successful PATCH returns. */
+  draft?: OutboundDraft;
+}
+
+/**
+ * One place the draft routes' failures become a `DraftFailure`.
+ *
+ * `apiFetch` throws a bare `API error: <status>` on any non-2xx, which discards
+ * the body — and the body is where `state` and `retryable` live. So these three
+ * verbs go through `fetch` directly, the way the send path already does for the
+ * same reason.
+ */
+async function draftAction(
+  path: string,
+  init: RequestInit = { method: 'POST' },
+): Promise<DraftActionResult> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api${path}`, {
+      ...init,
+      credentials: 'same-origin',
+    });
+  } catch {
+    // The request never landed, so nothing was decided. Safe to offer again.
+    return { ok: false, status: 0, failure: 'transient' };
+  }
+  if (resp.status === 401) throw new AuthError();
+  let data: Record<string, unknown> = {};
+  try {
+    data = await resp.json();
+  } catch {
+    /* an empty or non-JSON body still has to classify by status */
+  }
+  if (resp.ok) return { ...data, ok: true, status: resp.status };
+  const error = typeof data.error === 'string' ? data.error : `error ${resp.status}`;
+  if (resp.status === 404) return { ok: false, status: 404, failure: 'gone', error };
+  if (resp.status === 409) {
+    const state = data.state;
+    return {
+      ok: false,
+      status: 409,
+      failure: 'conflict',
+      state: typeof state === 'string' ? (state as DraftActionResult['state']) : 'gone',
+      error,
+    };
+  }
+  if (data.sent === true) {
+    return {
+      ok: false,
+      status: resp.status,
+      failure: 'sent_unrecorded',
+      message_id: typeof data.message_id === 'string' ? data.message_id : undefined,
+      error,
+    };
+  }
+  // The server's own transient/permanent split, not a guess from the status:
+  // it alone knows whether the relay refused or the instance is misconfigured.
+  return {
+    ok: false,
+    status: resp.status,
+    failure: data.retryable === true ? 'transient' : 'permanent',
+    error,
+  };
+}
+
+export function approveOutboundDraft(draftId: number): Promise<DraftActionResult> {
+  return draftAction(`/chat/drafts/${draftId}/approve`);
+}
+
+export function discardOutboundDraft(draftId: number): Promise<DraftActionResult> {
+  return draftAction(`/chat/drafts/${draftId}/discard`);
+}
+
+export function editOutboundDraft(draftId: number, body: string): Promise<DraftActionResult> {
+  return draftAction(`/chat/drafts/${draftId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+}
+
 export function confirmChatTask(taskId: number): Promise<{ status: string }> {
   return apiFetch<{ status: string }>(`/chat/tasks/${taskId}/confirm`, { method: 'POST' });
 }
@@ -2545,6 +2702,14 @@ export interface ChatRoomEventsPage {
   /** Cursor to adopt for the deletion tail — its own sequence, unrelated to
    * `cursor`. */
   deletion_cursor?: number;
+  /** Held outbound mail, as a whole-set snapshot rather than a tail: a draft's
+   * transitions are not all insertions, so an id cursor would carry one of
+   * three. Always present on a healthy read, even when empty. */
+  drafts?: OutboundDraft[];
+  /** The drafts read failed. Distinct from an empty set, which is why the key
+   * above is always sent — a client reading absence as "none held" would clear
+   * every card on one transient lock. */
+  drafts_unavailable?: boolean;
 }
 
 export interface ChatMessageDeletion {

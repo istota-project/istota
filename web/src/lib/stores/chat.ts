@@ -29,6 +29,11 @@ import {
   type ChatRoomEvent,
   listPendingConfirmations,
   type PendingConfirmation,
+  listOutboundDrafts,
+  approveOutboundDraft,
+  discardOutboundDraft,
+  editOutboundDraft,
+  type OutboundDraft,
   markAllRoomsRead,
   markRoomRead,
   sendChatMessage,
@@ -290,6 +295,13 @@ export interface ChatSession {
   pendingConfirmations: Writable<PendingConfirmation[]>;
   refreshConfirmations: () => Promise<void>;
   answerConfirmation: (taskId: number, approve: boolean) => Promise<void>;
+  // Outbound mail the approval gate is holding. User-scoped rather than
+  // room-scoped — rooms are shared and a co-member must not see the body — so
+  // the client places each card by the `room_token` on the draft.
+  outboundDrafts: Writable<OutboundDraft[]>;
+  refreshDrafts: () => Promise<void>;
+  answerDraft: (draftId: number, action: 'approve' | 'discard') => Promise<boolean>;
+  editDraft: (draftId: number, body: string) => Promise<boolean>;
   teardown: () => void;
 }
 
@@ -800,6 +812,93 @@ function createSession(): ChatSession {
     void refreshRooms();
   }
 
+  // ---- Held outbound drafts ----
+
+  const outboundDrafts = writable<OutboundDraft[]>([]);
+
+  async function refreshDrafts() {
+    try {
+      const res = await listOutboundDrafts();
+      outboundDrafts.set(res.drafts ?? []);
+    } catch {
+      // Same rule as the confirmations poll: a failed read is nothing the user
+      // did, and the cards on screen stay until a read succeeds. Clearing them
+      // on a transient failure would read as the mail having gone out.
+    }
+  }
+
+  /**
+   * Apply a drafts snapshot from the stream or the polling fallback.
+   *
+   * A whole-set replace, because that is what the server sends — and the set
+   * shrinking is how a draft reports being sent or discarded elsewhere. Guarded
+   * on `unavailable`, since a failed server-side read must leave the cards
+   * alone rather than empty them.
+   */
+  function applyDraftsSnapshot(drafts: OutboundDraft[] | undefined, unavailable = false) {
+    if (unavailable || !drafts) return;
+    outboundDrafts.set(drafts);
+  }
+
+  /**
+   * Approve or discard a held draft, returning whether it left the list.
+   *
+   * Removal is **optimistic on success only**, and the row is kept on every
+   * failure: this card is the only place the held mail is visible in the web
+   * UI, so dropping it on a refused approve would leave the user believing a
+   * message went out that did not.
+   */
+  async function answerDraft(draftId: number, action: 'approve' | 'discard'): Promise<boolean> {
+    const res =
+      action === 'approve'
+        ? await approveOutboundDraft(draftId)
+        : await discardOutboundDraft(draftId);
+    if (res.ok) {
+      outboundDrafts.update((list) => list.filter((d) => d.id !== draftId));
+      return true;
+    }
+    if (res.failure === 'gone' || (res.failure === 'conflict' && res.state !== 'sending')) {
+      // Answered from another client or another surface. The decision stands;
+      // only this view was stale, so the card goes without a complaint.
+      outboundDrafts.update((list) => list.filter((d) => d.id !== draftId));
+      void refreshDrafts();
+      return true;
+    }
+    if (res.failure === 'sent_unrecorded') {
+      // The mail left. Never a retry — see `DraftFailure`.
+      notifyError(
+        'That message was sent, but recording it failed. Check your Sent folder before resending.',
+        { key: `chat:draft:${draftId}` },
+      );
+    } else if (res.failure === 'conflict') {
+      notifyError('That message is being sent right now.', {
+        key: `chat:draft:${draftId}`,
+      });
+    } else {
+      notifyError(res.error || 'Could not answer that draft.', {
+        key: `chat:draft:${draftId}`,
+      });
+    }
+    // The row's own state may have moved under us; re-read rather than guess.
+    void refreshDrafts();
+    return false;
+  }
+
+  /** Replace a held draft's body. The server returns the re-read row. */
+  async function editDraft(draftId: number, body: string): Promise<boolean> {
+    const res = await editOutboundDraft(draftId, body);
+    if (res.ok && res.draft) {
+      const updated = res.draft;
+      outboundDrafts.update((list) => list.map((d) => (d.id === draftId ? updated : d)));
+      return true;
+    }
+    notifyError(res.error || 'Could not save that edit.', {
+      key: `chat:draft:${draftId}`,
+    });
+    void refreshDrafts();
+    return false;
+  }
+
   function startRoomsRefresh() {
     if (roomsTimer) return;
     roomsTimer = setInterval(() => {
@@ -1130,6 +1229,12 @@ function createSession(): ChatSession {
       }
       countedUpTo = recoveryBuffer?.length ?? 0;
       await refreshRooms(RECOVERY_FETCH_TIMEOUT_MS);
+      // The drafts frame is a diffed snapshot, so a change that happened during
+      // the gap produced a frame the reconnecting client did not receive and no
+      // later frame will repeat. Metadata-only recoveries need this too: a
+      // backgrounded tab is exactly where an approval given on the phone would
+      // otherwise leave a card on screen for a message already sent.
+      void refreshDrafts();
       if (target != null && target > roomCursor) roomCursor = target;
     } catch {
       /* transient — the next frame or poll retries */
@@ -1197,6 +1302,7 @@ function createSession(): ChatSession {
         // room from the server, which already omits the deleted rows, but the
         // cursor still has to advance or every poll re-sends the same batch.
         applyDeletions(page.deletions ?? []);
+        applyDraftsSnapshot(page.drafts, page.drafts_unavailable === true);
         const delCursor = Number(page.deletion_cursor) || 0;
         if (delCursor > roomDeletionCursor) roomDeletionCursor = delCursor;
         if (page.gap) {
@@ -1284,6 +1390,18 @@ function createSession(): ChatSession {
         lastRoomEventAt = Date.now();
         try {
           applyRoomFrame(JSON.parse(e.data));
+        } catch {
+          /* swallow */
+        }
+      });
+      // Auxiliary frame, and a whole-set snapshot rather than a tail — it
+      // carries no SSE `id:` for the same reason `room` and `message_deleted`
+      // do not: that cursor belongs to the message tail.
+      es.addEventListener('drafts', (e: MessageEvent) => {
+        if (e.data == null) return;
+        lastRoomEventAt = Date.now();
+        try {
+          applyDraftsSnapshot(JSON.parse(e.data).drafts);
         } catch {
           /* swallow */
         }
@@ -1710,6 +1828,12 @@ function createSession(): ChatSession {
       // A gate parked before this tab was open has no stream frame to arrive
       // on, so the banner is seeded on entry rather than only on the next tick.
       void refreshConfirmations();
+      // Same reason, and one more: the drafts frame is *diffed* against a
+      // baseline seeded empty, so an instance where the set has not changed
+      // since the connection opened pushes no frame at all. Without this seed a
+      // draft held before the tab opened would wait for the next change to
+      // something else.
+      void refreshDrafts();
       if (typeof document !== 'undefined') {
         removeVisibilityListener(); // never stack two
         onVisibility = () => {
@@ -2479,6 +2603,10 @@ function createSession(): ChatSession {
     pendingConfirmations,
     refreshConfirmations,
     answerConfirmation,
+    outboundDrafts,
+    refreshDrafts,
+    answerDraft,
+    editDraft,
     teardown,
   };
 }
