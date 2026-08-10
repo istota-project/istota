@@ -506,6 +506,44 @@ def _store_room_turn(conn, task, body: str) -> int | None:
     )
 
 
+def _talk_result_mirror_body(
+    conn, task, talk_token: str, room_body: str, web_push_dests,
+) -> str | None:
+    """The result body to mirror into the *delivered* Talk room, or None.
+
+    `_store_room_turn` keys on ``task.conversation_token``; the Talk post keys on
+    the resolved ``talk_token`` (`_talk_target_for_delivery`). For an email task
+    those are two different things — the first is a synthetic thread hash naming
+    no room, the second is the user's DM room via the resolve ladder — so the
+    reply appeared in Talk and the web view of that same room stayed blank. That
+    is the ISSUE-242 gap on the *result* rather than on a notification, and the
+    reason it survived the ISSUE-242 fix is that only `_dispatch`'s talk leg was
+    taught to mirror what it delivered.
+
+    Closing it with an assistant row is not available: the email's user turn is
+    deliberately **not** mirrored into that room (`record_inbound`'s
+    ``mirror_only`` gate is room existence, and a gated message must not publish
+    attacker text before the user answers), so the row would be an orphaned
+    bubble in a room holding no question — the ISSUE-136 defect, re-reached from
+    the other side. From that room's point of view an email reply *is* an
+    out-of-band notice, so it gets the same ``role='system'`` treatment an alert
+    already gets, and never re-pairs into LLM context.
+
+    Two cases return None. A task whose own conversation token **is** a room was
+    already handled by `_store_room_turn` above (assistant bubble, with its
+    question above it), and a room the plan also pushes to over ``web`` would get
+    two rows for one message — the dedup `_dispatch` does against its own `web`
+    leg, applied here against the plan's.
+    """
+    token = task.conversation_token
+    if token and db.get_room(conn, token) is not None:
+        return None
+    canonical = db.resolve_room_token(conn, "talk", talk_token) or talk_token
+    if any(d.channel == canonical for d in web_push_dests):
+        return None
+    return room_body
+
+
 def download_talk_attachments(config: Config, attachments: list[str]) -> list[str]:
     """
     Get local paths for Talk attachments.
@@ -1863,6 +1901,9 @@ def process_one_task(
 
     # Track what to post after DB transaction closes
     post_talk_message = None
+    # The same body, mirrored into the delivered Talk room's web transcript when
+    # `_store_room_turn` can't reach it. See `_talk_result_mirror_body`.
+    post_talk_mirror_body = None
     post_email = False
     is_failure_notify = False
 
@@ -2049,6 +2090,9 @@ def process_one_task(
                     if plan_talk and talk_token:
                         post_talk_message = delivery_result
                         _store_room_turn(conn, task, room_body)
+                        post_talk_mirror_body = _talk_result_mirror_body(
+                            conn, task, talk_token, room_body, web_push_dests,
+                        )
                     if plan_email:
                         post_email = True
                     if plan_ntfy:
@@ -2396,6 +2440,17 @@ def process_one_task(
             reference_id=f"istota:task:{task.id}:result",
             target_token=talk_token,
         ))
+        # Mirror what Talk just showed into that room's web transcript, for the
+        # results `_store_room_turn` can't reach. Gated on the post having
+        # landed, like `_dispatch`'s talk leg: the mirror records a Talk message,
+        # so a failed post has nothing to record. Best-effort and gated on room
+        # existence inside the helper — the delivery has already happened.
+        if post_talk_mirror_body and response_msg_id:
+            from .notifications import mirror_talk_to_room
+            mirror_talk_to_room(
+                config, talk_token, post_talk_mirror_body,
+                talk_message_id=response_msg_id,
+            )
     # Store bot's response message ID for reply tracking
     if response_msg_id and not is_failure_notify:
         try:

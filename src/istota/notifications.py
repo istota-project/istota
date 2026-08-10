@@ -354,7 +354,7 @@ def _send_web(
 # How long the transcript mirror waits for the write lock before giving up. Well
 # under the 30s default, because a caller holding a transaction is a stall on
 # whatever thread it runs on rather than an error anyone sees. See the note in
-# `_mirror_talk_to_room`.
+# `mirror_talk_to_room`.
 _MIRROR_LOCK_WAIT_MS = 250
 
 
@@ -385,7 +385,7 @@ def _canonical_room_token(config: "Config", token: str) -> str:
         return token
 
 
-def _mirror_talk_to_room(
+def mirror_talk_to_room(
     config: "Config", token: str, message: str,
     *, title: str | None = None, talk_message_id: int | None = None,
 ) -> None:
@@ -555,7 +555,7 @@ def _dispatch(
                 if talk_message_id is None:
                     talk_message_id = msg_id
                 if token and _canonical_room_token(config, token) not in web_rooms:
-                    _mirror_talk_to_room(
+                    mirror_talk_to_room(
                         config, token, message,
                         title=title, talk_message_id=msg_id,
                     )
