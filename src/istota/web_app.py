@@ -183,11 +183,34 @@ def _publish_config(app: FastAPI) -> None:
     app.state.istota_config = _config
 
 
+def _reload_config_on_signal(app: FastAPI) -> None:
+    """SIGHUP reload that keeps the running config when the new one won't load.
+
+    `load_config` raises on a malformed config — `[email]
+    outbound_approval_floor` is a deliberate hard failure, since no fallback
+    value for a security floor is safe to pick. At startup that is what we want:
+    the lifespan fails loudly and the process doesn't serve. On SIGHUP it is
+    not. The exception would propagate out of the signal handler into whatever
+    main-thread bytecode uvicorn happened to be executing, so an operator
+    typo'ing a value and reloading would take down a running web process rather
+    than being told the reload failed. Keep serving the config we have and say
+    so — the same shape `webhook_receiver._maybe_reload_for_signal` already uses.
+    """
+    try:
+        _reload_config()
+        _publish_config(app)
+    except Exception as e:
+        logger.error(
+            "SIGHUP config reload failed, keeping the previously loaded "
+            "config: %s", e,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _reload_config()
     _publish_config(app)
-    signal.signal(signal.SIGHUP, lambda *_: (_reload_config(), _publish_config(app)))
+    signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
     yield
 
 

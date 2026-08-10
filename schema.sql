@@ -492,6 +492,75 @@ CREATE TABLE IF NOT EXISTS sent_emails (
 CREATE INDEX IF NOT EXISTS idx_sent_emails_message_id ON sent_emails(message_id);
 CREATE INDEX IF NOT EXISTS idx_sent_emails_user ON sent_emails(user_id);
 
+-- Outbound drafts: an email the approval gate held rather than sent, waiting
+-- for the user to approve, edit or discard it.
+--
+-- A durable table rather than a file in $ISTOTA_DEFERRED_DIR, for three
+-- reasons: deferred files are unlinked on drain, they carry no identity the
+-- web UI can address, and they cannot survive an edit-and-resend cycle.
+--
+-- The row must be self-sufficient. `reply` builds its threading headers from a
+-- message fetched over IMAP at compose time; re-fetching at release time is a
+-- second network round trip that can fail or return something different. So
+-- the recipients, subject and threading headers are snapshotted at hold time
+-- and the release sends from the row.
+--
+-- These rows are deliberately NOT touched by `expire_stale_confirmations`. The
+-- inbound gate's 120-minute auto-cancel is right for its own case — dropping an
+-- unapproved stranger's email destroys nothing of the user's — and wrong here,
+-- where the draft is the user's own intended reply. They sit in `pending` until
+-- answered; a 24-hour sweep notifies once (`nagged_at`) rather than expiring.
+CREATE TABLE IF NOT EXISTS outbound_drafts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT NOT NULL,
+    task_id       INTEGER,
+    room_token    TEXT,                  -- room to render the card in; NULL = global list only
+    -- pending | sending | sent | discarded.
+    -- `sending` is the claim: `release` takes it in its own committed
+    -- transaction *before* touching SMTP, so two concurrent approvals cannot
+    -- both send and a discard/edit arriving mid-send is refused rather than
+    -- silently losing the race. A row stuck in `sending` means the process died
+    -- between the claim and the result — deliberately terminal, because we
+    -- cannot know whether the mail went out, and guessing `pending` would risk
+    -- sending it twice.
+    status        TEXT NOT NULL DEFAULT 'pending',
+    to_addrs      TEXT NOT NULL DEFAULT '[]',        -- JSON array
+    cc_addrs      TEXT NOT NULL DEFAULT '[]',
+    bcc_addrs     TEXT NOT NULL DEFAULT '[]',
+    subject       TEXT NOT NULL DEFAULT '',
+    body          TEXT NOT NULL DEFAULT '',
+    html          INTEGER NOT NULL DEFAULT 0,
+    in_reply_to   TEXT,
+    "references"  TEXT,
+    -- The Reply-To header the holding verb was given (`email send --reply-to`).
+    -- Snapshotted like the threading headers: it decides where the recipient's
+    -- answer lands, so dropping it on the way through the hold would silently
+    -- reroute the conversation.
+    reply_to      TEXT,
+    attachments   TEXT NOT NULL DEFAULT '[]',        -- JSON array of host paths, re-confined at release
+    origin_target TEXT,                  -- originating surface descriptor, copied to sent_emails on release
+    hold_reason   TEXT NOT NULL DEFAULT '',
+    sent_message_id TEXT,                -- set on release
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT,
+    nagged_at     TEXT,                  -- stale-draft notification sent; NULL = not yet
+    -- Decorative: `PRAGMA foreign_keys` is never enabled on this database, and
+    -- `cleanup_old_tasks` prunes tasks at `task_retention_days` (7) while a
+    -- draft is designed to outlive that, so `task_id` is *expected* to dangle.
+    -- Nothing reads through it; reply routing keys on `origin_target`.
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_drafts_user_status
+    ON outbound_drafts(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_outbound_drafts_room
+    ON outbound_drafts(room_token, status);
+-- The stale-draft sweep filters on status alone and runs on the scheduler's
+-- dispatch path, so neither index above is usable for it. Without this one it
+-- is a full scan that grows forever, since resolved rows are never pruned.
+CREATE INDEX IF NOT EXISTS idx_outbound_drafts_stale
+    ON outbound_drafts(status, nagged_at, created_at);
+
 -- Note: Per-user location data (location_pings, places, visits,
 -- dismissed_clusters, location_state) lives in per-user
 -- {workspace}/location/data/location.db files; see src/istota/location/.
@@ -622,6 +691,8 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
     default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
     email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
+    outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
+    external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)

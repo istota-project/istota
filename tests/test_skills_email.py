@@ -291,6 +291,10 @@ class TestConfigFromEnv:
 
 
 class TestCmdSend:
+    @pytest.fixture(autouse=True)
+    def _gate_off(self, outbound_gate_off):
+        """Send mechanics, not approval policy — see the fixture's docstring."""
+
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
     def test_send_basic(self, mock_send, mock_config):
@@ -390,6 +394,10 @@ class TestCmdSend:
 
 
 class TestEmailCLIMain:
+    @pytest.fixture(autouse=True)
+    def _gate_off(self, outbound_gate_off):
+        """Send mechanics, not approval policy — see the fixture's docstring."""
+
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
     def test_main_send(self, mock_send, mock_config, capsys):

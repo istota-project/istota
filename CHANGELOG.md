@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Email to someone you have not trusted is no longer sent on the bot's own judgement. It is written, held, and shown to you to approve, edit or discard, and approving sends exactly the text you read. Trusted addresses and your own send immediately as before, so briefings and ordinary correspondence are unaffected. `!drafts` lists what is waiting, `!drafts send <id>` releases one and `!drafts discard <id>` bins it; a draft you leave for a day raises a notification rather than expiring, because it is your own unfinished reply. Operators set the floor with `[email] outbound_approval_floor` (`off`, `untrusted` — the default — or `all`, which holds everything not addressed to you); a user may tighten it but not loosen it.
+
 ### Changed
+
+- Files attached to an email are now restricted to the places the bot is allowed to read for you — your own workspace, the conversation's own folder, and the working directory for the task in hand. It could previously be pointed at any file the service itself could read and asked to mail it out. `!trust` also says what it does in both directions now: a trusted address skips the approval question on mail arriving *and* on mail going out.
 
 - Messages in a shared room now say who wrote them. Anyone else's message used to be labelled with your own name, so a room with two people in it read as though you had said everything in it. Existing transcripts change how they read the next time you open them, and mail from an outside contact is named by its sending address rather than appearing as your own words.
 
 ### Fixed
+
+- When the bot stopped mid-task to ask you something while working on an email, the question reached nobody. It could not be mailed to the outside contact, and the room it would otherwise have gone to was excluded too, so the task simply sat there and was cancelled two hours later without you ever seeing it. The question now goes to the room the conversation belongs to. It is still never mailed to the contact.
 
 - A reply from an outside contact could stop arriving once the conversation had run long enough, with nothing to show it had ever come back — no message, no notification, and no trace beyond the mail sitting read in the mailbox. Long threads eventually carry their reply-tracking headers in an encoded form the poller could not read, so it no longer recognised the reply as belonging to a conversation and quietly filed it as unrelated. Those headers are now decoded, and a second one is consulted as a fallback. A reply already missed this way stays missed — it is on record as handled, so it is not retried; forward it back into the thread to pick the conversation up again.
 

@@ -285,6 +285,32 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # your MTA stamps — it is the only way "the mailbox moved to a provider that does
 # not evaluate DMARC" ever surfaces.
 # dmarc_canary_warn_on_missing = false
+#
+# The weakest outbound approval policy any user on this instance may run. The
+# bot holds an outgoing email as an editable draft, rather than sending it, when
+# its recipients are not explicitly authorized; the user approves or discards it
+# from web chat or with `!drafts`. Three values:
+#
+#   off        no holds — every send goes out immediately
+#   untrusted  hold unless EVERY recipient (To, Cc, Bcc) is trusted: one of the
+#              user's own addresses, a `trusted_email_senders` pattern, or an
+#              address they trusted at runtime via `!trust` / "yes trust"
+#   all        hold unless every recipient is one of the user's own addresses
+#
+# This is a floor, not a default: a user may tighten past it (`all` over a
+# `untrusted` floor) but never loosen below it. A user who has never touched
+# their own setting follows this value, so raising it reaches everyone.
+#
+# Any single untrusted recipient holds the whole message — there are no partial
+# sends. An invalid value here FAILS THE CONFIG LOAD rather than falling back:
+# `off` would disable a gate you asked for and `untrusted` would override an
+# `off` you meant, so there is no safe value to guess.
+#
+# Note that `trusted_email_senders` now means both "their mail skips the inbound
+# gate" and "I may mail them without approving each message". A catch-all
+# pattern there (`*`, `*@*`) turns the `untrusted` policy off entirely; it is
+# logged when it happens, but narrow the pattern rather than relying on that.
+# outbound_approval_floor = "untrusted"
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

@@ -405,7 +405,10 @@ class TestDeferredSentEmail:
         # No file should be written
         assert not list(tmp_path.glob("*.json"))
 
-    def test_cmd_send_writes_deferred(self, tmp_path):
+    def test_cmd_send_writes_deferred(self, tmp_path, outbound_gate_off):
+        # `outbound_gate_off` supplies the acting user and an `off` policy: this
+        # is about the deferred provenance file, and under the default floor the
+        # send would be held instead (no row, nothing to record yet).
         from istota.skills.email import cmd_send
 
         env = {
@@ -414,7 +417,6 @@ class TestDeferredSentEmail:
             "SMTP_FROM": "bot@test.com",
             "ISTOTA_TASK_ID": "99",
             "ISTOTA_DEFERRED_DIR": str(tmp_path),
-            "ISTOTA_USER_ID": "carol",
         }
         args = MagicMock()
         args.to = "bob@example.com"

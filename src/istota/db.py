@@ -460,6 +460,89 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: outbound email approval policy. '' means unset and
+    # resolves to the operator's [email] outbound_approval_floor — deliberately,
+    # so a user who never touched the setting follows the operator when the
+    # operator raises the floor, which is what a floor is for.
+    #
+    # Both ALTERs below swallow OperationalError, which covers the two expected
+    # cases: "duplicate column name" on a re-run, and "no such table" on a fresh
+    # DB (this runs before `executescript` creates it from schema.sql, which
+    # declares both columns). A *lock* is also an OperationalError, and there
+    # the degradation is asymmetric but safe: reads go through `_row_get` and
+    # fall back to '' (= follow the floor) and 'collapsed', both safe
+    # directions, while every write names the column explicitly and fails loudly
+    # with "no such column" rather than silently dropping the setting.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "outbound_approval TEXT NOT NULL DEFAULT ''"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # User profiles: how an external-origin turn renders in web chat.
+    # full | collapsed | hidden — body only. 'collapsed' for existing rows
+    # because the alternative is a stranger's full mail body rendered as an
+    # ordinary user bubble, which is what this setting exists to stop.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "external_turn_display TEXT NOT NULL DEFAULT 'collapsed'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # Outbound drafts: emails the approval gate held instead of sending.
+    # Created here for existing DBs; schema.sql also has it (with the full
+    # commentary) for fresh installs.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outbound_drafts (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       TEXT NOT NULL,
+            task_id       INTEGER,
+            room_token    TEXT,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            to_addrs      TEXT NOT NULL DEFAULT '[]',
+            cc_addrs      TEXT NOT NULL DEFAULT '[]',
+            bcc_addrs     TEXT NOT NULL DEFAULT '[]',
+            subject       TEXT NOT NULL DEFAULT '',
+            body          TEXT NOT NULL DEFAULT '',
+            html          INTEGER NOT NULL DEFAULT 0,
+            in_reply_to   TEXT,
+            "references"  TEXT,
+            reply_to      TEXT,
+            attachments   TEXT NOT NULL DEFAULT '[]',
+            origin_target TEXT,
+            hold_reason   TEXT NOT NULL DEFAULT '',
+            sent_message_id TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at   TEXT,
+            nagged_at     TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+        """
+    )
+
+    # `reply_to` arrived after the table did (the gate wires up `email send
+    # --reply-to`, which the store had nowhere to put). Dropping the header
+    # would reroute the recipient's answer, so an existing draft table gets the
+    # column rather than the gate refusing to hold such a send.
+    #
+    # Narrowed to the duplicate-column case, unlike the `user_profiles` ALTERs
+    # above, because here the degradation is **not** safe. Those columns are
+    # read through `_row_get` and fall back to a defined default; this one is
+    # read unconditionally by `outbound_drafts._row`, so a swallowed lock leaves
+    # every draft read raising `IndexError` and every `hold` failing with
+    # `no such column` — which the gate turns into "refusing to send", stopping
+    # all outbound mail on the instance. Better to fail the open loudly.
+    try:
+        conn.execute("ALTER TABLE outbound_drafts ADD COLUMN reply_to TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
+
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
     # reserved `__output__` key. Add the column, then hoist `__output__` out of

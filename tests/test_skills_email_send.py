@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,16 +41,31 @@ def skill_env(monkeypatch, tmp_path):
     db.init_db(dbp)
     cfg = Config()
     cfg.db_path = dbp
-    cfg.email = AppEmailConfig(enabled=True, bot_email=BOT)
+    # The outbound approval gate runs for real on `send` / `reply`, and the
+    # default floor (`untrusted`) would hold every recipient below. These are
+    # send-mechanics tests; the gate has its own files (test_outbound_gate.py,
+    # test_outbound_gate_fires.py), so switch it off rather than patch it out.
+    cfg.email = AppEmailConfig(
+        enabled=True, bot_email=BOT, outbound_approval_floor="off",
+    )
     cfg.users = {
         "alice": UserConfig(email_addresses=["alice@personal.com"]),
         "dana": UserConfig(email_addresses=["dana@personal.com"]),
     }
     monkeypatch.setattr("istota.config.load_config", lambda *a, **k: cfg)
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    # An attachment path is scoped to the roots the sandbox binds for this
+    # caller — the skill CLI runs host-side with the daemon's filesystem view,
+    # so an unscoped path argument is an arbitrary read. Give the fixture the
+    # deferred-dir root the executor always exports, and a file inside it.
+    deferred = tmp_path / "deferred"
+    deferred.mkdir()
+    (deferred / "x.txt").write_text("attachment")
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
     for k, v in {"SMTP_HOST": "smtp.test", "IMAP_HOST": "imap.test",
                  "IMAP_USER": "u", "IMAP_PASSWORD": "p", "SMTP_FROM": BOT}.items():
         monkeypatch.setenv(k, v)
+    cfg._test_attachment = str(deferred / "x.txt")
     return cfg
 
 
@@ -124,9 +140,10 @@ class TestSend:
         assert _recipients("a@x.com", ["a@x.com", "b@y.com"], None) == ["a@x.com", "b@y.com"]
 
     def test_cmd_send_passes_options(self, skill_env):
+        attachment = skill_env._test_attachment
         args = MagicMock(to="a@out.com", subject="S", body="hi", body_file=None,
                          html=False, cc="c@out.com", bcc="d@out.com",
-                         attach=["/tmp/x.txt"], reply_to="r@x.com")
+                         attach=[attachment], reply_to="r@x.com")
         with patch("istota.skills.email.send_email", return_value="<mid@x>") as se, \
              patch("istota.skills.email._write_deferred_sent_email"):
             res = cmd_send(args)
@@ -134,8 +151,22 @@ class TestSend:
         _, kwargs = se.call_args
         assert kwargs["cc"] == ["c@out.com"]
         assert kwargs["bcc"] == ["d@out.com"]
-        assert kwargs["attachments"] == ["/tmp/x.txt"]
+        # The *resolved* path, not the string passed in — reopening the original
+        # would re-walk the symlinks the scoping settled.
+        assert kwargs["attachments"] == [str(Path(attachment).resolve())]
         assert kwargs["reply_to"] == "r@x.com"
+
+    def test_cmd_send_refuses_an_unscoped_attachment_path(self, skill_env):
+        """The CLI runs host-side with the daemon's filesystem view, so a path
+        the model chose is an arbitrary read unless it is scoped."""
+        args = MagicMock(to="a@out.com", subject="S", body="hi", body_file=None,
+                         html=False, cc=None, bcc=None,
+                         attach=["/etc/hosts"], reply_to=None)
+        with patch("istota.skills.email.send_email") as se, \
+             patch("istota.skills.email._write_deferred_sent_email"):
+            res = cmd_send(args)
+        se.assert_not_called()
+        assert res["status"] == "error"
 
     def test_cmd_send_echoes_message_id(self, skill_env):
         """The ok envelope carries the sent Message-ID so 'sent' is backed by

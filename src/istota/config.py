@@ -77,6 +77,15 @@ class EmailConfig:
     # a provider that does not evaluate DMARC" drift case is visible.
     dmarc_canary_warn_on_missing: bool = False
     imap_timeout_seconds: int = 30  # socket timeout for IMAP connections (0/unset → 30)
+    # Outbound approval floor: the weakest policy any user may run. One of
+    # `off` (no holds), `untrusted` (hold unless every recipient is explicitly
+    # trusted), `all` (hold unless every recipient is one of the user's own
+    # addresses). A user may tighten past the floor but never loosen below it,
+    # so this is the operator's minimum rather than a default. `untrusted` on a
+    # fresh install: the gate exists because prose rules against committing on
+    # the principal's behalf lose to context pressure, and an install that ships
+    # with it off has no gate at all. See istota.outbound_policy.
+    outbound_approval_floor: str = "untrusted"
 
     @property
     def effective_smtp_user(self) -> str:
@@ -410,6 +419,15 @@ class UserConfig:
     routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
     default_destination: str = "talk"  # fallback delivery descriptor
     email_reply_routing: str = "origin+thread"  # origin+thread | origin | thread
+    # Outbound approval policy: "" (unset — follow the operator floor) | off |
+    # untrusted | all. Unset rather than a concrete default so that raising
+    # [email] outbound_approval_floor reaches every user who never touched it.
+    outbound_approval: str = ""
+    # How an external-origin turn renders in web chat: full | collapsed | hidden.
+    # Body only — the turn itself is always in the transcript, because a bot
+    # answer with no question above it is the defect the inbound mirror exists
+    # to fix (ISSUE-136).
+    external_turn_display: str = "collapsed"
     default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
@@ -1689,6 +1707,12 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         routing=dict(user_data.get("routing", {}) or {}),
         default_destination=user_data.get("default_destination", "talk") or "talk",
         email_reply_routing=user_data.get("email_reply_routing", "origin+thread") or "origin+thread",
+        # No `or` fallback: "" is a meaningful value here (follow the floor),
+        # not an absent one.
+        outbound_approval=str(user_data.get("outbound_approval", "") or ""),
+        external_turn_display=str(
+            user_data.get("external_turn_display", "collapsed") or "collapsed",
+        ),
         briefing_email_html=bool(user_data.get("briefing_email_html", True)),
         timezone_follow_location=bool(
             user_data.get("timezone_follow_location", False)
@@ -1735,6 +1759,29 @@ def _validate_sandbox_ro_paths(raw: object) -> list[str]:
             continue
         cleaned.append(entry)
     return cleaned
+
+
+def _validate_outbound_approval_floor(raw: object) -> str:
+    """Validate ``[email] outbound_approval_floor``, raising on anything else.
+
+    Deliberately a hard failure rather than the warn-and-fall-back other
+    enum-ish keys use (``[web] token_storage``, ``email_reply_routing``). Every
+    wrong answer here is unsafe in one direction or the other and there is no
+    neutral one to pick: falling back to ``off`` disables a gate the operator
+    asked for, and silently falling back to ``untrusted`` overrides an operator
+    who deliberately wrote ``off``. A typo in a security floor should stop the
+    process, not pick a policy on the operator's behalf.
+    """
+    from .outbound_policy import VALID_POLICIES
+
+    value = raw if isinstance(raw, str) else ""
+    value = value.strip()
+    if value not in VALID_POLICIES:
+        raise ValueError(
+            f"[email] outbound_approval_floor={raw!r} is not valid. "
+            f"Use one of: {', '.join(VALID_POLICIES)}."
+        )
+    return value
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -1866,6 +1913,9 @@ def load_config(config_path: Path | None = None) -> Config:
             dmarc_canary=email.get("dmarc_canary", True),
             dmarc_canary_warn_on_missing=email.get("dmarc_canary_warn_on_missing", False),
             imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
+            outbound_approval_floor=_validate_outbound_approval_floor(
+                email.get("outbound_approval_floor", "untrusted"),
+            ),
         )
 
     if "conversation" in data:
@@ -2730,7 +2780,15 @@ def _apply_user_profiles(config: "Config") -> None:
     try:
         rows = _up.list_profiles(Path(db_path))
     except Exception as e:  # pragma: no cover - defensive
-        logger.debug("user_profiles overlay skipped: %s", e)
+        # WARNING, not DEBUG: the overlay now carries security-relevant fields.
+        # A user who tightened `outbound_approval` past the operator floor loses
+        # that tightening when this is skipped — it never falls *below* the
+        # floor, so the operator's contract holds, but the user's own choice is
+        # silently undone and at DEBUG nothing records it.
+        logger.warning(
+            "user_profiles overlay skipped (%s); per-user settings fall back to "
+            "TOML values and operator defaults for this load", e,
+        )
         return
 
     for user_id, profile in rows.items():

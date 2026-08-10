@@ -88,6 +88,7 @@ from .transport import (
     plan_has_surface,
     resolve_delivery_plan,
 )
+from .transport.ingest import ROOM_SURFACES
 from .transport.registry import _surface_for_source_type
 from .storage import ensure_user_directories_v2
 
@@ -1896,8 +1897,10 @@ def process_one_task(
     )
     plan_talk = _talk_dest is not None
     # A mirror Talk leg (room fan-out from a non-Talk origin, e.g. a web-origin
-    # task mirrored to its bound Talk room) must not carry the confirmation
-    # prompt — confirmations stay on the originating surface (open question 7).
+    # task mirrored to its bound Talk room) carries the confirmation prompt only
+    # when the task's own origin is *not* a room surface — a web-origin
+    # confirmation stays on web, an email-origin one has nowhere else to go. The
+    # full argument is at the branch that reads this, below.
     _talk_is_mirror = bool(_talk_dest and getattr(_talk_dest, "mirror", False))
     plan_email = plan_has_surface(plan, "email")
     plan_ntfy = plan_has_surface(plan, "ntfy")
@@ -2026,9 +2029,28 @@ def process_one_task(
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 # Talk confirmations post the prompt to the room; web/stream
                 # confirmations surface it via the `confirmation` task event
-                # (emitted below) and must not cross-post to Talk. A mirror Talk
-                # leg is excluded — a web-origin confirmation stays on web.
-                if plan_talk and talk_token and not _talk_is_mirror:
+                # (emitted below) and must not cross-post to Talk.
+                #
+                # A mirror Talk leg is suppressed only for a task whose OWN
+                # origin is a room surface — a web-origin confirmation stays on
+                # web, where its SSE stream carries it and the /chat confirm
+                # endpoint answers it. An email-origin task has no such stream:
+                # the mirror leg is the only push surface that can reach the
+                # user at all, and the email leg must never carry the question
+                # (it would mail the principal's decision to the external
+                # correspondent — it stays suppressed by sitting in the `else:`
+                # below). Excluding every mirror leg meant the task parked with
+                # the question delivered nowhere, then died at
+                # `expire_stale_confirmations` two hours later.
+                #
+                # `ROOM_SURFACES` is the set being asked for here — "does this
+                # task's own origin surface show it the question itself?" — and
+                # not the inbound room-creation question the constant is named
+                # for. They coincide because a surface owns rooms exactly when
+                # it has a transcript of its own to render the prompt into.
+                if plan_talk and talk_token and not (
+                    _talk_is_mirror and (task.source_type or "") in ROOM_SURFACES
+                ):
                     post_talk_message = result
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
@@ -4121,6 +4143,93 @@ def run_cleanup_checks(config: Config) -> None:
                 logger.info(f"Deleted {deleted_logs} old Claude session log(s)")
         except Exception as e:
             logger.error(f"Error cleaning up Claude logs: {e}")
+
+    # 10. Tell users about outbound drafts they have left unanswered.
+    try:
+        nag_stale_outbound_drafts(config)
+    except Exception as e:
+        logger.error(f"Error notifying about stale outbound drafts: {e}")
+
+
+# How long a held outbound draft sits before it raises a notification of its
+# own. Fixed rather than a knob: it governs one reminder about the user's own
+# unfinished decision, and there is nothing to tune between "long enough that a
+# same-day answer is never nagged" and "soon enough that a reply the user
+# believes went out is not discovered days later".
+STALE_DRAFT_HOURS = 24
+
+
+def nag_stale_outbound_drafts(config: Config) -> int:
+    """One notification per outbound draft left pending for a day. Returns the
+    count delivered.
+
+    Not a briefing item and not an expiry. Held drafts never expire — binning
+    the user's own intended reply after a timeout loses work with no trace,
+    which is why `expire_stale_confirmations` does not touch this table — so the
+    only thing that surfaces a forgotten draft is this. It matters most for a
+    draft with no room (a cron job mailing an external address), where there is
+    no card anywhere to notice.
+
+    `purpose="alert"` routes through the user's own routing table, so it lands
+    wherever they have alerts pointed rather than on a surface they may not
+    read.
+
+    Stamped **after** delivery: `send_notification` returns False for "no
+    destination configured" rather than raising, and stamping on the decision
+    rather than the delivery would let one silent failure swallow the reminder
+    permanently. A failed send leaves `nagged_at` NULL and the next sweep
+    retries.
+    """
+    from . import outbound_drafts as drafts
+
+    # Read and deliver in separate transactions, and deliver outside both: an
+    # alert routed to the web surface opens a second connection to this
+    # database, and sending inside a write transaction would block it for the
+    # full busy timeout on the dispatch thread. Same rule as `expiry_notices`.
+    with db.get_db(config.db_path) as conn:
+        stale = drafts.stale_unnagged(conn, older_than_hours=STALE_DRAFT_HOURS)
+    if not stale:
+        return 0
+
+    delivered: list[int] = []
+    for draft in stale:
+        recipients = ", ".join(draft.all_recipients) or "an unnamed recipient"
+        subject = (draft.subject or "(no subject)").replace("\n", " ")
+        # No imperative aimed at *this* notification: it routes by the user's
+        # alert purpose, which may be ntfy or email — surfaces with no composer,
+        # where "reply with !drafts send" is an instruction that cannot be
+        # followed. Name the commands and where they work instead.
+        message = (
+            f"An email to {recipients} has been waiting for your approval "
+            f"since {draft.created_at} and has not gone out.\n\n"
+            f"Subject: {subject}\n\n"
+            f"In Talk or web chat: `!drafts` lists it, `!drafts send {draft.id}` "
+            f"releases it, `!drafts discard {draft.id}` bins it."
+        )
+        try:
+            sent = send_notification(
+                config, draft.user_id, message, purpose="alert",
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to notify user %s about stale draft %d: %s",
+                draft.user_id, draft.id, e,
+            )
+            continue
+        if sent:
+            delivered.append(draft.id)
+        else:
+            logger.warning(
+                "No destination for the stale-draft notice for user %s "
+                "(draft %d); will retry next sweep", draft.user_id, draft.id,
+            )
+
+    if delivered:
+        with db.get_db(config.db_path) as conn:
+            for draft_id in delivered:
+                drafts.mark_nagged(conn, draft_id)
+        logger.info("Notified about %d stale outbound draft(s)", len(delivered))
+    return len(delivered)
 
 
 def _reconcile_visits_for_all_users(config: Config) -> None:

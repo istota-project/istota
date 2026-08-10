@@ -158,10 +158,29 @@ def _maybe_reload_for_signal() -> None:
         logger.exception("failed to reload location ingest config")
 
 
+def _reload_config_on_signal() -> None:
+    """SIGHUP reload that survives a config that no longer loads.
+
+    `load_config` raises on a malformed config (`[email]
+    outbound_approval_floor` is a deliberate hard failure — no fallback value
+    for a security floor is safe to pick). Failing at startup is intended;
+    letting the exception escape a *signal handler* into arbitrary main-thread
+    bytecode is not. `_maybe_reload_for_signal` above already catches for the
+    ingest path — this gives SIGHUP the same treatment, keeping the running
+    token map rather than taking the receiver down on an operator's typo.
+    """
+    try:
+        reload_config()
+    except Exception:
+        logger.exception(
+            "SIGHUP config reload failed, keeping the previously loaded config",
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     reload_config()
-    signal.signal(signal.SIGHUP, lambda *_: reload_config())
+    signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal())
     yield
 
 
