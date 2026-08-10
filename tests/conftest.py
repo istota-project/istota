@@ -157,6 +157,36 @@ def _reset_async_runtime_singletons():
     reset_async_runtime()
 
 
+@pytest.fixture
+def outbound_gate_off(monkeypatch, tmp_path):
+    """Put the outbound approval gate in ``off`` mode for a send-mechanics test.
+
+    The gate runs for real and answers "send" — it is not patched out. Tests
+    about how `send` / `reply` build a message have nothing to say about the
+    policy, and the default floor (`untrusted`) would hold every one of their
+    fixture recipients. The gate's own behaviour is covered in
+    ``test_outbound_gate.py`` and ``test_outbound_gate_fires.py``.
+
+    Also isolates the catch-all-pattern warning latch, a process-global set that
+    would otherwise carry across tests in an xdist worker.
+    """
+    from istota import outbound_policy
+    from istota.config import Config, EmailConfig
+
+    db_path = tmp_path / "gate-off.db"
+    db.init_db(db_path)
+    cfg = Config(
+        db_path=db_path,
+        email=EmailConfig(enabled=True, outbound_approval_floor="off"),
+        users={"alice": UserConfig(display_name="Alice")},
+    )
+    monkeypatch.setattr("istota.config.load_config", lambda *a, **k: cfg)
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    outbound_policy._warned_catch_all.clear()
+    yield cfg
+    outbound_policy._warned_catch_all.clear()
+
+
 @pytest.fixture(autouse=True)
 def _reset_expunge_warning_latch():
     """Isolate ``skills.email._expunge_warned_hosts``.

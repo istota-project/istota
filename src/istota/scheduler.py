@@ -4144,6 +4144,93 @@ def run_cleanup_checks(config: Config) -> None:
         except Exception as e:
             logger.error(f"Error cleaning up Claude logs: {e}")
 
+    # 10. Tell users about outbound drafts they have left unanswered.
+    try:
+        nag_stale_outbound_drafts(config)
+    except Exception as e:
+        logger.error(f"Error notifying about stale outbound drafts: {e}")
+
+
+# How long a held outbound draft sits before it raises a notification of its
+# own. Fixed rather than a knob: it governs one reminder about the user's own
+# unfinished decision, and there is nothing to tune between "long enough that a
+# same-day answer is never nagged" and "soon enough that a reply the user
+# believes went out is not discovered days later".
+STALE_DRAFT_HOURS = 24
+
+
+def nag_stale_outbound_drafts(config: Config) -> int:
+    """One notification per outbound draft left pending for a day. Returns the
+    count delivered.
+
+    Not a briefing item and not an expiry. Held drafts never expire — binning
+    the user's own intended reply after a timeout loses work with no trace,
+    which is why `expire_stale_confirmations` does not touch this table — so the
+    only thing that surfaces a forgotten draft is this. It matters most for a
+    draft with no room (a cron job mailing an external address), where there is
+    no card anywhere to notice.
+
+    `purpose="alert"` routes through the user's own routing table, so it lands
+    wherever they have alerts pointed rather than on a surface they may not
+    read.
+
+    Stamped **after** delivery: `send_notification` returns False for "no
+    destination configured" rather than raising, and stamping on the decision
+    rather than the delivery would let one silent failure swallow the reminder
+    permanently. A failed send leaves `nagged_at` NULL and the next sweep
+    retries.
+    """
+    from . import outbound_drafts as drafts
+
+    # Read and deliver in separate transactions, and deliver outside both: an
+    # alert routed to the web surface opens a second connection to this
+    # database, and sending inside a write transaction would block it for the
+    # full busy timeout on the dispatch thread. Same rule as `expiry_notices`.
+    with db.get_db(config.db_path) as conn:
+        stale = drafts.stale_unnagged(conn, older_than_hours=STALE_DRAFT_HOURS)
+    if not stale:
+        return 0
+
+    delivered: list[int] = []
+    for draft in stale:
+        recipients = ", ".join(draft.all_recipients) or "an unnamed recipient"
+        subject = (draft.subject or "(no subject)").replace("\n", " ")
+        # No imperative aimed at *this* notification: it routes by the user's
+        # alert purpose, which may be ntfy or email — surfaces with no composer,
+        # where "reply with !drafts send" is an instruction that cannot be
+        # followed. Name the commands and where they work instead.
+        message = (
+            f"An email to {recipients} has been waiting for your approval "
+            f"since {draft.created_at} and has not gone out.\n\n"
+            f"Subject: {subject}\n\n"
+            f"In Talk or web chat: `!drafts` lists it, `!drafts send {draft.id}` "
+            f"releases it, `!drafts discard {draft.id}` bins it."
+        )
+        try:
+            sent = send_notification(
+                config, draft.user_id, message, purpose="alert",
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to notify user %s about stale draft %d: %s",
+                draft.user_id, draft.id, e,
+            )
+            continue
+        if sent:
+            delivered.append(draft.id)
+        else:
+            logger.warning(
+                "No destination for the stale-draft notice for user %s "
+                "(draft %d); will retry next sweep", draft.user_id, draft.id,
+            )
+
+    if delivered:
+        with db.get_db(config.db_path) as conn:
+            for draft_id in delivered:
+                drafts.mark_nagged(conn, draft_id)
+        logger.info("Notified about %d stale outbound draft(s)", len(delivered))
+    return len(delivered)
+
 
 def _reconcile_visits_for_all_users(config: Config) -> None:
     """Re-derive the visits table for each user with the location module

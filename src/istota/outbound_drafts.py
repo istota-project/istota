@@ -60,6 +60,29 @@ class DraftNotPending(DraftError):
     """
 
 
+class DraftSentButUnrecorded(DraftError):
+    """The mail went out and the bookkeeping after it did not.
+
+    Its own class because it is the one failure a caller must **not** describe
+    as "still waiting, try again". The finalize step runs after an irreversible
+    external act, so a lock, a full disk or a schema fault there leaves the
+    recipient holding the message while the row still reads `sending`. Reported
+    as an ordinary send failure it invites a retry that would either be refused
+    (the row is not pending) or, worse on some future code path, send twice.
+
+    ``message_id`` is the id of the message that really did go out, so the
+    caller can name it.
+    """
+
+    def __init__(self, message_id: str, cause: BaseException):
+        super().__init__(
+            f"the message was sent ({message_id}) but recording it failed: "
+            f"{cause}"
+        )
+        self.message_id = message_id
+        self.cause = cause
+
+
 class DraftCorrupt(DraftError):
     """A stored JSON column does not hold what it must.
 
@@ -84,6 +107,7 @@ class OutboundDraft:
     html: bool
     in_reply_to: str | None
     references: str | None
+    reply_to: str | None
     attachments: list[str]
     origin_target: str | None
     hold_reason: str
@@ -182,6 +206,7 @@ def _row(row: sqlite3.Row) -> OutboundDraft:
         html=bool(row["html"]),
         in_reply_to=row["in_reply_to"],
         references=row["references"],
+        reply_to=row["reply_to"],
         attachments=_json_list(row["attachments"], column="attachments"),
         origin_target=row["origin_target"],
         hold_reason=row["hold_reason"] or "",
@@ -209,6 +234,7 @@ def hold(
     attachments: list[str],
     origin_target: str | None,
     hold_reason: str,
+    reply_to: str | None = None,
 ) -> int:
     """Record a held draft and return its id.
 
@@ -232,9 +258,9 @@ def hold(
         INSERT INTO outbound_drafts (
             user_id, task_id, room_token, status,
             to_addrs, cc_addrs, bcc_addrs,
-            subject, body, html, in_reply_to, "references",
+            subject, body, html, in_reply_to, "references", reply_to,
             attachments, origin_target, hold_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -243,7 +269,7 @@ def hold(
             json.dumps(list(cc_addrs or [])),
             json.dumps(list(bcc_addrs or [])),
             subject or "", body or "", 1 if html else 0,
-            in_reply_to, references,
+            in_reply_to, references, reply_to,
             json.dumps(list(attachments or [])),
             origin_target, hold_reason or "",
         ),
@@ -465,12 +491,28 @@ def release(config: "Config", draft_id: int) -> str:
         raise DraftNotPending(f"draft {draft_id} is {state}, not pending")
 
     def _revert(reason: str) -> None:
-        with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "UPDATE outbound_drafts SET status = ? WHERE id = ? AND status = ?",
-                (STATUS_PENDING, draft_id, STATUS_SENDING),
+        """Undo the claim after a send that did not happen.
+
+        Never raises. It runs inside an ``except`` block, so an exception here
+        would replace the send failure the caller needs to see — and would
+        strand the row in ``sending``, which readers treat as "we cannot know
+        whether the mail went out", in the one case where we know it did not.
+        """
+        try:
+            with db.get_db(config.db_path) as conn:
+                conn.execute(
+                    "UPDATE outbound_drafts SET status = ? "
+                    "WHERE id = ? AND status = ?",
+                    (STATUS_PENDING, draft_id, STATUS_SENDING),
+                )
+                conn.commit()
+        except Exception as e:  # noqa: BLE001 — must not mask the send failure
+            logger.error(
+                "draft %d: the send failed AND the row could not be returned "
+                "to pending (%s). It is stuck in 'sending'; nothing was sent.",
+                draft_id, e,
             )
-            conn.commit()
+            return
         logger.info("draft %d returned to pending: %s", draft_id, reason)
 
     try:
@@ -487,6 +529,7 @@ def release(config: "Config", draft_id: int) -> str:
             cc=draft.cc_addrs or None,
             bcc=draft.bcc_addrs or None,
             attachments=attachments or None,
+            reply_to=draft.reply_to,
             in_reply_to=draft.in_reply_to,
             references=draft.references,
         )
@@ -494,39 +537,55 @@ def release(config: "Config", draft_id: int) -> str:
         _revert("send failed")
         raise
 
-    with db.get_db(config.db_path) as conn:
-        conn.execute(
-            "UPDATE outbound_drafts SET status = ?, sent_message_id = ?, "
-            "resolved_at = datetime('now') WHERE id = ? AND status = ?",
-            (STATUS_SENT, message_id, draft_id, STATUS_SENDING),
+    # Everything from here runs *after* the mail has left. A failure is no
+    # longer a send failure, and must never be reported as one — hence the
+    # wrapper: it turns "the bookkeeping broke" into a distinct exception
+    # carrying the Message-ID, so the caller can say the message went out and
+    # tell the user not to resend. Reported as an ordinary failure it invites a
+    # retry that would be refused (the row is not pending) and would leave the
+    # user believing nothing was delivered.
+    try:
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET status = ?, sent_message_id = ?, "
+                "resolved_at = datetime('now') WHERE id = ? AND status = ?",
+                (STATUS_SENT, message_id, draft_id, STATUS_SENDING),
+            )
+            # The provenance row the direct send path writes, so a reply to the
+            # released mail routes back to the room the originating task came
+            # from rather than falling to the alerts ladder. `origin_target`
+            # was resolved at hold time, when the task was still in scope.
+            try:
+                db.record_sent_email(
+                    conn,
+                    user_id=draft.user_id,
+                    message_id=message_id,
+                    # The whole recipient string, matching what the direct CLI
+                    # path stores and what was handed to `to=`.
+                    to_addr=", ".join(draft.to_addrs),
+                    subject=draft.subject,
+                    task_id=draft.task_id,
+                    in_reply_to=draft.in_reply_to,
+                    references=draft.references,
+                    conversation_token=draft.room_token,
+                    talk_delivery_token=_talk_delivery_token(conn, draft.task_id),
+                    origin_target=draft.origin_target,
+                )
+            except Exception as e:  # noqa: BLE001 — provenance is not the send
+                # Losing this row costs reply routing on this thread, not the
+                # send, and the status update above is worth keeping. Swallowed
+                # deliberately, unlike the status update itself.
+                logger.warning(
+                    "released draft %d but failed to record sent_emails: %s",
+                    draft_id, e,
+                )
+    except Exception as e:  # noqa: BLE001 — the mail is already gone
+        logger.error(
+            "draft %d was SENT as %s but could not be marked sent: %s. "
+            "The row is stuck in 'sending'; do not resend it.",
+            draft_id, message_id, e,
         )
-        # The provenance row the direct send path writes, so a reply to the
-        # released mail routes back to the room the originating task came from
-        # rather than falling to the alerts ladder. `origin_target` was resolved
-        # at hold time, when the task was still in scope.
-        try:
-            db.record_sent_email(
-                conn,
-                user_id=draft.user_id,
-                message_id=message_id,
-                # The whole recipient string, matching what the direct CLI path
-                # stores and what was handed to `to=`.
-                to_addr=", ".join(draft.to_addrs),
-                subject=draft.subject,
-                task_id=draft.task_id,
-                in_reply_to=draft.in_reply_to,
-                references=draft.references,
-                conversation_token=draft.room_token,
-                talk_delivery_token=_talk_delivery_token(conn, draft.task_id),
-                origin_target=draft.origin_target,
-            )
-        except Exception as e:  # pragma: no cover - provenance is non-critical
-            # The mail has gone out. Losing the provenance row costs reply
-            # routing on this thread, not the send.
-            logger.warning(
-                "released draft %d but failed to record sent_emails: %s",
-                draft_id, e,
-            )
+        raise DraftSentButUnrecorded(message_id, e) from e
 
     return message_id
 

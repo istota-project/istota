@@ -532,6 +532,11 @@ CREATE TABLE IF NOT EXISTS outbound_drafts (
     html          INTEGER NOT NULL DEFAULT 0,
     in_reply_to   TEXT,
     "references"  TEXT,
+    -- The Reply-To header the holding verb was given (`email send --reply-to`).
+    -- Snapshotted like the threading headers: it decides where the recipient's
+    -- answer lands, so dropping it on the way through the hold would silently
+    -- reroute the conversation.
+    reply_to      TEXT,
     attachments   TEXT NOT NULL DEFAULT '[]',        -- JSON array of host paths, re-confined at release
     origin_target TEXT,                  -- originating surface descriptor, copied to sent_emails on release
     hold_reason   TEXT NOT NULL DEFAULT '',

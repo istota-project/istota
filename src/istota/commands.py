@@ -2142,7 +2142,12 @@ async def cmd_search(ctx: CommandContext):
     return text
 
 
-@command("trust", "Trust an email sender: `!trust sender@example.com`")
+@command(
+    "trust",
+    "Trust an email sender both ways — their mail is processed without asking, "
+    "and you may be mailed at that address without approving each message: "
+    "`!trust sender@example.com`",
+)
 async def cmd_trust(ctx: CommandContext):
     config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
     email = args.strip().lower()
@@ -2152,7 +2157,12 @@ async def cmd_trust(ctx: CommandContext):
         user_config = config.users.get(user_id)
         config_patterns = user_config.trusted_email_senders if user_config else []
 
-        lines = ["**Trusted email senders:**", ""]
+        # One list, two meanings. Since the outbound approval gate shipped,
+        # every entry here also authorizes *mailing* that address without
+        # per-message approval — and every row written before it was made under
+        # the narrower inbound-only meaning. Saying so is the price of not
+        # carrying two lists; see `outbound_policy`'s module docstring.
+        lines = ["**Trusted email senders** (inbound and outbound):", ""]
         if config_patterns:
             for p in sorted(config_patterns):
                 lines.append(f"- `{p}` (config)")
@@ -2161,6 +2171,11 @@ async def cmd_trust(ctx: CommandContext):
                 lines.append(f"- `{s['sender_email']}`")
         if not config_patterns and not db_senders:
             lines.append("No trusted senders configured.")
+        lines.append("")
+        lines.append(
+            "Mail from these is processed without asking, and mail *to* them "
+            "is sent without waiting for your approval."
+        )
         return "\n".join(lines)
 
     if "@" not in email:
@@ -2168,8 +2183,190 @@ async def cmd_trust(ctx: CommandContext):
 
     added = db.add_trusted_sender(conn, user_id, email)
     if added:
-        return f"Trusted `{email}` — future emails from this sender will be processed automatically."
-    return f"`{email}` is already trusted."
+        return (
+            f"Trusted `{email}` — their mail is processed without asking, and "
+            "mail to that address is sent without waiting for your approval. "
+            "`!untrust` reverses both."
+        )
+    return f"`{email}` is already trusted, for both incoming and outgoing mail."
+
+
+def _visible_recipients(draft) -> str:
+    """To + Cc by address, Bcc by count.
+
+    `!drafts` is surface-agnostic and works in a multi-user Talk room, so
+    anything this returns may be posted where every participant reads it.
+    Printing the blind-carbon list there would defeat the one property Bcc has.
+    The count is enough for the user to recognise their own message.
+    """
+    shown = [*draft.to_addrs, *draft.cc_addrs]
+    text = ", ".join(shown) or "(no recipients)"
+    if draft.bcc_addrs:
+        n = len(draft.bcc_addrs)
+        text += f" (+{n} bcc)"
+    return text
+
+
+def _draft_line(draft) -> str:
+    """One held draft, addressable by id.
+
+    Recipients and subject, and nothing of the body: the listing exists so the
+    user can pick which draft to answer, and a body inlined here would push the
+    others off a phone screen.
+    """
+    subject = (draft.subject or "(no subject)").replace("\n", " ")
+    return f"- `#{draft.id}` → {_visible_recipients(draft)} — {subject}"
+
+
+def _drafts_listing(drafts_list, *, lead: str) -> str:
+    lines = [lead, ""]
+    lines.extend(_draft_line(d) for d in drafts_list)
+    lines.append("")
+    lines.append("Answer with `!drafts send <id>` or `!drafts discard <id>`.")
+    return "\n".join(lines)
+
+
+@command(
+    "drafts",
+    "Outbound mail waiting for your approval: `!drafts`, `!drafts send <id>`, "
+    "`!drafts discard <id>`",
+)
+async def cmd_drafts(ctx: CommandContext):
+    """List and answer the outbound emails the approval gate held.
+
+    Here so the gate is answerable from Talk, without a web session. The
+    resolution rules deliberately mirror `!confirm` — bare verb acts only when
+    exactly one draft is pending, several means say which — but the *tiebreak
+    reasoning* is the opposite one, and worth stating so nobody "fixes" it into
+    symmetry: an ambiguous `!confirm` resolves away from approval because it
+    gates untrusted *inbound* mail, whereas an unambiguous `!drafts send` is the
+    user releasing their own words. Ambiguity still refuses in both.
+    """
+    import asyncio
+
+    from . import outbound_drafts as drafts
+
+    conn, user_id = ctx.conn, ctx.user_id
+    words = ctx.args.split()
+
+    verb = ""
+    if words and not words[0].lstrip("#").isdecimal():
+        verb = words.pop(0).lower()
+        if verb not in ("send", "discard", "list"):
+            return (
+                f"Don't know what `{verb}` means here. Try `!drafts`, "
+                "`!drafts send <id>` or `!drafts discard <id>`."
+            )
+
+    target_id: int | None = None
+    if words:
+        token = words.pop(0).lstrip("#")
+        # `isdecimal`, not `isdigit`: the latter is True for '²', which `int()`
+        # then refuses, turning a typo into a traceback.
+        if not token.isdecimal():
+            return f"`{token}` is not a draft id. Try `!drafts` to see the open ones."
+        target_id = int(token)
+    if words:
+        return (
+            f"Too many arguments. Try `!drafts {verb or 'send'} <id>`."
+        )
+
+    pending = drafts.pending_for_user(conn, user_id)
+    if not pending:
+        return "No outbound mail is waiting for your approval."
+
+    if verb in ("", "list"):
+        if target_id is not None:
+            # A bare `!drafts 41` names a draft but no decision. Refuse rather
+            # than pick one: guessing `send` would mail a message off a typo,
+            # and guessing `discard` would bin the user's own words.
+            return (
+                f"`!drafts {target_id}` doesn't say what to do with it. Use "
+                f"`!drafts send {target_id}` or `!drafts discard {target_id}`."
+            )
+        return _drafts_listing(
+            pending,
+            lead=f"**{len(pending)} draft(s) waiting for your approval:**",
+        )
+
+    if target_id is not None:
+        draft = next((d for d in pending if d.id == target_id), None)
+        if draft is None:
+            # One message for "no such draft", "not yours" and "already
+            # answered" — the command must not become an oracle for which draft
+            # ids exist, and the three read the same to the user.
+            return _drafts_listing(
+                pending,
+                lead=f"Draft #{target_id} isn't waiting for your approval. Open right now:",
+            )
+    elif len(pending) == 1:
+        draft = pending[0]
+    else:
+        return _drafts_listing(
+            pending,
+            lead=f"{len(pending)} drafts are waiting — say which:",
+        )
+
+    recipients = _visible_recipients(draft)
+    if verb == "discard":
+        try:
+            drafts.discard(conn, draft.id)
+        except drafts.DraftError as e:
+            return f"Couldn't discard #{draft.id}: {e}"
+        # Commit before we say it happened. The Talk poller wraps its whole
+        # batch — every conversation, every message — in one transaction and
+        # hands us that connection, so an exception anywhere later in the batch
+        # would roll this back after the user had already been told their draft
+        # was gone. It would then reappear in `!drafts` and be nagged a day
+        # later.
+        conn.commit()
+        return f"Discarded #{draft.id} — nothing was sent to {recipients}."
+
+    # Commit the caller's transaction before handing off, for two reasons.
+    #
+    # The blocking one: `release` opens its **own** connection and commits a
+    # `status='sending'` claim there before it touches SMTP (it has to — the
+    # decision to send an irreversible message must be durable before the
+    # message goes out, which is impossible inside a transaction it does not
+    # own). The Talk poller hands `dispatch` its poll connection, which is
+    # already mid-write by the time a `!command` is dispatched — the message
+    # cache upsert and the poll cursor both sit in it uncommitted. Second writer
+    # against first writer is `database is locked` after the full 30s busy
+    # timeout, on the poll loop, every time. This is only reachable from Talk;
+    # the web path opens its own connection and holds no write.
+    #
+    # The correctness one: the user's decision should be durable before the mail
+    # is. Committing here costs the Talk poll batch its all-or-nothing property
+    # for the messages already processed, which is the right trade — their side
+    # effects are done and their cursor entries name messages we have finished
+    # with, while a message later in the batch has not written a cursor entry
+    # yet and is unaffected.
+    ctx.conn.commit()
+
+    # `release` then blocks on the network. Handlers run on the persistent
+    # asyncio loop that also carries every Talk request, so the send goes to a
+    # thread rather than stalling Talk for an SMTP conversation plus the IMAP
+    # append to Sent.
+    try:
+        message_id = await asyncio.to_thread(drafts.release, ctx.config, draft.id)
+    except drafts.DraftSentButUnrecorded as e:
+        # Checked before the DraftError branch it belongs to. The mail is gone;
+        # calling this "failed, try again" would be the one wrong thing to say.
+        logger.error("!drafts send: draft %s sent but unrecorded: %s", draft.id, e)
+        return (
+            f"#{draft.id} **was sent** to {recipients} (`{e.message_id}`), but "
+            f"recording it failed: {e.cause}. Do not resend it. A reply on this "
+            "thread may not route back to this conversation."
+        )
+    except drafts.DraftError as e:
+        return f"Couldn't send #{draft.id}: {e}"
+    except Exception as e:  # noqa: BLE001 — SMTP failure; the row stays pending
+        logger.warning("!drafts send failed for draft %s: %s", draft.id, e)
+        return (
+            f"Sending #{draft.id} failed: {e}. The draft is still waiting — "
+            "try `!drafts send` again."
+        )
+    return f"Sent #{draft.id} to {recipients} (`{message_id}`)."
 
 
 @command("untrust", "Remove a trusted email sender: `!untrust sender@example.com`")

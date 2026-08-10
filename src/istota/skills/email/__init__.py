@@ -1704,6 +1704,316 @@ def _reply_subject(subject: str) -> str:
     return _sanitize_header(reply_subject)
 
 
+# --- Outbound approval gate -----------------------------------------------
+#
+# The one place every outward verb funnels through. It lives here rather than in
+# the skill proxy (which would need to parse per-skill argv to find recipients,
+# putting email knowledge in a generic dispatcher) or the scheduler (which sees
+# the task only after SMTP has already run). This module runs host-side under
+# the proxy, outside the sandbox, so the model cannot reach around it.
+#
+# It is deliberately **not** in `send_email` itself. That function is also the
+# send path for briefing delivery and for `outbound_drafts.release` — gating it
+# would hold every briefing and re-hold every approval the user just granted,
+# forever. The gate belongs to the *verbs the model invokes*, which is what
+# `send`, `reply` and `reply-all` are.
+#
+# There is no `--confirmed` escape. A self-supplied flag is not a gate; the
+# failure being fixed is a model talking itself past a rule under third-party
+# pressure, and it would supply the flag in exactly that state.
+
+
+class _GateRefusal(Exception):
+    """The gate cannot decide, or cannot hold. Refuse the send.
+
+    Never "send anyway". A gate that fails open on a missing database is not a
+    gate, and the addresses it most needs to hold are the ones nothing vouches
+    for.
+    """
+
+
+def _gate_error(message: str) -> dict:
+    return {
+        "status": "error",
+        "error": (
+            f"Refusing to send: {message}. Outbound mail is checked against "
+            "your approval policy before it goes out, and a check that cannot "
+            "run is not a pass."
+        ),
+    }
+
+
+def _task_context(conn, user_id: str) -> tuple[int | None, str | None, str | None]:
+    """``(task_id, room_token, origin_target)`` for the task making this send.
+
+    ``origin_target`` is stamped onto the ``sent_emails`` row at release so a
+    reply to the eventually-sent mail routes back to the conversation the task
+    came from, exactly as a direct send does. ``room_token`` is what makes the
+    approval card appear inline; it is set only when the origin really is a
+    registered room, since that is the only place a card can render. A draft
+    without one is still answerable from the global list and from `!drafts`.
+
+    Identity comes from the task row and the env only chooses which row — the
+    same rule `_record_sent_email_direct` follows. A disagreement means the env
+    is not describing this task, so we attribute the draft to nobody rather than
+    to someone else's conversation.
+    """
+    raw = os.environ.get("ISTOTA_TASK_ID", "").strip()
+    if not raw.isdecimal():
+        return None, None, None
+    from ... import db
+    from ...transport import routing
+
+    task = db.get_task(conn, int(raw))
+    if task is None:
+        return None, None, None
+    if task.user_id != user_id:
+        logger.warning(
+            "outbound gate: task %s belongs to another user; holding the draft "
+            "unattributed", raw,
+        )
+        return None, None, None
+    origin = routing.origin_descriptor(task, conn)
+    room = origin[len("room:"):] if origin and origin.startswith("room:") else None
+    return task.id, room, origin
+
+
+def _scoped_attachments(attachments: list[str]) -> list[str]:
+    """Resolved host paths for an outbound message's attachments.
+
+    Runs on **every** send, held or not. The skill CLI is spawned host-side by
+    the proxy with the daemon's whole filesystem view, so a path argument the
+    model chose is an arbitrary read unless it is scoped — the exact condition
+    `skill_host_paths` exists for. `_attach_files` does a bare `read_bytes` on
+    whatever it is handed, so before this the verb would cheerfully mail
+    `/etc/istota/config.toml` to anyone. The roots are the ones the sandbox
+    binds for this caller: the deferred dir, the user's workspace, the task's
+    own channel dir, and Talk read-only.
+
+    Callers use the returned paths, not the ones passed in — re-opening the
+    original re-walks the symlinks this resolution just settled.
+    """
+    from ...skill_host_paths import resolve_host_path
+
+    resolved: list[str] = []
+    for raw in attachments or []:
+        path, err = resolve_host_path(
+            Path(raw), writable=False, operation="attaching a file to an email",
+        )
+        if err is not None:
+            raise _GateRefusal(err)
+        resolved.append(str(path))
+    return resolved
+
+
+def _holdable_attachments(
+    app_config, user_id: str, originals: list[str], resolved: list[str],
+) -> list[str]:
+    """The same, narrowed to the user's own workspace, for a draft.
+
+    Narrower than `_scoped_attachments` because a *held* attachment has a second
+    check ahead of it: `outbound_drafts._confined_attachment` re-validates
+    against `{mount}/Users/{uid}` at release — necessarily, since a pending
+    draft sits for as long as the user likes and the path stays writable that
+    whole time. Anything accepted here but outside the workspace would be a
+    draft the user could approve and never send. Refusing now leaves the model
+    able to retry without the attachment; refusing at release leaves the user
+    with a dead draft they cannot fix.
+
+    Validated at hold time rather than release time for the other half of the
+    same reason: the holding task's environment describes the roots it may read,
+    and the daemon that runs `release` hours later has none of it set.
+    """
+    if not resolved:
+        return []
+    root = app_config.workspace_root(user_id)
+    if root is None:
+        raise _GateRefusal(
+            "attachment paths cannot be checked without a local workspace"
+        )
+    root = Path(root).resolve()
+    for raw, path in zip(originals, resolved):
+        try:
+            Path(path).relative_to(root)
+        except ValueError:
+            raise _GateRefusal(
+                f"attachment {raw} is outside your workspace, so the held draft "
+                "could not be sent on approval"
+            ) from None
+    return resolved
+
+
+def _unparseable(entry: object) -> bool:
+    """Whether the gate could not read an addr-spec out of this entry at all.
+
+    Such an entry is held under every policy above `off`, because "nothing to
+    check" must not read as "everything checked out" — but the *reason* is not
+    that the recipient is untrusted, and saying so sends the model off to
+    suggest trusting a string no trust entry could ever match.
+    """
+    from ...outbound_policy import _expand
+
+    return _expand(entry) is None
+
+
+def _held_message(reason: str, held: list[str]) -> str:
+    """What the model is told, and therefore roughly what the user hears.
+
+    Names only surfaces that exist. Stage 4 has no room card and no web drafts
+    list — those are later stages — so pointing at either would have the model
+    confidently tell the user to look somewhere with nothing in it.
+
+    Ends by telling it not to retry: a held send is a finished verb, and a model
+    that reads the envelope as a transient failure will reach for a different
+    spelling of the same message.
+    """
+    from ...outbound_policy import HOLD_ALL_MODE
+
+    unreadable = [e for e in held if _unparseable(e)]
+    if unreadable:
+        # Checked first: an entry that does not parse is held whatever the
+        # policy says, and it is the one hold the user can fix themselves.
+        what = (
+            f"{', '.join(repr(e) for e in unreadable)} is not a readable email "
+            "address, so it could not be checked against the trusted list"
+        )
+    elif reason == HOLD_ALL_MODE:
+        what = (
+            "the outbound approval policy is 'all', so every message to an "
+            "address other than the user's own waits for approval"
+        )
+    elif not held:
+        # The per-entry re-ask disagreed with the whole-list one. It cannot
+        # today (the predicate is per-address and the list is its union), but
+        # the envelope must still read as a hold rather than as "0 recipients".
+        what = "a recipient is not on the user's trusted list"
+    elif len(held) == 1:
+        what = f"{held[0]} is not on the user's trusted list"
+    else:
+        what = (
+            f"{len(held)} recipients are not on the user's trusted list "
+            f"({', '.join(held)})"
+        )
+    return (
+        f"Held for approval — {what}. Nothing was sent. The user can review it "
+        "with `!drafts`, and answer with `!drafts send <id>` or "
+        "`!drafts discard <id>`. Tell them the message is drafted and waiting; "
+        "do not retry the send with different arguments."
+    )
+
+
+def _outbound_gate(
+    *,
+    to: list[str],
+    cc: list[str],
+    bcc: list[str],
+    subject: str,
+    body: str,
+    html: bool,
+    attachments: list[str],
+    reply_to: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> tuple[dict | None, list[str]]:
+    """``(None, attachment_paths)`` to send, else ``(envelope, [])``.
+
+    A hold is a **successful** outcome (`status: "held"`, exit 0) — the verb did
+    what it was asked, and a non-zero exit invites the model to retry with
+    different arguments. A gate that could not run returns `status: "error"`
+    and exits non-zero, which is the one case where these verbs fail.
+
+    The second element carries the *resolved* attachment paths back to the
+    caller, which must attach those rather than the strings it passed in:
+    re-opening the originals would re-walk the symlinks the scoping just
+    settled.
+    """
+    from ... import db, outbound_drafts as drafts
+    from ...outbound_policy import effective_policy, recipients_require_hold
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
+    if not user_id:
+        # No identity, no policy. The verb is reachable from an operator shell
+        # this way, and refusing there is the right trade: an unattributed send
+        # is exactly the one nothing would have held.
+        return _gate_error("ISTOTA_USER_ID is not set, so no approval policy applies"), []
+
+    # Attachment paths first, and under every policy. This is not part of the
+    # approval decision — it is the host-path scoping the CLI owes because the
+    # proxy runs it outside the sandbox with the daemon's filesystem view — so
+    # it must not be reachable-around by having the gate switched off.
+    try:
+        send_paths = _scoped_attachments(attachments)
+    except _GateRefusal as e:
+        return _gate_error(str(e)), []
+
+    try:
+        from ...config import load_config
+        app_config = load_config()
+    except Exception as e:  # noqa: BLE001 — any load failure is a refusal
+        return _gate_error(f"the configuration could not be loaded ({e})"), []
+
+    # Resolved before the connection is opened, so `off` costs no database at
+    # all. Opening first made an unreachable or merely busy DB fail a send on an
+    # instance that had deliberately switched the gate off — a path that never
+    # touched the framework DB before this feature existed.
+    if effective_policy(app_config, user_id) == "off":
+        return None, send_paths
+
+    entries = [*to, *cc, *bcc]
+    try:
+        with db.get_db(app_config.db_path) as conn:
+            reason = recipients_require_hold(app_config, conn, user_id, entries)
+            if reason is None:
+                return None, send_paths
+
+            # Which entries failed, re-asking the same predicate one at a time
+            # rather than reimplementing it. Named because the model has to tell
+            # the user *who* the message is waiting on.
+            held = [
+                e for e in entries
+                if isinstance(e, str)
+                and recipients_require_hold(app_config, conn, user_id, [e])
+            ]
+            paths = _holdable_attachments(
+                app_config, user_id, attachments, send_paths,
+            )
+            task_id, room_token, origin_target = _task_context(conn, user_id)
+            draft_id = drafts.hold(
+                conn,
+                user_id=user_id,
+                task_id=task_id,
+                room_token=room_token,
+                to_addrs=list(to),
+                cc_addrs=list(cc),
+                bcc_addrs=list(bcc),
+                subject=subject or "",
+                body=body or "",
+                html=html,
+                in_reply_to=in_reply_to,
+                references=references,
+                reply_to=reply_to,
+                attachments=paths,
+                origin_target=origin_target,
+                hold_reason=reason,
+            )
+    except _GateRefusal as e:
+        return _gate_error(str(e)), []
+    except drafts.DraftError as e:
+        return _gate_error(f"the draft could not be stored ({e})"), []
+    except Exception as e:  # noqa: BLE001 — a gate that fails open is not a gate
+        logger.warning("outbound gate: refusing to send: %s", e)
+        return _gate_error(f"the approval check could not run ({e})"), []
+
+    return {
+        "status": "held",
+        "needs_confirmation": True,
+        "draft_id": draft_id,
+        "reason": reason,
+        "held_recipients": held,
+        "message": _held_message(reason, held),
+    }, []
+
+
 def cmd_send(args):
     """Send an email via CLI (with optional cc/bcc/attachments/reply-to)."""
     config = _config_from_env()
@@ -1713,6 +2023,19 @@ def cmd_send(args):
     bcc = _split_csv(getattr(args, "bcc", None))
     attachments = list(getattr(args, "attach", None) or [])
 
+    held, send_paths = _outbound_gate(
+        to=[args.to],
+        cc=cc,
+        bcc=bcc,
+        subject=args.subject,
+        body=body,
+        html=bool(args.html),
+        attachments=attachments,
+        reply_to=getattr(args, "reply_to", None),
+    )
+    if held is not None:
+        return held
+
     message_id = send_email(
         to=args.to,
         subject=args.subject,
@@ -1721,7 +2044,9 @@ def cmd_send(args):
         content_type=content_type,
         cc=cc or None,
         bcc=bcc or None,
-        attachments=attachments or None,
+        # The scoped, resolved paths — not `attachments`. Re-opening the strings
+        # the model passed would re-walk the symlinks the scoping settled.
+        attachments=send_paths or None,
         reply_to=getattr(args, "reply_to", None),
     )
 
@@ -1783,6 +2108,25 @@ def cmd_reply(args):
     if orig.message_id:
         references = (references + " " + orig.message_id).strip()
 
+    attachments = list(getattr(args, "attach", None) or [])
+    # The gate runs *after* the threading headers are derived, so a held draft
+    # carries the snapshot from the message we already fetched. Re-deriving them
+    # at release would be a second IMAP round trip that can fail or come back
+    # different — and by then the message may have been moved or deleted.
+    held, send_paths = _outbound_gate(
+        to=[to_addr],
+        cc=cc,
+        bcc=[],
+        subject=subject,
+        body=body,
+        html=bool(getattr(args, "html", False)),
+        attachments=attachments,
+        in_reply_to=orig.message_id,
+        references=references or None,
+    )
+    if held is not None:
+        return held
+
     message_id = send_email(
         to=to_addr,
         subject=subject,
@@ -1790,7 +2134,7 @@ def cmd_reply(args):
         config=email_config,
         content_type="html" if getattr(args, "html", False) else "plain",
         cc=cc or None,
-        attachments=list(getattr(args, "attach", None) or []) or None,
+        attachments=send_paths or None,
         in_reply_to=orig.message_id,
         references=references or None,
     )

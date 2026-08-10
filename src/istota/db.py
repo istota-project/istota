@@ -512,6 +512,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             html          INTEGER NOT NULL DEFAULT 0,
             in_reply_to   TEXT,
             "references"  TEXT,
+            reply_to      TEXT,
             attachments   TEXT NOT NULL DEFAULT '[]',
             origin_target TEXT,
             hold_reason   TEXT NOT NULL DEFAULT '',
@@ -523,6 +524,24 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    # `reply_to` arrived after the table did (the gate wires up `email send
+    # --reply-to`, which the store had nowhere to put). Dropping the header
+    # would reroute the recipient's answer, so an existing draft table gets the
+    # column rather than the gate refusing to hold such a send.
+    #
+    # Narrowed to the duplicate-column case, unlike the `user_profiles` ALTERs
+    # above, because here the degradation is **not** safe. Those columns are
+    # read through `_row_get` and fall back to a defined default; this one is
+    # read unconditionally by `outbound_drafts._row`, so a swallowed lock leaves
+    # every draft read raising `IndexError` and every `hold` failing with
+    # `no such column` — which the gate turns into "refusing to send", stopping
+    # all outbound mail on the instance. Better to fail the open loudly.
+    try:
+        conn.execute("ALTER TABLE outbound_drafts ADD COLUMN reply_to TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
