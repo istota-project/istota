@@ -1039,35 +1039,17 @@ class WorkerPool:
 
 
 def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
-    """Resolve the Talk room to deliver this task's notifications to.
+    """Back-compat shim over ``routing.talk_channel_for_task``.
 
-    Tasks carry two related fields:
-      - conversation_token: doubles as the email-thread grouping key for
-        email-source tasks (synthetic 16-char hex hash) and as the Talk room
-        for talk-source tasks. Used by context/memory lookups.
-      - talk_delivery_token: the real Talk room for notifications. Always a
-        valid Talk token (or NULL).
-
-    Delivery prefers talk_delivery_token. Falls back to conversation_token,
-    which is correct for talk-source tasks. Legacy email-source tasks that
-    pre-date the talk_delivery_token column may carry only a synthetic
-    conversation_token; for those we fall back to the user's resolved
-    notification channel (alerts > briefing > auto-detected DM).
+    The resolution moved to the transport layer, where the rest of delivery
+    routing lives and where the room registry is already in scope. The name
+    survives because the event consumers, the Talk transport's
+    ``resolve_target`` and a good deal of introspection-shaped test coverage
+    call it — see the "delivery shims stay" note in `.claude/rules/transport.md`
+    for the same argument about `post_result_to_talk`.
     """
-    if task.talk_delivery_token:
-        return task.talk_delivery_token
-    token = task.conversation_token
-    if task.source_type != "email" or not token:
-        return token
-    # Legacy fallback: pre-migration email tasks with a synthetic 16-char-hex
-    # conversation_token need redirection to the user's resolved channel,
-    # because the synthetic token is not a real Talk room.
-    from .email_support import is_synthetic_email_thread_token
-    if not is_synthetic_email_thread_token(token):
-        return token
-    from .notifications import resolve_conversation_token
-    resolved = resolve_conversation_token(config, task.user_id)
-    return resolved or token
+    from .transport.routing import talk_channel_for_task
+    return talk_channel_for_task(config, task)
 
 
 def _notify_confirmed_email_result(

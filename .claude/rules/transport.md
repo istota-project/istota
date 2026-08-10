@@ -612,11 +612,40 @@ of them.
   scheduler delivers to. Precedence: explicit `output_target` > reply-to-origin
   (interactive source types: `talk` / `email` / `repl`) > source-type default >
   drop. Each destination has its channel filled (Talk via
-  `_talk_target_for_delivery`) or is dropped with a WARNING (unregistered
+  `talk_channel_for_task`) or is dropped with a WARNING (unregistered
   surface, or a configured surface whose user-level channel resolves to `None`).
   **Never raises** — plan resolution must not abort task finalization. An empty
   post-drop plan for an interactive source type falls back to reply-to-origin so
   a misconfigured `output_target` can't silently eat a reply.
+- **`talk_channel_for_task(config, task) -> str | None`** — which Talk room a
+  task's result goes to. Four rungs, in order: **(0)** `tasks.talk_delivery_token`
+  when set, absolutely; **(1)** the task's room's `talk` binding; **(2)**
+  `conversation_token` itself, when the task has one and is not email-sourced;
+  **(3)** `notifications.resolve_conversation_token` (alerts → briefing →
+  auto-DM) for an email task whose token is a synthetic 16-char hex thread hash
+  naming no Talk room. No token and no room gives `None`, deliberately *not* the
+  alerts ladder — a task with nothing to deliver to is not an email thread hash
+  needing redirection. A synthetic token that resolves to nothing is returned
+  as-is, preserving the pre-existing silent no-op rather than trading it for a
+  different failure. `scheduler._talk_target_for_delivery` is a shim over this.
+
+  Rung 1 replaced `tasks.talk_delivery_token` as the *general* answer: the
+  column was a denormalized copy of the room's Talk binding, and it went stale
+  whenever a room was promoted to Talk after the task was created. **Rung 0
+  survives on purpose and must be deleted last.** While anything still writes
+  the column it carries information nothing else has — the legacy thread-match
+  branch in `transport/email/inbound.py`, reached when
+  `sent_emails.origin_target` is NULL, copies a Talk room onto the task that the
+  registry may never have heard of. Demoting rung 0 to "a hint for finding a
+  room" reroutes those tasks to the alerts ladder with no error: ISSUE-057's fix
+  undone. Room resolution inside rung 1 is **surface-scoped**
+  (`_canonical_room_token(..., cross_surface=False)`), unlike descriptor
+  stamping — a `surface_ref` is unique only within its surface, and an unscoped
+  match on the delivery path posts the answer into a different conversation.
+  (`cross_surface` has no default: both answers are defensible and the
+  difference is invisible at the call site, so each caller states which it
+  wants. A wrong *descriptor* is re-resolved by live bindings at delivery; a
+  wrong *channel* is not.)
 - **`plan_has_surface(plan, surface) -> bool`** — the replacement for the old
   `target in ("talk", "both", "all")` string checks. `process_one_task`
   precomputes `plan_talk` / `plan_email` / `plan_ntfy` / `plan_file` from the

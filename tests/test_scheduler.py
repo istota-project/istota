@@ -465,6 +465,12 @@ class TestTalkTargetForDelivery:
         task = self._task(source_type="email", conversation_token=synthetic)
         assert _talk_target_for_delivery(config, task) == "briefroom"
 
+    # `talk_delivery_token` is still rung 0 and still absolute while anything
+    # writes it. These three are the originals, kept verbatim: they are the only
+    # coverage of a task whose column and conversation_token *disagree*, which
+    # is exactly the shape the legacy email thread-match branch produces and
+    # exactly what a premature retirement of the column misroutes.
+
     def test_talk_delivery_token_takes_precedence_over_synthetic(self, tmp_path):
         # ISSUE-057 proper fix: talk_delivery_token wins regardless of shape
         # heuristics on conversation_token.
@@ -499,6 +505,94 @@ class TestTalkTargetForDelivery:
             talk_delivery_token="parent_room",
         )
         assert _talk_target_for_delivery(config, task) == "parent_room"
+
+    def test_the_column_still_wins_over_a_disagreeing_binding(self, tmp_path):
+        """Rung 0 is absolute, not a tiebreak.
+
+        The column can name a room the registry has never heard of (the legacy
+        thread-match branch copies one onto the task), so a registry that
+        disagrees is not evidence the column is wrong — only that the registry
+        is incomplete. Demoting the column to a room-finding hint is what turns
+        that into a silent reroute.
+        """
+        config = self._live_config(tmp_path)
+        self._room(config, "other_room", "binding_room")
+        task = self._task(
+            source_type="email",
+            conversation_token="other_room",
+            talk_delivery_token="delivery_room",
+        )
+        assert _talk_target_for_delivery(config, task) == "delivery_room"
+
+    # The cases below used to be answered by `tasks.talk_delivery_token` too,
+    # but with the column NULL — which is every talk- and web-sourced task, and
+    # every task once the column is finally retired. They are answered by the
+    # room's `talk` binding now. Same expected token, different source of truth,
+    # and one thing the column could never do: see the promote test.
+
+    def _room(self, config, canonical, talk_ref, *, origin="web"):
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, canonical, "alice", origin=origin)
+            db.add_room_binding(conn, canonical, "talk", talk_ref)
+
+    def _live_config(self, tmp_path, alerts_channel="alerts1"):
+        config = self._config(tmp_path, alerts_channel=alerts_channel)
+        config.db_path = tmp_path / "rooms.db"
+        db.init_db(config.db_path)
+        return config
+
+    def test_a_promoted_rooms_binding_beats_its_canonical_token(self, tmp_path):
+        """The shape rung 1 exists for: canonical token ≠ Talk ref.
+
+        A web room promoted to Talk keeps its `web-…` canonical token, so the
+        token is not postable and only the binding names the real Talk room.
+        Deliberately built on a promoted room rather than on a synthetic email
+        hash — `record_inbound` never registers a room under a thread hash (the
+        mirror gate is room existence, never creation), so a test doing that
+        would pin a reachability the system denies.
+        """
+        config = self._live_config(tmp_path)
+        self._room(config, "web-alice-abc123def456", "RealTalkRoom")
+        task = self._task(
+            source_type="email", conversation_token="web-alice-abc123def456",
+        )
+        assert _talk_target_for_delivery(config, task) == "RealTalkRoom"
+
+    def test_room_binding_beats_a_real_looking_token(self, tmp_path):
+        # A thread-matched email task inherited `other_room` from a prior
+        # outbound; the room's own Talk binding is the authority for delivery.
+        config = self._live_config(tmp_path)
+        self._room(config, "other_room", "delivery_room")
+        task = self._task(source_type="email", conversation_token="other_room")
+        assert _talk_target_for_delivery(config, task) == "delivery_room"
+
+    def test_a_subtask_resolves_through_its_inherited_room(self, tmp_path):
+        # A subtask inherits the parent's conversation_token verbatim
+        # (`scheduler_deferred` overrides whatever the deferred JSON asked for,
+        # to keep prompt injection out of routing), so it resolves to the same
+        # room the parent delivers to.
+        config = self._live_config(tmp_path)
+        self._room(config, "parent_conv", "parent_room", origin="talk")
+        task = self._task(
+            source_type="subtask", conversation_token="parent_conv",
+        )
+        assert _talk_target_for_delivery(config, task) == "parent_room"
+
+    def test_a_binding_added_after_the_task_is_picked_up(self, tmp_path):
+        """What the stored column structurally could not do.
+
+        A room promoted to Talk after the task was created gained a binding the
+        column would never learn about, so the reply kept going wherever the
+        stale copy pointed.
+        """
+        config = self._live_config(tmp_path)
+        task = self._task(source_type="talk", conversation_token="rm_late")
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "rm_late", "alice", origin="web")
+        assert _talk_target_for_delivery(config, task) == "rm_late"
+        with db.get_db(config.db_path) as conn:
+            db.add_room_binding(conn, "rm_late", "talk", "PromotedRoom")
+        assert _talk_target_for_delivery(config, task) == "PromotedRoom"
 
 
 # ---------------------------------------------------------------------------

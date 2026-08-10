@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("istota.transport.routing")
 
+# Latch for the missing-room-tables warning in `_talk_binding_for_task`. Once
+# per process: the condition is static for the life of a deployment and the
+# lookup runs on every delivery.
+_WARNED_NO_ROOM_TABLES = False
+
 # Surfaces whose outbound is the task_events log (no push delivery). Web chat
 # rides the same substrate as the REPL: the client tails task_events over SSE,
 # so there is nothing to push. This governs the planner's push-vs-stream
@@ -152,7 +157,13 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
         for token in candidates:
             if not token or is_synthetic_email_thread_token(token):
                 continue  # an email thread hash names no room
-            canonical = _canonical_room_token(conn, surface, token)
+            # Cross-surface: an email continuation's token belongs to whichever
+            # surface the originating send recorded, and its own surface owns no
+            # bindings. A wrong answer here is a wrong *descriptor*, which live
+            # bindings re-resolve at delivery — unlike a wrong channel.
+            canonical = _canonical_room_token(
+                conn, surface, token, cross_surface=True,
+            )
             if canonical is None:
                 continue
             room = db.get_room(conn, canonical)
@@ -166,7 +177,9 @@ def _room_descriptor(conn, surface: str, task: "db.Task") -> str | None:
         return None
 
 
-def _canonical_room_token(conn, surface: str, token: str) -> str | None:
+def _canonical_room_token(
+    conn, surface: str, token: str, *, cross_surface: bool,
+) -> str | None:
     """The canonical room token a raw token names, or None if it names no room.
 
     Three tries, narrowest first: the token already *is* a canonical token; it
@@ -177,15 +190,30 @@ def _canonical_room_token(conn, surface: str, token: str) -> str | None:
     promoted room, the Talk ref — while the task's own surface is ``email``,
     which owns no bindings, so a surface-scoped lookup can only ever miss and
     the room reads as unregistered.
+
+    ``cross_surface=False`` drops that third try, and delivery *must* pass it.
+    A surface ref is unique only within its surface, so an unscoped match can
+    resolve a token to a room that merely shares the string on another surface
+    — and on the delivery path the consequence is posting the answer into a
+    different conversation. For a talk-sourced task the destination is
+    definitionally its ``conversation_token``; the binding rung is only an
+    improvement on that while it is looking up the *same* room.
+
+    The parameter has no default on purpose. Both answers are defensible and the
+    difference is invisible at the call site, so each caller states which it
+    wants rather than inheriting one. Stamping a descriptor passes True — the
+    cross-surface case is the whole reason it can find a promoted room's token
+    at all — and lives with the collision risk because a wrong descriptor is
+    re-resolved by live bindings at delivery, where a wrong *channel* is not.
     """
     from .. import db
 
     if db.get_room(conn, token) is not None:
         return token
-    return (
-        db.resolve_room_token(conn, surface, token)
-        or db.find_room_token_by_ref(conn, token)
-    )
+    scoped = db.resolve_room_token(conn, surface, token)
+    if scoped is not None or not cross_surface:
+        return scoped
+    return db.find_room_token_by_ref(conn, token)
 
 
 def origin_descriptor(task: "db.Task", conn=None) -> str | None:
@@ -433,10 +461,134 @@ def _expand_room_destinations(
     return dests
 
 
+def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
+    """The Talk room to deliver this task's notifications to.
+
+    Replaces the ``tasks.talk_delivery_token`` column, which existed because in
+    the Talk-only era an email task needed somewhere to record "the real Talk
+    room" that was not its thread-grouping ``conversation_token``. A room's Talk
+    room is now a property of the room — its ``talk`` binding — so the column
+    was a denormalized copy of a fact the registry already holds, and one that
+    could go stale: a room promoted to Talk *after* the task was created gained
+    a binding the stored token never learned about.
+
+    The ladder, in order:
+
+    0. **``talk_delivery_token``, when set.** Still first, and still absolute.
+       The column is on its way out but it is not gone, and while anything
+       writes it, it carries information nothing else has: the legacy
+       thread-match branch in ``transport/email/inbound.py`` (reached when
+       ``sent_emails.origin_target`` is NULL) copies a Talk room onto the task
+       that the room registry may never have heard of. Demoting this rung to "a
+       hint for finding a room" silently reroutes those tasks to the alerts
+       ladder — ISSUE-057's fix, undone, with a green test suite. Deleting the
+       rung is the *last* step of retiring the column, not the first.
+    1. **The task's room's Talk binding.** The replacement for the column, and
+       the only rung that knows about a binding added after the task was
+       created. Reached whenever the column is NULL, which is every talk- and
+       web-sourced task.
+    2. **``conversation_token`` itself**, when the task has one and is not
+       email-sourced — the Talk-source case, where the token *is* the room, and
+       the case of a DM with no registered room.
+    3. **The user's resolved notification channel** (alerts → briefing → DM),
+       for an email task whose token is a synthetic thread hash naming no Talk
+       room at all. Posting to that hash silently no-ops.
+
+    No token and no room resolves to ``None`` rather than falling through to the
+    alerts ladder: a task with nothing to deliver to is not the same as an email
+    whose thread hash needs redirecting, and conflating them would reroute every
+    channel-less task into the user's alerts room.
+
+    A synthetic token that resolves to nothing is returned **as-is** rather than
+    as ``None``, preserving the pre-existing silent no-op at delivery instead of
+    trading it for a different failure mode.
+    """
+    from ..email_support import is_synthetic_email_thread_token
+
+    if task.talk_delivery_token:
+        return task.talk_delivery_token
+    room_talk = _talk_binding_for_task(config, task)
+    if room_talk:
+        return room_talk
+    token = task.conversation_token
+    if not token or task.source_type != "email":
+        return token
+    if not is_synthetic_email_thread_token(token):
+        return token
+    from ..notifications import resolve_conversation_token
+    return resolve_conversation_token(config, task.user_id) or token
+
+
+def _talk_binding_for_task(config: "Config", task: "db.Task") -> str | None:
+    """The ``surface_ref`` of the Talk binding on this task's room, or None.
+
+    Never raises and never blocks delivery on a database problem: an
+    unresolvable room falls through to the rest of the ladder, which is where
+    every pre-rooms deployment already lives.
+
+    Room resolution is **surface-scoped** here (``cross_surface=False``), unlike
+    descriptor stamping. A ref is unique only within its surface, so the
+    unscoped fallback can match a room that merely shares the string — harmless
+    when the answer is a stored descriptor, a misroute when it is where the
+    answer gets posted.
+
+    Only ``conversation_token`` is tried. ``talk_delivery_token`` is not a second
+    candidate: rung 0 returns it outright before this is ever called, so a
+    lookup keyed on it could only run when it is empty. When rung 0 finally
+    goes, this is where it would come back — as a candidate rather than as an
+    answer.
+
+    ``rooms.archived`` is deliberately **not** checked, unlike the two sibling
+    lookups in this module. Skipping an archived room here changes which token
+    delivery attempts, not whether it succeeds: the fallback is
+    ``conversation_token``, which for the only shape that can diverge (a
+    *promoted* room, canonical token ≠ Talk ref) is not a Talk room either. Both
+    answers fail at the API, so the guard would buy nothing and lose the last
+    attempt at a room the bot may still be in.
+    """
+    if not config.db_path:
+        return None
+    from .. import db
+    from .registry import _surface_for_source_type
+
+    token = task.conversation_token
+    if not token:
+        return None
+    try:
+        with db.get_db(config.db_path) as conn:
+            surface = _surface_for_source_type(task.source_type)
+            canonical = _canonical_room_token(
+                conn, surface, token, cross_surface=False,
+            )
+            if canonical is not None:
+                binding = db.get_room_binding(conn, canonical, "talk")
+                if binding is not None:
+                    return binding.surface_ref
+    except Exception as e:  # pragma: no cover - best-effort, never abort delivery
+        # A missing room registry is a real fault, not a quiet fallback:
+        # `init_db` creates these tables, so any database the daemon has opened
+        # has them, and a deployment without them is a failed migration or a
+        # partial restore. It also degrades delivery rather than merely
+        # narrowing it, so it must be visible. Latched to once per process,
+        # because this runs on every message and the alternative is a per-
+        # delivery repeat of the same line.
+        global _WARNED_NO_ROOM_TABLES
+        if "no such table" in str(e).lower():
+            if not _WARNED_NO_ROOM_TABLES:
+                _WARNED_NO_ROOM_TABLES = True
+                logger.warning(
+                    "Room registry tables are missing (%s) — Talk delivery is "
+                    "falling back to the pre-rooms ladder. This is logged once.",
+                    e,
+                )
+        else:
+            logger.warning("talk binding lookup failed for task %s: %s",
+                           getattr(task, "id", "?"), e)
+    return None
+
+
 def _resolve_talk_channel(config: "Config", task: "db.Task") -> str | None:
-    # Lazy import: scheduler imports the transport package at module load.
-    from ..scheduler import _talk_target_for_delivery
-    return _talk_target_for_delivery(config, task)
+    return talk_channel_for_task(config, task)
 
 
 def _resolve_one(
@@ -531,8 +683,9 @@ def resolve_delivery_plan(
 
     Precedence: explicit ``task.output_target`` > reply-to-origin (interactive
     source types) > source-type default > drop. For each destination the
-    channel is filled (Talk via the synthetic-email-token fallback that
-    ``_talk_target_for_delivery`` uses) or the destination is dropped (logged at
+    channel is filled (Talk via ``talk_channel_for_task``'s
+    column → binding → token → resolved-channel ladder) or the destination is
+    dropped (logged at
     WARNING) when its surface is unregistered or its user-level channel resolves
     to ``None``. Never raises into the caller.
     """
