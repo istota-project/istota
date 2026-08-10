@@ -594,6 +594,63 @@ def reply_to_email(
     return message_id
 
 
+# Socket timeout for SMTP. Without one the constructors inherit the global
+# default (None — block forever), and since the approval gate landed, `release`
+# is reachable from a browser tap through `asyncio.to_thread`, whose executor is
+# a small pool shared with the room stream's own DB reads. A hung SMTP server
+# would pin a worker indefinitely and, with a few of them, stall the UI for
+# every user. Generous rather than tight: a slow relay under load is ordinary,
+# and a spurious timeout on a message that was in fact delivered is the failure
+# this whole area is trying to avoid.
+_SMTP_TIMEOUT_SECONDS = 60
+
+
+def _close_smtp_after_delivery(server) -> None:
+    """Close a session whose message the server has already accepted.
+
+    Deliberately swallows. `smtplib.SMTP.__exit__` issues QUIT and raises
+    `SMTPResponseException` on any reply that is not 221 — and that runs *after*
+    `send_message` returned, meaning after the server accepted DATA and the mail
+    is irreversibly on its way. A relay answering QUIT with a 421 under load is
+    the ordinary way to get one.
+
+    Letting that propagate makes a delivered message indistinguishable from a
+    refused one, and the consequence is concrete rather than cosmetic:
+    `outbound_drafts.release` reverts its claim on *any* exception, so the row
+    goes back to `pending`, the approval card reports "not sent, retry", and the
+    retry sends the same message to the same recipients a second time. That is
+    precisely the class `DraftSentButUnrecorded` exists to prevent, and it
+    cannot fire here because the failure looks like a refusal from the outside.
+    """
+    try:
+        server.quit()
+    except Exception as e:  # noqa: BLE001 — the message is already delivered
+        logger.warning(
+            "SMTP teardown failed after the message was accepted (%s); "
+            "treating the send as successful, since it was", e,
+        )
+        try:
+            server.close()
+        except Exception:  # noqa: BLE001 — best-effort socket cleanup
+            pass
+
+
+def _open_smtp(config: EmailConfig):
+    """A logged-out but connected SMTP session, TLS already established."""
+    # Port 587 typically uses STARTTLS, port 465 uses implicit TLS
+    if config.smtp_port == 465:
+        context = ssl.create_default_context()
+        return smtplib.SMTP_SSL(
+            config.smtp_host, config.smtp_port, context=context,
+            timeout=_SMTP_TIMEOUT_SECONDS,
+        )
+    server = smtplib.SMTP(
+        config.smtp_host, config.smtp_port, timeout=_SMTP_TIMEOUT_SECONDS,
+    )
+    server.starttls()
+    return server
+
+
 def _send_smtp(
     msg: EmailMessage, config: EmailConfig, recipients: list[str] | None = None,
 ) -> None:
@@ -602,25 +659,32 @@ def _send_smtp(
     ``recipients`` is the explicit envelope recipient list (To + Cc + Bcc). The
     Bcc header is stripped before serialization so it is never transmitted while
     Bcc recipients still receive the mail.
+
+    Written as an explicit open/try/close rather than a ``with`` block so that
+    the teardown cannot turn a delivered message into a raised exception — see
+    :func:`_close_smtp_after_delivery`. Everything that may raise happens
+    *before* ``send_message`` returns; nothing after it does.
     """
     del msg["Bcc"]  # never transmit Bcc; recipients carry it in the envelope
     to_addrs = recipients if recipients is not None else None
 
-    # Port 587 typically uses STARTTLS, port 465 uses implicit TLS
-    if config.smtp_port == 465:
-        # Implicit TLS
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, context=context) as server:
-            server.login(config.effective_smtp_user, config.effective_smtp_password)
-            server.send_message(msg, to_addrs=to_addrs)
-    else:
-        # STARTTLS (typically port 587)
-        with smtplib.SMTP(config.smtp_host, config.smtp_port) as server:
-            server.starttls()
-            server.login(config.effective_smtp_user, config.effective_smtp_password)
-            server.send_message(msg, to_addrs=to_addrs)
+    server = _open_smtp(config)
+    try:
+        server.login(config.effective_smtp_user, config.effective_smtp_password)
+        server.send_message(msg, to_addrs=to_addrs)
+    except BaseException:
+        # Nothing was accepted, so the caller must see this. `close()` rather
+        # than `quit()`: QUIT expects a live session and would raise over the
+        # failure the caller needs.
+        try:
+            server.close()
+        except Exception:  # noqa: BLE001 — best-effort socket cleanup
+            pass
+        raise
 
-    # Save a copy to Sent Items folder via IMAP
+    # The message is delivered from here down. Nothing below may raise.
+    _close_smtp_after_delivery(server)
+    # Save a copy to Sent Items folder via IMAP (swallows its own failures).
     _save_to_sent(msg, config)
 
 

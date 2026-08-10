@@ -105,6 +105,64 @@ class TestSend:
         assert "c@out.com" in captured["to_addrs"]
         assert captured["msg"]["Cc"] == "c@out.com"
 
+    def test_a_teardown_failure_after_acceptance_is_not_a_failed_send(
+        self, econf,
+    ):
+        """QUIT runs after the server accepted DATA, so a non-221 reply there
+        must not read as a refusal.
+
+        `smtplib.SMTP.__exit__` raises `SMTPResponseException` on any non-221
+        QUIT reply — a relay answering 421 under load is the ordinary way to get
+        one — and by then the message is irreversibly on its way. Propagating it
+        makes a delivered message look refused, and `outbound_drafts.release`
+        reverts its claim on any exception: the row returns to `pending`, the
+        card offers Retry, and the retry sends the same mail a second time.
+        """
+        import smtplib
+
+        server = MagicMock()
+        server.quit.side_effect = smtplib.SMTPResponseException(
+            421, b"Service not available, closing transmission channel",
+        )
+        with patch("smtplib.SMTP", return_value=server), \
+             patch("istota.skills.email._save_to_sent"):
+            message_id = send_email(
+                to="a@out.com", subject="Hi", body="b", config=econf,
+            )
+
+        assert server.send_message.call_count == 1
+        assert message_id  # reported as sent, because it was
+        server.close.assert_called_once()  # socket still cleaned up
+
+    def test_a_failure_before_acceptance_still_raises(self, econf):
+        """The other direction: a refusal must not be swallowed with it."""
+        import smtplib
+
+        server = MagicMock()
+        server.send_message.side_effect = smtplib.SMTPRecipientsRefused(
+            {"a@out.com": (550, b"No such user")},
+        )
+        with patch("smtplib.SMTP", return_value=server), \
+             patch("istota.skills.email._save_to_sent"):
+            with pytest.raises(smtplib.SMTPRecipientsRefused):
+                send_email(to="a@out.com", subject="Hi", body="b", config=econf)
+
+        # Closed rather than QUIT — the session is not in a state to be quit.
+        server.close.assert_called_once()
+        server.quit.assert_not_called()
+
+    def test_the_smtp_socket_carries_a_timeout(self, econf):
+        """Unbounded, `release` from a browser tap could pin a thread-pool
+        worker forever and stall the room stream for every user."""
+        from istota.skills.email import _SMTP_TIMEOUT_SECONDS
+
+        server = MagicMock()
+        with patch("smtplib.SMTP", return_value=server) as ctor, \
+             patch("istota.skills.email._save_to_sent"):
+            send_email(to="a@out.com", subject="Hi", body="b", config=econf)
+
+        assert ctor.call_args.kwargs["timeout"] == _SMTP_TIMEOUT_SECONDS
+
     def test_attachments_added(self, econf, tmp_path):
         f = tmp_path / "report.txt"
         f.write_text("data")

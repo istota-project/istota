@@ -118,9 +118,11 @@ class TestEmailOperations:
     @patch("istota.skills.email._save_to_sent")
     @patch("istota.skills.email.smtplib.SMTP")
     def test_send_email(self, mock_smtp_class, mock_save, email_config):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         send_email(
             to="bob@example.com",
@@ -129,7 +131,7 @@ class TestEmailOperations:
             config=email_config,
         )
 
-        mock_smtp_class.assert_called_once_with("smtp.test.com", 587)
+        mock_smtp_class.assert_called_once_with("smtp.test.com", 587, timeout=60)
         mock_server.starttls.assert_called_once()
         mock_server.login.assert_called_once_with("user@test.com", "secret")
         mock_server.send_message.assert_called_once()
@@ -144,9 +146,11 @@ class TestEmailOperations:
     @patch("istota.skills.email._save_to_sent")
     @patch("istota.skills.email.smtplib.SMTP")
     def test_reply_with_threading(self, mock_smtp_class, mock_save, email_config):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         reply_to_email(
             to_addr="alice@example.com",
@@ -165,9 +169,11 @@ class TestEmailOperations:
     @patch("istota.skills.email._save_to_sent")
     @patch("istota.skills.email.smtplib.SMTP")
     def test_reply_already_has_re_prefix(self, mock_smtp_class, mock_save, email_config):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         reply_to_email(
             to_addr="alice@example.com",
@@ -187,9 +193,11 @@ class TestEmailOperations:
         self, mock_smtp_class, mock_save, email_config
     ):
         """When references is None but in_reply_to is set, use it as References."""
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         reply_to_email(
             to_addr="alice@example.com",
@@ -762,9 +770,11 @@ class TestSendEmailSanitizesSubject:
     @patch("istota.skills.email._save_to_sent")
     @patch("istota.skills.email.smtplib.SMTP")
     def test_newlines_stripped_from_subject(self, mock_smtp_class, mock_save, email_config):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         send_email(
             to="bob@example.com",
@@ -780,9 +790,11 @@ class TestSendEmailSanitizesSubject:
     @patch("istota.skills.email._save_to_sent")
     @patch("istota.skills.email.smtplib.SMTP")
     def test_reply_newlines_stripped_from_subject(self, mock_smtp_class, mock_save, email_config):
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         reply_to_email(
             to_addr="alice@example.com",
@@ -799,9 +811,11 @@ class TestSendEmailSanitizesSubject:
     @patch("istota.skills.email.smtplib.SMTP")
     def test_reply_sanitizes_threading_headers(self, mock_smtp_class, mock_save, email_config):
         """Folded newlines in References/In-Reply-To from original email are stripped."""
-        mock_server = MagicMock()
-        mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
-        mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
+        # `_send_smtp` opens the session explicitly rather than with `with`, so
+        # that a QUIT failure after the server accepted the message cannot be
+        # raised as though the send had been refused. The session is therefore
+        # the constructor's return value, not an `__enter__` result.
+        mock_server = mock_smtp_class.return_value
 
         # Simulate folded References header from original email
         folded_refs = "<msg1@example.com>\r\n <msg2@example.com>\r\n <msg3@example.com>"
