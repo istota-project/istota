@@ -3847,6 +3847,10 @@ def run_cleanup_checks(config: Config) -> None:
     # block on the write lock `expire_stale_confirmations` takes, for the full
     # busy timeout, per expired task, on the dispatch loop.
     expiry_notices: list[tuple[str, str, str | None]] = []
+    # The ancient-pending notice, buffered for the same reason. It used to be
+    # sent inline because a bare `talk` route touched no database; the ISSUE-242
+    # transcript mirror made that untrue.
+    ancient_notices: list[tuple[str, str, str | None]] = []
 
     with db.get_db(config.db_path) as conn:
         # 1. Expire stale confirmations; the user is told after the transaction.
@@ -3899,20 +3903,20 @@ def run_cleanup_checks(config: Config) -> None:
             # ("A task you submitted…") isn't even true for them.
             if task_info["source_type"] in _AUTOMATED_SOURCE_TYPES:
                 continue
-            # Notify user via Talk if conversation_token is set
+            # Buffered, not sent here — same rule as `expiry_notices` above, and
+            # now for the same reason on *both* legs of the route. A `web`
+            # destination always opened a second connection to this database;
+            # since ISSUE-242 a `talk` one does too (the transcript mirror), so
+            # sending inside this write transaction would block the second
+            # connection until the busy timeout on the dispatch thread.
             if task_info["conversation_token"] and config.nextcloud.url:
-                try:
-                    msg = (
-                        "A task you submitted was cancelled because it was pending too long "
-                        "without being processed. Please try again or contact support if this "
-                        "keeps happening."
-                    )
-                    send_notification(
-                        config, task_info["user_id"], msg,
-                        conversation_token=task_info["conversation_token"],
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to notify user about failed task: {e}")
+                ancient_notices.append((
+                    task_info["user_id"],
+                    "A task you submitted was cancelled because it was pending too long "
+                    "without being processed. Please try again or contact support if this "
+                    "keeps happening.",
+                    task_info["conversation_token"],
+                ))
 
         # 4. Clean up old completed tasks
         deleted_count = db.cleanup_old_tasks(conn, sched.task_retention_days)
@@ -3946,6 +3950,13 @@ def run_cleanup_checks(config: Config) -> None:
             )
         except Exception as e:
             logger.error(f"Failed to notify user about expired confirmation: {e}")
+
+    # 4d. And about the ancient pending tasks that were just auto-failed.
+    for user_id, message, token in ancient_notices:
+        try:
+            send_notification(config, user_id, message, conversation_token=token)
+        except Exception as e:
+            logger.error(f"Failed to notify user about failed task: {e}")
 
     # 5. Clean up old emails from IMAP (outside db context)
     if config.email.enabled and sched.email_retention_days > 0:

@@ -650,90 +650,65 @@ async def handle_confirmation_reply(
     """
     Check if a message is a confirmation reply to a pending task.
 
-    Three-path lookup:
-    1. Reply to specific confirmation message (by talk_response_id)
-    2. Same-conversation confirmation (existing behavior)
-    3. Cross-conversation fallback by user_id (for email gates)
+    Talk-specific half only. The word lists, the three-path lookup and the ack
+    text live in ``confirmations`` (ISSUE-243) so the web composer answers
+    identically; what stays here is reading the reply's Talk parent id, posting
+    the ack to the room, and recording the exchange in that room's canonical
+    transcript so the web view of the same room shows it too (ISSUE-242).
 
-    Returns True if the message was handled as a confirmation.
+    Returns True if the message was handled as a confirmation. False means it
+    was not an answer — a bare "yes" with nothing parked is an ordinary message
+    and must fall through to task creation.
     """
-    # Check for affirmative/negative responses
-    content_lower = content.strip().lower()
-    # "yes trust" variants: confirm + add sender to trusted list
-    trust_sender = content_lower in ("yes trust", "yes, trust", "y trust")
-    affirmative = trust_sender or content_lower in ("yes", "y", "ok", "okay", "proceed", "confirm", "do it", "go ahead")
-    negative = content_lower in ("no", "n", "cancel", "abort", "stop", "don't", "nevermind")
-
-    if not (affirmative or negative):
+    answer = confirmations.parse_answer(content)
+    if answer is None:
         return False
 
-    # Path A: reply to specific confirmation message
-    pending_task = None
-    if reply_to_talk_id:
-        pending_task = db.get_pending_confirmation_by_response_id(conn, reply_to_talk_id)
+    # A per-surface ref maps to the canonical room — a promoted web room's Talk
+    # token is not its own token — and a task parks under the *canonical* one.
+    # Resolving before the lookup rather than only before the transcript write
+    # is what keeps Path B working there: unresolved, a same-room answer misses
+    # and falls to Path C, which with a second question open answers neither.
+    room_token = (
+        db.resolve_room_token(conn, "talk", conversation_token)
+        or conversation_token
+    )
 
-    # Path B: same-conversation confirmation (existing behavior)
-    if not pending_task:
-        pending_task = db.get_pending_confirmation(conn, conversation_token)
-
-    # Path C: cross-conversation fallback by user_id (email gates). Unlike A
-    # and B this one is not bound to a specific question, so it may only fire
-    # when there is exactly one — with a burst of gated mail, a bare "yes"
-    # would otherwise land on whichever arrived last rather than on the one the
-    # user is answering, approving the wrong untrusted email (ISSUE-241). The
-    # ambiguity is *handled*, not passed through: falling back to task creation
-    # would turn "yes" into a prompt.
-    if not pending_task:
-        open_for_user = confirmations.pending_for_user(conn, actor_id)
-        if len(open_for_user) > 1:
-            listing = confirmations.format_listing(conn, open_for_user)
-            try:
-                client = get_talk_client(config)
-                await client.send_message(
-                    conversation_token,
-                    f"{len(open_for_user)} things are waiting for your "
-                    f"confirmation — say which:\n{listing}\n\n"
-                    "Answer with `!confirm <task-id>` or `!confirm <task-id> no`.",
-                )
-            except Exception:
-                logger.warning(
-                    "Could not post the ambiguous-confirmation listing to %s",
-                    conversation_token, exc_info=True,
-                )
-            return True
-        if open_for_user:
-            pending_task = open_for_user[0]
-
-    if not pending_task:
-        return False
-
-    # Verify the reply is from the same user who owns the pending task
-    if pending_task.user_id != actor_id:
-        return False
-
-    if affirmative:
-        trusted = confirmations.approve(
-            conn, pending_task, trust_sender=trust_sender,
+    res = confirmations.resolve(
+        conn, actor_id,
+        conversation_token=room_token,
+        talk_response_id=reply_to_talk_id,
+    )
+    if res.ambiguous:
+        # Nothing decided, so nothing recorded — see the web sibling.
+        await _post_ack(
+            config, conversation_token,
+            confirmations.ambiguity_listing(conn, res.ambiguous),
         )
-        if trusted:
-            email_record = db.get_email_for_task(conn, pending_task.id)
-            if email_record:
-                try:
-                    client = get_talk_client(config)
-                    await client.send_message(
-                        conversation_token,
-                        f"Trusted {email_record.sender_email} — future emails will be processed automatically.",
-                    )
-                except Exception:
-                    pass
-    else:
-        confirmations.decline(conn, pending_task)
+        return True
+    if res.task is None:
+        return False
 
-        # Notify user
-        try:
-            client = get_talk_client(config)
-            await client.send_message(conversation_token, "Task cancelled.")
-        except Exception:
-            pass
-
+    ack = confirmations.apply_answer(conn, res.task, answer)
+    await _post_ack(config, conversation_token, ack)
+    confirmations.record_exchange(
+        conn, room_token, answer_text=content, ack=ack, origin_surface="talk",
+    )
     return True
+
+
+async def _post_ack(config: Config, conversation_token: str, ack: str) -> None:
+    """Post a confirmation ack to Talk. Best-effort.
+
+    The answer has already been recorded and is what the user asked for, so a
+    failed post must not report the reply as unhandled — that would fall
+    through to task creation and turn "yes" into a prompt.
+    """
+    try:
+        client = get_talk_client(config)
+        await client.send_message(conversation_token, ack)
+    except Exception:
+        logger.warning(
+            "Could not post the confirmation ack to %s", conversation_token,
+            exc_info=True,
+        )

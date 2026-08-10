@@ -8,6 +8,16 @@ carried its own version of "approve this", which is how the transcript-mirror
 restore came to exist in none of them. The verbs live here so the three cannot
 drift.
 
+ISSUE-243 moved the last two pieces Talk still kept private in with them: the
+word lists a bare "yes" is read against (:func:`parse_answer`) and the
+three-path lookup that decides *which* question it answers (:func:`resolve`).
+Web had neither, so "yes" typed there started a task whose prompt was the word
+"yes" — and, via ``_chat_create_web_task``'s room-scoped cancel, discarded the
+very question it was meant to approve. The acks came with them
+(:func:`apply_answer`, :func:`ambiguity_listing`): Talk used to say nothing at
+all on a plain approve, and one prompt read on two surfaces should not have two
+answers.
+
 Nothing in here decides *whether* to ask. That is the gate in
 ``transport/email/inbound.py``, and it stays there.
 """
@@ -15,6 +25,7 @@ Nothing in here decides *whether* to ask. That is the gate in
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from . import db
 
@@ -82,6 +93,21 @@ def format_listing(conn, tasks: list[db.Task]) -> str:
     return "\n".join(lines)
 
 
+def ambiguity_listing(conn, tasks) -> str:
+    """The whole "several are open — say which" reply, not just its lines.
+
+    One string rather than three copies of the same sentence: the Talk poller,
+    the web composer and ``!confirm`` all reach this state, and a listing that
+    names a different command on one surface than another is worse than none.
+    """
+    tasks = list(tasks)
+    return (
+        f"{len(tasks)} things are waiting for your confirmation — say which:\n"
+        f"{format_listing(conn, tasks)}\n\n"
+        "Answer with `!confirm <task-id>` or `!confirm <task-id> no`."
+    )
+
+
 def approve(conn, task: db.Task, *, trust_sender: bool = False) -> bool:
     """Release a held task for execution.
 
@@ -121,6 +147,168 @@ def decline(conn, task: db.Task) -> None:
     """Discard a held task. The withheld transcript mirror stays withheld."""
     db.cancel_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User cancelled task")
+
+
+# The words a bare answer may be spelled with. Fixed lists rather than a
+# classifier: this runs on every inbound message on every surface, and the cost
+# of a false positive is an unrelated message being swallowed as an
+# authorization decision.
+_TRUST = ("yes trust", "yes, trust", "y trust")
+_YES = ("yes", "y", "ok", "okay", "proceed", "confirm", "do it", "go ahead")
+_NO = ("no", "n", "cancel", "abort", "stop", "don't", "nevermind")
+
+
+@dataclass(frozen=True)
+class Answer:
+    """What a bare "yes" / "no" / "yes trust" says."""
+
+    approve: bool
+    trust_sender: bool
+
+
+def parse_answer(text: str) -> Answer | None:
+    """Read a message as an answer to a held task, or None if it isn't one.
+
+    Exact-match against the fixed word lists, not a prefix or substring test: a
+    message that merely *starts* with "no" is a message, and swallowing it as
+    an answer loses it. None means "not an answer" and the caller must fall
+    through to normal task creation — "yes" is also a perfectly ordinary reply
+    to a question the bot asked in prose, and only a parked task makes it a
+    verb. That is why matching here does not by itself suppress task creation;
+    only :func:`resolve` finding a question may.
+
+    Surrounding whitespace is stripped and nothing else. Collapsing *internal*
+    whitespace too would make ``"do  it"`` an answer, and every widening here
+    widens the set of ordinary messages that can be swallowed as an
+    authorization decision — the direction this function is least willing to
+    move in.
+    """
+    t = text.strip().lower()
+    if t in _TRUST:
+        return Answer(approve=True, trust_sender=True)
+    if t in _YES:
+        return Answer(approve=True, trust_sender=False)
+    if t in _NO:
+        return Answer(approve=False, trust_sender=False)
+    return None
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """Which held task an answer lands on. At most one field is set."""
+
+    task: db.Task | None = None
+    ambiguous: tuple[db.Task, ...] = ()
+
+
+def resolve(
+    conn,
+    user_id: str,
+    *,
+    conversation_token: str | None = None,
+    talk_response_id: int | None = None,
+) -> Resolution:
+    """The three-path lookup a bare answer is matched through.
+
+    A: an explicit reply to the prompt message, addressed by the Talk id the
+    prompt was posted under. B: a question parked in this same conversation.
+    C: the user's single open question anywhere — bounded to *one*, because a
+    bare "yes" with several open would otherwise approve whichever arrived last
+    rather than the one being answered (ISSUE-241). The ambiguity is returned,
+    not resolved; the caller asks which.
+
+    The ownership check lives here rather than at the call sites. Path C
+    already filters by user, so it only ever mattered for A and B — and both
+    are reachable with an id the answerer does not own.
+    """
+    task = None
+    if talk_response_id:
+        task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
+    if task is None and conversation_token:
+        task = db.get_pending_confirmation(conn, conversation_token)
+    if task is None:
+        open_for_user = pending_for_user(conn, user_id)
+        if len(open_for_user) > 1:
+            return Resolution(ambiguous=tuple(open_for_user))
+        if open_for_user:
+            task = open_for_user[0]
+    if task is not None and task.user_id != user_id:
+        return Resolution()
+    return Resolution(task=task)
+
+
+def apply_answer(conn, task: db.Task, answer: Answer) -> str:
+    """Act on ``answer`` and return the ack every surface posts.
+
+    The ack text is shared deliberately. Talk used to stay silent on a plain
+    approve — the only feedback was the task's own result arriving minutes
+    later — while the web endpoints and ``!confirm`` each said something else.
+    One prompt reaches a user on whichever surface they read, so one answer
+    should read the same wherever they give it.
+    """
+    if not answer.approve:
+        decline(conn, task)
+        return "Task cancelled."
+
+    trusted = approve(conn, task, trust_sender=answer.trust_sender)
+    if trusted:
+        record = db.get_email_for_task(conn, task.id)
+        if record is not None:
+            return (
+                f"Trusted {record.sender_email} — future emails will be "
+                "processed automatically."
+            )
+    return "Confirmed."
+
+
+def record_exchange(
+    conn,
+    room_token: str | None,
+    *,
+    answer_text: str,
+    ack: str,
+    origin_surface: str,
+    client_msg_id: str | None = None,
+) -> tuple[int | None, int | None]:
+    """Write the answer and its ack into a room's canonical transcript.
+
+    An inline-only exchange matches what a ``!command`` does, and that is the
+    wrong precedent here: a confirmation is an authorization decision, and
+    "did I approve that untrusted email?" deserves an answer after a refresh.
+    Storing both halves also makes an answer given on one surface visible in
+    the other's view of the same room, which is the whole point of pairing this
+    with the Talk→room mirror.
+
+    ``task_id`` is left NULL, following ``!steer``: the ``(room, role,
+    task_id)`` unique index reserves the per-task user slot for the original
+    prompt, and LLM-context reconstruction joins on ``task_id`` — so a
+    NULL-task_id row is display-only and never re-paired as a phantom turn.
+
+    Existence-only, like every other room write: a synthetic email-thread token
+    is not a room and approving mail must not mint one in anyone's sidebar.
+    Best-effort — the answer has already been recorded and is what the user
+    asked for. Returns the two ``messages.id``s, or ``(None, None)``.
+    """
+    if not room_token:
+        return (None, None)
+    try:
+        if db.get_room(conn, room_token) is None:
+            return (None, None)
+        user_msg_id = db.add_message(
+            conn, room_token, role="user", body=answer_text,
+            origin_surface=origin_surface, client_msg_id=client_msg_id,
+        )
+        system_msg_id = db.add_message(
+            conn, room_token, role="system", body=ack,
+            origin_surface=origin_surface,
+        )
+        return (user_msg_id, system_msg_id)
+    except Exception:
+        logger.warning(
+            "Failed to record the confirmation exchange in %r", room_token,
+            exc_info=True,
+        )
+        return (None, None)
 
 
 def _restore_transcript_mirror(conn, task: db.Task) -> None:

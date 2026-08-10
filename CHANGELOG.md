@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The notice that a request timed out never arrived for email, and said nothing about what had expired. It now goes to your alert destination and names the sender and subject, so the message can be found again in the mailbox.
 
+- A Talk room and its web view are one room, but only your conversations crossed over. Alerts, heartbeat notices, reminders and the approval question for held mail landed in Talk alone, so reading in the dashboard you saw nothing — and for the approval question that meant the mail was dropped hours later without you ever being asked. Anything posted to a room now shows in both views of it.
+
+- Replying "yes" in web chat started a new task saying "yes" instead of answering the question, and in the room the question was asked in it discarded that question outright. A bare yes or no now answers wherever you type it, `yes trust` included, and the exchange stays in the transcript after a reload rather than vanishing. Approving still says so on both surfaces — Talk used to say nothing at all until the task's own result turned up.
+
 ## [0.39.0] - 2026-08-09
 
 ### Added

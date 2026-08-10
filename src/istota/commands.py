@@ -484,29 +484,85 @@ async def cmd_confirm(ctx: CommandContext):
     elif len(pending) == 1:
         task = pending[0]
     else:
-        return (
-            f"{len(pending)} things are waiting for your confirmation — say which:\n"
-            f"{confirmations.format_listing(conn, pending)}\n\n"
-            "Answer with `!confirm <task-id>` or `!confirm <task-id> no`."
-        )
+        # Nothing decided, so nothing recorded — same rule as the bare-answer
+        # path on both surfaces.
+        return confirmations.ambiguity_listing(conn, pending)
 
+    # The wording stays addressed — `#id` and a label — rather than adopting the
+    # bare "Confirmed." a natural-language answer gets. This command exists to
+    # answer a *named* question, most often one of several, so saying which one
+    # was answered is the whole point of having typed it.
     label = confirmations.describe(conn, task)
     if verb == "decline":
         confirmations.decline(conn, task)
-        conn.commit()
-        return f"Declined #{task.id} — {label}. Nothing was run."
+        return _record_confirm_exchange(
+            ctx, f"Declined #{task.id} — {label}. Nothing was run.",
+        )
 
     trusted = confirmations.approve(conn, task, trust_sender=(verb == "trust"))
-    conn.commit()
     if trusted:
-        return (
+        return _record_confirm_exchange(
+            ctx,
             f"Confirmed #{task.id} — {label}. Future mail from this sender is "
-            "processed without asking."
+            "processed without asking.",
         )
     # Deliberately keyed on what happened, not on what was asked: `trust` on a
     # task with no recorded sender trusts nobody, and claiming otherwise would
     # leave the user believing a control is in place that isn't.
-    return f"Confirmed #{task.id} — {label}. Running it now."
+    return _record_confirm_exchange(
+        ctx, f"Confirmed #{task.id} — {label}. Running it now.",
+    )
+
+
+# Surfaces whose `role='user'` rows the web transcript actually renders
+# (`TRANSCRIPT_SURFACE_FILTER`). Recording an answer from anywhere else stores
+# an invisible question above a visible ack, which is worse than storing
+# nothing — a CLI or REPL `!confirm` therefore leaves no transcript row.
+_TRANSCRIPT_SURFACES = ("web", "talk", "email")
+
+
+def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult":
+    """Commit the answer and leave it in the room transcript.
+
+    A confirmation is an authorization decision, so the exchange is durable
+    however it was given — typed as `!confirm` here, or as a bare "yes" through
+    `confirmations.parse_answer` on either surface. Without this the two ways
+    of answering the same question leave different records, and the answer is
+    gone on the next reload. Usage errors ("nothing is waiting", an unknown id)
+    and the ambiguity listing deliberately do not record: neither decides
+    anything.
+
+    The message ids ride back on `result_data` under the same
+    `confirmation_answered` kind the bare-answer path uses, because the web
+    client stamps them onto the rows it has already drawn. Without that, the
+    room stream's echo of the two stored rows appends a second copy of each —
+    they carry no task id, so `msg_id` is the only dedup key available.
+    """
+    from . import confirmations
+
+    if ctx.surface not in _TRANSCRIPT_SURFACES:
+        ctx.conn.commit()
+        return CommandResult(handled=True, text=reply)
+
+    room_token = (
+        db.resolve_room_token(ctx.conn, ctx.surface, ctx.conversation_token)
+        or ctx.conversation_token
+    )
+    user_msg_id, system_msg_id = confirmations.record_exchange(
+        ctx.conn, room_token,
+        answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
+        ack=reply, origin_surface=ctx.surface,
+    )
+    ctx.conn.commit()
+    return CommandResult(
+        handled=True,
+        text=reply,
+        data={
+            "kind": "confirmation_answered",
+            "user_msg_id": user_msg_id,
+            "system_msg_id": system_msg_id,
+        },
+    )
 
 
 # Max steers that may sit `pending` (undrained) on one task at once. A steer is

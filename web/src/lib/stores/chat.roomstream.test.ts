@@ -349,6 +349,43 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('dedups the echo of a confirmation answered from the composer', async () => {
+    // ISSUE-243's exchange is the one inline result that is also durable: the
+    // server writes the answer and the ack into `messages`, so both come back
+    // over this stream. Neither carries a task id — they are display-only rows
+    // like a `!steer` — so the `msg_id` the send response hands back is the
+    // only thing standing between one exchange and two copies of it.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomMessages.mockResolvedValue(emptyHistory);
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.sendChatMessage.mockResolvedValue({
+      ok: true,
+      status: 200,
+      task_id: null,
+      inline_result: 'Confirmed.',
+      command_data: { kind: 'confirmation_answered', user_msg_id: 71, system_msg_id: 72 },
+    });
+    const s = await freshSession();
+    await s.init();
+    await s.send('yes');
+    expect(get(s.messages)).toHaveLength(2);
+
+    queueEvents(
+      [
+        // No task id on either — they are display-only rows, which is exactly
+        // why the msg_id guard is the only one that can fire.
+        row(71, 't1', { role: 'user', text: 'yes' }),
+        row(72, 't1', { role: 'system', text: 'Confirmed.' }),
+      ],
+      72,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(get(s.messages)).toHaveLength(2);
+    s.teardown();
+  });
+
   it('adopts the canonical body when deduping our own user turn', async () => {
     // The server does not always store what was typed: an attachment-only send
     // becomes a descriptor and a `!model …` prefix is stripped. Keeping the raw
