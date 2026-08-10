@@ -2357,6 +2357,12 @@ def _drafts_snapshot(username: str) -> list[dict]:
     shared, and a co-member must not be handed the body and recipients of
     someone else's held mail; the client places each card by `room_token`, and a
     NULL one renders in the global list.
+
+    **Setting ``room_stream_room_check_seconds = 0`` disables this too**, not
+    only the room-metadata diff, because the two share that tick. `GET
+    /chat/events` still carries the set, so a client polling keeps working; an
+    SSE-only client on such an instance learns about a held draft on its next
+    reload. Worth knowing before turning the knob off, since nothing logs it.
     """
     from . import db, outbound_drafts  # noqa: PLC0415
 
@@ -2414,10 +2420,18 @@ async def chat_room_events(
     # deletion tail does: on the polling path a draft would otherwise be
     # invisible until the next full reload. Unconditional here — a snapshot
     # endpoint has no previous state to diff against, unlike the stream.
+    #
+    # The key is always present, and `drafts_unavailable` rather than a missing
+    # key carries a failed read. `_drafts_snapshot` runs on the 2s stream busy
+    # timeout, so `OperationalError` under lock contention is the ordinary
+    # failure rather than an exotic one — and a client that read an absent key
+    # as "none held" would clear the approval cards every time the DB was busy.
+    batch["drafts"] = []
     try:
         batch["drafts"] = await asyncio.to_thread(_drafts_snapshot, username)
     except Exception:  # noqa: BLE001 — drafts must not fail the event snapshot
         logger.warning("chat events: drafts unavailable", exc_info=True)
+        batch["drafts_unavailable"] = True
     return batch
 
 
@@ -5229,21 +5243,27 @@ def _draft_actions(conn, task_id: int | None) -> list[str]:
     A draft routinely outlives its task (retention prunes at seven days, and a
     hold is designed to sit indefinitely), so a missing row is ordinary and
     yields an empty list rather than an error.
+
+    **Reads `actions_taken` and deliberately not `execution_trace`**, unlike
+    `_trace_tool_descriptions`' callers in the transcript. The two carry the
+    same strings for this purpose — the brains append the identical
+    `_describe_tool_use` output to both (`brain/native.py:827-835`) — but
+    `execution_trace` also carries every text and thinking entry, which makes it
+    the largest column on the row. This runs per draft on every stream tick on
+    every open connection, so pulling and JSON-parsing that column would be the
+    dominant cost of the whole feature in exchange for nothing.
     """
     if not task_id:
         return []
     try:
         row = conn.execute(
-            "SELECT actions_taken, execution_trace FROM tasks WHERE id = ?",
-            (task_id,),
+            "SELECT actions_taken FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
     except Exception:  # noqa: BLE001 — the card renders without it
         return []
     if row is None:
         return []
-    return _trace_tool_descriptions(
-        _row_get(row, "execution_trace"), _row_get(row, "actions_taken"),
-    )
+    return _trace_tool_descriptions(None, _row_get(row, "actions_taken"))
 
 
 def _draft_dict(draft, actions: list[str]) -> dict:
@@ -5361,8 +5381,30 @@ async def chat_approve_draft(
     except outbound_drafts.DraftNotFound:
         return JSONResponse({"error": "not found"}, status_code=404)
     except outbound_drafts.DraftNotPending as e:
-        return JSONResponse({"error": str(e)}, status_code=409)
-    except Exception as e:  # noqa: BLE001 — SMTP or config; the row stays pending
+        # `state` so the card can tell the two apart: a row that is `sending`
+        # means "your mail is going out right now, do not press again", while
+        # `discarded` or `sent` means the decision was already made elsewhere.
+        # Both produce this 409 and they call for opposite wording.
+        current = await asyncio.to_thread(_chat_owned_draft, draft_id, username)
+        return JSONResponse(
+            {"error": str(e), "state": current.status if current else "gone"},
+            status_code=409,
+        )
+    except outbound_drafts.DraftError as e:
+        # Every remaining DraftError is permanent: email is not configured on
+        # this instance, an attachment no longer resolves inside the owner's
+        # workspace, a stored JSON column is corrupt, or a `sent` row records no
+        # Message-ID. None of them get better by pressing the button again, and
+        # `.claude/rules/web-chat.md` sets the rule — "Retry is withheld where it
+        # cannot succeed". 500 rather than 502: the fault is local, not the
+        # relay's. Caught after the three subclasses above and before the bare
+        # Exception, so the transport case keeps its own shape.
+        logger.warning("approving draft %s refused: %s", draft_id, e)
+        return JSONResponse(
+            {"error": str(e), "sent": False, "retryable": False},
+            status_code=500,
+        )
+    except Exception as e:  # noqa: BLE001 — SMTP transport; the row stays pending
         logger.warning("approving draft %s failed: %s", draft_id, e)
         return JSONResponse(
             {"error": str(e), "sent": False, "retryable": True}, status_code=502,
@@ -5377,11 +5419,17 @@ async def chat_edit_draft(
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ):
-    """Replace a pending draft's body.
+    """Replace a pending draft's body, and optionally its content type.
 
-    Only the body. Recipients and threading are deliberately not editable — an
-    editable recipient list is a gate the user can be talked through, which is
-    the failure this whole feature exists to prevent.
+    The body, and the flag saying how to interpret it. Recipients and threading
+    are deliberately not editable — an editable recipient list is a gate the
+    user can be talked through, which is the failure this whole feature exists
+    to prevent. `html` is not part of that argument and has to move with the
+    body: `release` sends `content_type="html" if draft.html else "plain"`, so a
+    user retyping an HTML draft in a plain textarea would otherwise have their
+    newlines collapsed and a typed `<` parsed as markup — on an irreversible
+    send, and against the one promise this feature makes, that approving sends
+    exactly what was read.
     """
     from . import db, outbound_drafts  # noqa: PLC0415
 
@@ -5398,6 +5446,9 @@ async def chat_edit_draft(
             {"error": f"body exceeds {_MAX_DRAFT_BODY_CHARS} characters"},
             status_code=400,
         )
+    html = data.get("html")
+    if html is not None and not isinstance(html, bool):
+        return JSONResponse({"error": "html must be a boolean"}, status_code=400)
 
     draft = await asyncio.to_thread(_chat_owned_draft, draft_id, username)
     if draft is None:
@@ -5405,7 +5456,7 @@ async def chat_edit_draft(
 
     def _edit() -> dict | None:
         with db.get_db(_config.db_path) as conn:
-            outbound_drafts.edit_body(conn, draft_id, body)
+            outbound_drafts.edit_body(conn, draft_id, body, html=html)
             fresh = outbound_drafts.get(conn, draft_id)
             actions = _draft_actions(conn, fresh.task_id) if fresh else []
         return _draft_dict(fresh, actions) if fresh else None
@@ -5416,6 +5467,15 @@ async def chat_edit_draft(
         return JSONResponse({"error": "not found"}, status_code=404)
     except outbound_drafts.DraftNotPending as e:
         return JSONResponse({"error": str(e)}, status_code=409)
+    except outbound_drafts.DraftCorrupt:
+        # A malformed stored column is a server-side data fault the client
+        # cannot fix by changing its request, so it is neither a 400 nor
+        # something to echo back — the message names the column and its
+        # contents. Logged whole, reported generically.
+        logger.error("draft %s has a corrupt column", draft_id, exc_info=True)
+        return JSONResponse(
+            {"error": "this draft could not be read"}, status_code=500,
+        )
     except outbound_drafts.DraftError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     if updated is None:

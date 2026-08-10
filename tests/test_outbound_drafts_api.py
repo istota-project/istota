@@ -11,6 +11,7 @@ list and a subject the user has not yet decided to send, so a route that answers
 answers 404 instead, indistinguishable from an id that was never issued.
 """
 
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -201,12 +202,26 @@ class TestListDrafts:
         # Basenames only — the stored values are daemon-side host paths.
         assert draft["attachments"] == ["notes.pdf"]
 
-    async def test_a_sent_draft_leaves_the_list(self, client, app, db_path):
+    async def test_a_discarded_draft_leaves_the_list(self, client, app, db_path):
         draft_id = _hold(db_path)
         with db.get_db(db_path) as conn:
             outbound_drafts.discard(conn, draft_id)
             conn.commit()
         cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
+
+        assert resp.json()["drafts"] == []
+
+    async def test_a_sent_draft_leaves_the_list(self, client, app, db_path):
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        with patch("istota.skills.email.send_email") as send:
+            send.return_value = "<sent@example.com>"
+            await client.post(
+                f"/istota/api/chat/drafts/{draft_id}/approve",
+                cookies=cookies, headers=ORIGIN,
+            )
 
         resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
 
@@ -389,6 +404,67 @@ class TestEdit:
         assert resp.status_code == 200
         assert send.call_args.kwargs["body"] == "the version the user read"
 
+    async def test_the_html_flag_moves_with_the_body(self, client, app, db_path):
+        """`release` picks the content type off this flag, so a user retyping an
+        HTML draft in a plain textarea must be able to say so — otherwise their
+        newlines collapse and a typed `<` is parsed as markup, irreversibly."""
+        draft_id = _hold(db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET html = 1 WHERE id = ?", (draft_id,),
+            )
+            conn.commit()
+        cookies = await _login(client)
+
+        resp = await client.patch(
+            f"/istota/api/chat/drafts/{draft_id}",
+            json={"body": "plain text with <brackets>", "html": False},
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["draft"]["html"] is False
+        with patch("istota.skills.email.send_email") as send:
+            send.return_value = "<sent@example.com>"
+            await client.post(
+                f"/istota/api/chat/drafts/{draft_id}/approve",
+                cookies=cookies, headers=ORIGIN,
+            )
+        assert send.call_args.kwargs["content_type"] == "plain"
+
+    async def test_omitting_html_leaves_the_flag_alone(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET html = 1 WHERE id = ?", (draft_id,),
+            )
+            conn.commit()
+        cookies = await _login(client)
+
+        resp = await client.patch(
+            f"/istota/api/chat/drafts/{draft_id}",
+            json={"body": "<p>still html</p>"},
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.json()["draft"]["html"] is True
+
+    async def test_a_non_boolean_html_is_rejected(self, client, app, db_path):
+        draft_id = _hold(db_path, body="original")
+        cookies = await _login(client)
+
+        resp = await client.patch(
+            f"/istota/api/chat/drafts/{draft_id}",
+            json={"body": "edited", "html": "yes"},
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 400
+        with db.get_db(db_path) as conn:
+            assert outbound_drafts.get(conn, draft_id).body == "original"
+
     async def test_patch_on_a_discarded_row_is_refused(
         self, client, app, db_path,
     ):
@@ -541,6 +617,49 @@ class TestApprove:
         assert payload["retryable"] is False
         assert payload["message_id"] == "<gone@example.com>"
 
+    async def test_a_permanent_refusal_is_not_offered_a_retry(
+        self, client, app, db_path,
+    ):
+        """`.claude/rules/web-chat.md`: retry is withheld where it cannot
+        succeed. Email being unconfigured, an attachment that no longer resolves
+        and a corrupt column are all permanent — pressing the button again
+        cannot fix any of them."""
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+
+        with patch("istota.outbound_drafts.release") as release:
+            release.side_effect = outbound_drafts.DraftError(
+                "email sending is not configured on this instance",
+            )
+            resp = await client.post(
+                f"/istota/api/chat/drafts/{draft_id}/approve",
+                cookies=cookies, headers=ORIGIN,
+            )
+
+        assert resp.status_code == 500
+        assert resp.json()["retryable"] is False
+        assert resp.json()["sent"] is False
+        # Still answerable — the row was never claimed.
+        assert _status(db_path, draft_id) == "pending"
+
+    async def test_a_409_says_which_state_it_is_in(self, client, app, db_path):
+        """`sending` and `discarded` both produce a 409 and call for opposite
+        wording: one means "going out right now, do not press again", the other
+        means "already binned"."""
+        draft_id = _hold(db_path)
+        with db.get_db(db_path) as conn:
+            outbound_drafts.discard(conn, draft_id)
+            conn.commit()
+        cookies = await _login(client)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/approve",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "discarded"
+
     async def test_approving_a_discarded_draft_is_409(
         self, client, app, db_path,
     ):
@@ -649,6 +768,32 @@ class TestEventTail:
         resp = await client.get("/istota/api/chat/events", cookies=cookies)
 
         assert resp.json()["drafts"] == []
+
+    async def test_a_failed_read_says_so_rather_than_dropping_the_key(
+        self, client, app, db_path,
+    ):
+        """A client reading an absent key as "none held" would clear the
+        approval cards on every transient lock — and the snapshot runs on the
+        2s stream busy timeout, so contention is the ordinary failure."""
+        import istota.web_app as mod
+        _hold(db_path, room_token="rm1")
+        cookies = await _login(client)
+
+        with patch.object(mod, "_drafts_snapshot") as snap:
+            snap.side_effect = sqlite3.OperationalError("database is locked")
+            resp = await client.get("/istota/api/chat/events", cookies=cookies)
+
+        assert resp.status_code == 200
+        assert resp.json()["drafts"] == []
+        assert resp.json()["drafts_unavailable"] is True
+
+    async def test_a_healthy_read_carries_no_unavailable_marker(
+        self, client, app, db_path,
+    ):
+        cookies = await _login(client)
+        resp = await client.get("/istota/api/chat/events", cookies=cookies)
+        assert resp.json()["drafts"] == []
+        assert "drafts_unavailable" not in resp.json()
 
     async def test_a_resolved_draft_leaves_the_snapshot(
         self, client, app, db_path,
