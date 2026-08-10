@@ -490,6 +490,29 @@ def release(config: "Config", draft_id: int) -> str:
         state = current.status if current else "gone"
         raise DraftNotPending(f"draft {draft_id} is {state}, not pending")
 
+    # Re-read, and send from *this* snapshot rather than the pre-claim one.
+    #
+    # The read above and the claim are two statements, not one: a plain SELECT
+    # takes no lock under deferred isolation, and the claim UPDATE then waits up
+    # to the full busy timeout for the write lock. `edit_body` is exactly the
+    # competing writer, and it leaves `status='pending'` — so an edit committing
+    # in that window satisfies its own guard (the user is told the edit landed,
+    # and the row holds the new body) while the claim still matches. Sending the
+    # pre-claim snapshot would then deliver the *old* text, irreversibly, with
+    # nothing recording that the stored and sent bytes differed.
+    #
+    # After the claim the row is `sending`, which `edit_body` and `discard` both
+    # refuse, so this snapshot is stable for the rest of the function. That is
+    # what makes one extra read sufficient rather than a lock.
+    with db.get_db(config.db_path) as conn:
+        claimed_draft = get(conn, draft_id)
+    if claimed_draft is None:
+        # Nothing deletes an outbound_drafts row, so this is unreachable short
+        # of hand surgery on the DB. Refuse rather than fall back to the stale
+        # snapshot: we hold a claim on a row we can no longer read.
+        raise DraftNotFound(f"draft {draft_id} vanished after being claimed")
+    draft = claimed_draft
+
     def _revert(reason: str) -> None:
         """Undo the claim after a send that did not happen.
 

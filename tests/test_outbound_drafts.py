@@ -659,6 +659,49 @@ class TestConcurrency:
         assert d.body == "Tuesday works."
         assert d.status == "sent"
 
+    def test_an_edit_landing_before_the_claim_is_what_sends(self, conn, config):
+        """The window the mid-send guard does not cover: an edit that commits
+        between `release`'s read and its claim.
+
+        Both statements succeed, because both require `status='pending'` and the
+        edit leaves it there. The edit's own guard is satisfied and the PATCH
+        route reports 200, so the user is told their new text is what will go
+        out. If `release` sends from the row it read *before* the claim, the
+        recipient gets the pre-edit body instead — irreversibly, and with
+        nothing anywhere recording that the sent bytes were not the stored ones.
+
+        A plain SELECT takes no lock under deferred isolation, and the claim
+        UPDATE then waits up to the full busy timeout for the write lock, so the
+        window is wide rather than theoretical and the competing writer is
+        exactly `edit_body`. Patching `get` to edit on its first call reproduces
+        the interleaving deterministically.
+        """
+        draft_id = _hold(conn)
+        real_get = drafts.get
+        calls = {"n": 0}
+
+        def edit_then_read(c, did):
+            calls["n"] += 1
+            result = real_get(c, did)
+            if calls["n"] == 1:
+                # Commits on its own connection, exactly as the PATCH route does.
+                with db.get_db(config.db_path) as other:
+                    drafts.edit_body(other, did, "Wednesday, actually.")
+                    other.commit()
+            return result
+
+        with patch("istota.skills.email.send_email") as send:
+            send.return_value = "<sent@test.invalid>"
+            with patch.object(drafts, "get", side_effect=edit_then_read):
+                drafts.release(config, draft_id)
+
+        assert send.call_args.kwargs["body"] == "Wednesday, actually."
+        with db.get_db(config.db_path) as c:
+            d = drafts.get(c, draft_id)
+        # The stored body and the sent body cannot diverge.
+        assert d.body == "Wednesday, actually."
+        assert d.status == "sent"
+
     def test_the_sent_marker_survives_a_caller_rollback(self, conn, config):
         """`release` owns its own transaction, so a caller who rolls back after
         it returns cannot resurrect the draft and send the mail twice."""
