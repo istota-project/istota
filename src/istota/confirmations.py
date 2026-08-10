@@ -108,7 +108,9 @@ def ambiguity_listing(conn, tasks) -> str:
     )
 
 
-def approve(conn, task: db.Task, *, trust_sender: bool = False) -> bool:
+def approve(
+    conn, task: db.Task, *, trust_sender: bool = False, config=None,
+) -> bool:
     """Release a held task for execution.
 
     Also undoes the transcript-mirror suppression the gate applied. The gate
@@ -125,6 +127,12 @@ def approve(conn, task: db.Task, *, trust_sender: bool = False) -> bool:
     for an email task with a recorded sender; the **return value** says whether
     it actually happened, so a caller does not report having trusted somebody it
     could not name.
+
+    ``config`` is optional and used only to attribute the restored row: it
+    supplies the task user's own email addresses, which is what separates "the
+    user mailed themselves" from "a stranger wrote in". Pass it whenever one is
+    in scope — the DB-only fallback cannot see addresses configured in TOML
+    alone, and would label such a self-mail as an external speaker.
     """
     db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
@@ -139,7 +147,7 @@ def approve(conn, task: db.Task, *, trust_sender: bool = False) -> bool:
             )
             trusted = True
 
-    _restore_transcript_mirror(conn, task)
+    _restore_transcript_mirror(conn, task, config)
     return trusted
 
 
@@ -237,7 +245,7 @@ def resolve(
     return Resolution(task=task)
 
 
-def apply_answer(conn, task: db.Task, answer: Answer) -> str:
+def apply_answer(conn, task: db.Task, answer: Answer, config=None) -> str:
     """Act on ``answer`` and return the ack every surface posts.
 
     The ack text is shared deliberately. Talk used to stay silent on a plain
@@ -245,12 +253,16 @@ def apply_answer(conn, task: db.Task, answer: Answer) -> str:
     later — while the web endpoints and ``!confirm`` each said something else.
     One prompt reaches a user on whichever surface they read, so one answer
     should read the same wherever they give it.
+
+    ``config`` is passed straight through to ``approve`` for attribution only.
     """
     if not answer.approve:
         decline(conn, task)
         return "Task cancelled."
 
-    trusted = approve(conn, task, trust_sender=answer.trust_sender)
+    trusted = approve(
+        conn, task, trust_sender=answer.trust_sender, config=config,
+    )
     if trusted:
         record = db.get_email_for_task(conn, task.id)
         if record is not None:
@@ -269,6 +281,7 @@ def record_exchange(
     ack: str,
     origin_surface: str,
     client_msg_id: str | None = None,
+    answered_by: str | None = None,
 ) -> tuple[int | None, int | None]:
     """Write the answer and its ack into a room's canonical transcript.
 
@@ -284,6 +297,12 @@ def record_exchange(
     prompt, and LLM-context reconstruction joins on ``task_id`` — so a
     NULL-task_id row is display-only and never re-paired as a phantom turn.
 
+    ``answered_by`` is stamped as the answer row's author. A ``task_id=NULL``
+    row has no task to recover an identity from, so without it the transcript
+    labels the answer with whoever is *reading* — and in a shared room an
+    authorization decision attributed to the wrong member is the one row worth
+    getting right. The ack is left unattributed: it is the bot's.
+
     Existence-only, like every other room write: a synthetic email-thread token
     is not a room and approving mail must not mint one in anyone's sidebar.
     Best-effort — the answer has already been recorded and is what the user
@@ -297,6 +316,7 @@ def record_exchange(
         user_msg_id = db.add_message(
             conn, room_token, role="user", body=answer_text,
             origin_surface=origin_surface, client_msg_id=client_msg_id,
+            author_user_id=answered_by,
         )
         system_msg_id = db.add_message(
             conn, room_token, role="system", body=ack,
@@ -311,7 +331,7 @@ def record_exchange(
         return (None, None)
 
 
-def _restore_transcript_mirror(conn, task: db.Task) -> None:
+def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     """Publish the approved turn's question into its room, if it has one.
 
     Existence-only, mirroring `transport.ingest.record_inbound`'s `mirror_only`
@@ -321,6 +341,12 @@ def _restore_transcript_mirror(conn, task: db.Task) -> None:
     included — for the same reason `record_inbound` stores it that way: it is
     re-paired straight back into LLM context, and a prettified body would drop
     the guard.
+
+    Attribution is resolved here rather than inherited, because this row is
+    written on a path that never saw the inbound message. With a `config` the
+    task user's own addresses are authoritative; without one the resolver falls
+    back to what the database can prove, which is weaker — see
+    `db.own_addresses_without_config`.
     """
     room_token = task.conversation_token
     if not room_token:
@@ -335,9 +361,18 @@ def _restore_transcript_mirror(conn, task: db.Task) -> None:
         ).fetchone()
         if already:
             return
+        own = None
+        if config is not None:
+            user_config = config.users.get(task.user_id or "")
+            if user_config is not None:
+                own = list(user_config.email_addresses or [])
+        author_user_id, author_label = db.author_for_email_task(
+            conn, task.id, task.user_id, own,
+        )
         db.add_message(
             conn, room_token, role="user", body=task.prompt,
             origin_surface=task.source_type or "email", task_id=task.id,
+            author_user_id=author_user_id, author_label=author_label,
         )
     except Exception:
         # The approval itself has already been recorded and is what the user

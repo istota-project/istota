@@ -33,7 +33,56 @@ logger = logging.getLogger(__name__)
 # This is deliberately narrower than "surfaces whose turns are stored". A
 # mirror-only surface (email) still records its turn when the token it resolved
 # to *already is* a room — see `mirror_only` in `record_inbound`.
+#
+# Not to be confused with `TransportCapabilities.room_view`, which is the set of
+# surfaces that are a *view of* a room (talk + web again today, but for a
+# different reason and with a different consequence — it drives the outbound
+# fan-out, this drives inbound room creation). The two sets are distinct
+# concepts that happen to have the same members; keep them apart.
 ROOM_SURFACES = frozenset({"talk", "web"})
+
+
+def resolve_author(
+    config: "Config", user_id: str, sender_address: str | None,
+) -> tuple[str | None, str | None]:
+    """`(author_user_id, author_label)` for an inbound turn. Never raises.
+
+    A surface that reports no separate sender is the istota user speaking, so
+    the turn is theirs. Email reports an envelope sender, which may be the user
+    mailing themselves — `external_email_sender` answers None for that, and the
+    turn is again theirs — or someone else, in which case the *sanitized* label
+    is the author and no user id applies.
+
+    Sanitizing here rather than at any reader is the point of the split: the
+    label reaches the store as an addr-spec or the fixed unattributed sentinel,
+    so a raw `From:` header with a display name in it can never be rendered.
+
+    Best-effort by contract. This runs inside `record_inbound`'s transaction,
+    which is the inbound one — a failed attribution lookup must cost the row its
+    author, never cost the user their message.
+
+    The failure path **keeps the sender's existence** even when it cannot
+    classify it, following `external_email_sender`'s own rule: under-trusting
+    the principal costs an odd label, while over-trusting launders a third
+    party's text into their turn. So a message that arrived with a sender falls
+    back to the unattributed sentinel rather than to nothing — `(None, None)`
+    renders as the room owner, which for a stranger's mail is exactly the
+    mislabelling these columns exist to end.
+    """
+    try:
+        if not sender_address:
+            return (user_id or None), None
+        user_config = config.users.get(user_id or "")
+        own = list(user_config.email_addresses or []) if user_config else []
+        label = db.external_email_sender(sender_address, own)
+        if label:
+            return None, label
+        return (user_id or None), None
+    except Exception as e:  # pragma: no cover - never fail an ingest over this
+        logger.warning("author resolution failed for user %s: %s", user_id, e)
+        if sender_address:
+            return None, db.UNATTRIBUTED_SENDER
+        return (user_id or None), None
 
 
 def display_attachment_names(
@@ -129,6 +178,9 @@ def record_inbound(
     external_id: str | None = None,
     client_msg_id: str | None = None,
     suppress_transcript_mirror: bool = False,
+    # The message's own sender when it isn't `user_id` (email's envelope
+    # sender). Raw and untrusted; sanitized here, never by a reader.
+    sender_address: str | None = None,
 ) -> tuple[str, int | None]:
     """Resolve → echo-check → store user message → create task.
 
@@ -312,6 +364,9 @@ def record_inbound(
             (room_token, task_id),
         ).fetchone()
         if not already:
+            author_user_id, author_label = resolve_author(
+                config, user_id, sender_address,
+            )
             # Stamp the surface-native message id (Talk's message id) so the
             # canonical row knows where it exists on that surface: this feeds
             # both the echo ledger and the Talk→web read-sync cursor cap
@@ -319,6 +374,8 @@ def record_inbound(
             db.add_message(
                 conn, room_token, role="user", body=text,
                 origin_surface=surface, task_id=task_id,
+                author_user_id=author_user_id,
+                author_label=author_label,
                 external_ids=(
                     {surface: str(external_id)}
                     if external_id is not None
@@ -366,5 +423,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         if msg.platform_message_id is not None
         else None,
         suppress_transcript_mirror=msg.suppress_transcript_mirror,
+        sender_address=msg.sender_address,
     )
     return task_id

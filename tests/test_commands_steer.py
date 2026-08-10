@@ -159,6 +159,28 @@ class TestTranscriptAndEvents:
             assert steer_rows[0]["task_id"] is None  # display-only, not re-paired
             assert steer_rows[0]["origin_surface"] == "talk"
 
+    async def test_transcript_row_names_who_steered(self, make_config):
+        """A `task_id IS NULL` row has no task to recover an identity from, so
+        the author column is the only record of who typed it.
+
+        Steering is own-task-only, but a room is shared: bob steers bob's task
+        in a room alice also reads, and without the author alice sees it as her
+        own words.
+        """
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk", name="Room 1")
+            _running_task(conn, user_id="bob")
+            await cmd_steer(
+                _ctx(config, conn, user_id="bob", args="check the db layer"),
+            )
+            row = conn.execute(
+                "SELECT author_user_id, author_label FROM messages "
+                "WHERE room_token = ? AND body = ?",
+                ("room1", "check the db layer"),
+            ).fetchone()
+            assert (row["author_user_id"], row["author_label"]) == ("bob", None)
+
     async def test_no_room_skips_transcript_but_still_steers(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

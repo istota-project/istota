@@ -271,9 +271,25 @@ class TestPoll:
 
 class TestResolveTarget:
     def test_prefers_delivery_token(self):
+        # Rung 0, unchanged: the column is still absolute where it is set.
         t = TalkTransport(_config())
         task = _task(talk_delivery_token="real_room", conversation_token="other")
         assert t.resolve_target(task) == "real_room"
+
+    def test_prefers_the_rooms_talk_binding(self, tmp_path):
+        # Was `talk_delivery_token`, a stored copy of this same fact. The room's
+        # own binding is the authority now, so a promote after task creation is
+        # visible where the stored copy never was.
+        from istota import db
+
+        config = _config()
+        config.db_path = tmp_path / "rooms.db"
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "other", "alice", origin="web")
+            db.add_room_binding(conn, "other", "talk", "real_room")
+        t = TalkTransport(config)
+        assert t.resolve_target(_task(conversation_token="other")) == "real_room"
 
     def test_falls_back_to_conversation_token_for_talk(self):
         t = TalkTransport(_config())

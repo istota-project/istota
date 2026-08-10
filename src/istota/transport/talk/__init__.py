@@ -50,6 +50,9 @@ class TalkTransport:
         # push a part over. Only messages past this are split at all — a normal
         # long answer posts as one message instead of many 4000-char fragments.
         max_message_length=30000,
+        # Talk is a room view whose transcript lives in Nextcloud, not in our
+        # `messages` table — a room fan-out has to make a real API call here.
+        room_view="external",
     )
 
     def __init__(self, config: "Config"):

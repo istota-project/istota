@@ -781,7 +781,9 @@ class TestPollEmailsThreadMatching:
         config = make_config()
         self._dual_bound(config)
         task = self._origin_reply(config, origin_target="web:rm_web123")
-        assert task.output_target == "room,email"
+        # The stored descriptor names one view of the room; it is upgraded to the
+        # room form at reply time so the fan-out reaches every view of it.
+        assert task.output_target == "room:rm_web123,email"
         assert task.conversation_token == "rm_web123"
 
     def test_dual_bound_talk_origin_fans_out_to_room(self, make_config):
@@ -791,7 +793,7 @@ class TestPollEmailsThreadMatching:
             config, origin_target="talk:RealRoomXYZ",
             sent_conversation_token="RealRoomXYZ",
         )
-        assert task.output_target == "room,email"
+        assert task.output_target == "room:RealRoomXYZ,email"
 
     def test_dual_bound_respects_origin_only_policy(self, make_config):
         config = make_config()
@@ -799,7 +801,7 @@ class TestPollEmailsThreadMatching:
         task = self._origin_reply(
             config, origin_target="web:rm_web123", policy="origin",
         )
-        assert task.output_target == "room"
+        assert task.output_target == "room:rm_web123"
 
     def test_single_bound_room_keeps_its_surface_descriptor(self, make_config):
         # Nothing to fan out to: one binding means one surface, and `room` would
@@ -816,6 +818,57 @@ class TestPollEmailsThreadMatching:
         # descriptor naming no room at all must route exactly as before.
         task = self._origin_reply(make_config(), origin_target="web:rm_web123")
         assert task.output_target == "web:rm_web123,email"
+
+    def test_a_stored_room_descriptor_is_used_as_is(self, make_config):
+        """The form new sends stamp. No upgrade step — it already names the
+        conversation, and expansion reads live bindings at delivery."""
+        config = make_config()
+        self._dual_bound(config)
+        task = self._origin_reply(config, origin_target="room:rm_web123")
+        assert task.output_target == "room:rm_web123,email"
+        assert task.conversation_token == "rm_web123"
+
+    def test_an_archived_origin_room_falls_back_rather_than_dropping(
+        self, make_config,
+    ):
+        """A reply must never be lost because its room went away.
+
+        The room is gone, so there is nothing to fan out to — but the email leg
+        is still a real delivery and the reply reaches the contact who sent it.
+        """
+        config = make_config()
+        self._dual_bound(config)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE rooms SET archived = 1 WHERE token = ?", ("rm_web123",),
+            )
+        task = self._origin_reply(config, origin_target="web:rm_web123")
+        # Not upgraded to the room form: the room is not live to upgrade to.
+        # Note this is deliberately *not* the same outcome as the sibling test
+        # below, where the descriptor names the room directly and expansion
+        # yields email alone. A legacy descriptor names a surface leg, so it
+        # keeps delivering to that leg — "existing values keep routing as they
+        # do today" — while the room form asks about a room that is gone.
+        assert task.output_target == "web:rm_web123,email"
+
+    def test_an_archived_room_named_directly_still_delivers_to_email(
+        self, make_config,
+    ):
+        """Same room, but the descriptor names it directly — the case a send
+        stamped before the room was archived. Expansion yields the origin
+        delivery alone rather than raising or dropping the reply."""
+        from istota.transport.routing import resolve_delivery_plan
+
+        config = make_config()
+        self._dual_bound(config)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE rooms SET archived = 1 WHERE token = ?", ("rm_web123",),
+            )
+        task = self._origin_reply(config, origin_target="room:rm_web123")
+        assert task.output_target == "room:rm_web123,email"
+        plan = resolve_delivery_plan(config, task, None)
+        assert [d.surface for d in plan] == ["email"]
 
     def _poll_reply(self, config, *, sender, to, references="<origin_out@bot.com>"):
         """Poll a single inbound reply and return the created task (or None)."""

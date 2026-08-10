@@ -109,6 +109,10 @@ class WebTransport:
         max_message_length=None,
         surface_class="stream",
         user_routable=True,
+        # Web renders the canonical `messages` store directly, so writing the
+        # row *is* the delivery — a room fan-out that also pushed here would
+        # render the same message twice.
+        room_view="canonical",
     )
 
     def __init__(self, config: "Config"):

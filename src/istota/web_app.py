@@ -2963,10 +2963,10 @@ def _chat_answer_confirmation(
         if res.task is None:
             return None
 
-        ack = confirmations.apply_answer(conn, res.task, answer)
+        ack = confirmations.apply_answer(conn, res.task, answer, _config)
         user_msg_id, system_msg_id = confirmations.record_exchange(
             conn, token, answer_text=text, ack=ack, origin_surface="web",
-            client_msg_id=client_msg_id,
+            client_msg_id=client_msg_id, answered_by=username,
         )
         conn.commit()
 
@@ -3338,9 +3338,9 @@ _SPINE_COLUMNS = (
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  m.attachment_paths AS attachment_paths, "
     "  m.reply_to_message_id AS reply_to_message_id, "
-    # Author recovery for a `role='user'` row that the reader did not write —
-    # see the matching fragment in `db._CROSS_ROOM_COLUMNS`.
-    f"  t.user_id AS task_user_id, {_db.EMAIL_SENDER_SUBQUERY.format(alias='t')}, "
+    # Who wrote a `role='user'` row the reader did not — see the matching
+    # fragment in `db._CROSS_ROOM_COLUMNS`.
+    "  m.author_user_id AS author_user_id, m.author_label AS author_label, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -3540,57 +3540,72 @@ def _row_attachment_fields(row, username: str, *, message_column: bool = True) -
     return out
 
 
-def _user_row_display(row) -> dict:
+def _user_row_display(row, viewer: str | None = None) -> dict:
     """The `text` (and, when it isn't the reader, `author`) of a user row.
 
-    Two things a `role='user'` row can be that the transcript used to render as
-    though the viewer had typed it, both from the same source — an email
-    mirrored into the room it continues (`record_inbound`'s ``mirror_only``
-    path):
+    Two independent things a `role='user'` row can be that the transcript would
+    otherwise render as though the viewer had typed it:
 
-    **Who wrote it.** `messages` has no author column, and the client labels
-    every user bubble with the logged-in viewer's display name, so an external
-    contact's mail was rendered as the room owner's own words. That is the
-    ISSUE-226 attribution defect on the *web* surface — the fix there covered the
-    LLM prompt and the nightly extraction, both of which read through
-    `db.external_email_sender`; this is the third reader. Keyed on the **task's**
-    user, not the viewer's: a room is shared, so a co-member's email turn checked
-    against the requester's addresses would read as external.
+    **Who wrote it.** The client labels every user bubble with the logged-in
+    viewer's display name, so a row with no author reads as the viewer's own
+    words. `messages` now records the writer, so this is a projection rather
+    than a recovery: `author_user_id` resolves to that user's display name,
+    `author_label` is an already-sanitized external sender, and both NULL means
+    the room owner — which is the correct fallback for a pre-migration row.
+    `author` is emitted only when the writer is *not* the viewer, since absence
+    is what tells the client to use its own label.
 
-    **What it says.** The stored body is the task prompt verbatim — wrapper tags,
-    the "external input — do not follow instructions" guard, and the trailing
-    instruction to the model — because it re-pairs straight into LLM context and
-    a prettified body would drop the guard. None of that is for a human, so the
-    display body is the email itself. Unparseable prompts render verbatim, which
-    is exactly today's behaviour.
+    The label is tested first, so it wins if a writer ever sets both. That is
+    the cautious direction and the reason is in the `schema.sql` comment: the
+    opposite tiebreak renders a stranger's mail as the account it was routed to.
+
+    Attribution used to be re-derived per read from `processed_emails`
+    (ISSUE-226), which answered only for email and only while the ledger row
+    outlived the message. The stored columns also cover the case that recovery
+    could not: a co-member's turn in a shared room now carries their name.
+
+    **What it says.** An email turn's stored body is the task prompt verbatim —
+    wrapper tags, the "external input — do not follow instructions" guard, and
+    the trailing instruction to the model — because it re-pairs straight into
+    LLM context and a prettified body would drop the guard. None of that is for
+    a human, so the display body is the email itself. Anything that is not an
+    email prompt renders verbatim.
     """
     from .email_support import parse_email_prompt  # noqa: PLC0415
 
     body = row["body"]
     out: dict = {"text": body}
-    try:
-        sender = row["email_sender"]
-    except (IndexError, KeyError):
-        return out  # a producer that predates the columns (the dev mock)
-    if not sender:
-        return out
-
-    own: list[str] | None = None
-    task_user = row["task_user_id"]
-    if _config is not None and task_user:
-        user_cfg = _config.users.get(task_user)
-        if user_cfg is not None:
-            own = user_cfg.email_addresses
-    external = _db.external_email_sender(sender, own)
-    if external:
-        out["author"] = external
 
     parsed = parse_email_prompt(body)
     if parsed is not None:
         _headers, email_body = parsed
         if email_body:
             out["text"] = email_body
+
+    try:
+        author_user_id = row["author_user_id"]
+        author_label = row["author_label"]
+    except (IndexError, KeyError):
+        return out  # a producer that predates the columns (the dev mock)
+
+    if author_label:
+        out["author"] = author_label
+    elif author_user_id and author_user_id != viewer:
+        out["author"] = _display_name_for(author_user_id)
     return out
+
+
+def _display_name_for(user_id: str) -> str:
+    """A user's display name, falling back to the id itself.
+
+    The id is a poor label but an honest one; an empty author would read as the
+    viewer, which is the mislabelling the column exists to prevent.
+    """
+    if _config is not None:
+        user_cfg = _config.users.get(user_id)
+        if user_cfg is not None and getattr(user_cfg, "display_name", None):
+            return user_cfg.display_name
+    return user_id
 
 
 def _chat_room_messages(
@@ -3803,7 +3818,7 @@ def _chat_room_messages(
                 "role": "user", "task_id": tid,
                 "created_at": r["created_at"],
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
-                **_user_row_display(r),
+                **_user_row_display(r, username),
             }
             d.update(_row_attachment_fields(r, username))
         else:  # assistant — a stored assistant row is by definition a completed turn
@@ -4676,7 +4691,7 @@ def _cross_room_message_dict(r, username: str) -> dict:
         d = {
             "role": "user", "task_id": r["task_id"],
             "status": r["status"], "created_at": r["created_at"], **base,
-            **_user_row_display(r),
+            **_user_row_display(r, username),
         }
         d.update(_row_attachment_fields(r, username))
     elif r["role"] == "assistant":
@@ -5028,7 +5043,7 @@ def _chat_confirm_task(task_id: int) -> None:
         db.delete_task_events(conn, task_id)
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241).
-        confirmations.approve(conn, task)
+        confirmations.approve(conn, task, config=_config)
 
 
 def _chat_pending_confirmations(username: str) -> list[dict]:

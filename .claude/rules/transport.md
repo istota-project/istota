@@ -27,7 +27,8 @@ Transports split into two `surface_class`es (`TransportCapabilities.surface_clas
   `source_type="web"` / `output_target="web"`; `web` is in
   `routing._STREAM_SURFACES` so the planner short-circuits a web task's result
   to a stream destination (no push) and the `/api/chat/*` SSE endpoint tails
-  `task_events`. `ReplTransport.deliver` is a genuine no-op (the terminal has no
+  `task_events`. `_STREAM_SURFACES` governs *that* short-circuit and nothing
+  else — the room fan-out asks `room_view` instead. `ReplTransport.deliver` is a genuine no-op (the terminal has no
   persistent store). `WebTransport.deliver`, by contrast, is a real write
   (ISSUE-121): web is a *user-routable* delivery surface, so alerts / the
   verbose execution log / any notification routed to `web` append an unsolicited
@@ -88,11 +89,26 @@ paths). It is the only email code outside `transport/email/`.
   `platform_message_id` → `Task.talk_message_id`, `reply_to_message_id` →
   `Task.reply_to_talk_id`; plus `user_id`, `text`, `source_type`, `surface`,
   `attachments`, `is_group_chat`, `output_target`, `model`/`effort`, `raw`.
+  `sender_address` is the message's *own* sender when that differs from
+  `user_id` — today only email's envelope sender, which names who wrote the mail
+  rather than the istota user it was routed to. Raw and untrusted;
+  `record_inbound` sanitizes it through `db.external_email_sender` before it can
+  reach `messages.author_label`, so no reader ever sees a raw `From:`.
 - **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
   `supports_progress_ack`, `supports_typing`, `max_message_length`,
-  `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`).
+  `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`),
+  `room_view` (`"external"` | `"canonical"` | `None`, default `None`).
   Drives capability-gated wiring in the scheduler instead of `source_type ==`
   checks; the delivery planner reads `surface_class` to decide push-vs-stream.
+  `room_view` is the **second, orthogonal** routing axis and the one the room
+  fan-out reads: whether the surface is a view of a shared room, and if so where
+  that view's transcript is stored. `talk` → `"external"` (Nextcloud owns the
+  store, so a room fan-out must push), `web` → `"canonical"` (the store *is*
+  `messages`, so writing the row is the delivery and a push would double-post),
+  everything else → `None` (a delivery target, not a room view). The two axes
+  agree today only because web happens to be both the only stream room surface
+  and the only canonical-transcript one; `repl` is the counterexample that keeps
+  them separate (`"stream"`, no room view). See `_expand_room_destinations`.
   `user_routable` marks a surface a user can deliberately point traffic at (a
   briefing output, a default destination, an alert route). The self-routing
   surfaces are `False` — `istota_file` only ever delivers back to the TASKS.md
@@ -407,15 +423,33 @@ messages are re-polled rather than silently lost.
   concern.
 
   **Email-reply origin routing.** A thread-matched reply (recipient replies to a
-  mail we sent) routes back to the *surface the original send came from*, not
-  unconditionally to Talk. At send time `routing.origin_descriptor(task)` stamps
-  `sent_emails.origin_target` — a descriptor (`web:<token>` / `talk:<token>`)
-  recovered from the originating task's surface, or, for an email-*continuation*
-  task, from its `conversation_token` (a `web-`/`repl-`/synthetic token is
-  classified accordingly so multi-round threads keep their origin). On the inbound
+  mail we sent) routes back to the *conversation the original send came from*,
+  not unconditionally to Talk. At send time `routing.origin_descriptor(task,
+  conn)` stamps `sent_emails.origin_target`. **When the origin is a registered
+  live room the descriptor names the room** — `room:<canonical_token>` — rather
+  than one of its views: a room is one conversation bound to several surfaces,
+  and recording the leg the send happened to leave by throws away the fact that
+  it was a room, so the reply reaches that leg alone and the other view stays
+  blank. The room form re-expands by *live* bindings at delivery, so it also
+  picks up a binding added after the send (an "Also open in Talk" promote is
+  exactly that). The candidate token is `conversation_token`, else
+  `talk_delivery_token`, each resolved to canonical through
+  `routing._canonical_room_token` — which tries the token as canonical, then as
+  this surface's ref, then as *any* surface's ref, the last being the promoted-room
+  email continuation whose token belongs to Talk while its own surface owns no
+  bindings. Without a `conn`, or for a destination that is not a live room (a
+  Talk DM, a genuine email-only thread, an archived room), it falls back to the
+  surface-qualified `web:<token>` / `talk:<token>` form as before. Rows stamped
+  before the room form existed are upgraded at read time by
+  `routing.upgrade_legacy_origin` — **which is not merely transitional**: any
+  writer whose room is reachable from neither candidate token still stamps the
+  surface form, so check `_room_descriptor`'s coverage before assuming it has
+  become dead code. It replaced `room_fanout_descriptor`, which widened a
+  descriptor to the bare `room` and so could only ever name the room the task was
+  already sitting in. On the inbound
   reply, `poll_emails` reads that descriptor and applies the per-user
   `Config.email_reply_routing_for(user_id)` policy (`origin+thread` default |
-  `origin` | `thread`) to build `output_target` (e.g. `web:<token>,email`), with
+  `origin` | `thread`) to build `output_target` (e.g. `room:<token>,email`), with
   `conversation_token` set to the origin room so the reply continues that
   conversation. A NULL `origin_target` (pre-migration row, or a non-deliverable
   origin) falls back to the exact legacy `talk,email` behavior + the
@@ -425,6 +459,25 @@ messages are re-polled rather than silently lost.
   confirmations (only own-origin `source_type="web"` tasks do). Policy column lives
   in `user_profiles.email_reply_routing`; set via `istota user ensure
   --email-reply-routing`.
+
+**Who wrote a row.** `messages` records the author on two nullable columns —
+`author_user_id` (an istota user) and `author_label` (an external sender,
+**pre-sanitized** through `db.external_email_sender`, so an addr-spec or the
+fixed `UNATTRIBUTED_SENDER` and never a raw header). Exactly one is set, or
+neither; readers test the label first, so a writer that wrongly set both breaks
+toward naming the stranger rather than toward crediting the account the mail was
+routed to. Both NULL means the room owner, which is what every pre-migration row
+falls back to. Resolved once at write time — `transport.ingest.resolve_author`
+where a `Config` is in scope, `db.author_for_email_task` for the two callers
+without one (the confirmation-approval mirror and the `messages_author_v1`
+backfill), and those callers should pass `Config.users[uid].email_addresses`
+when they can, because the DB-only fallback
+(`db.own_addresses_without_config`) cannot see addresses configured in TOML
+alone. Every `role='user'` writer sets it: `record_inbound`, `!steer`, `!retry`,
+and the confirmation exchange. This replaced a per-read recovery from
+`processed_emails` (ISSUE-226) that answered only for email; the columns also
+cover a co-member's ordinary turn in a shared room, which had no sender to
+recover and rendered as the reader's own words.
 
 `ingest_message` is the only shared inbound code; it maps an `IncomingMessage`
 straight onto `db.create_task` (the duplicate-Talk-message guard returns the
@@ -559,11 +612,40 @@ of them.
   scheduler delivers to. Precedence: explicit `output_target` > reply-to-origin
   (interactive source types: `talk` / `email` / `repl`) > source-type default >
   drop. Each destination has its channel filled (Talk via
-  `_talk_target_for_delivery`) or is dropped with a WARNING (unregistered
+  `talk_channel_for_task`) or is dropped with a WARNING (unregistered
   surface, or a configured surface whose user-level channel resolves to `None`).
   **Never raises** — plan resolution must not abort task finalization. An empty
   post-drop plan for an interactive source type falls back to reply-to-origin so
   a misconfigured `output_target` can't silently eat a reply.
+- **`talk_channel_for_task(config, task) -> str | None`** — which Talk room a
+  task's result goes to. Four rungs, in order: **(0)** `tasks.talk_delivery_token`
+  when set, absolutely; **(1)** the task's room's `talk` binding; **(2)**
+  `conversation_token` itself, when the task has one and is not email-sourced;
+  **(3)** `notifications.resolve_conversation_token` (alerts → briefing →
+  auto-DM) for an email task whose token is a synthetic 16-char hex thread hash
+  naming no Talk room. No token and no room gives `None`, deliberately *not* the
+  alerts ladder — a task with nothing to deliver to is not an email thread hash
+  needing redirection. A synthetic token that resolves to nothing is returned
+  as-is, preserving the pre-existing silent no-op rather than trading it for a
+  different failure. `scheduler._talk_target_for_delivery` is a shim over this.
+
+  Rung 1 replaced `tasks.talk_delivery_token` as the *general* answer: the
+  column was a denormalized copy of the room's Talk binding, and it went stale
+  whenever a room was promoted to Talk after the task was created. **Rung 0
+  survives on purpose and must be deleted last.** While anything still writes
+  the column it carries information nothing else has — the legacy thread-match
+  branch in `transport/email/inbound.py`, reached when
+  `sent_emails.origin_target` is NULL, copies a Talk room onto the task that the
+  registry may never have heard of. Demoting rung 0 to "a hint for finding a
+  room" reroutes those tasks to the alerts ladder with no error: ISSUE-057's fix
+  undone. Room resolution inside rung 1 is **surface-scoped**
+  (`_canonical_room_token(..., cross_surface=False)`), unlike descriptor
+  stamping — a `surface_ref` is unique only within its surface, and an unscoped
+  match on the delivery path posts the answer into a different conversation.
+  (`cross_surface` has no default: both answers are defensible and the
+  difference is invisible at the call site, so each caller states which it
+  wants. A wrong *descriptor* is re-resolved by live bindings at delivery; a
+  wrong *channel* is not.)
 - **`plan_has_surface(plan, surface) -> bool`** — the replacement for the old
   `target in ("talk", "both", "all")` string checks. `process_one_task`
   precomputes `plan_talk` / `plan_email` / `plan_ntfy` / `plan_file` from the
@@ -703,7 +785,7 @@ same seam.
 
 ## Unified Talk / web room sync
 
-Talk and web chat share one surface-independent **room** model (spec in `Specs/Done/unified-talk-web-room-sync.md`). A `rooms` registry (PK = canonical `conversation_token`, `origin` talk|web) + `room_bindings` (per-surface ref) + a canonical `messages` store (role user|assistant|system, `task_id`, `origin_surface`, `external_ids`) + `room_read_state` supersede the de-facto `tasks`-as-history store; a markered one-time migration folds `web_chat_rooms`/`web_chat_messages`/distinct Talk tokens in and backfills. `get_conversation_history` reads `messages` with task-id re-pairing behind a self-healing dual-read (falls back to `tasks` until the store is caught up — a _completeness_ check: every completed turn mirrored, not just the newest, so a partial migration / mid-rollout window can't truncate history to the mirrored subset); Talk keeps its metadata-rich `_build_talk_api_context` for Talk-origin context. Inbound flows through one `transport.ingest.record_inbound` choke point (resolve canonical token → echo-check → store user turn → create task), used by `ingest_message` (Talk/email) and the web POST. The scheduler stores the assistant turn on completion via `_store_room_turn(conn, task, body)` — one general producer that mirrors **any** room-delivered bot post (subtask, scheduled, briefing, heartbeat, an email round-trip into its own web room, …) as an assistant spine row when the room exists, replacing the old per-source-type `_store_scheduled_room_turn` / `_store_web_room_turn` (canonical-room-transcript spec, ISSUE-176). Storage is universal (any web-visible room gets the row, `origin_surface` = the real source type as provenance, not a visibility gate); only conversational turns additionally carry a `user` row, and a narrower set still gates the caught-up dual-read. **Those two sets are no longer the same** (ISSUE-136): `TRANSCRIPT_SURFACE_FILTER` is assistant-any / user-in-`('web','talk','email')`, while `_CONVERSATIONAL_SOURCE_TYPES` stays `('talk','web')` — email is mirrored as a user+assistant pair but its *complete* history is not guaranteed (a turn completed before the change, or under a `thread` reply-routing policy whose email-only plan never reached `_store_room_turn`, has no assistant row and never will), and counting those would peg the room to the legacy `tasks` path forever. Mirroring is not the gate criterion; guaranteed completeness is. A markered `nonconversational_transcript_cleanup_v1` migration drops the synthetic `user` rows the old `unified_rooms_v1` blanket backfill inserted for non-conversational tasks and normalizes backfilled briefing bodies from raw JSON to the delivered body; **its DELETE allowlist must stay in sync with `TRANSCRIPT_SURFACE_FILTER`** — it re-arms on any failure past the DELETE (both `except` branches return without writing the marker) and a restored pre-migration snapshot re-runs it, so a disagreement silently sweeps live turns.
+Talk and web chat share one surface-independent **room** model (spec in `Specs/Done/unified-talk-web-room-sync.md`). A `rooms` registry (PK = canonical `conversation_token`, `origin` talk|web) + `room_bindings` (per-surface ref) + a canonical `messages` store (role user|assistant|system, `task_id`, `origin_surface`, `external_ids`) + `room_read_state` supersede the de-facto `tasks`-as-history store; a markered one-time migration folds `web_chat_rooms`/`web_chat_messages`/distinct Talk tokens in and backfills. `get_conversation_history` reads `messages` with task-id re-pairing behind a self-healing dual-read (falls back to `tasks` until the store is caught up — a _completeness_ check: every completed turn mirrored, not just the newest, so a partial migration / mid-rollout window can't truncate history to the mirrored subset); Talk keeps its metadata-rich `_build_talk_api_context` for Talk-origin context. Inbound flows through one `transport.ingest.record_inbound` choke point (resolve canonical token → echo-check → store user turn → create task), used by `ingest_message` (Talk/email) and the web POST. The scheduler stores the assistant turn on completion via `_store_room_turn(conn, task, body)` — one general producer that mirrors **any** room-delivered bot post (subtask, scheduled, briefing, heartbeat, an email round-trip into its own web room, …) as an assistant spine row when the room exists, replacing the old per-source-type `_store_scheduled_room_turn` / `_store_web_room_turn` (canonical-room-transcript spec, ISSUE-176). Storage is *near*-universal and is decided by `scheduler._room_turn_belongs_here`, not by any delivery branch: the row is written when the plan delivers this answer into the room on some surface (Talk, or a surface whose `room_view` is `"canonical"` — that push **is** the row, ISSUE-164) **or** when the room already holds the question. Neither holding means a room that never received the question and is not being delivered into, where a row would be an answer-only bubble — ISSUE-136 from the other side. The two rungs are not interchangeable: an email task in a room with `output_target="email"` and no mirrored question must store nothing, while the same task with `output_target="web:<its own room>"` must store a bubble, so the delivery plan carries intent no task-only predicate can express. `origin_surface` = the real source type as provenance, not a visibility gate; only conversational turns additionally carry a `user` row, and a narrower set still gates the caught-up dual-read. **Those two sets are no longer the same** (ISSUE-136): `TRANSCRIPT_SURFACE_FILTER` is assistant-any / user-in-`('web','talk','email')`, while `_CONVERSATIONAL_SOURCE_TYPES` stays `('talk','web')` — email is mirrored as a user+assistant pair but its *complete* history is not guaranteed (a turn completed before the change, or under a `thread` reply-routing policy before the evidence rung existed, has no assistant row and never will), and counting those would peg the room to the legacy `tasks` path forever. Mirroring is not the gate criterion; guaranteed completeness is. A markered `nonconversational_transcript_cleanup_v1` migration drops the synthetic `user` rows the old `unified_rooms_v1` blanket backfill inserted for non-conversational tasks and normalizes backfilled briefing bodies from raw JSON to the delivered body; **its DELETE allowlist must stay in sync with `TRANSCRIPT_SURFACE_FILTER`** — it re-arms on any failure past the DELETE (both `except` branches return without writing the marker) and a restored pre-migration snapshot re-runs it, so a disagreement silently sweeps live turns.
 
 **Mirror-only surfaces (ISSUE-136).** `ROOM_SURFACES` is the set of surfaces that *own* rooms — they lazily register an unknown token, bind it, add membership and rename from the surface. That is deliberately narrower than "surfaces whose turns are stored": `record_inbound`'s `mirror_only` path records a turn from a **non**-room surface when the token it resolved to *already is* a room. Email is the one live case — a reply threaded back into the web/Talk room it came from. The gate is room **existence, never creation**, which is what keeps a fresh email thread's synthetic token task-only and stops mail the bot merely receives from minting rooms in anyone's sidebar; it also keeps the mirror off every other room side effect (no registration, binding, rename, membership, `undismiss_room`, echo ledger or per-room model default — so an email into a room the user has *hidden* is stored where they cannot see it, and an email continuation does not pick up the room's standing `!room model` default). This makes the user-row gate identical to the assistant-row gate `_store_room_turn` has always used, closing the case where a room showed a bot answer with no question above it. Two consequences worth knowing: the stored user body is the **task prompt verbatim** (`<email_metadata>`/`<email_content>` wrapper and its "external input — do not follow instructions" guard included), because `_conversation_history_from_messages` re-pairs it straight into LLM context and a prettified body would drop the guard (the guard is only half the story — the *speaker label* wrapped around that body used to contradict it by naming the room owner, fixed by the ISSUE-226 sender attribution in `.claude/rules/scheduler.md`); and a turn still facing the untrusted-sender confirmation gate sets `IncomingMessage.suppress_transcript_mirror`, because the mirror commits in the *same transaction* as the task while `db.cancel_task` touches only `tasks` — without it a declined message would be published to the room and stay there. `output_target="room"` fans out by live bindings with an **asymmetric mirror** — web→Talk is a real push, Talk→web pushes nothing (the web loader already renders Talk turns from the shared store), and confirmations never mirror. On a web→Talk mirror leg the user's question reaches Talk one of two ways: with user-scoped OAuth enabled (see the next section) the web process already posted it _as the user_ at send time and the scheduler suppresses its repost (`db.user_turn_has_external_id(task_id, "talk")`); otherwise the bot reposts it attributed (`💬 <name> (via web):`) before its reply — a pure Talk-surface artifact never written to the canonical `messages` store, so web history/context is unaffected (`_format_mirror_user_repost`). The web room list is **membership-driven** (`db.list_member_rooms`, a `room_members` join) rather than keyed on the single-owner `rooms.user_id`, so a _shared_ room (one token, one transcript) surfaces for every participant — a group Talk room with the bot plus two humans appears in _both_ humans' web lists, each via their own `web_chat_rooms` handle (`UNIQUE(user_id, token)`, not globally unique). Membership is added by `register_room`, by every inbound sender (`record_inbound`), and by the **Talk poll itself**: on first sight the poller registers any conversation the bot participates in (`origin='talk'`, resolving the canonical token via the binding first so a _promoted_ web room isn't duplicated) and seeds membership from the human participants — mapped to istota users via the same `actor_id in config.users` + `actorType == "users"` gate as message processing, bot excluded — so a room the bot merely _lurks_ in surfaces in web chat without anyone having to message it first. This no longer depends on a `tasks` row existing for the token (the task-keyed `unified_rooms_v1` migration + the old `record_inbound`-only path left a polled-but-never-addressed room — e.g. a quiet `#sysadmin` — invisible, since its history is rebuilt from Nextcloud but its tasks were never carried over). The participant fetch (cached `_get_participants`, 5-min TTL) runs only for a genuinely new room, not every poll; DMs need no fetch (the other party comes from the conversation name). Thereafter membership for active users is kept current in the poll's message loop (any observed message from an istota user re-adds them) and by `record_inbound`. Backfilled for existing deploys by the `room_members_v1` migration. A per-user delete/hide writes a **dismissal tombstone** (`room_dismissals`, keyed `(room_token, user_id)`) _and_ drops that user's membership; `list_member_rooms` excludes a tombstoned room even while membership is later re-added, so the hide is durable. The tombstone is cleared by the user's **own** next message in the room — `record_inbound` → `undismiss_room` for an addressed message, and the poll message loop for a non-`@mention` post in a multi-user room (which never reaches `record_inbound`) — "re-engagement un-hides"; a co-member's hide is left intact. The web delete UI reflects this: an imported (Talk-origin) room is a one-click **Hide** with no type-the-name confirm, while a web-origin room keeps the destructive type-to-confirm **Delete**. The global `rooms.archived` flag stays reserved for `archive_orphaned_talk_rooms` — "the bot left the Nextcloud room", which a fresh inbound un-archives. Fixes ISSUE-134, where a group room was visible to only one arbitrary participant. Room titles are backfilled from Talk's `displayName` every poll cycle, not just on the next inbound message, so a migrated room stops showing the generic "Talk room". The same poll cycle reconciles the other direction (`db.archive_orphaned_talk_rooms`): a Talk room the bot is no longer in (deleted in Nextcloud / bot removed) is archived so it stops surfacing in web — guarded against a transient empty conversation fetch, archive-not-delete so mirror history survives. An "Also open in Talk" promote (`POST /chat/rooms/{id}/promote`) creates a real Talk conversation via new OCS `TalkClient` methods, with two-way rename propagation, and a Talk turn streams live into an open web room. Full reference in this file.
 
