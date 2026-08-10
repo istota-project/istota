@@ -762,6 +762,61 @@ class TestPollEmailsThreadMatching:
         assert task.output_target == "talk:RealRoomXYZ,email"
         assert task.conversation_token == "RealRoomXYZ"
 
+    # -- Dual-bound origin room: the descriptor must not pick one surface ------
+    #
+    # A room reachable on both Talk and web is ONE conversation. A stored
+    # `web:<tok>` descriptor delivers the reply to the web leg only, so the Talk
+    # view of that same room shows nothing — the exact mirror of the ISSUE-242
+    # gap, arrived at from the other side. `room` is the primitive that already
+    # fans out by live bindings, and bindings are resolved at reply time because
+    # a room can be promoted to Talk after the send that stamped the descriptor.
+
+    def _dual_bound(self, config, token="rm_web123"):
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, token, "carol", origin="web")
+            db.add_room_binding(conn, token, "web", token)
+            db.add_room_binding(conn, token, "talk", token)
+
+    def test_dual_bound_web_origin_fans_out_to_room(self, make_config):
+        config = make_config()
+        self._dual_bound(config)
+        task = self._origin_reply(config, origin_target="web:rm_web123")
+        assert task.output_target == "room,email"
+        assert task.conversation_token == "rm_web123"
+
+    def test_dual_bound_talk_origin_fans_out_to_room(self, make_config):
+        config = make_config()
+        self._dual_bound(config, token="RealRoomXYZ")
+        task = self._origin_reply(
+            config, origin_target="talk:RealRoomXYZ",
+            sent_conversation_token="RealRoomXYZ",
+        )
+        assert task.output_target == "room,email"
+
+    def test_dual_bound_respects_origin_only_policy(self, make_config):
+        config = make_config()
+        self._dual_bound(config)
+        task = self._origin_reply(
+            config, origin_target="web:rm_web123", policy="origin",
+        )
+        assert task.output_target == "room"
+
+    def test_single_bound_room_keeps_its_surface_descriptor(self, make_config):
+        # Nothing to fan out to: one binding means one surface, and `room` would
+        # add a DB lookup at every delivery for no change in outcome.
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "rm_web123", "carol", origin="web")
+            db.add_room_binding(conn, "rm_web123", "web", "rm_web123")
+        task = self._origin_reply(config, origin_target="web:rm_web123")
+        assert task.output_target == "web:rm_web123,email"
+
+    def test_unregistered_origin_room_is_unchanged(self, make_config):
+        # The pre-existing case every other test in this class exercises: a
+        # descriptor naming no room at all must route exactly as before.
+        task = self._origin_reply(make_config(), origin_target="web:rm_web123")
+        assert task.output_target == "web:rm_web123,email"
+
     def _poll_reply(self, config, *, sender, to, references="<origin_out@bot.com>"):
         """Poll a single inbound reply and return the created task (or None)."""
         envelope = _envelope(id="40", sender=sender, subject="Re: Question")

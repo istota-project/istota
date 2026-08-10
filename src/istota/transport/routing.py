@@ -181,6 +181,45 @@ def _infer_default_plan(task: "db.Task") -> list[Destination]:
     return []
 
 
+def room_fanout_descriptor(conn, origin: str) -> str | None:
+    """``"room"`` when a stored origin descriptor names a room reachable on more
+    than one surface; None to keep the descriptor exactly as stored.
+
+    `origin_descriptor` records the one surface a send came from, which is all it
+    can know at send time. A room is one conversation, though, and can be bound
+    to several surfaces — a web room promoted to Talk, a Talk room surfaced in
+    web — so delivering the reply to the recorded leg alone leaves the other view
+    of the same room blank. That is the ISSUE-242 gap reached from the delivery
+    side rather than the transcript side, and it is the more confusing half:
+    ISSUE-242 left a *record* missing from one surface, this leaves the reply
+    itself missing, in a room where the user watched the question arrive.
+
+    Resolved here at reply time rather than baked into the stored descriptor,
+    because a room can gain a binding after the send that stamped it (an "Also
+    open in Talk" promote is exactly that), and `room` re-reads bindings at every
+    delivery anyway. The stored value stays a faithful record of the origin.
+
+    Three cases keep the descriptor: a bare surface with no channel (nothing to
+    look up), a token naming no room, and a room with only the descriptor's own
+    binding — where `room` would cost a lookup per delivery and expand to what
+    the descriptor already says.
+    """
+    from .. import db
+
+    surface, _sep, channel = origin.partition(":")
+    if not channel:
+        return None
+    # A promoted room's per-surface ref is not its canonical token, so resolve
+    # the binding before asking whether the room exists.
+    token = db.resolve_room_token(conn, surface, channel) or channel
+    if db.get_room(conn, token) is None:
+        return None
+    bound = {b.surface for b in db.list_room_bindings(conn, token)}
+    if not bound - {surface}:
+        return None
+    return "room"
+
+
 def _expand_room_destinations(
     config: "Config", task: "db.Task",
 ) -> list[Destination]:

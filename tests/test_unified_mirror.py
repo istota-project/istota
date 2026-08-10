@@ -66,6 +66,30 @@ class TestRoomExpansion:
         assert [d.surface for d in plan] == ["web"]
         assert plan[0].kind == "stream"
 
+    def test_email_reply_into_dual_bound_room_pushes_to_talk(self, config):
+        """An email reply routed by `room` reaches the room's Talk binding.
+
+        The live failure this covers: the reply's stored origin descriptor named
+        `web:<token>` for a room bound to *both* surfaces, so Talk — where the
+        user had watched the whole exchange — showed nothing at all. `email` is
+        not a room surface, so the Talk binding is a non-origin push and the
+        email leg is the origin delivery. The web binding is skipped as a stream
+        surface: that room's assistant row is written by `_store_room_turn`, and
+        a push would render it a second time as a system note.
+        """
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "rm1", "alice", origin="web")
+            db.add_room_binding(conn, "rm1", "web", "rm1")
+            db.add_room_binding(conn, "rm1", "talk", "rm1")
+        task = _task(source_type="email", conversation_token="rm1",
+                     output_target="room,email")
+        plan = resolve_delivery_plan(config, task, None)
+        assert ("talk", "rm1", "push") in {
+            (d.surface, d.channel, d.kind) for d in plan
+        }
+        assert [d.surface for d in plan].count("email") == 1
+        assert not [d for d in plan if d.surface == "web" and d.kind == "push"]
+
     def test_talk_origin_does_not_push_to_web_binding(self, config):
         # talk-origin room bound to web: web binding is a stream surface, so no
         # mirror push — the web view renders Talk turns from the shared store.
