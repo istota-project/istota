@@ -27,7 +27,8 @@ Transports split into two `surface_class`es (`TransportCapabilities.surface_clas
   `source_type="web"` / `output_target="web"`; `web` is in
   `routing._STREAM_SURFACES` so the planner short-circuits a web task's result
   to a stream destination (no push) and the `/api/chat/*` SSE endpoint tails
-  `task_events`. `ReplTransport.deliver` is a genuine no-op (the terminal has no
+  `task_events`. `_STREAM_SURFACES` governs *that* short-circuit and nothing
+  else — the room fan-out asks `room_view` instead. `ReplTransport.deliver` is a genuine no-op (the terminal has no
   persistent store). `WebTransport.deliver`, by contrast, is a real write
   (ISSUE-121): web is a *user-routable* delivery surface, so alerts / the
   verbose execution log / any notification routed to `web` append an unsolicited
@@ -90,9 +91,19 @@ paths). It is the only email code outside `transport/email/`.
   `attachments`, `is_group_chat`, `output_target`, `model`/`effort`, `raw`.
 - **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
   `supports_progress_ack`, `supports_typing`, `max_message_length`,
-  `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`).
+  `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`),
+  `room_view` (`"external"` | `"canonical"` | `None`, default `None`).
   Drives capability-gated wiring in the scheduler instead of `source_type ==`
   checks; the delivery planner reads `surface_class` to decide push-vs-stream.
+  `room_view` is the **second, orthogonal** routing axis and the one the room
+  fan-out reads: whether the surface is a view of a shared room, and if so where
+  that view's transcript is stored. `talk` → `"external"` (Nextcloud owns the
+  store, so a room fan-out must push), `web` → `"canonical"` (the store *is*
+  `messages`, so writing the row is the delivery and a push would double-post),
+  everything else → `None` (a delivery target, not a room view). The two axes
+  agree today only because web happens to be both the only stream room surface
+  and the only canonical-transcript one; `repl` is the counterexample that keeps
+  them separate (`"stream"`, no room view). See `_expand_room_destinations`.
   `user_routable` marks a surface a user can deliberately point traffic at (a
   briefing output, a default destination, an alert route). The self-routing
   surfaces are `False` — `istota_file` only ever delivers back to the TASKS.md

@@ -30,7 +30,10 @@ logger = logging.getLogger("istota.transport.routing")
 
 # Surfaces whose outbound is the task_events log (no push delivery). Web chat
 # rides the same substrate as the REPL: the client tails task_events over SSE,
-# so there is nothing to push.
+# so there is nothing to push. This governs the planner's push-vs-stream
+# short-circuit in `_resolve_one` and nothing else — the room fan-out asks
+# `TransportCapabilities.room_view` instead (see `_expand_room_destinations`),
+# which is a different question that happens to have the same answer today.
 _STREAM_SURFACES = frozenset({"stream", "web"})
 # Source types that must never silently drop a reply (interactive surfaces).
 _INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "repl", "web"})
@@ -220,17 +223,61 @@ def room_fanout_descriptor(conn, origin: str) -> str | None:
     return "room"
 
 
+def _room_view(
+    config: "Config", registry: "TransportRegistry | None", surface: str,
+) -> str | None:
+    """``TransportCapabilities.room_view`` for a surface name, or None when the
+    surface is not a room view *or* is not resolvable.
+
+    Those two answers deliberately collapse, and the caller skips only on
+    ``"canonical"`` rather than keeping only ``"external"``. A binding whose
+    surface has no live transport (Talk bound but ``talk.enabled = false``) has
+    no capabilities to read, and the safe reading of an unresolvable surface is
+    "not a canonical view": the destination survives expansion and resolves to a
+    normal push against the binding's own ``surface_ref``, exactly as it did
+    when this was a name check against ``_STREAM_SURFACES``. It then fails at
+    delivery time, where a disabled surface is already handled. Treating
+    unresolvable as "don't mirror" would instead make the mirror vanish at plan
+    time with nothing logged — a behaviour change, and a silent one.
+
+    Falls back to a config-built registry so a caller without one in scope still
+    gets the real answer for the unconditionally-registered surfaces (web);
+    ``make_registry`` does no I/O.
+    """
+    if registry is None:
+        from .registry import make_registry
+        try:
+            registry = make_registry(config)
+        except Exception as e:  # pragma: no cover - never abort delivery
+            logger.warning("registry construction failed for room_view: %s", e)
+            return None
+    transport = registry.get(surface)
+    if transport is None:
+        return None
+    return getattr(transport.capabilities, "room_view", None)
+
+
 def _expand_room_destinations(
     config: "Config", task: "db.Task",
+    registry: "TransportRegistry | None" = None,
 ) -> list[Destination]:
     """Expand a ``room`` meta-destination by the room's live bindings: the
-    origin delivery plus a push mirror to every *non-origin push* binding.
+    origin delivery plus a push mirror to every *non-origin* binding whose view
+    of the room lives in a store we don't own.
 
-    Stream bindings (web) are skipped — their clients read the shared canonical
-    store / SSE, so a push would double-post the turn. The mirror is therefore
-    asymmetric by design: a web-origin task mirrors to its bound Talk room
-    (Talk's store is external), but a Talk-origin task pushes nothing to its
-    bound web room (the web display loader already renders Talk turns).
+    The one rule: write the canonical ``messages`` row once, then push to every
+    bound surface whose transcript lives somewhere else. A ``room_view`` of
+    ``"canonical"`` (web) is already delivered by that row, so pushing to it
+    would render the turn twice. A ``room_view`` of ``"external"`` (Talk, whose
+    store is in Nextcloud) needs a real API call.
+
+    So the mirror is asymmetric by design — a web-origin task mirrors to its
+    bound Talk room, a Talk-origin task pushes nothing to its bound web room —
+    and the asymmetry falls out of where each surface's transcript is stored
+    rather than being asserted per surface. It used to key on
+    ``_STREAM_SURFACES``, which gave the same answer only because web happens to
+    be both the only canonical-transcript room view and the only stream room
+    surface.
     """
     from .. import db
     from .registry import _surface_for_source_type
@@ -248,7 +295,9 @@ def _expand_room_destinations(
                        getattr(task, "id", "?"), e)
         return dests
     for b in bindings:
-        if b.surface == origin_surface or b.surface in _STREAM_SURFACES:
+        if b.surface == origin_surface:
+            continue
+        if _room_view(config, registry, b.surface) == "canonical":
             continue
         dests.append(Destination(b.surface, b.surface_ref, mirror=True))
     return dests
@@ -368,7 +417,8 @@ def resolve_delivery_plan(
         expanded: list[Destination] = []
         for d in plan:
             if d.surface == "room":
-                expanded.extend(_expand_room_destinations(config, task))
+                expanded.extend(
+                    _expand_room_destinations(config, task, registry))
             else:
                 expanded.append(d)
         plan = expanded

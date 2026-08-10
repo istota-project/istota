@@ -16,7 +16,7 @@ transport-abstraction spec for why neither is renamed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .. import db
@@ -91,6 +91,27 @@ class TransportCapabilities:
       contributes no push work; the ``result``/``error``/``done`` events satisfy
       it.
 
+    ``room_view`` is a *second, orthogonal* routing dimension: whether the
+    surface is a view of a shared room, and if so where that view's transcript
+    is stored. It answers "does a message written into this room still need to
+    be pushed here?", which ``surface_class`` cannot — that one describes how
+    outbound works for a task's *own* result.
+
+    - ``"external"`` — the surface is a room view whose transcript lives in a
+      store Istota does not own (Talk's is in Nextcloud). Writing the canonical
+      ``messages`` row does not put the message in front of this surface's
+      users, so a room fan-out must push to it.
+    - ``"canonical"`` — the surface is a room view rendered *from* the canonical
+      ``messages`` store (web chat). Writing the row **is** the delivery; a push
+      would render the same message twice.
+    - ``None`` — not a room view at all (email, ntfy, istota_file, repl). These
+      are delivery targets; a room fan-out never mirrors to them.
+
+    The two axes are independent and must not be conflated. Web is
+    ``surface_class="stream"`` *and* ``room_view="canonical"`` today, which is a
+    coincidence of having exactly one room-view stream surface — a surface that
+    is one but not the other is what the split exists to keep correct.
+
     ``user_routable`` marks a surface as one a user can deliberately point
     traffic at (a briefing output, a default destination, an alert route). The
     self-routing surfaces are False: ``istota_file`` only ever delivers back to
@@ -107,6 +128,8 @@ class TransportCapabilities:
     max_message_length: int | None = None  # None = unlimited; drives splitting
     surface_class: str = "push"          # "push" | "stream"
     user_routable: bool = True           # can a user select it as a destination
+    # Room view + where that view's transcript lives; None = not a room view.
+    room_view: Literal["external", "canonical"] | None = None
 
 
 @dataclass(frozen=True)
