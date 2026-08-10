@@ -493,6 +493,37 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Outbound drafts: emails the approval gate held instead of sending.
+    # Created here for existing DBs; schema.sql also has it (with the full
+    # commentary) for fresh installs.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outbound_drafts (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       TEXT NOT NULL,
+            task_id       INTEGER,
+            room_token    TEXT,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            to_addrs      TEXT NOT NULL DEFAULT '[]',
+            cc_addrs      TEXT NOT NULL DEFAULT '[]',
+            bcc_addrs     TEXT NOT NULL DEFAULT '[]',
+            subject       TEXT NOT NULL DEFAULT '',
+            body          TEXT NOT NULL DEFAULT '',
+            html          INTEGER NOT NULL DEFAULT 0,
+            in_reply_to   TEXT,
+            "references"  TEXT,
+            attachments   TEXT NOT NULL DEFAULT '[]',
+            origin_target TEXT,
+            hold_reason   TEXT NOT NULL DEFAULT '',
+            sent_message_id TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at   TEXT,
+            nagged_at     TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+        """
+    )
+
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
     # reserved `__output__` key. Add the column, then hoist `__output__` out of
