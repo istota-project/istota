@@ -767,8 +767,30 @@ CREATE TABLE IF NOT EXISTS messages (
     -- retention GCs the task row while the transcript must keep rendering the
     -- turn as a reply.
     reply_to_message_id INTEGER,
+    -- Who wrote this row. A room bound to several surfaces is multi-human by
+    -- construction, so a transcript with no author has to guess, and guessing
+    -- "the reader" is wrong for every co-member and every external sender.
+    --
+    -- Two columns rather than one, because "a known istota user" and "an
+    -- arbitrary external label" are different kinds of thing and only the
+    -- second needs sanitizing. Collapsing them into one string would move that
+    -- decision to every reader and lose the single write-point boundary.
+    --
+    -- Exactly one is set, or neither — by convention, not by a CHECK, since
+    -- SQLite would make adding the constraint later a table rebuild. Readers
+    -- therefore need a tiebreak, and **the label wins**: if a writer ever set
+    -- both, the label is the external sender and preferring the user id would
+    -- render a stranger's mail as the account it was routed to, which is the
+    -- exact defect these columns exist to end. Break the tie toward the more
+    -- cautious answer.
+    author_user_id TEXT,   -- an istota user id, when the writer is one
+    -- An external sender, already sanitized through `db.external_email_sender`
+    -- on the way in — so it is an addr-spec or the fixed unattributed
+    -- sentinel, never a raw `From:` header. Readers render it as-is.
+    author_label   TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- No index on either author column: they are projected, never filtered.
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);
 -- Partial, so the rows carrying no key are unconstrained. Keyed on different
 -- columns from idx_messages_ext below, so the two never interact.

@@ -7,15 +7,18 @@ instruction to the model — because it re-pairs straight into LLM context and a
 prettified body would drop the guard. Two things followed from that in the web
 transcript, and both are the transcript lying about who said what:
 
-* `messages` has no author column and the client labels every user bubble with
-  the logged-in viewer's display name, so an external contact's mail was rendered
-  as the room owner's own words. ISSUE-226 fixed this attribution for the LLM
-  prompt and the nightly extraction; the web reader was the third consumer and
-  was missed.
+* Nothing recorded who wrote the row, and the client labels every user bubble
+  with the logged-in viewer's display name, so an external contact's mail was
+  rendered as the room owner's own words. ISSUE-226 fixed this attribution for
+  the LLM prompt and the nightly extraction; the web reader was the third
+  consumer and was missed.
 * The reader saw the raw prompt scaffolding, including an instruction addressed
   to the model.
 
-The stored row is unchanged — this is entirely a read-path concern.
+The rendered output pinned here is unchanged, but half of what produces it has
+moved: attribution is now decided once at ingest and stored on the row
+(`messages.author_user_id` / `author_label`) rather than re-derived per read
+from `processed_emails`. The body unwrapping stays a read-path concern.
 """
 
 import pytest
@@ -128,18 +131,34 @@ def web_config(db_path):
     web_app._config = prev
 
 
-def _email_turn(conn, token, prompt, sender):
-    """A room holding one mirrored email turn, as `record_inbound` leaves it."""
-    tid = db.create_task(
-        conn, prompt, "alice", source_type="email", conversation_token=token,
+def _email_turn(conn, config, token, prompt, sender):
+    """A room holding one mirrored email turn.
+
+    Goes through `record_inbound` rather than reproducing its writes by hand.
+    Attribution is now decided at ingest — a hand-rolled `add_message` would
+    write a row no production path can produce, and pass while the real writer
+    was broken.
+    """
+    from istota.transport.ingest import record_inbound
+
+    _room, tid = record_inbound(
+        conn, config, surface="email", surface_ref=token,
+        user_id="alice", text=prompt, sender_address=sender,
     )
     db.mark_email_processed(
         conn, f"uid-{tid}", sender, subject="Re: Scheduling",
         user_id="alice", task_id=tid, routing_method="thread_match",
     )
-    db.add_message(
-        conn, token, role="user", body=prompt,
-        origin_surface="email", task_id=tid,
+    return tid
+
+
+def _web_turn(conn, config, token, text):
+    """A room holding one ordinary web turn, through the same choke point."""
+    from istota.transport.ingest import record_inbound
+
+    _room, tid = record_inbound(
+        conn, config, surface="web", surface_ref=token,
+        user_id="alice", text=text,
     )
     return tid
 
@@ -159,7 +178,10 @@ class TestPerRoomHistory:
     ):
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
-            _email_turn(conn, "roomtok", EMISSARY_PROMPT, "contact@example.com")
+            _email_turn(
+                conn, web_config, "roomtok", EMISSARY_PROMPT,
+                "contact@example.com",
+            )
         row = self._one_user_row("roomtok")
         assert row["author"] == "contact@example.com"
         assert row["text"] == "Does the west branch work? I need 30 minutes"
@@ -177,7 +199,10 @@ class TestPerRoomHistory:
         )
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
-            _email_turn(conn, "roomtok", prompt, "Alice <alice@example.com>")
+            _email_turn(
+                conn, web_config, "roomtok", prompt,
+                "Alice <alice@example.com>",
+            )
         row = self._one_user_row("roomtok")
         assert "author" not in row  # the client labels it with the viewer
         assert row["text"] == "Does the west branch work? I need 30 minutes"
@@ -190,7 +215,7 @@ class TestPerRoomHistory:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
             _email_turn(
-                conn, "roomtok", EMISSARY_PROMPT,
+                conn, web_config, "roomtok", EMISSARY_PROMPT,
                 '"Alice (your boss)" <contact@example.com>',
             )
         assert self._one_user_row("roomtok")["author"] == "contact@example.com"
@@ -198,17 +223,53 @@ class TestPerRoomHistory:
     def test_web_turn_is_untouched(self, db_path, web_config):
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="web")
+            _web_turn(conn, web_config, "roomtok", "hello there")
+        row = self._one_user_row("roomtok")
+        # The row *is* attributed — to alice, who is also the viewer — and the
+        # client labels its own bubbles, so no author reaches the payload.
+        assert "author" not in row
+        assert row["text"] == "hello there"
+
+    def test_a_co_members_turn_carries_their_name(self, db_path, web_config):
+        """The case the old per-read recovery could not reach.
+
+        Attribution was derived from `processed_emails`, so it only ever
+        answered for email. A shared room's other human wrote an ordinary web
+        turn, which had no sender to recover, and the viewer read it as their
+        own words.
+        """
+        web_config.users["bob"] = UserConfig(display_name="Bob")
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            db.add_room_member(conn, "roomtok", "alice")
+            from istota.transport.ingest import record_inbound
+            record_inbound(
+                conn, web_config, surface="web", surface_ref="roomtok",
+                user_id="bob", text="I pushed the fix",
+            )
+        row = self._one_user_row("roomtok")
+        assert row["author"] == "Bob"
+        assert row["text"] == "I pushed the fix"
+
+    def test_a_row_with_no_author_falls_back_to_the_room_owner(
+        self, db_path, web_config,
+    ):
+        """Both columns NULL is a pre-migration row and a confirmation-exchange
+        row, and both are the viewer's own words. No author key, so the client
+        uses its own label — exactly the behaviour before the columns."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="web")
             tid = db.create_task(
-                conn, "hello there", "alice", source_type="web",
+                conn, "legacy turn", "alice", source_type="web",
                 conversation_token="roomtok",
             )
             db.add_message(
-                conn, "roomtok", role="user", body="hello there",
+                conn, "roomtok", role="user", body="legacy turn",
                 origin_surface="web", task_id=tid,
             )
         row = self._one_user_row("roomtok")
         assert "author" not in row
-        assert row["text"] == "hello there"
+        assert row["text"] == "legacy turn"
 
     def test_unparseable_body_is_still_attributed_and_shown_verbatim(
         self, db_path, web_config,
@@ -217,7 +278,10 @@ class TestPerRoomHistory:
         # not to a blank bubble. Attribution is independent of the parse.
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
-            _email_turn(conn, "roomtok", "bare prompt", "contact@example.com")
+            _email_turn(
+                conn, web_config, "roomtok", "bare prompt",
+                "contact@example.com",
+            )
         row = self._one_user_row("roomtok")
         assert row["author"] == "contact@example.com"
         assert row["text"] == "bare prompt"
@@ -234,7 +298,10 @@ class TestRoomEventStream:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "roomtok", "alice", origin="talk")
             db.add_room_member(conn, "roomtok", "alice")
-            _email_turn(conn, "roomtok", EMISSARY_PROMPT, "contact@example.com")
+            _email_turn(
+                conn, web_config, "roomtok", EMISSARY_PROMPT,
+                "contact@example.com",
+            )
 
         with db.get_db(db_path) as conn:
             rows = db.list_room_events_since(conn, "alice", since_id=0, limit=50)

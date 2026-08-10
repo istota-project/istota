@@ -499,7 +499,9 @@ async def cmd_confirm(ctx: CommandContext):
             ctx, f"Declined #{task.id} — {label}. Nothing was run.",
         )
 
-    trusted = confirmations.approve(conn, task, trust_sender=(verb == "trust"))
+    trusted = confirmations.approve(
+        conn, task, trust_sender=(verb == "trust"), config=ctx.config,
+    )
     if trusted:
         return _record_confirm_exchange(
             ctx,
@@ -551,7 +553,7 @@ def _record_confirm_exchange(ctx: CommandContext, reply: str) -> "CommandResult"
     user_msg_id, system_msg_id = confirmations.record_exchange(
         ctx.conn, room_token,
         answer_text=f"!{ctx.invoked_as} {ctx.args}".strip(),
-        ack=reply, origin_surface=ctx.surface,
+        ack=reply, origin_surface=ctx.surface, answered_by=ctx.user_id,
     )
     ctx.conn.commit()
     return CommandResult(
@@ -655,6 +657,10 @@ async def cmd_steer(ctx: CommandContext):
                 db.add_message(
                     conn, room_token, role="user", body=text,
                     origin_surface=ctx.surface, task_id=None,
+                    # A steer is a `task_id IS NULL` row like a confirmation
+                    # answer, so nothing downstream can recover who typed it —
+                    # and in a shared room the answer is not always the reader.
+                    author_user_id=user_id,
                 )
                 conn.commit()
         except Exception:
@@ -1590,6 +1596,9 @@ def _record_retry_user_turn(
             db.add_message(
                 conn, token, role="user", body=original.prompt,
                 origin_surface=surface, task_id=task_id,
+                # The retry re-asks the original question, so it is the original
+                # asker's turn — not the reader's, in a shared room.
+                author_user_id=original.user_id,
             )
     except Exception:
         logger.debug("retry transcript user-row write failed", exc_info=True)

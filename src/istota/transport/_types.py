@@ -69,6 +69,12 @@ class IncomingMessage:
     # the user's room before they approve it — and leaving it there when they
     # decline — is exactly what the gate exists to prevent.
     suppress_transcript_mirror: bool = False
+    # The message's own sender, as the surface reported it, when that is not
+    # simply ``user_id`` — today only email's envelope sender, which names the
+    # person who *wrote* the mail rather than the istota user it was routed to.
+    # Raw and untrusted: ``record_inbound`` sanitizes it through
+    # ``db.external_email_sender`` before it reaches ``messages.author_label``.
+    sender_address: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)  # original payload
 
 

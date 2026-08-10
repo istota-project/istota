@@ -689,10 +689,11 @@ async def handle_confirmation_reply(
     if res.task is None:
         return False
 
-    ack = confirmations.apply_answer(conn, res.task, answer)
+    ack = confirmations.apply_answer(conn, res.task, answer, config)
     await _post_ack(config, conversation_token, ack)
     confirmations.record_exchange(
         conn, room_token, answer_text=content, ack=ack, origin_surface="talk",
+        answered_by=actor_id,
     )
     return True
 

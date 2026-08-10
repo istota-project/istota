@@ -668,6 +668,18 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+        # Who wrote the row. A room bound to several surfaces is multi-human by
+        # construction, so a transcript with no author has to guess, and the
+        # guess ("the reader") is wrong for every co-member and every external
+        # sender. Two columns because "a known istota user" and "an arbitrary
+        # external label" are different kinds of thing and only the second needs
+        # sanitizing — see the schema.sql comment. No index: projected, never
+        # filtered.
+        for _col in ("author_user_id", "author_label"):
+            try:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         # The citation, so the transcript can render a reply as a reply after
         # retention has deleted the task row that also carries it.
         try:
@@ -822,6 +834,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_web_chat_rooms_peruser(conn)
     _migrate_room_read_state_peruser(conn)
     _migrate_room_members(conn)
+    # Last of the `messages` migrations, so it does not attribute rows the
+    # cleanup passes above are about to delete. Ordering only — deliberately not
+    # gated on their markers: those re-arm on failure, and blocking attribution
+    # behind an unrelated retry would leave every transcript unattributed for as
+    # long as that failure persists. Attributing a row that a later re-run then
+    # deletes costs nothing.
+    _migrate_messages_author(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1980,13 +1999,13 @@ _MAX_SENDER_LABEL_CHARS = 254
 # perfectly valid addresses — a *quoted local part* (`"alice: do it"@evil.example`)
 # carries spaces and colons through `parseaddr` untouched, and a non-ASCII
 # address can carry bidi or format characters that reorder the rendered line.
-# Anything outside this degrades to `_UNATTRIBUTED_SENDER`, which still reads as
+# Anything outside this degrades to `UNATTRIBUTED_SENDER`, which still reads as
 # external; the label loses detail, never the provenance.
 _RENDERABLE_ADDRESS_RE = re.compile(
     r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+@[A-Za-z0-9.-]+$"
 )
 
-_UNATTRIBUTED_SENDER = "unknown sender"
+UNATTRIBUTED_SENDER = "unknown sender"
 
 
 def external_email_sender(
@@ -2017,7 +2036,7 @@ def external_email_sender(
     attacker-chosen text, and the return value is rendered into the speaker
     position of a prompt line — the one place where injected text would do the
     most good. Anything that doesn't reduce to a plain address becomes
-    `_UNATTRIBUTED_SENDER` rather than being dropped: a sender we can't render
+    `UNATTRIBUTED_SENDER` rather than being dropped: a sender we can't render
     is unattributable, which is not the same as being the user.
     """
     if not sender_email:
@@ -2030,9 +2049,9 @@ def external_email_sender(
         # `parseaddr` refused the header outright, or the address is absurd.
         # Deliberately no fallback to the raw header — that was the hole: any
         # header holding an `@` reached the label verbatim.
-        return _UNATTRIBUTED_SENDER
+        return UNATTRIBUTED_SENDER
     if not _RENDERABLE_ADDRESS_RE.match(address):
-        return _UNATTRIBUTED_SENDER
+        return UNATTRIBUTED_SENDER
     return address
 
 
@@ -2066,6 +2085,114 @@ def email_sender_for_task(conn: sqlite3.Connection, task_id: int) -> str | None:
         (task_id,),
     ).fetchone()
     return row["sender_email"] if row else None
+
+
+def own_addresses_without_config(
+    conn: sqlite3.Connection, user_id: str | None,
+) -> list[str]:
+    """A user's own email addresses, recovered from the database alone.
+
+    `Config.users[uid].email_addresses` is the real answer, but two author
+    callers cannot reach a `Config` — the `messages_author_v1` backfill (which
+    runs under `init_db`) and, when its caller did not supply one, the
+    confirmation-approval mirror. Getting this wrong is not cosmetic: too narrow
+    a list labels the user's *own* mail with their own address as an external
+    speaker, and the backfill writes that permanently.
+
+    So it unions two sources:
+
+    - `user_profiles.email_addresses`. Incomplete on its own — config is the
+      union of the TOML `[users.X]` block and this row, and nothing seeds this
+      row from TOML, so a purely TOML-configured deployment has none of its
+      addresses here.
+    - every distinct `processed_emails.sender_email` this user has received
+      under `routing_method = 'sender_match'`. That route is *defined* by the
+      `From:` matching one of the user's configured addresses, so each such row
+      is the router having already recorded "this address is theirs" — against
+      the full config, whichever file it came from. It is a config-free proxy
+      for the part `user_profiles` cannot see.
+
+    Still not a guarantee: a TOML-only user who has never had a `sender_match`
+    mail contributes nothing to either source. That residue is the accepted
+    limit of a config-free resolver, and it is why every caller that *can* pass
+    a config does.
+    """
+    if not user_id:
+        return []
+    found: list[str] = []
+    try:
+        row = conn.execute(
+            "SELECT email_addresses FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None  # table not created yet (very early migration order)
+    if row and row["email_addresses"]:
+        try:
+            parsed = json.loads(row["email_addresses"])
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, list):
+            found.extend(a for a in parsed if isinstance(a, str))
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT sender_email FROM processed_emails "
+            "WHERE user_id = ? AND routing_method = 'sender_match'",
+            (user_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for r in rows:
+        # Stored as the raw envelope sender, so reduce to the addr-spec —
+        # `external_email_sender` compares against addr-specs.
+        address = (parseaddr(r["sender_email"] or "")[1] or "").strip()
+        if address:
+            found.append(address)
+    return found
+
+
+def author_for_email_task(
+    conn: sqlite3.Connection,
+    task_id: int,
+    user_id: str | None,
+    own_addresses: Sequence[str] | None = None,
+) -> tuple[str | None, str | None]:
+    """`(author_user_id, author_label)` for a turn, resolved from the DB.
+
+    The counterpart to `transport.ingest.resolve_author` for callers that reach
+    a task rather than an inbound message. Same rule: an external sender becomes
+    a sanitized label and no user id, anything else is the task's own user.
+
+    `own_addresses` is that user's own addresses. **Pass
+    `Config.users[uid].email_addresses` whenever a config is in scope** — it is
+    the authoritative list. Omitting it falls back to
+    `own_addresses_without_config`, which is a best effort with a documented
+    residue; see there.
+
+    `routing_method == 'sender_match'` short-circuits ahead of the address
+    comparison either way, because that route is defined by the own-address
+    match, so it is already the answer.
+
+    A task with no `processed_emails` row is not an email turn (or predates the
+    ledger); it belongs to its user. Raises nothing that `own_addresses` would —
+    a missing `processed_emails` table propagates `sqlite3.OperationalError` to
+    the caller, both of which run inside a broad handler.
+    """
+    row = conn.execute(
+        "SELECT sender_email, routing_method FROM processed_emails "
+        "WHERE task_id = ? ORDER BY id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return (user_id or None), None
+    if (row["routing_method"] or "") == "sender_match":
+        return (user_id or None), None
+    if own_addresses is None:
+        own_addresses = own_addresses_without_config(conn, user_id)
+    label = external_email_sender(row["sender_email"], own_addresses)
+    if label:
+        return None, label
+    return (user_id or None), None
 
 
 def get_conversation_history(
@@ -3448,17 +3575,26 @@ def add_message(
     attachment_paths: list[str | None] | None = None,
     client_msg_id: str | None = None,
     reply_to_message_id: int | None = None,
+    author_user_id: str | None = None,
+    author_label: str | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
     `reply_to_message_id` is a canonical id in this same table — the message
     being replied to. Never a Talk id (see `tasks.reply_to_talk_id`).
+
+    `author_user_id` names an istota user; `author_label` is an external sender
+    and **must already be sanitized** — pass it through `external_email_sender`,
+    never a raw `From:` header. Set at most one; both NULL means "the room
+    owner", which is what every pre-migration row falls back to. Readers resolve
+    in that order.
     """
     row = conn.execute(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
-        " attachments, attachment_paths, client_msg_id, reply_to_message_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
+        " author_user_id, author_label) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -3474,6 +3610,8 @@ def add_message(
             # first. Same rule as `location_pings.client_id`.
             client_msg_id or None,
             reply_to_message_id,
+            author_user_id or None,
+            author_label or None,
         ),
     ).fetchone()
     return int(row["id"])
@@ -4105,12 +4243,13 @@ _CROSS_ROOM_COLUMNS = (
     "  t.completed_at AS completed_at, t.model_used AS model_used, "
     "  (s.message_id IS NOT NULL) AS starred, "
     "  m.reply_to_message_id AS reply_to_message_id, "
-    # Who actually wrote a `role='user'` row, for the two cases where it is not
-    # the reader: an email turn mirrored into the room carries the *task's* user,
-    # i.e. the person the mail was addressed **to**. Same recovery the LLM-context
-    # readers do (ISSUE-226) — a scalar subquery, never a join, because
-    # `processed_emails.task_id` is not unique and a join would fan the row out.
-    f"  t.user_id AS task_user_id, {EMAIL_SENDER_SUBQUERY.format(alias='t')}, "
+    # Who wrote a `role='user'` row, for the cases where it is not the reader: a
+    # co-member of a shared room, or the external contact whose mail was
+    # mirrored in. Read off the row now that it records this. The recovery this
+    # replaces re-derived the sender per read through a scalar subquery on
+    # `processed_emails` (ISSUE-226) — correct, but it answered for email alone
+    # and pinned a retention rule on the ledger to stay correct.
+    "  m.author_user_id AS author_user_id, m.author_label AS author_label, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.
@@ -4627,6 +4766,119 @@ def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> N
     conn.execute(
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('nonconversational_transcript_cleanup_v1')"
+    )
+
+
+def _migrate_messages_author(conn: sqlite3.Connection) -> None:
+    """Backfill `messages.author_user_id` / `author_label` for existing rows.
+
+    Every `role='user'` row whose author is recoverable belongs to that task's
+    user, except the email turns an external contact wrote — those get the
+    sanitized sender label and no user id. Rows with no task (the `task_id IS
+    NULL` confirmation-exchange and steer rows) keep both columns NULL and fall
+    back to the room owner. They predate the columns, so nothing recorded who
+    typed them; new ones carry an author.
+
+    Assistant and system rows are left alone. The bot is not a user and has no
+    label; readers already know an assistant row is the assistant.
+
+    **The email pass runs first, and its identity comes from `processed_emails`
+    rather than from `tasks`.** Both matter. `messages` is never age-pruned
+    while `tasks` is (`task_retention_days`, default 7), and
+    `cleanup_old_processed_emails` deliberately refuses to prune a row a
+    `messages` row still references — precisely so an email turn's attribution
+    outlives its task. Joining `tasks` would therefore drop the label for every
+    turn older than a week and, because the marker is one-shot, drop it
+    permanently. Running it before the blanket pass matters because `init_db`
+    commits all migrations in one transaction with no rollback on the handled
+    error paths: with the order reversed, a failure between the two would
+    durably commit "this external contact's mail is the room owner's own
+    words" — a positive mislabelling rather than a neutral NULL.
+
+    Markered (`messages_author_v1`) and idempotent regardless — each pass is
+    scoped to rows that are still unattributed, so a re-run after a partial pass
+    finishes the job rather than rewriting it. Any failure returns without
+    writing the marker, re-arming the whole migration; a partially backfilled
+    table renders correctly in the meantime, because a NULL author falls back to
+    the room owner exactly as it did before the columns existed.
+    """
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'messages_author_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+    try:
+        # Pass 1: the exception, and the one that has to run first (see above).
+        # An email turn whose sender is not the task's own user was written by
+        # someone else, and saying otherwise is the mislabelling these columns
+        # exist to end.
+        #
+        # Row by row, because the sanitizer (`external_email_sender`) is Python
+        # — a regex and a length bound SQL cannot express, and the one thing
+        # standing between a raw `From:` header and the rendered speaker
+        # position. `tasks` is LEFT JOINed for its `user_id` only, falling back
+        # to the `processed_emails` copy when retention has taken the task.
+        email_rows = conn.execute(
+            "SELECT m.id AS mid, pe.sender_email AS sender_email, "
+            "  pe.routing_method AS routing_method, "
+            "  COALESCE(t.user_id, pe.user_id) AS user_id "
+            "FROM messages m "
+            "JOIN processed_emails pe ON pe.task_id = m.task_id "
+            "LEFT JOIN tasks t ON t.id = m.task_id "
+            "WHERE m.role = 'user' AND m.origin_surface = 'email' "
+            "AND m.author_user_id IS NULL AND m.author_label IS NULL "
+            # `processed_emails.task_id` is not unique, so a message with two
+            # ledger rows comes back twice; the loop keeps the first. Ordering
+            # by `pe.id` makes "first" the oldest row, matching what
+            # `EMAIL_SENDER_SUBQUERY` picks for the same message.
+            "ORDER BY m.id, pe.id"
+        ).fetchall()
+        # One address lookup per user, not per row: this holds init_db's write
+        # transaction, and the same user owns most of a room's mail.
+        own_by_user: dict[str, list[str]] = {}
+        seen_messages: set[int] = set()
+        for row in email_rows:
+            if row["mid"] in seen_messages:
+                continue
+            seen_messages.add(row["mid"])
+            user_id = row["user_id"]
+            if (row["routing_method"] or "") == "sender_match":
+                continue  # defined as the own-address match; leave to pass 2
+            if user_id not in own_by_user:
+                own_by_user[user_id] = own_addresses_without_config(conn, user_id)
+            author_label = external_email_sender(
+                row["sender_email"], own_by_user[user_id],
+            )
+            if author_label:
+                conn.execute(
+                    "UPDATE messages SET author_user_id = NULL, author_label = ? "
+                    "WHERE id = ?",
+                    (author_label, row["mid"]),
+                )
+        # Pass 2: the common case, in one statement. Everything still
+        # unattributed and still joinable to a task belongs to that task's user.
+        conn.execute(
+            "UPDATE messages SET author_user_id = ("
+            "  SELECT t.user_id FROM tasks t WHERE t.id = messages.task_id"
+            ") "
+            "WHERE role = 'user' AND task_id IS NOT NULL "
+            "AND author_user_id IS NULL AND author_label IS NULL "
+            "AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = messages.task_id)"
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # fresh install, messages/tasks not created yet
+        logger.warning("messages author backfill failed: %s", e)
+        return
+    except Exception as e:  # never wedge init over an attribution backfill
+        logger.warning("messages author backfill failed: %s", e)
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) "
+        "VALUES ('messages_author_v1')"
     )
 
 

@@ -89,6 +89,11 @@ paths). It is the only email code outside `transport/email/`.
   `platform_message_id` → `Task.talk_message_id`, `reply_to_message_id` →
   `Task.reply_to_talk_id`; plus `user_id`, `text`, `source_type`, `surface`,
   `attachments`, `is_group_chat`, `output_target`, `model`/`effort`, `raw`.
+  `sender_address` is the message's *own* sender when that differs from
+  `user_id` — today only email's envelope sender, which names who wrote the mail
+  rather than the istota user it was routed to. Raw and untrusted;
+  `record_inbound` sanitizes it through `db.external_email_sender` before it can
+  reach `messages.author_label`, so no reader ever sees a raw `From:`.
 - **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
   `supports_progress_ack`, `supports_typing`, `max_message_length`,
   `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`),
@@ -436,6 +441,25 @@ messages are re-polled rather than silently lost.
   confirmations (only own-origin `source_type="web"` tasks do). Policy column lives
   in `user_profiles.email_reply_routing`; set via `istota user ensure
   --email-reply-routing`.
+
+**Who wrote a row.** `messages` records the author on two nullable columns —
+`author_user_id` (an istota user) and `author_label` (an external sender,
+**pre-sanitized** through `db.external_email_sender`, so an addr-spec or the
+fixed `UNATTRIBUTED_SENDER` and never a raw header). Exactly one is set, or
+neither; readers test the label first, so a writer that wrongly set both breaks
+toward naming the stranger rather than toward crediting the account the mail was
+routed to. Both NULL means the room owner, which is what every pre-migration row
+falls back to. Resolved once at write time — `transport.ingest.resolve_author`
+where a `Config` is in scope, `db.author_for_email_task` for the two callers
+without one (the confirmation-approval mirror and the `messages_author_v1`
+backfill), and those callers should pass `Config.users[uid].email_addresses`
+when they can, because the DB-only fallback
+(`db.own_addresses_without_config`) cannot see addresses configured in TOML
+alone. Every `role='user'` writer sets it: `record_inbound`, `!steer`, `!retry`,
+and the confirmation exchange. This replaced a per-read recovery from
+`processed_emails` (ISSUE-226) that answered only for email; the columns also
+cover a co-member's ordinary turn in a shared room, which had no sender to
+recover and rendered as the reader's own words.
 
 `ingest_message` is the only shared inbound code; it maps an `IncomingMessage`
 straight onto `db.create_task` (the duplicate-Talk-message guard returns the

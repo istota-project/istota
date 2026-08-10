@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Messages in a shared room now say who wrote them. Anyone else's message used to be labelled with your own name, so a room with two people in it read as though you had said everything in it. Existing transcripts change how they read the next time you open them, and mail from an outside contact is named by its sending address rather than appearing as your own words.
+
 ### Fixed
 
 - Mail from a stranger was held for your approval and then asked about in a room you might never open. If you live in the web dashboard you were never asked at all, and the message was dropped a couple of hours later with no notice anywhere. The question now follows wherever you have routed your alerts, web chat shows any unanswered ones in a banner you can approve or discard from, and `!confirm` answers one from any surface.
