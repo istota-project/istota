@@ -622,6 +622,8 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
     default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
     email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
+    outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
+    external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)

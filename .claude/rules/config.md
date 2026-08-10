@@ -431,6 +431,22 @@ briefing_email_html: bool = True          # briefing email as multipart/alternat
 
 `email_reply_routing` is a `user_profiles` column read via `Config.email_reply_routing_for(user_id)` (invalid value → default + warning). It controls where a reply to a bot-sent email is delivered — the origin surface (`web:`/`talk:` descriptor stored on `sent_emails.origin_target`), the email thread, or both. Set via `istota user ensure --email-reply-routing`. See `.claude/rules/transport.md` "Email-reply origin routing".
 
+`outbound_approval` is a `user_profiles` column (`'' | off | untrusted | all`) holding the user's own outbound email approval policy. `''` means **unset**, not "off" — it resolves to the operator's `[email] outbound_approval_floor`, which is what makes raising the floor reach every user who never touched the setting. Resolution is `istota.outbound_policy.effective_policy(config, user_id)` = `max(floor, user)` on the ordering `off < untrusted < all`: the operator sets a minimum and a user may tighten but never loosen. Same shape as the Google scope ceiling, in the opposite direction. An invalid stored value (a hand-edited row) logs a warning naming the user and is treated as unset, so it tightens toward the floor rather than disabling the gate. See `.claude/rules/transport.md` "Outbound email approval gate".
+
+`external_turn_display` is a `user_profiles` column (`full | collapsed | hidden`, default `collapsed`) controlling how an external-origin turn's **body** renders in web chat. It never removes the turn: a transcript showing a bot answer with no question above it is the defect the inbound mirror was built to fix (ISSUE-136), so `hidden` still renders the sender/subject header row.
+
+### `[email] outbound_approval_floor`
+
+```
+outbound_approval_floor: str = "untrusted"   # off | untrusted | all
+```
+
+The weakest outbound approval policy any user on this instance may run. `off` = no holds (the pre-feature behaviour); `untrusted` = hold unless **every** recipient (To, Cc, Bcc) is trusted per `Config.is_trusted_email_sender`; `all` = hold unless every recipient is one of the user's own addresses. Any single untrusted recipient holds the whole message — there are no partial sends.
+
+Unlike the other enum-ish keys, an invalid value **raises at config load** rather than warning and falling back (`_validate_outbound_approval_floor`). There is no safe fallback to pick: `off` would disable a gate the operator asked for, and `untrusted` would override an operator who deliberately wrote `off`. A typo in a security floor stops the process.
+
+The allowlist is explicit authorization only and must never be derived from observed correspondence — not `sent_emails.to_addr`, not `processed_emails.sender_email`, and not a "we already replied to them once" shortcut. An earlier attempt did exactly that and inverted the gate, since one inbound message from a stranger then permanently authorized mailing them. `tests/test_outbound_gate.py::TestLayerARegressionGuard` is the standing guard.
+
 `briefing_email_html` is a `user_profiles` bool read via `Config.briefing_email_html_for(user_id)` (unknown user → True, matching `is_module_enabled`'s docker auto-seed rule). On (the default) a briefing email is sent `multipart/alternative` — `skills/briefing.render_briefing_html` output plus the `strip_markdown` plain fallback — so article links are clickable in a mail client; off is byte-identical to the pre-feature single-part plain send. Set via `istota user ensure --briefing-email-html/--no-briefing-email-html`, the `[users.X] briefing_email_html` TOML key (Ansible `briefing_email_html:`), or the **Email delivery** card on `/briefings/settings` (it governs briefing delivery, so it lives with the briefings module rather than in the general profile card). See `.claude/rules/transport.md` "Briefing email bodies".
 
 `google_scopes` is a `user_profiles` JSON-dict column (`{service: off|readonly|full}`) and deliberately **not** a `UserConfig` field — nothing at config-load time reads it, only the web connect/status path does. It is the user's own selection within the `[google_workspace] scopes` ceiling; `{}` means unset and resolves to the whole ceiling. Written by `PUT /api/google/scopes`, resolved by `istota.google_scopes.resolve_selection`, and there is no CLI or TOML surface for it — a scope grant is the user's consent, so the operator sets the maximum and nothing else. See `.claude/rules/skills.md` under `google_workspace/`.

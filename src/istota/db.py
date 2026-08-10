@@ -460,6 +460,39 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: outbound email approval policy. '' means unset and
+    # resolves to the operator's [email] outbound_approval_floor — deliberately,
+    # so a user who never touched the setting follows the operator when the
+    # operator raises the floor, which is what a floor is for.
+    #
+    # Both ALTERs below swallow OperationalError, which covers the two expected
+    # cases: "duplicate column name" on a re-run, and "no such table" on a fresh
+    # DB (this runs before `executescript` creates it from schema.sql, which
+    # declares both columns). A *lock* is also an OperationalError, and there
+    # the degradation is asymmetric but safe: reads go through `_row_get` and
+    # fall back to '' (= follow the floor) and 'collapsed', both safe
+    # directions, while every write names the column explicitly and fails loudly
+    # with "no such column" rather than silently dropping the setting.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "outbound_approval TEXT NOT NULL DEFAULT ''"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # User profiles: how an external-origin turn renders in web chat.
+    # full | collapsed | hidden — body only. 'collapsed' for existing rows
+    # because the alternative is a stranger's full mail body rendered as an
+    # ordinary user bubble, which is what this setting exists to stop.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "external_turn_display TEXT NOT NULL DEFAULT 'collapsed'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
     # reserved `__output__` key. Add the column, then hoist `__output__` out of
