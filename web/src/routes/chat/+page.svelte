@@ -15,6 +15,7 @@
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
   import PendingConfirmations from '$lib/components/chat/PendingConfirmations.svelte';
+  import DraftCard from '$lib/components/chat/DraftCard.svelte';
   import {
     isTap,
     nextActivation,
@@ -43,6 +44,7 @@
     sendSettled,
     sendReturned,
     pendingConfirmations,
+    outboundDrafts,
   } = session;
 
   // Cross-room views: the transcript pane renders either the active room
@@ -56,6 +58,60 @@
   // Client-side total for the sidebar Unread badge (sum of per-room counts;
   // the active room is already held at 0 by the store).
   const unreadTotal = $derived($rooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
+
+  // Where each held draft's card goes. A draft belongs to the turn that
+  // composed it, so it renders under that turn when the turn is on screen —
+  // that is where the drafted text and "this task also created a calendar
+  // event" are legible together. Everything else falls to the list above the
+  // transcript: a task with no room at all (a cron job mailing an external
+  // address), a turn paged out of view, a turn whose task row retention has
+  // deleted, and a stub that has not been filled in yet. The fallback is what
+  // makes the placement safe — no draft can be hidden by not finding a home.
+  const draftsByTask = $derived.by(() => {
+    const byTask = new Map<number, typeof $outboundDrafts>();
+    if (inViewMode) return byTask; // aggregate panes are read-only surfaces
+    for (const draft of $outboundDrafts) {
+      if (draft.task_id == null) continue;
+      const list = byTask.get(draft.task_id);
+      if (list) list.push(draft);
+      else byTask.set(draft.task_id, [draft]);
+    }
+    return byTask;
+  });
+  // The **assistant** row alone. A turn has a user row and an assistant row
+  // sharing one task id, so keying on the id without the role renders every
+  // card twice — and the card belongs under the answer, not under the question
+  // that started the task.
+  function draftsForRow(message: { role: string; taskId?: number | null }) {
+    if (message.role !== 'assistant' || message.taskId == null) return [];
+    return draftsByTask.get(message.taskId) ?? [];
+  }
+  // Gated on `!inViewMode` for exactly the reason `draftsByTask` is. An
+  // aggregate pane renders through the same `messages` store, so its rows carry
+  // task ids too — but the per-turn cards are withheld there (the panes are
+  // read-only and pass no `draftActions`). Without this guard a draft whose
+  // turn happened to be in the All pane was excluded from the fallback list and
+  // drawn by no row either, which is the one outcome the fallback exists to
+  // make impossible.
+  const onScreenTaskIds = $derived(
+    inViewMode
+      ? new Set<number>()
+      : new Set(
+          $messages
+            .filter((m) => m.role === 'assistant')
+            .map((m) => m.taskId)
+            .filter((id): id is number => id != null),
+        ),
+  );
+  const looseDrafts = $derived(
+    $outboundDrafts.filter((d) => d.task_id == null || !onScreenTaskIds.has(d.task_id)),
+  );
+  const draftActions = {
+    approve: (id: number) => session.answerDraft(id, 'approve'),
+    discard: (id: number) => session.answerDraft(id, 'discard'),
+    edit: (id: number, body: string) => session.editDraft(id, body),
+    refresh: () => void session.refreshDrafts(),
+  };
 
   // The room whose settings modal is open (null = closed).
   let settingsRoom = $state<ChatRoom | null>(null);
@@ -759,6 +815,23 @@
          being unanswered is what holds its task. Rendered in every view for the
          same reason — an aggregate pane is still where the user is looking. -->
     <PendingConfirmations items={$pendingConfirmations} onAnswer={session.answerConfirmation} />
+    <!-- Held drafts whose turn is not on this screen. Rendered in every view,
+         like the confirmations above: an aggregate pane is still where the user
+         is looking, and outbound mail waiting on an approval is not something
+         to hide behind a room selection. -->
+    {#if looseDrafts.length > 0}
+      <section class="loose-drafts" aria-label="Email held for approval">
+        {#each looseDrafts as draft (draft.id)}
+          <DraftCard
+            {draft}
+            onApprove={draftActions.approve}
+            onDiscard={draftActions.discard}
+            onEdit={draftActions.edit}
+            onNeedsFullRow={draftActions.refresh}
+          />
+        {/each}
+      </section>
+    {/if}
     <div class="messages-wrap">
       <div
         class="messages"
@@ -823,6 +896,8 @@
               onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
+              drafts={draftsForRow(message)}
+              draftActions={inViewMode ? undefined : draftActions}
               aggregate={inViewMode}
               active={message.cid === activeCid}
               touch={pointerIsTouch}
@@ -1017,6 +1092,19 @@
   .composer-reserve {
     height: calc(var(--composer-h, 0px) + 1rem);
   }
+  /* Held drafts with no turn on screen, above the transcript beside the pending
+     confirmations. Capped in height and scrolled: a card carries a whole email
+     body, and several of them would otherwise push the transcript off the pane
+     entirely. */
+  .loose-drafts {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+
   /* Wrapper anchors the floating jump-to-latest button to the bottom of the
 	   scroll area; the button offsets itself above the docked composer. */
   .messages-wrap {

@@ -811,6 +811,285 @@ class TestEventTail:
 
 
 @_needs_web_deps
+class TestStuckAndUnreadableRows:
+    """The two states the card has to be able to show, and neither of which the
+    Stage 5 payload could reach.
+
+    A row stuck in `sending` was filtered out by every producer, so the one
+    state that calls for "check your Sent folder" was invisible on the whole web
+    surface. And one row with a malformed JSON column 500'd the list for every
+    other draft the user held.
+    """
+
+    def _corrupt(self, db_path, draft_id, column="to_addrs", value="not json"):
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                f"UPDATE outbound_drafts SET {column} = ? WHERE id = ?",
+                (value, draft_id),
+            )
+            conn.commit()
+
+    def _mark_sending(self, db_path, draft_id):
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET status = 'sending' WHERE id = ?",
+                (draft_id,),
+            )
+            conn.commit()
+
+    async def test_a_sending_row_is_listed_with_its_status(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path, room_token="rm1")
+        self._mark_sending(db_path, draft_id)
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
+
+        [draft] = resp.json()["drafts"]
+        assert draft["id"] == draft_id
+        assert draft["status"] == "sending"
+
+    async def test_a_sending_row_reaches_the_stream_snapshot_too(
+        self, client, app, db_path,
+    ):
+        """The list and the frame have to agree, or the card appears on a
+        reload and not on the tick that produced it."""
+        draft_id = _hold(db_path, room_token="rm1")
+        self._mark_sending(db_path, draft_id)
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/events", cookies=cookies)
+
+        assert [d["status"] for d in resp.json()["drafts"]] == ["sending"]
+
+    async def test_one_corrupt_row_does_not_500_the_list(
+        self, client, app, db_path,
+    ):
+        good = _hold(db_path, subject="Readable")
+        bad = _hold(db_path, subject="Corrupt")
+        self._corrupt(db_path, bad)
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
+
+        assert resp.status_code == 200
+        assert [d["id"] for d in resp.json()["drafts"]] == [good, bad]
+
+    async def test_the_corrupt_row_is_marked_and_carries_no_content(
+        self, client, app, db_path,
+    ):
+        """Named rather than dropped, so held mail never disappears silently —
+        and stripped, because the columns that would carry it are the ones we
+        just failed to read."""
+        good = _hold(db_path, subject="Readable")
+        bad = _hold(db_path, subject="Corrupt")
+        self._corrupt(db_path, bad)
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
+
+        by_id = {d["id"]: d for d in resp.json()["drafts"]}
+        assert by_id[good].get("unreadable") is not True
+        assert by_id[bad]["unreadable"] is True
+        assert "body" not in by_id[bad]
+        assert "to" not in by_id[bad]
+
+    async def test_a_corrupt_row_can_still_be_discarded(
+        self, client, app, db_path,
+    ):
+        """The one action that does not depend on reading the row. Without it
+        the card is stuck on screen forever with nothing that works."""
+        draft_id = _hold(db_path)
+        self._corrupt(db_path, draft_id, column="attachments", value="[1,2]")
+        cookies = await _login(client)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/discard",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 200
+        with db.get_db(db_path) as conn:
+            assert outbound_drafts.identity(conn, draft_id)[1] == "discarded"
+
+    async def test_a_corrupt_row_still_refuses_to_send(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path)
+        self._corrupt(db_path, draft_id)
+        cookies = await _login(client)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/approve",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 500
+        assert resp.json()["retryable"] is False
+
+    async def test_someone_elses_corrupt_row_is_still_404(
+        self, client, app, db_path,
+    ):
+        """The parse-free ownership read must not become a way around the rule
+        every other route follows."""
+        draft_id = _hold(db_path, user_id="mallory")
+        self._corrupt(db_path, draft_id)
+        cookies = await _login(client, "alice")
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/discard",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 404
+
+
+@_needs_web_deps
+class TestConflictState:
+    """A 409 has to say what the row is now, on every route that can raise one.
+
+    The client reads `state` to decide whether the card goes: a settled state
+    means "answered elsewhere", `sending` means "in motion, keep it". A route
+    that omits the key leaves the client to guess, and the wrong guess reports a
+    refused action as a completed one.
+    """
+
+    def _claim(self, db_path, draft_id):
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET status = 'sending' WHERE id = ?",
+                (draft_id,),
+            )
+            conn.commit()
+
+    async def test_a_discard_losing_the_race_reports_sending(
+        self, client, app, db_path,
+    ):
+        """`!drafts send` from Talk, or a second tab, puts the row in `sending`
+        while this card is still on screen. Discard must not report success on
+        mail that is going out."""
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        self._claim(db_path, draft_id)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/discard",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "sending"
+
+    async def test_a_discard_of_an_already_sent_row_names_that_state(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE outbound_drafts SET status = 'sent' WHERE id = ?",
+                (draft_id,),
+            )
+            conn.commit()
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/discard",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "sent"
+
+    async def test_an_approve_losing_the_race_reports_sending(
+        self, client, app, db_path,
+    ):
+        draft_id = _hold(db_path)
+        cookies = await _login(client)
+        self._claim(db_path, draft_id)
+
+        resp = await client.post(
+            f"/istota/api/chat/drafts/{draft_id}/approve",
+            cookies=cookies, headers=ORIGIN,
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["state"] == "sending"
+
+
+@_needs_web_deps
+class TestStreamBudget:
+    """The frame carries the whole set on every tick, and a body is capped only
+    by the PATCH ceiling (200k each). Past a budget the extra rows ride as stubs
+    and the client refetches, rather than the frame growing without bound."""
+
+    async def test_a_small_set_rides_whole(self, client, app, db_path):
+        _hold(db_path, room_token="rm1", body="short")
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/events", cookies=cookies)
+
+        [draft] = resp.json()["drafts"]
+        assert draft["body"] == "short"
+        assert draft.get("truncated") is not True
+
+    async def test_rows_past_the_budget_become_stubs(
+        self, client, app, db_path,
+    ):
+        import istota.web_app as mod
+        first = _hold(db_path, room_token="rm1", body="x" * 4000)
+        second = _hold(db_path, room_token="rm1", body="y" * 4000)
+        cookies = await _login(client)
+
+        with patch.object(mod, "_DRAFT_FRAME_MAX_BYTES", 3000):
+            resp = await client.get("/istota/api/chat/events", cookies=cookies)
+
+        drafts_out = {d["id"]: d for d in resp.json()["drafts"]}
+        # Every draft is still named — the card must not lose one to a budget.
+        assert set(drafts_out) == {first, second}
+        assert drafts_out[first].get("truncated") is not True
+        assert drafts_out[second]["truncated"] is True
+        assert "body" not in drafts_out[second]
+        # Enough to place the card and go fetch the rest.
+        assert drafts_out[second]["room_token"] == "rm1"
+        assert drafts_out[second]["status"] == "pending"
+
+    async def test_a_stub_carries_the_field_that_places_its_card(
+        self, client, app, db_path,
+    ):
+        """`task_id` is the placement key. Without it a stub moves its own card
+        out of its turn and into the fallback list, and back again when the full
+        row lands — which destroys the component and any edit in progress."""
+        import istota.web_app as mod
+        _hold(db_path, room_token="rm1", task_id=7, body="x" * 4000)
+        second = _hold(db_path, room_token="rm1", task_id=9, body="y" * 4000)
+        cookies = await _login(client)
+
+        with patch.object(mod, "_DRAFT_FRAME_MAX_BYTES", 3000):
+            resp = await client.get("/istota/api/chat/events", cookies=cookies)
+
+        stub = next(d for d in resp.json()["drafts"] if d["id"] == second)
+        assert stub["truncated"] is True
+        assert stub["task_id"] == 9
+
+    async def test_the_full_list_endpoint_is_not_budgeted(
+        self, client, app, db_path,
+    ):
+        """`GET /chat/drafts` is what a stubbed frame sends the client to, so
+        capping it too would leave the body unreachable."""
+        import istota.web_app as mod
+        _hold(db_path, room_token="rm1", body="x" * 4000)
+        _hold(db_path, room_token="rm1", body="y" * 4000)
+        cookies = await _login(client)
+
+        with patch.object(mod, "_DRAFT_FRAME_MAX_BYTES", 3000):
+            resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
+
+        bodies = [d["body"] for d in resp.json()["drafts"]]
+        assert bodies == ["x" * 4000, "y" * 4000]
+
+
+@_needs_web_deps
 class TestChatConfig:
     async def test_config_carries_the_display_and_policy_settings(
         self, client, app, db_path,
@@ -851,4 +1130,34 @@ class TestChatConfig:
 
         body = resp.json()
         assert body["outbound_approval"] == "off"
+        assert body["outbound_approval_effective"] == "untrusted"
+
+    @pytest.mark.parametrize("stored", ["", "off", "untrusted", "all"])
+    async def test_a_recognized_setting_is_flagged_valid(
+        self, tmp_path, client, app, db_path, stored,
+    ):
+        _patch_app(_make_config(tmp_path, db_path, user_setting=stored))
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/config", cookies=cookies)
+
+        assert resp.json()["outbound_approval_valid"] is True
+
+    async def test_an_unrecognized_setting_is_published_but_flagged(
+        self, tmp_path, client, app, db_path,
+    ):
+        """`effective_policy` treats it as unset and resolves to the floor. The
+        raw value still goes out — hiding a hand-edited row would make the pane
+        show a setting nobody chose — so the flag is what stops the pane from
+        rendering it as a live selection."""
+        _patch_app(
+            _make_config(tmp_path, db_path, floor="untrusted", user_setting="lax"),
+        )
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/config", cookies=cookies)
+
+        body = resp.json()
+        assert body["outbound_approval"] == "lax"
+        assert body["outbound_approval_valid"] is False
         assert body["outbound_approval_effective"] == "untrusted"

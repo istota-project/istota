@@ -4,10 +4,12 @@
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
   import type { ChatMessage } from '$lib/stores/chat';
+  import type { OutboundDraft } from '$lib/api';
   import { messageCopyText, renderGroups } from '$lib/stores/segments';
   import { Button } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
+  import DraftCard from './DraftCard.svelte';
   import SearchResults from './SearchResults.svelte';
 
   let {
@@ -25,6 +27,8 @@
     retryBusy = false,
     onRoomClick,
     onJump,
+    drafts = [],
+    draftActions,
     aggregate = false,
     active = false,
     touch = false,
@@ -63,6 +67,19 @@
     // Jump to a search result's conversation turn (room token + task id).
     // Passed to a search_results system row's cards; absent elsewhere.
     onJump?: (roomToken: string, taskId: number) => void;
+    // Outbound mail this turn's task composed and the gate is holding. Placed
+    // under the turn that produced it, which is where the drafted text and the
+    // "this task also created a calendar event" summary are legible together.
+    // A draft whose turn is not on screen — a task with no room, or one paged
+    // out of view — renders in the page's own list instead, so nothing is lost
+    // by this being per-turn. Empty (and the handlers absent) everywhere else.
+    drafts?: OutboundDraft[];
+    draftActions?: {
+      approve: (id: number) => Promise<boolean> | boolean;
+      discard: (id: number) => Promise<boolean> | boolean;
+      edit: (id: number, body: string) => Promise<boolean> | boolean;
+      refresh?: () => void;
+    };
     // True in the cross-room views (All messages / Unread / Starred), where
     // the hover bar carries only the task number — model and timings are
     // room-level detail that belongs in the room view.
@@ -528,6 +545,18 @@
           onConfirm={() => onConfirm(message.cid, message.taskId!)}
           onReject={() => onReject(message.cid, message.taskId!)}
         />
+      {/if}
+
+      {#if draftActions}
+        {#each drafts as draft (draft.id)}
+          <DraftCard
+            {draft}
+            onApprove={draftActions.approve}
+            onDiscard={draftActions.discard}
+            onEdit={draftActions.edit}
+            onNeedsFullRow={draftActions.refresh}
+          />
+        {/each}
       {/if}
 
       {#if hasRowActions}

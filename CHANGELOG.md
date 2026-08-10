@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Held email is now answerable from the web dashboard without leaving the conversation. A card appears under the turn that wrote the message, showing the recipients, the subject and the full drafted text, plus anything else that task did — a calendar event it created, say, so declining does not quietly leave one behind. Send, edit the wording, or discard. A draft from a scheduled job with no conversation of its own appears above the transcript instead, so nothing is only reachable from a room you never open.
+
 - Email to someone you have not trusted is no longer sent on the bot's own judgement. It is written, held, and shown to you to approve, edit or discard, and approving sends exactly the text you read. Trusted addresses and your own send immediately as before, so briefings and ordinary correspondence are unaffected. `!drafts` lists what is waiting, `!drafts send <id>` releases one and `!drafts discard <id>` bins it; a draft you leave for a day raises a notification rather than expiring, because it is your own unfinished reply. Operators set the floor with `[email] outbound_approval_floor` (`off`, `untrusted` — the default — or `all`, which holds everything not addressed to you); a user may tighten it but not loosen it.
 
 ### Changed

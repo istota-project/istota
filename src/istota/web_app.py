@@ -2355,24 +2355,42 @@ def _drafts_snapshot(username: str) -> list[dict]:
 
     Scoped to the draft's own `user_id`, not to the rooms in view. Rooms are
     shared, and a co-member must not be handed the body and recipients of
-    someone else's held mail; the client places each card by `room_token`, and a
-    NULL one renders in the global list.
+    someone else's held mail; the client places each card by `task_id`, under
+    the turn that composed it, and falls back to a list above the transcript
+    for a draft whose turn is not on screen.
 
     **Setting ``room_stream_room_check_seconds = 0`` disables this too**, not
     only the room-metadata diff, because the two share that tick. `GET
     /chat/events` still carries the set, so a client polling keeps working; an
     SSE-only client on such an instance learns about a held draft on its next
     reload. Worth knowing before turning the knob off, since nothing logs it.
+
+    **Byte-budgeted, unlike the list endpoint.** A body is capped only by the
+    PATCH ceiling (200k), the whole set rides every frame, and the frame is
+    pushed on every tick of every open connection — so an oversized draft is
+    paid for indefinitely rather than once. Past `_DRAFT_FRAME_MAX_BYTES` a
+    draft rides as a stub: enough to place the card and know it is there, with
+    the body left to `GET /chat/drafts`, which is deliberately not budgeted. The
+    first draft always rides whole whatever its size, since a budget that could
+    stub everything would make the frame useless exactly when it matters.
     """
     from . import db, outbound_drafts  # noqa: PLC0415
 
     with db.get_db(
         _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
     ) as conn:
-        return [
-            _draft_dict(d, _draft_actions(conn, d.task_id))
-            for d in outbound_drafts.pending_for_user(conn, username)
-        ]
+        listing = outbound_drafts.open_for_user(conn, username)
+        out: list[dict] = []
+        spent = 0
+        for draft in listing.drafts:
+            if spent >= _DRAFT_FRAME_MAX_BYTES:
+                out.append(_draft_stub(draft))
+                continue
+            item = _draft_dict(draft, _draft_actions(conn, draft.task_id))
+            spent += len(json.dumps(item))
+            out.append(item)
+        out.extend(_unreadable_draft_dict(i) for i in listing.unreadable)
+    return sorted(out, key=lambda d: d["id"])
 
 
 def _room_delta_frames(before: dict[str, dict], after: dict[str, dict]) -> list[dict]:
@@ -4452,12 +4470,21 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     would then not reach the user. `outbound_approval_effective` is the resolved
     answer for anything that renders rather than edits, and
     `outbound_approval_floor` is what the user may not go below.
+
+    `outbound_approval_valid` says whether the raw value is one the code
+    recognizes. A hand-edited DB row can hold anything, and `effective_policy`
+    treats an unknown value as unset — so publishing the raw string beside a
+    resolved one that ignores it would have the pane render a live selection
+    nobody made. The value still goes out rather than being normalized away,
+    because hiding it would leave the user unable to see what is actually
+    stored; the flag is what tells the pane to show it as unrecognized.
     """
-    from .outbound_policy import effective_policy  # noqa: PLC0415
+    from .outbound_policy import VALID_POLICIES, effective_policy  # noqa: PLC0415
 
     chat = _config.web.chat
     username = user["username"]
     user_config = _config.users.get(username)
+    raw_approval = (getattr(user_config, "outbound_approval", "") or "").strip()
     return {
         "max_prompt_chars": chat.max_prompt_chars,
         "max_attachment_mb": chat.max_attachment_mb,
@@ -4466,8 +4493,9 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
         "external_turn_display": (
             getattr(user_config, "external_turn_display", "") or "collapsed"
         ),
-        "outbound_approval": (
-            getattr(user_config, "outbound_approval", "") or ""
+        "outbound_approval": raw_approval,
+        "outbound_approval_valid": (
+            raw_approval == "" or raw_approval in VALID_POLICIES
         ),
         "outbound_approval_effective": effective_policy(_config, username),
         "outbound_approval_floor": _config.email.outbound_approval_floor,
@@ -5231,6 +5259,16 @@ async def chat_pending_confirmations(user: dict = Depends(_require_api_auth)):
 # was already held must stay editable.
 _MAX_DRAFT_BODY_CHARS = 200_000
 
+# Budget for the drafts frame on the room stream, in bytes of serialized JSON.
+# The message tail has `room_stream_max_bytes` for the same reason; this set had
+# none, and it is the worse of the two — a body is capped only by the ceiling
+# above, the whole set rides *every* frame rather than each row riding once, and
+# every open connection pays. A module constant rather than a `[web.chat]` knob
+# because nothing about the number is worth an operator's attention: it is high
+# enough that a realistic set of model-composed emails always rides whole, and
+# the stub path degrades to one extra fetch rather than to a missing card.
+_DRAFT_FRAME_MAX_BYTES = 256_000
+
 
 def _draft_actions(conn, task_id: int | None) -> list[str]:
     """What else the task that composed this draft did, as rendered strings.
@@ -5301,36 +5339,90 @@ def _draft_dict(draft, actions: list[str]) -> dict:
     }
 
 
+def _draft_stub(draft) -> dict:
+    """A draft named but not carried, for a stream frame that has spent its budget.
+
+    Everything needed to know a draft exists and where its card belongs, and
+    nothing that is unbounded. `truncated` is the client's cue to fetch the full
+    row from `GET /chat/drafts`.
+    """
+    return {
+        "id": draft.id,
+        # `task_id` is what actually places the card — under the assistant row
+        # of the turn that composed it — so a stub without it would move its own
+        # card from that row into the page's fallback list and back again as the
+        # full row arrives. That is not merely cosmetic: moving a card between
+        # two `{#each}` blocks destroys and recreates the component, which
+        # throws away a correction the user was part-way through typing.
+        "task_id": draft.task_id,
+        "room_token": draft.room_token,
+        "status": draft.status,
+        "created_at": _iso_utc(draft.created_at),
+        "truncated": True,
+    }
+
+
+def _unreadable_draft_dict(draft_id: int) -> dict:
+    """A held draft whose stored columns do not parse.
+
+    Named rather than dropped: the user has mail held that they will otherwise
+    never hear about. Carries no subject, body or recipients — those are the
+    columns the read just failed on, so there is nothing honest to put there.
+    The card offers Discard alone, which is the one action that does not depend
+    on reading the row. The 24-hour nag skips such a row rather than naming it
+    (`stale_unnagged`), so this listing is where it is answerable.
+    """
+    return {"id": draft_id, "unreadable": True}
+
+
 def _chat_pending_drafts(username: str) -> list[dict]:
     """Every outbound email held for this user, oldest first.
 
     Global rather than room-scoped, so a draft from a task with no room — a cron
     job mailing an external address under the `all` policy — is still reachable.
-    The client places each card by `room_token`; a NULL one belongs to the list
-    alone.
+    The client places each card by `task_id`, under the turn that composed it,
+    and falls back to a list above the transcript for a draft whose turn is not
+    on screen. `room_token` is provenance rather than placement.
+
+    Carries `sending` rows alongside `pending` ones, and unreadable rows as
+    stubs — see `outbound_drafts.open_for_user`. Deliberately **not** byte-
+    budgeted, unlike the stream frame: this endpoint is what a stubbed frame
+    sends the client to, so capping it would leave the body unreachable from
+    either path.
     """
     from . import db, outbound_drafts  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
-        drafts = outbound_drafts.pending_for_user(conn, username)
-        return [_draft_dict(d, _draft_actions(conn, d.task_id)) for d in drafts]
+        listing = outbound_drafts.open_for_user(conn, username)
+        out = [
+            _draft_dict(d, _draft_actions(conn, d.task_id)) for d in listing.drafts
+        ]
+        out.extend(_unreadable_draft_dict(i) for i in listing.unreadable)
+    return sorted(out, key=lambda d: d["id"])
 
 
-def _chat_owned_draft(draft_id: int, username: str):
-    """A draft, if it is this user's. ``None`` otherwise.
+def _chat_draft_owner_status(draft_id: int, username: str) -> str | None:
+    """This user's draft's status, or ``None`` if it is not theirs (or absent).
 
     Ownership is checked on `user_id` before the row is used for anything, and
     "not yours" is reported as 404 rather than 403 — same rule the star, delete
     and reply endpoints already follow, so no endpoint becomes an id oracle for
     another.
+
+    Reads through `outbound_drafts.identity`, which parses nothing beyond these
+    two plain columns. Going through `get` meant a row with one malformed JSON
+    column raised out of the *ownership check*, before any route's own error
+    handling — so a corrupt draft 500'd with an empty body and could not even be
+    discarded. Refusing to send such a row is still right, and still happens:
+    `release` does its own strict read.
     """
     from . import db, outbound_drafts  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
-        draft = outbound_drafts.get(conn, draft_id)
-    if draft is None or draft.user_id != username:
+        found = outbound_drafts.identity(conn, draft_id)
+    if found is None or found[0] != username:
         return None
-    return draft
+    return found[1]
 
 
 @api_router.get("/chat/drafts")
@@ -5356,8 +5448,8 @@ async def chat_approve_draft(
     from . import outbound_drafts  # noqa: PLC0415
 
     username = user["username"]
-    draft = await asyncio.to_thread(_chat_owned_draft, draft_id, username)
-    if draft is None:
+    owned = await asyncio.to_thread(_chat_draft_owner_status, draft_id, username)
+    if owned is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
         message_id = await asyncio.to_thread(
@@ -5385,15 +5477,28 @@ async def chat_approve_draft(
         # means "your mail is going out right now, do not press again", while
         # `discarded` or `sent` means the decision was already made elsewhere.
         # Both produce this 409 and they call for opposite wording.
-        current = await asyncio.to_thread(_chat_owned_draft, draft_id, username)
+        current = await asyncio.to_thread(
+            _chat_draft_owner_status, draft_id, username,
+        )
         return JSONResponse(
-            {"error": str(e), "state": current.status if current else "gone"},
-            status_code=409,
+            {"error": str(e), "state": current or "gone"}, status_code=409,
+        )
+    except outbound_drafts.DraftCorrupt:
+        # Same rule the PATCH route already writes down: a malformed stored
+        # column is a server-side data fault, logged whole and reported
+        # generically. Newly reachable here — the ownership check used to go
+        # through `get`, so a corrupt row raised before `release` was ever
+        # called, and the parse-free check removed that accidental barrier.
+        logger.error("draft %s has a corrupt column", draft_id, exc_info=True)
+        return JSONResponse(
+            {"error": "this draft could not be read", "sent": False,
+             "retryable": False},
+            status_code=500,
         )
     except outbound_drafts.DraftError as e:
         # Every remaining DraftError is permanent: email is not configured on
         # this instance, an attachment no longer resolves inside the owner's
-        # workspace, a stored JSON column is corrupt, or a `sent` row records no
+        # workspace, or a `sent` row records no
         # Message-ID. None of them get better by pressing the button again, and
         # `.claude/rules/web-chat.md` sets the rule — "Retry is withheld where it
         # cannot succeed". 500 rather than 502: the fault is local, not the
@@ -5450,8 +5555,8 @@ async def chat_edit_draft(
     if html is not None and not isinstance(html, bool):
         return JSONResponse({"error": "html must be a boolean"}, status_code=400)
 
-    draft = await asyncio.to_thread(_chat_owned_draft, draft_id, username)
-    if draft is None:
+    owned = await asyncio.to_thread(_chat_draft_owner_status, draft_id, username)
+    if owned is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     def _edit() -> dict | None:
@@ -5497,8 +5602,8 @@ async def chat_discard_draft(
     from . import db, outbound_drafts  # noqa: PLC0415
 
     username = user["username"]
-    draft = await asyncio.to_thread(_chat_owned_draft, draft_id, username)
-    if draft is None:
+    owned = await asyncio.to_thread(_chat_draft_owner_status, draft_id, username)
+    if owned is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     def _discard() -> None:
@@ -5513,7 +5618,19 @@ async def chat_discard_draft(
         # A release claimed the row between the ownership read and the write.
         # The mail is going out; saying "discarded" would be the opposite of
         # what happened.
-        return JSONResponse({"error": str(e)}, status_code=409)
+        #
+        # `state` for the same reason the approve route carries it, and it is
+        # load-bearing rather than symmetric-for-neatness: the client treats a
+        # conflict whose state is anything but `sending` as "answered elsewhere,
+        # the decision stands" and drops the card silently. With the key absent
+        # it defaulted to `gone` and took that branch — so pressing Discard on
+        # mail that was going out reported the discard as having worked.
+        current = await asyncio.to_thread(
+            _chat_draft_owner_status, draft_id, username,
+        )
+        return JSONResponse(
+            {"error": str(e), "state": current or "gone"}, status_code=409,
+        )
     return {"status": "discarded", "draft_id": draft_id}
 
 
