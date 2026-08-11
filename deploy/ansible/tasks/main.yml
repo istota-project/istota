@@ -935,6 +935,8 @@
     {% for purpose, descriptor in (user_item.value.routing | default({})).items() %}--route "{{ purpose }}={{ descriptor }}" {% endfor %}
     {% if (user_item.value.default_destination | default('')) %}--default-destination "{{ user_item.value.default_destination }}"{% endif %}
     {% if (user_item.value.email_reply_routing | default('')) %}--email-reply-routing "{{ user_item.value.email_reply_routing }}"{% endif %}
+    {% if user_item.value.outbound_approval is defined %}--outbound-approval "{{ user_item.value.outbound_approval }}"{% endif %}
+    {% if (user_item.value.external_turn_display | default('')) %}--external-turn-display "{{ user_item.value.external_turn_display }}"{% endif %}
     {% if user_item.value.default_briefings is defined %}{{ '--default-briefings' if user_item.value.default_briefings else '--no-default-briefings' }}{% endif %}
     {% if user_item.value.briefing_email_html is defined %}{{ '--briefing-email-html' if user_item.value.briefing_email_html else '--no-briefing-email-html' }}{% endif %}
     {% if user_item.value.timezone_follow_location is defined %}{{ '--timezone-follow-location' if user_item.value.timezone_follow_location else '--no-timezone-follow-location' }}{% endif %}

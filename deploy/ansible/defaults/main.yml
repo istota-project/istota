@@ -294,6 +294,22 @@ istota_email_confirm_sender_match: false
 # provider that does not evaluate DMARC.
 istota_email_dmarc_canary: true
 istota_email_dmarc_canary_warn_on_missing: false
+# The weakest outbound approval policy any user on this instance may run. An
+# outgoing email whose recipients are not explicitly authorized is held as an
+# editable draft instead of being sent; the user approves, edits or discards it
+# from web chat or with `!drafts`. One of:
+#   off        no holds — every send goes out immediately (pre-feature behaviour)
+#   untrusted  hold unless EVERY recipient (To, Cc, Bcc) is trusted: one of the
+#              user's own addresses, a `trusted_email_senders` pattern, or an
+#              address trusted at runtime via `!trust` / "yes trust"
+#   all        hold unless every recipient is one of the user's own addresses
+# A floor, not a default: a user may tighten past it but never loosen below it,
+# and a user who never set their own follows this value. An invalid value FAILS
+# the config load rather than falling back — there is no safe value to guess.
+# Note `trusted_email_senders` now authorizes both directions (inbound gate
+# skip + outbound send without approval), so a catch-all pattern there turns
+# `untrusted` off entirely.
+istota_email_outbound_approval_floor: "untrusted"
 
 # Conversation context settings
 istota_conversation_enabled: true               # false = no conversation context at all
@@ -377,6 +393,19 @@ istota_experimental_features: []
 #                                   # omit to leave the stored value (default "talk")
 #     email_reply_routing: "origin+thread"  # where a reply to a sent email goes:
 #                                   # origin+thread (default) | origin | thread
+#     outbound_approval: "all"      # this user's own outbound approval policy:
+#                                   # off | untrusted | all. Omit to follow
+#                                   # istota_email_outbound_approval_floor above;
+#                                   # "" clears a previously set value back to
+#                                   # following it. The floor is a minimum, so a
+#                                   # value weaker than it has no effect.
+#     external_turn_display: "collapsed"  # how much of a turn that arrived from
+#                                   # outside the room (an external contact's
+#                                   # email) shows inline in web chat:
+#                                   # full | collapsed (default) | hidden. The
+#                                   # turn itself is always shown. A user
+#                                   # preference — set it in the web UI unless
+#                                   # you mean to hold every deploy to it.
 #     resources:
 #       # Only `folder` is declarable after the Resources sunset — an
 #       # out-of-workspace path mounted into the sandbox. In-workspace paths

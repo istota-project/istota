@@ -30,6 +30,13 @@ from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
+# How an external-origin turn's body renders in web chat. Lives here rather than
+# inline at each consumer because three surfaces validate against it — the web
+# profile PUT, `istota user ensure`, and the column default below — and a fourth
+# list would be the one that drifts. The outbound counterpart is
+# `outbound_policy.VALID_POLICIES`, which stays with the predicate that reads it.
+EXTERNAL_TURN_DISPLAY_VALUES = ("full", "collapsed", "hidden")
+
 
 @dataclass
 class UserProfile:

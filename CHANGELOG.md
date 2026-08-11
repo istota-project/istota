@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Files attached to an email are now restricted to the places the bot is allowed to read for you — your own workspace, the conversation's own folder, and the working directory for the task in hand. It could previously be pointed at any file the service itself could read and asked to mail it out. `!trust` also says what it does in both directions now: a trusted address skips the approval question on mail arriving *and* on mail going out.
+- Committing you to something is now its own decision, in the rules the bot carries. Offering a window on your behalf is not consent to a point inside it, and naming a time, place, price or duration you did not name is a confirmation point even when it falls inside something you approved — the test being whether you named the specific thing, not whether the bot feels confident you would have. An instruction to send one message no longer reads as authority over the thread that follows it, and a correspondent who keeps pinging gets an acknowledgment rather than a decision.
+
+- Operators can set the outbound approval floor from Ansible (`istota_email_outbound_approval_floor`), and a user's own policy per user. The gate shipped switched on with no supported way to turn it off, since the playbook overwrites hand edits to the config file. `istota user ensure` gained `--outbound-approval` and `--external-turn-display` to match.
+
+- Files attached to an email are now restricted to the places the bot is allowed to read for you — your own workspace, the conversation's own folder, and the working directory for the task in hand. It could previously be pointed at any file the service itself could read and asked to mail it out. Trusting an address also says what it does in both directions now — `!trust`, the prompt that offers you "yes trust" on a stranger's first message, and the documentation. A trusted address skips the approval question on mail arriving *and* on mail going out, which is worth knowing before you trust someone to stop being interrupted by them.
 
 - Messages in a shared room now say who wrote them. Anyone else's message used to be labelled with your own name, so a room with two people in it read as though you had said everything in it. Existing transcripts change how they read the next time you open them, and mail from an outside contact is named by its sending address rather than appearing as your own words.
 

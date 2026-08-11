@@ -125,3 +125,127 @@ class TestTimezoneSurvivesRedeploy:
         profile = user_profiles.get_profile(db_path, "alice")
         assert profile is not None
         assert profile.timezone == "Europe/Lisbon"
+
+
+class TestAnsibleOutboundApprovalSurface:
+    """The outbound approval gate must be operable from the inventory.
+
+    Carried out of the Stage 4 review of the outbound-email-approval spec:
+    ``[email] outbound_approval_floor`` defaults to ``untrusted`` in the
+    dataclass, so the gate switches itself on for every existing deployment at
+    upgrade — and with no Ansible surface there was no supported way to turn it
+    back off, since the role overwrites hand edits to ``config.toml`` on the
+    next play. These pin the three pieces that make it operable, each of which
+    is silently inert without the other two.
+    """
+
+    @staticmethod
+    def _defaults() -> dict:
+        return yaml.safe_load(
+            (REPO / "deploy" / "ansible" / "defaults" / "main.yml").read_text()
+        )
+
+    @staticmethod
+    def _template() -> str:
+        return (
+            REPO / "deploy" / "ansible" / "templates" / "config.toml.j2"
+        ).read_text()
+
+    def test_the_floor_has_a_default_matching_the_dataclass(self):
+        from istota.config import EmailConfig
+
+        value = self._defaults()["istota_email_outbound_approval_floor"]
+        # Running the role must not re-decide the policy on its own. A default
+        # here that disagrees with the code changes behaviour for every
+        # deployment that never set the variable.
+        assert value == EmailConfig().outbound_approval_floor
+
+    def test_the_template_renders_the_floor(self):
+        assert "istota_email_outbound_approval_floor" in self._template(), (
+            "the variable exists but nothing renders it into config.toml, so "
+            "setting it in the inventory would do nothing"
+        )
+
+    def test_the_rendered_floor_survives_a_config_load(self, tmp_path):
+        """End to end on the value that matters: an operator turning it off.
+
+        An invalid floor raises at config load rather than falling back, so a
+        template rendering (say) an unquoted bareword takes the daemon down on
+        the next deploy instead of degrading.
+        """
+        from istota.config import load_config
+
+        # The template as a whole uses Ansible-only filters (`to_json`), so a
+        # bare Jinja2 Environment cannot compile it. Render the one line under
+        # test, which is what this is about anyway.
+        source = next(
+            ln for ln in self._template().splitlines()
+            if ln.startswith("outbound_approval_floor")
+        )
+        line = Environment().from_string(source).render(
+            istota_email_outbound_approval_floor="off",
+        )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(f"[email]\n{line}\n")
+        assert load_config(cfg).email.outbound_approval_floor == "off"
+
+    def test_user_ensure_threads_the_per_user_policy(self):
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "outbound_approval": "all"},
+        )
+        assert '--outbound-approval "all"' in rendered
+
+    def test_an_empty_per_user_policy_is_still_passed(self):
+        """`""` is a value, not an omission — it clears the user back to
+        following the operator floor. A truthiness test on this key would put
+        that out of reach from the inventory, which is why the template asks
+        ``is defined`` here and truthiness elsewhere."""
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "outbound_approval": ""},
+        )
+        assert '--outbound-approval ""' in rendered
+
+    def test_an_absent_per_user_policy_passes_nothing(self):
+        # Omitting the key leaves a web- or CLI-set value alone, the same
+        # non-clobber rule timezone has.
+        rendered = _render(
+            _ensure_profiles_command(), {"display_name": "Alice"},
+        )
+        assert "--outbound-approval" not in rendered
+
+    def test_user_ensure_threads_external_turn_display(self):
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "external_turn_display": "hidden"},
+        )
+        assert '--external-turn-display "hidden"' in rendered
+
+    def test_an_absent_external_turn_display_passes_nothing(self):
+        rendered = _render(
+            _ensure_profiles_command(), {"display_name": "Alice"},
+        )
+        assert "--external-turn-display" not in rendered
+
+    @pytest.mark.parametrize(
+        "flag,value",
+        [("--outbound-approval", "off"), ("--external-turn-display", "full")],
+    )
+    def test_the_cli_parser_accepts_the_flags_the_role_renders(
+        self, flag, value, monkeypatch,
+    ):
+        """The role and the parser live in different files, and a rendered flag
+        argparse does not know fails the play at deploy time — inside a task
+        whose ``changed_when: false`` makes it easy to skim past."""
+        import istota.cli as cli
+
+        seen = {}
+        monkeypatch.setattr(cli, "cmd_user_ensure", lambda args: seen.update(vars(args)))
+        monkeypatch.setattr(
+            "sys.argv",
+            ["istota", "user", "ensure", "--name", "alice", flag, value],
+        )
+        cli.main()
+
+        assert seen[flag.lstrip("-").replace("-", "_")] == value

@@ -1907,6 +1907,61 @@ class TestSenderMatchConfirmationGate:
         assert "yes trust" in prompt
         assert "unknown sender" in prompt
 
+    def test_trust_offer_discloses_the_outbound_half(self, make_config):
+        """`yes trust` grants more than the question appears to ask about.
+
+        One list, two meanings since the outbound approval gate shipped: the
+        answer also stops holding mail *to* this address for approval. A user
+        who does not want the outbound half has to know to answer plain `yes`,
+        so the prompt has to say so — this is one of the three disclosures
+        `outbound_policy`'s module docstring commits to, and the only one on a
+        surface the user reads under time pressure.
+        """
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="ob1", sender="stranger@evil.com", subject="Hi")
+        email = _email(id="ob1", sender="stranger@evil.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 7)) as send,
+        ):
+            poll_emails(config)
+
+        prompt = send.call_args.args[2].lower()
+        assert "without waiting for your approval" in prompt
+        # Specifically the *outbound* direction. A sentence about processing
+        # incoming mail would pass a looser assertion while saying nothing new.
+        assert "mail to this address" in prompt
+
+    def test_self_claim_prompt_makes_no_trust_offer_to_disclose(self, make_config):
+        """The own-address branch offers a plain yes/no, so there is nothing to
+        disclose — and adding the outbound sentence there would advertise a
+        shortcut the prompt deliberately withholds from a self-claim."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        envelope = _envelope(id="ob2", sender="alice@test.com", subject="Hi")
+        email = _email(id="ob2", sender="alice@test.com", to=("bot+alice@test.com",))
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(True, 7)) as send,
+        ):
+            poll_emails(config)
+
+        prompt = send.call_args.args[2].lower()
+        assert "yes trust" not in prompt
+        assert "without waiting for your approval" not in prompt
+
     def test_trusted_external_sender_is_unaffected_by_the_gate(self, make_config):
         """The flag suppresses only the own-address branch, which cannot match an
         external sender — so their trust answer is arithmetically unchanged."""

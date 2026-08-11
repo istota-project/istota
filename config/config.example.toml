@@ -857,7 +857,18 @@ display_name = "Alice"
 email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # alerts_channel = "alertsroom456"  # Talk room for confirmations and security alerts
-# trusted_email_senders = ["*@company.com"]  # trusted senders bypass email confirmation gate
+# trusted_email_senders = ["*@company.com"]  # trusted in both directions: their mail
+                               # skips the inbound confirmation gate, and mail to them
+                               # is sent without waiting for approval
+# outbound_approval = "all"    # this user's own outbound approval policy:
+                               # off | untrusted | all. Omit (or "") to follow
+                               # `[email] outbound_approval_floor`, which is a
+                               # minimum — a value weaker than it has no effect.
+# external_turn_display = "full"  # how much of a turn that arrived from outside the
+                               # room (an external contact's email) shows inline in
+                               # web chat: full | collapsed (default) | hidden. The
+                               # turn itself is always shown. Editable by the user
+                               # on the web settings page.
 # briefing_email_html = false  # briefing email as plain text only. Default (true) sends
                                # multipart/alternative — HTML with clickable article links
                                # plus a plain-text fallback part. Also settable per user via

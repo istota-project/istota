@@ -41,6 +41,8 @@ class _FakeArgs:
             "default_destination": None,
             "route": None,
             "email_reply_routing": None,
+            "outbound_approval": None,
+            "external_turn_display": None,
             "default_briefings": None,
         }
         defaults.update(kwargs)
@@ -243,3 +245,137 @@ class TestUserEnsureDefaultBriefings:
         cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_briefings=True))
         profile = user_profiles.get_profile(db_path, "alice")
         assert profile.default_briefings is True
+
+
+class TestUserEnsureOutboundApproval:
+    """`istota user ensure --outbound-approval` — the per-user half of the
+    outbound email approval gate, and the flag Ansible threads.
+
+    The column carries a three-state policy plus a fourth state that is not one
+    of the three: `''` means *unset*, i.e. follow the operator's
+    `[email] outbound_approval_floor`. That distinction is the whole reason the
+    flag validates by hand instead of using argparse `choices` — "" has to be
+    accepted and named in the error.
+    """
+
+    def test_unset_by_default(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice"))
+        profile = user_profiles.get_profile(db_path, "alice")
+        # Not "off": a user who never chose follows the floor, which is what
+        # lets an operator raise it and reach everyone.
+        assert profile.outbound_approval == ""
+
+    @pytest.mark.parametrize("policy", ["off", "untrusted", "all"])
+    def test_each_policy_persists(self, cfg_with_db, policy):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", outbound_approval=policy,
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.outbound_approval == policy
+
+    def test_empty_value_clears_back_to_following_the_floor(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", outbound_approval="all",
+        ))
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", outbound_approval="",
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.outbound_approval == ""
+
+    def test_omitted_flag_preserves_existing(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", outbound_approval="all",
+        ))
+        # A redeploy that does not mention the policy must not reset it —
+        # the same non-clobber rule timezone has.
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", display_name="Alice K",
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.outbound_approval == "all"
+
+    def test_unknown_policy_exits(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, _ = cfg_with_db
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", outbound_approval="none",
+            ))
+
+    def test_a_rejected_value_writes_nothing(self, cfg_with_db):
+        """A typo must not half-apply: the row keeps whatever it had.
+
+        This is a security floor, so silently landing on a *weaker* value than
+        the operator typed is the failure worth pinning.
+        """
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", outbound_approval="all",
+        ))
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", outbound_approval="offf",
+            ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.outbound_approval == "all"
+
+
+class TestUserEnsureExternalTurnDisplay:
+    def test_default_is_collapsed(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice"))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.external_turn_display == "collapsed"
+
+    @pytest.mark.parametrize("value", ["full", "collapsed", "hidden"])
+    def test_each_value_persists(self, cfg_with_db, value):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", external_turn_display=value,
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.external_turn_display == value
+
+    def test_unknown_value_exits(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, _ = cfg_with_db
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", external_turn_display="collapse",
+            ))
+
+    def test_cli_and_web_validate_against_one_list(self):
+        """The CLI, the web profile PUT and the column default must agree.
+
+        Three surfaces write this column; a second hand-maintained tuple is the
+        one that drifts, and the symptom would be a value the CLI accepts and
+        the pane cannot render.
+        """
+        from istota import user_profiles as up
+        from istota.web_app import _PROFILE_EDITABLE_FIELDS
+
+        assert (
+            _PROFILE_EDITABLE_FIELDS["external_turn_display"]["values"]
+            is up.EXTERNAL_TURN_DISPLAY_VALUES
+        )
