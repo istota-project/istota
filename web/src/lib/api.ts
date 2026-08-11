@@ -1008,9 +1008,22 @@ export interface UserProfile {
   // Opt-in: follow the GPS timezone on travel (ISSUE-096). Off by default —
   // it overwrites the timezone the user chose above.
   timezone_follow_location: boolean;
+  // How much of a turn that arrived from outside the room (today, mirrored
+  // email) the transcript shows. The row is always there whatever this says —
+  // `hidden` withholds the body, never the turn.
+  external_turn_display: ExternalTurnDisplay;
   // Read-only hint from the server: surfaces available for delivery routing.
   delivery_surfaces?: string[];
 }
+
+/**
+ * How much of an external-origin turn the chat transcript shows.
+ *
+ * The type lives here with the payload shapes that carry it; the normalizer and
+ * the value list live in `$lib/stores/externalTurns`, because a function on this
+ * module is mocked away by every store test that replaces `$lib/api`.
+ */
+export type ExternalTurnDisplay = 'full' | 'collapsed' | 'hidden';
 
 export async function getProfile(): Promise<{ profile: UserProfile | null }> {
   return apiFetch<{ profile: UserProfile | null }>('/settings/profile');
@@ -2040,8 +2053,8 @@ export interface ChatConfig {
   max_attachment_mb: number;
   attachment_extensions: string[];
   client_poll_interval_ms: number;
-  /** How an external-origin turn's body renders. Stage 7 consumes it. */
-  external_turn_display?: 'full' | 'collapsed' | 'hidden';
+  /** How an external-origin turn's body renders. */
+  external_turn_display?: ExternalTurnDisplay;
   /** The caller's own raw setting, where `''` means "follow the operator". */
   outbound_approval?: string;
   /**
@@ -2111,6 +2124,13 @@ export interface ChatHistoryMessage {
   // email mirrored into the room it continues. Absent means the viewer, which
   // is what every user row was assumed to be.
   author?: string;
+  // The surface a user row entered from, when it is not one the room itself
+  // lives on — today `'email'` alone. Absent is the signal for "from inside
+  // this conversation", so a co-member's Talk or web turn carries no key.
+  origin?: string;
+  // The email's subject line, lifted out of the wrapper the display body
+  // strips. What a collapsed external turn shows in place of the body.
+  subject?: string;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */

@@ -12,6 +12,7 @@
     type UserProfile,
     type NextcloudTokenStatus,
   } from '$lib/api';
+  import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import { changedProfileFields } from '$lib/profilePatch';
   import {
     AppShell,
@@ -152,6 +153,15 @@
     return out;
   }
 
+  // Labelled by what the reader gets, not by the stored token: "collapsed"
+  // names the mechanism, and the choice being made is about how much of a
+  // stranger's text sits in the transcript.
+  const EXTERNAL_TURN_DISPLAY_OPTIONS: SelectOption[] = [
+    { value: 'full', label: 'Show the whole message' },
+    { value: 'collapsed', label: 'Sender, subject and first line (default)' },
+    { value: 'hidden', label: 'Sender and subject only' },
+  ];
+
   // Default destination dropdown: every surface, no no-op option (there is
   // always a default), plus the current value if it's a custom descriptor.
   function destinationOptions(current: string): SelectOption[] {
@@ -223,6 +233,7 @@
         default_destination: profile.default_destination || 'talk',
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
+        external_turn_display: profile.external_turn_display || 'collapsed',
       };
       // Send only what changed on this page. The server writes each key it is
       // given, so sending the whole form makes an untouched field overwrite
@@ -452,6 +463,20 @@
             </p>
           </Field>
         {/if}
+        <SettingsField
+          label="Email from outside, in chat"
+          hint="How much of a message that arrived from an external correspondent is shown inline in the chat transcript. The turn itself always appears — this decides how much of its text comes with it."
+        >
+          <Select
+            value={profile.external_turn_display || 'collapsed'}
+            options={EXTERNAL_TURN_DISPLAY_OPTIONS}
+            ariaLabel="External email display"
+            fullWidth
+            onValueChange={(v) => {
+              if (profile) profile.external_turn_display = normalizeExternalTurnDisplay(v);
+            }}
+          />
+        </SettingsField>
         <SettingsField
           label="Default delivery destination"
           hint="Where your results and notifications go. Alerts can use a separate channel below."

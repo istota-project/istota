@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { Copy, Star, Trash2, Reply } from 'lucide-svelte';
-  import { chatFileUrl } from '$lib/api';
+  import { Copy, Star, Trash2, Reply, Mail } from 'lucide-svelte';
+  import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
   import type { ChatMessage } from '$lib/stores/chat';
@@ -11,6 +11,9 @@
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
   import SearchResults from './SearchResults.svelte';
+
+  /** One line's worth of a collapsed external turn, in characters. */
+  const EXTERNAL_PREVIEW_CHARS = 160;
 
   let {
     message,
@@ -29,6 +32,7 @@
     onJump,
     drafts = [],
     draftActions,
+    externalDisplay = 'collapsed',
     aggregate = false,
     active = false,
     touch = false,
@@ -80,6 +84,11 @@
       edit: (id: number, body: string) => Promise<boolean> | boolean;
       refresh?: () => void;
     };
+    // How much of a turn that arrived from outside the room this reader wants
+    // inline. Applies to the body only — the header row and the origin marker
+    // render at every setting, because a transcript holding a bot answer with
+    // no question above it is what the inbound mirror was built to fix.
+    externalDisplay?: ExternalTurnDisplay;
     // True in the cross-room views (All messages / Unread / Starred), where
     // the hover bar carries only the task number — model and timings are
     // room-level detail that belongs in the room view.
@@ -108,6 +117,56 @@
   // System (!command) output goes through the safe markdown renderer; user text
   // is shown verbatim and the assistant body is rendered below.
   const bodyHtml = $derived(isSystem ? renderMarkdown(message.text) : '');
+
+  // ---- External-origin turns -------------------------------------------------
+  // A user row whose `origin` is set came from a surface this room does not live
+  // on — today, mail mirrored into the thread it continues. Without a marker it
+  // renders as an ordinary user bubble with an unfamiliar name in it: full body,
+  // no provenance, nothing saying a stranger wrote it. Keyed on presence rather
+  // than on a comparison, because the server only sends the field for a turn
+  // that is genuinely from outside.
+  const isExternal = $derived(isUser && !!message.origin);
+  // The server's contract is "a surface outside `ROOM_SURFACES`", which resolves
+  // to email today only because `TRANSCRIPT_SURFACE_FILTER` limits user rows to
+  // web/talk/email. That coupling lives in two files with nothing enforcing it,
+  // so the label is derived rather than hardcoded: if the filter ever widens, an
+  // unfamiliar origin reads as "External message" instead of asserting an email
+  // that never arrived.
+  const isEmailOrigin = $derived(message.origin === 'email');
+  const externalLabel = $derived(isEmailOrigin ? 'External email' : 'External message');
+  // `hidden` withholds the body and nothing else. The row stays, because a bot
+  // answer with no question above it was the defect the inbound mirror exists to
+  // fix (ISSUE-136) — this setting is about how much of a stranger's text sits
+  // in the transcript, not about whether the exchange happened.
+  let bodyExpanded = $state(false);
+  // The mode is tested rather than `bodyExpanded` being trusted on its own, so
+  // `hidden` wins whatever the reader expanded earlier. Expanding under
+  // `collapsed` and then arriving at `hidden` would otherwise leave the body on
+  // screen with the toggle gone — stuck open in the one mode whose whole job is
+  // to withhold it. Unreachable while the prop is only set at init, and one
+  // config refresh away from not being.
+  const externalBodyShown = $derived(
+    !isExternal || externalDisplay === 'full' || (externalDisplay === 'collapsed' && bodyExpanded),
+  );
+  // Only `collapsed` offers expansion. `hidden` is a reader saying they do not
+  // want the text inline at all, so a toggle there would be the setting asking
+  // to be overruled on every message it applies to.
+  const canExpandExternal = $derived(
+    isExternal && externalDisplay === 'collapsed' && !!message.text.trim(),
+  );
+  // The one line a collapsed turn shows in place of the body: the first line
+  // with anything on it, so a mail opening with a blank line or a quoted header
+  // still previews as something. Capped so a single long paragraph — mail is
+  // routinely one — cannot fill the row it is standing in for. Sliced by code
+  // *point*, since a cut landing between an emoji's surrogates renders U+FFFD.
+  const externalPreview = $derived.by(() => {
+    if (!isExternal) return '';
+    const line = message.text.split('\n').find((l) => l.trim()) ?? '';
+    const chars = [...line.trim()];
+    return chars.length > EXTERNAL_PREVIEW_CHARS
+      ? `${chars.slice(0, EXTERNAL_PREVIEW_CHARS).join('')}…`
+      : chars.join('');
+  });
 
   // The turn's body is an ordered list of render groups (substantial prose +
   // activity chips), interleaved in the model's true block order. A substantial
@@ -450,7 +509,45 @@
       {@render replyQuote()}
 
       {#if isUser}
-        {#if message.text}
+        {#if isExternal}
+          <!-- Provenance first, body second. The header renders at every
+               setting: it is what says a message arrived from outside and who
+               sent it, and withholding that is what made a stranger's mail read
+               as the reader's own words. Subject and preview are text nodes —
+               both are attacker-supplied, and the address in the author header
+               above is sanitized at write time. -->
+          <div class="external">
+            <div class="external-head">
+              <span class="external-mark" aria-hidden="true"><Mail size={13} /></span>
+              <span class="external-label">{externalLabel}</span>
+              {#if message.subject}
+                <span class="external-subject">{message.subject}</span>
+              {/if}
+              {#if canExpandExternal}
+                <button
+                  class="external-toggle"
+                  onclick={(e) => {
+                    bodyExpanded = !bodyExpanded;
+                    if (e.detail > 0) e.currentTarget.blur();
+                  }}
+                  aria-expanded={bodyExpanded}
+                  type="button"
+                >
+                  {bodyExpanded ? 'Hide' : 'Show'}
+                </button>
+              {/if}
+            </div>
+            {#if externalBodyShown}
+              {#if message.text}
+                <div class="body user-body">
+                  <span class="user-text">{message.text}</span>
+                </div>
+              {/if}
+            {:else if externalDisplay === 'collapsed' && externalPreview}
+              <div class="external-preview">{externalPreview}</div>
+            {/if}
+          </div>
+        {:else if message.text}
           <!-- The text carries `pre-wrap`, so it needs its own element: with
                the whitespace rule on the wrapper, the newlines and indentation
                around a sibling button would render as leading and trailing
@@ -1069,6 +1166,86 @@
   .msg.error .body,
   .cmd-output.error {
     color: var(--status-danger-fg);
+  }
+
+  /* A turn that arrived from outside the room. A filled, ruled block rather
+	   than the bare bubble every other user row is — an ordinary turn has no
+	   surface of its own, so *having* one is what reads as "not from in here",
+	   and it needs no colour to say it.
+
+	   Deliberately neutral rather than a status tint: provenance is not a
+	   severity, and borrowing `--status-warn-*` would call every external
+	   correspondent suspect. The leading rule is the activity chip's and the
+	   citation's geometry, since this sits in the same slot — a block between
+	   the author header and the turn's content. */
+  .external {
+    width: 100%;
+    max-width: var(--chat-body-max);
+    padding: var(--space-2);
+    background: var(--surface-badge);
+    border-left: 2px solid var(--border-hover);
+    border-radius: var(--radius-sm);
+  }
+  .external-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+  }
+  /* The icon has no text baseline of its own, so it centres on the row's
+	   leading line box rather than hanging off the synthesized one. */
+  .external-mark {
+    display: inline-flex;
+    align-self: center;
+    color: var(--text-muted);
+  }
+  .external-label {
+    flex: 0 0 auto;
+  }
+  /* Attacker-supplied and routinely long: it gives way before the label or the
+	   toggle, both of which are what the row is for. */
+  .external-subject {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+  }
+  .external-toggle {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--link);
+    font: inherit;
+    font-size: var(--text-xs);
+    line-height: 1.4;
+    cursor: pointer;
+  }
+  .external-toggle:hover {
+    text-decoration: underline;
+  }
+  /* The one line standing in for a withheld body. Single-line and clipped: it
+	   is a preview, not a shortened message, and letting it wrap would make
+	   `collapsed` shade into `full` for a mail with one long first paragraph. */
+  .external-preview {
+    margin-top: var(--space-1);
+    font-size: var(--text-sm);
+    line-height: 1.4;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The head sets no bottom margin: what separates it from whatever follows is
+	   that block's own top margin, and on a turn showing neither body nor preview
+	   there is nothing to separate it from. */
+  .external .body {
+    margin-top: var(--space-1);
   }
 
   /* Send lifecycle on the user's own row (ISSUE-200). Both marks sit under the

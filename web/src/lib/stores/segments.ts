@@ -188,6 +188,14 @@ export interface ChatMessage {
   // bubble is not necessarily the reader's own words. Absent → label with the
   // viewer's display name, the long-standing behaviour.
   author?: string;
+  // User rows only: the surface the turn entered from, when it is not one the
+  // room itself lives on — today `'email'` alone. Absent means it came from
+  // inside the conversation, which is every web and Talk turn, so the external
+  // treatment keys on presence rather than on a comparison.
+  origin?: string;
+  // The subject line of an external turn's mail. What a collapsed turn shows in
+  // place of the body, since the body itself is what is being withheld.
+  subject?: string;
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

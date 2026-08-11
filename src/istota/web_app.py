@@ -3429,6 +3429,14 @@ def _turn_created_at(row):
     return _row_get(row, "turn_ts") or _row_get(row, "created_at")
 
 
+# Display cap on an external turn's subject. It is an attacker-supplied header
+# with no length of its own, and the dict it lands on rides the byte-budgeted
+# room-event stream — the same reason `db._CROSS_ROOM_COLUMNS` truncates the
+# reply excerpt in SQL rather than in the dict builder. The header row renders
+# it on one clipped line, so nothing is lost by capping it here.
+_SUBJECT_MAX_CHARS = 200
+
+
 # Surface filter shared by the spine query and its `has_more` probe: web/talk
 # turns render both halves; scheduled posts render the assistant only (the
 # synthetic cron prompt was never user-authored). Canonical definition lives in
@@ -3452,6 +3460,11 @@ _SPINE_COLUMNS = (
     # Who wrote a `role='user'` row the reader did not — see the matching
     # fragment in `db._CROSS_ROOM_COLUMNS`.
     "  m.author_user_id AS author_user_id, m.author_label AS author_label, "
+    # Where the turn entered from — see the matching fragment in
+    # `db._CROSS_ROOM_COLUMNS`. Both, not one: they are assembled from shared
+    # pieces precisely so the room tail and the history query cannot disagree
+    # about what a reader sees.
+    "  m.origin_surface AS origin_surface, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -3652,9 +3665,10 @@ def _row_attachment_fields(row, username: str, *, message_column: bool = True) -
 
 
 def _user_row_display(row, viewer: str | None = None) -> dict:
-    """The `text` (and, when it isn't the reader, `author`) of a user row.
+    """The `text` (and, when they apply, `author` / `origin` / `subject`) of a
+    user row.
 
-    Two independent things a `role='user'` row can be that the transcript would
+    Three independent things a `role='user'` row can be that the transcript would
     otherwise render as though the viewer had typed it:
 
     **Who wrote it.** The client labels every user bubble with the logged-in
@@ -3680,18 +3694,47 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     the trailing instruction to the model — because it re-pairs straight into
     LLM context and a prettified body would drop the guard. None of that is for
     a human, so the display body is the email itself. Anything that is not an
-    email prompt renders verbatim.
+    email prompt renders verbatim. `subject` rides along when the wrapper had
+    one, because it is what a collapsed external turn shows in place of the body
+    and stripping the wrapper is what would otherwise lose it. A prompt that
+    parses to an **empty** body publishes an empty `text` rather than falling
+    back to the wrapper: an attachment-only mail would otherwise preview as
+    `<email_metadata>` and expand to the instruction addressed to the model.
+
+    **Where it came from.** `origin` needs two things to be true, and the second
+    is the one that is easy to miss. The surface must be one the room does not
+    itself live on — `ROOM_SURFACES` is `talk`/`web`, and
+    `TRANSCRIPT_SURFACE_FILTER` renders a user row only for those two plus
+    `email`, so this resolves to `email` today. And the row must carry an
+    `author_label`, which `transport.ingest.resolve_author` sets **iff the
+    envelope sender was not one of the user's own addresses**. Surface alone is
+    not enough: a user mailing their own plus-address writes an email-origin row
+    that is nonetheless the user's own words, and marking it would put a
+    stranger's treatment on the reader themselves — the same mislabelling as the
+    colleague case, pointed the other way. The label is the right signal because
+    it is never absent for a genuine outsider: an unclassifiable sender falls
+    back to `UNATTRIBUTED_SENDER` rather than to nothing.
+
+    The client uses this to render the turn as external and to apply the
+    reader's `external_turn_display` setting; nothing about the stored row
+    changes.
     """
     from .email_support import parse_email_prompt  # noqa: PLC0415
+    from .transport.ingest import ROOM_SURFACES  # noqa: PLC0415
 
     body = row["body"]
     out: dict = {"text": body}
 
     parsed = parse_email_prompt(body)
     if parsed is not None:
-        _headers, email_body = parsed
-        if email_body:
-            out["text"] = email_body
+        out["text"] = parsed[1]
+        # Capped for the same reason `_CROSS_ROOM_COLUMNS` truncates the reply
+        # excerpt in SQL: this dict also rides the byte-budgeted room-event
+        # stream, and a subject is an attacker-supplied header with no length of
+        # its own. The header row clips it to one line anyway.
+        subject = (parsed[0].get("subject") or "").strip()
+        if subject:
+            out["subject"] = subject[:_SUBJECT_MAX_CHARS]
 
     try:
         author_user_id = row["author_user_id"]
@@ -3703,6 +3746,12 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
         out["author"] = author_label
     elif author_user_id and author_user_id != viewer:
         out["author"] = _display_name_for(author_user_id)
+
+    # `_row_get` rather than indexing, like the author columns above: a producer
+    # that predates the column must degrade to today's rendering, not raise.
+    origin_surface = _row_get(row, "origin_surface") or ""
+    if author_label and origin_surface and origin_surface not in ROOM_SURFACES:
+        out["origin"] = origin_surface
     return out
 
 
@@ -4478,20 +4527,33 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     nobody made. The value still goes out rather than being normalized away,
     because hiding it would leave the user unable to see what is actually
     stored; the flag is what tells the pane to show it as unrecognized.
+
+    `external_turn_display` is read **live from `user_profiles`**, not off the
+    `_config.users` snapshot the rest of this handler uses. That snapshot is
+    rebuilt only by `_reload_config` — at startup and on SIGHUP — while
+    `PUT /settings/profile` writes the row and deliberately syncs nothing in
+    memory (the gates that read these fields read them live). So resolving this
+    one from the snapshot would have the settings pane show the new value, from
+    its own live read, while the transcript kept applying the old one until the
+    web process was restarted. `outbound_approval` below has the same staleness;
+    it is left as-is because nothing edits it yet and closing it means moving
+    `effective_policy` off the snapshot too.
     """
+    from . import user_profiles  # noqa: PLC0415
     from .outbound_policy import VALID_POLICIES, effective_policy  # noqa: PLC0415
 
     chat = _config.web.chat
     username = user["username"]
     user_config = _config.users.get(username)
     raw_approval = (getattr(user_config, "outbound_approval", "") or "").strip()
+    profile = user_profiles.get_profile(_config.db_path, username)
     return {
         "max_prompt_chars": chat.max_prompt_chars,
         "max_attachment_mb": chat.max_attachment_mb,
         "attachment_extensions": chat.attachment_extensions,
         "client_poll_interval_ms": chat.client_poll_interval_ms,
         "external_turn_display": (
-            getattr(user_config, "external_turn_display", "") or "collapsed"
+            getattr(profile, "external_turn_display", "") or "collapsed"
         ),
         "outbound_approval": raw_approval,
         "outbound_approval_valid": (
@@ -6595,6 +6657,9 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "routing":                {"type": "routing"},
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
+    "external_turn_display":  {
+        "type": "enum", "values": ("full", "collapsed", "hidden"),
+    },
 }
 
 
@@ -6707,6 +6772,17 @@ def _coerce_profile_value(field: str, value: object) -> object:
         if isinstance(value, str):
             return value.lower() in ("1", "true", "yes", "on")
         raise ValueError(f"{field} must be boolean")
+    if t == "enum":
+        # Rejected rather than folded onto the default: a value the code does
+        # not recognize is stored as-is and read back as the default, so the
+        # pane would render a selection nobody made and the user would have no
+        # way to see what is actually in the row.
+        allowed = spec["values"]
+        if not isinstance(value, str) or value not in allowed:
+            raise ValueError(
+                f"{field} must be one of: {', '.join(allowed)}",
+            )
+        return value
     if t == "descriptor":
         from .transport import parse_output_target
         if value is None or value == "":
@@ -6784,6 +6860,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "routing": profile.routing,
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
+        "external_turn_display": profile.external_turn_display or "collapsed",
         "delivery_surfaces": _registered_delivery_surfaces(),
     }}
 

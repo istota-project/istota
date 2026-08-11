@@ -2896,6 +2896,81 @@ class TestProfileEndpoints:
         )
         assert resp.status_code == 400
 
+    async def test_get_profile_external_turn_display_defaults_collapsed(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["profile"]["external_turn_display"] == "collapsed"
+
+    async def test_update_profile_external_turn_display(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"external_turn_display": "hidden"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.external_turn_display == "hidden"
+
+        got = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert got.json()["profile"]["external_turn_display"] == "hidden"
+
+    async def test_external_turn_display_reaches_chat_config_without_a_restart(
+        self, tmp_path, client, app,
+    ):
+        """The pane and the transcript must not disagree about the setting.
+
+        `/chat/config` is the only place the chat store reads it, and it used to
+        resolve it off `_config.users` — an in-memory snapshot rebuilt only at
+        startup and on SIGHUP. `PUT /settings/profile` writes the row and
+        deliberately syncs nothing in memory, so the pane showed the new value
+        (its own read is live) while the transcript kept applying the old one
+        until the web process was restarted.
+        """
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        before = await client.get("/istota/api/chat/config", cookies=cookies)
+        assert before.json()["external_turn_display"] == "collapsed"
+
+        await client.put(
+            "/istota/api/settings/profile",
+            json={"external_turn_display": "full"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        after = await client.get("/istota/api/chat/config", cookies=cookies)
+        assert after.json()["external_turn_display"] == "full"
+
+    async def test_update_profile_external_turn_display_rejects_unknown(
+        self, tmp_path, client, app,
+    ):
+        # Three values, and a hand-supplied fourth is a 400 rather than a
+        # silently stored string the client would fall back to `collapsed` on —
+        # the pane would then show a selection nobody made.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"external_turn_display": "sideways"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_update_profile_partial(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

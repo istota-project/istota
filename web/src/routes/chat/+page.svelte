@@ -45,6 +45,7 @@
     sendReturned,
     pendingConfirmations,
     outboundDrafts,
+    externalTurnDisplay,
   } = session;
 
   // Cross-room views: the transcript pane renders either the active room
@@ -898,6 +899,7 @@
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               drafts={draftsForRow(message)}
               draftActions={inViewMode ? undefined : draftActions}
+              externalDisplay={$externalTurnDisplay}
               aggregate={inViewMode}
               active={message.cid === activeCid}
               touch={pointerIsTouch}

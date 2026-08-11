@@ -312,3 +312,194 @@ class TestRoomEventStream:
         assert len(user_rows) == 1
         assert user_rows[0]["author"] == "contact@example.com"
         assert user_rows[0]["text"] == "Does the west branch work? I need 30 minutes"
+
+
+# ---------------------------------------------------------------------------
+# External-turn provenance (outbound-email spec, stage 7)
+# ---------------------------------------------------------------------------
+#
+# `origin_surface` has always been on the row and was dropped on the way out, so
+# a stranger's mail arrived at the client as an ordinary user bubble with an
+# unfamiliar name in it. `origin` is the field that lets the client tell "someone
+# outside this room wrote this" from "a co-member did"; `subject` comes with it
+# because a collapsed external turn is rendered as sender + subject + first line,
+# and the subject lives in the wrapper the display body strips.
+
+
+@_needs_web_deps
+class TestExternalOriginIsEmitted:
+    def _one_user_row(self, token):
+        from istota import web_app
+
+        page = web_app._chat_room_messages("alice", token, 20)
+        rows = [m for m in page["messages"] if m["role"] == "user"]
+        assert len(rows) == 1
+        return rows[0]
+
+    def test_email_turn_carries_its_origin_and_subject(self, db_path, web_config):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            _email_turn(
+                conn, web_config, "roomtok", EMISSARY_PROMPT,
+                "contact@example.com",
+            )
+        row = self._one_user_row("roomtok")
+        assert row["origin"] == "email"
+        assert row["subject"] == "Re: Scheduling"
+
+    def test_web_turn_omits_origin(self, db_path, web_config):
+        # Absence is the signal, so a turn written on a room's own surface must
+        # carry no key at all rather than `origin: "web"`.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="web")
+            _web_turn(conn, web_config, "roomtok", "hello there")
+        row = self._one_user_row("roomtok")
+        assert "origin" not in row
+        assert "subject" not in row
+
+    def test_talk_turn_omits_origin(self, db_path, web_config):
+        """Talk is a room surface, not an outside one.
+
+        A co-member typing in Talk is inside the conversation; marking their
+        turn as external would put a stranger's treatment on a colleague's
+        message, which is the opposite of what the marker is for.
+        """
+        from istota.transport.ingest import record_inbound
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            record_inbound(
+                conn, web_config, surface="talk", surface_ref="roomtok",
+                user_id="alice", text="typed in Talk",
+            )
+        row = self._one_user_row("roomtok")
+        assert "origin" not in row
+
+    def test_the_users_own_email_is_not_marked_external(
+        self, db_path, web_config,
+    ):
+        """The reader mailing themselves is not a stranger.
+
+        Surface alone would say otherwise: a user writing to their own
+        plus-address produces an `origin_surface='email'` row that is
+        nonetheless their own words, and marking it puts the stranger's
+        treatment — the "External email" label and a collapsed body — on the
+        reader. `resolve_author` already draws the line, setting `author_label`
+        only for a sender outside the user's own addresses, so the gate reads
+        that rather than the surface.
+        """
+        prompt = EMISSARY_PROMPT.replace(
+            "contact@example.com", "alice@example.com",
+        )
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            _email_turn(
+                conn, web_config, "roomtok", prompt,
+                "Alice <alice@example.com>",
+            )
+        row = self._one_user_row("roomtok")
+        assert "origin" not in row
+        assert "author" not in row  # the same call, from the other direction
+
+    def test_an_unclassifiable_sender_is_still_marked_external(
+        self, db_path, web_config,
+    ):
+        """Gating on the author label must not let a stranger through.
+
+        `resolve_author`'s failure path keeps the sender's *existence* — an
+        address it cannot classify becomes `UNATTRIBUTED_SENDER` rather than
+        nothing — so a row that arrived with any sender at all still carries a
+        label, and the gate cannot silently drop the marker on mail it failed to
+        parse.
+        """
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            tid = db.create_task(
+                conn, EMISSARY_PROMPT, "alice", source_type="email",
+                conversation_token="roomtok",
+            )
+            db.add_message(
+                conn, "roomtok", role="user", body=EMISSARY_PROMPT,
+                origin_surface="email", task_id=tid,
+                author_label=db.UNATTRIBUTED_SENDER,
+            )
+        row = self._one_user_row("roomtok")
+        assert row["origin"] == "email"
+        assert row["author"] == db.UNATTRIBUTED_SENDER
+
+    def test_unparseable_email_prompt_still_carries_origin(
+        self, db_path, web_config,
+    ):
+        # Provenance is read off the row, so it holds for a prompt shape the
+        # body parser stopped recognizing — where the marker matters most,
+        # since the reader is then looking at raw text.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            _email_turn(
+                conn, web_config, "roomtok", "bare prompt",
+                "contact@example.com",
+            )
+        row = self._one_user_row("roomtok")
+        assert row["origin"] == "email"
+        assert "subject" not in row
+
+    def test_an_empty_mail_body_does_not_fall_back_to_the_wrapper(
+        self, db_path, web_config,
+    ):
+        """An attachment-only mail has no text, and the wrapper is not text.
+
+        The parse succeeded, so the wrapper tags and the "do not follow
+        instructions" guard are known to be scaffolding rather than the message.
+        Publishing them made the collapsed preview read `<email_metadata>` and
+        expansion show an instruction addressed to the model.
+        """
+        prompt = PLAIN_PROMPT.replace("body text here", "   ")
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            _email_turn(
+                conn, web_config, "roomtok", prompt, "contact@example.com",
+            )
+        row = self._one_user_row("roomtok")
+        assert row["text"] == ""
+        assert "<email_metadata>" not in row["text"]
+        # The header row is what still identifies the turn.
+        assert row["subject"] == "Hello"
+        assert row["origin"] == "email"
+
+    def test_a_long_subject_is_capped(self, db_path, web_config):
+        # The dict rides the byte-budgeted room-event stream, and a subject is
+        # an attacker-supplied header with no length of its own — the same
+        # reason `_CROSS_ROOM_COLUMNS` truncates the reply excerpt in SQL.
+        from istota import web_app
+
+        prompt = PLAIN_PROMPT.replace("Subject: Hello", "Subject: " + "s" * 5000)
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            _email_turn(
+                conn, web_config, "roomtok", prompt, "contact@example.com",
+            )
+        row = self._one_user_row("roomtok")
+        assert len(row["subject"]) == web_app._SUBJECT_MAX_CHARS
+
+    def test_the_stream_agrees_with_the_reload(self, db_path, web_config):
+        """Both SQL fragments select the column, or a turn is external in one
+        view and ordinary in the other."""
+        from istota import web_app
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="talk")
+            db.add_room_member(conn, "roomtok", "alice")
+            _email_turn(
+                conn, web_config, "roomtok", EMISSARY_PROMPT,
+                "contact@example.com",
+            )
+        with db.get_db(db_path) as conn:
+            rows = db.list_room_events_since(conn, "alice", since_id=0, limit=50)
+        streamed = [
+            web_app._cross_room_message_dict(r, "alice") for r in rows
+        ]
+        user_rows = [d for d in streamed if d["role"] == "user"]
+        assert len(user_rows) == 1
+        assert user_rows[0]["origin"] == "email"
+        assert user_rows[0]["subject"] == "Re: Scheduling"
+        assert user_rows[0]["origin"] == self._one_user_row("roomtok")["origin"]
