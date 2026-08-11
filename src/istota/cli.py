@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from . import db
+from . import user_profiles
 from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
@@ -935,12 +936,14 @@ def cmd_user_ensure(args):
         updates["outbound_approval"] = outbound_approval
     external_turn_display = getattr(args, "external_turn_display", None)
     if external_turn_display is not None:
-        from .user_profiles import EXTERNAL_TURN_DISPLAY_VALUES
-
-        if external_turn_display not in EXTERNAL_TURN_DISPLAY_VALUES:
+        # Belt and braces: the parser's `choices` already rejects an unknown
+        # value, so this only fires for a caller building `args` by hand — the
+        # `_FakeArgs` shim in the tests, and any future programmatic caller.
+        values = user_profiles.EXTERNAL_TURN_DISPLAY_VALUES
+        if external_turn_display not in values:
             print(
                 f"Error: --external-turn-display must be one of "
-                f"{', '.join(EXTERNAL_TURN_DISPLAY_VALUES)}, "
+                f"{', '.join(values)}, "
                 f"got {external_turn_display!r}",
                 file=sys.stderr,
             )
@@ -1758,7 +1761,12 @@ def main():
     )
     user_ensure_parser.add_argument(
         "--external-turn-display",
-        choices=["full", "collapsed", "hidden"],
+        # From the shared constant, not a literal: argparse rejects the value
+        # before `cmd_user_ensure`'s own check ever runs, so a hardcoded list
+        # here is the one that decides, and a fourth copy would make adding a
+        # display mode fail with argparse's message while the handler's own
+        # error advertised the value as valid.
+        choices=list(user_profiles.EXTERNAL_TURN_DISPLAY_VALUES),
         help=(
             "How much of a turn that arrived from outside the room (an email "
             "from an external contact) is shown inline in web chat: 'full', "

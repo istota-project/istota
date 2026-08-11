@@ -1907,22 +1907,11 @@ class TestSenderMatchConfirmationGate:
         assert "yes trust" in prompt
         assert "unknown sender" in prompt
 
-    def test_trust_offer_discloses_the_outbound_half(self, make_config):
-        """`yes trust` grants more than the question appears to ask about.
-
-        One list, two meanings since the outbound approval gate shipped: the
-        answer also stops holding mail *to* this address for approval. A user
-        who does not want the outbound half has to know to answer plain `yes`,
-        so the prompt has to say so — this is one of the three disclosures
-        `outbound_policy`'s module docstring commits to, and the only one on a
-        surface the user reads under time pressure.
-        """
-        config = make_config()
-        config.email = _email_config()
-        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
-
-        envelope = _envelope(id="ob1", sender="stranger@evil.com", subject="Hi")
-        email = _email(id="ob1", sender="stranger@evil.com", to=("bot+alice@test.com",))
+    @staticmethod
+    def _gate_prompt(config, *, uid="ob1"):
+        """Poll one mail from an untrusted stranger, return the gate prompt."""
+        envelope = _envelope(id=uid, sender="stranger@evil.com", subject="Hi")
+        email = _email(id=uid, sender="stranger@evil.com", to=("bot+alice@test.com",))
 
         with (
             patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
@@ -1931,12 +1920,51 @@ class TestSenderMatchConfirmationGate:
             patch("istota.notifications.send_confirmation_prompt", return_value=(True, 7)) as send,
         ):
             poll_emails(config)
+        return send.call_args.args[2].lower()
 
-        prompt = send.call_args.args[2].lower()
+    def test_trust_offer_discloses_the_outbound_half(self, make_config):
+        """`yes trust` grants more than the question appears to ask about.
+
+        One list, two meanings since the outbound approval gate shipped: under
+        the `untrusted` policy the answer also stops holding mail *to* this
+        address for approval. A user who does not want the outbound half has to
+        know to answer plain `yes`, so the prompt has to say so — one of the
+        three disclosures `outbound_policy`'s module docstring commits to, and
+        the only one on a surface the user reads under time pressure.
+        """
+        config = make_config()
+        config.email = _email_config()
+        config.email.outbound_approval_floor = "untrusted"
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        prompt = self._gate_prompt(config)
         assert "without waiting for your approval" in prompt
         # Specifically the *outbound* direction. A sentence about processing
         # incoming mail would pass a looser assertion while saying nothing new.
         assert "mail to this address" in prompt
+
+    @pytest.mark.parametrize("policy", ["off", "all"])
+    def test_no_outbound_promise_under_a_policy_that_ignores_the_trust_list(
+        self, make_config, policy,
+    ):
+        """`untrusted` is the only policy that consults the trust list.
+
+        `off` holds nothing to begin with, and `all` clears only the user's own
+        addresses — so under either, trusting a correspondent buys no outbound
+        permission and promising one would be a lie told at the moment the user
+        is deciding whether to trust. `off` is not hypothetical: making it
+        reachable from the inventory is half of what this stage is for.
+        """
+        config = make_config()
+        config.email = _email_config()
+        config.email.outbound_approval_floor = policy
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+
+        prompt = self._gate_prompt(config, uid=f"ob-{policy}")
+        # The inbound half of the offer is unaffected — only the promise about
+        # outbound is withheld.
+        assert "yes trust" in prompt
+        assert "without waiting for your approval" not in prompt
 
     def test_self_claim_prompt_makes_no_trust_offer_to_disclose(self, make_config):
         """The own-address branch offers a plain yes/no, so there is nothing to
@@ -1945,6 +1973,7 @@ class TestSenderMatchConfirmationGate:
         config = make_config()
         config.email = _email_config()
         config.email.confirm_sender_match = True
+        config.email.outbound_approval_floor = "untrusted"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="ob2", sender="alice@test.com", subject="Hi")

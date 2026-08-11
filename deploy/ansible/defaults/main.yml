@@ -309,6 +309,9 @@ istota_email_dmarc_canary_warn_on_missing: false
 # Note `trusted_email_senders` now authorizes both directions (inbound gate
 # skip + outbound send without approval), so a catch-all pattern there turns
 # `untrusted` off entirely.
+# QUOTE THE VALUE. `off` unquoted is a YAML boolean, and would render
+# `outbound_approval_floor = "False"` into config.toml, which the daemon
+# refuses to load. The play asserts this before templating.
 istota_email_outbound_approval_floor: "untrusted"
 
 # Conversation context settings
@@ -394,11 +397,14 @@ istota_experimental_features: []
 #     email_reply_routing: "origin+thread"  # where a reply to a sent email goes:
 #                                   # origin+thread (default) | origin | thread
 #     outbound_approval: "all"      # this user's own outbound approval policy:
-#                                   # off | untrusted | all. Omit to follow
+#                                   # off | untrusted | all — QUOTED, since off
+#                                   # is a YAML boolean. Omit to follow
 #                                   # istota_email_outbound_approval_floor above;
 #                                   # "" clears a previously set value back to
-#                                   # following it. The floor is a minimum, so a
-#                                   # value weaker than it has no effect.
+#                                   # following it, and a bare key with no value
+#                                   # is treated as omitted rather than as "".
+#                                   # The floor is a minimum, so a value weaker
+#                                   # than it has no effect.
 #     external_turn_display: "collapsed"  # how much of a turn that arrived from
 #                                   # outside the room (an external contact's
 #                                   # email) shows inline in web chat:

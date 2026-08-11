@@ -189,6 +189,47 @@ class TestAnsibleOutboundApprovalSurface:
         cfg.write_text(f"[email]\n{line}\n")
         assert load_config(cfg).email.outbound_approval_floor == "off"
 
+    def test_the_floor_is_asserted_before_the_config_is_rendered(self):
+        """`off` is a YAML boolean, and it is the value an operator reaches for.
+
+        An inventory writing `istota_email_outbound_approval_floor: off`
+        unquoted hands Jinja Python `False`, which renders
+        `outbound_approval_floor = "False"` — and the config loader *raises* on
+        an unrecognized floor rather than falling back, so that is a config file
+        the daemon cannot load. `validate_config.py` would catch it, but only
+        after the broken file is already on disk, where the auto-update cron's
+        next restart finds it. The assert has to come before the template task
+        so the failure names the variable instead.
+        """
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        names = [t.get("name") for t in tasks if isinstance(t, dict)]
+        assert "Validate outbound approval floor" in names
+        assert names.index("Validate outbound approval floor") < names.index(
+            "Deploy istota configuration"
+        ), "the assert runs after the render, so a bad value is written to disk first"
+
+        assertion = next(
+            t for t in tasks
+            if isinstance(t, dict) and t.get("name") == "Validate outbound approval floor"
+        )
+        condition = " ".join(assertion["assert"]["that"])
+        for policy in ("off", "untrusted", "all"):
+            assert f"'{policy}'" in condition, f"{policy} is not an accepted floor"
+
+    def test_the_per_user_policy_is_asserted_too(self):
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        assertion = next(
+            t for t in tasks
+            if isinstance(t, dict)
+            and t.get("name") == "Validate per-user outbound approval policies"
+        )
+        condition = " ".join(assertion["assert"]["that"])
+        # "" is a value here (follow the floor) and must stay accepted, or the
+        # documented way to clear a user's policy fails the play.
+        assert "''" in condition or '""' in condition
+        for policy in ("off", "untrusted", "all"):
+            assert f"'{policy}'" in condition
+
     def test_user_ensure_threads_the_per_user_policy(self):
         rendered = _render(
             _ensure_profiles_command(),
@@ -215,6 +256,17 @@ class TestAnsibleOutboundApprovalSurface:
         )
         assert "--outbound-approval" not in rendered
 
+    def test_a_null_per_user_policy_is_treated_as_absent(self):
+        """`outbound_approval:` with nothing after it is a dangling key, not a
+        request to clear the policy — and clearing is a *loosening* action, so
+        the failure direction of guessing wrong here is the unsafe one. It
+        passes `is defined`, hence the explicit `is not none`."""
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "outbound_approval": None},
+        )
+        assert "--outbound-approval" not in rendered
+
     def test_user_ensure_threads_external_turn_display(self):
         rendered = _render(
             _ensure_profiles_command(),
@@ -233,18 +285,32 @@ class TestAnsibleOutboundApprovalSurface:
         [("--outbound-approval", "off"), ("--external-turn-display", "full")],
     )
     def test_the_cli_parser_accepts_the_flags_the_role_renders(
-        self, flag, value, monkeypatch,
+        self, flag, value, monkeypatch, tmp_path,
     ):
         """The role and the parser live in different files, and a rendered flag
         argparse does not know fails the play at deploy time — inside a task
-        whose ``changed_when: false`` makes it easy to skim past."""
+        whose ``changed_when: false`` makes it easy to skim past.
+
+        `-c` is not optional here even though the handler is stubbed: `main()`
+        loads the config before dispatching, and `load_config(None)` searches
+        `~/.config/istota/config.toml` — a real file on a developer machine —
+        then runs the obsolete-resource migration, which writes to whatever DB
+        it finds. Every other test in this file pins the config for the same
+        reason.
+        """
         import istota.cli as cli
+
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{tmp_path / "test.db"}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+        )
 
         seen = {}
         monkeypatch.setattr(cli, "cmd_user_ensure", lambda args: seen.update(vars(args)))
         monkeypatch.setattr(
             "sys.argv",
-            ["istota", "user", "ensure", "--name", "alice", flag, value],
+            ["istota", "-c", str(cfg), "user", "ensure", "--name", "alice", flag, value],
         )
         cli.main()
 

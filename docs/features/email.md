@@ -115,7 +115,9 @@ Three policies, ordered `off < untrusted < all`:
 | `untrusted` | every recipient is trusted: one of your own addresses, a `trusted_email_senders` pattern, or an address you trusted at runtime |
 | `all` | every recipient is one of your own addresses |
 
-The operator sets a floor in `[email] outbound_approval_floor` (default `untrusted`). A user may tighten past it and never loosen below it, and a user who has never set their own policy follows the floor — so raising the floor reaches everyone. Set a user's own policy with `istota user ensure --outbound-approval`, or clear it back to following the floor with `--outbound-approval ""`.
+The operator sets a floor in `[email] outbound_approval_floor` (default `untrusted`). A user may tighten past it and never loosen below it, and a user who has never set their own policy follows the floor — so raising the floor reaches everyone.
+
+A user's own policy is set with `istota user ensure --outbound-approval <policy>`, which is what Ansible runs, or cleared back to following the floor with `--outbound-approval ""`. The `[users.X] outbound_approval` key in `config.toml` seeds the value **only for a user with no profile row yet**; on any instance that has already started once the DB row wins, so editing the TOML for an existing user does nothing. That is the general rule for per-user fields, and it is the one that bites here — use the CLI.
 
 An invalid floor fails the config load rather than falling back. There is no safe value to guess: `off` would disable a gate you asked for, and `untrusted` would override an operator who deliberately wrote `off`.
 
@@ -134,6 +136,8 @@ From Talk or any other surface with a composer:
 ```
 
 With exactly one draft pending the id may be omitted. With several it is required, and the command lists them rather than guessing.
+
+One state needs a human rather than a button. If the process dies between claiming a draft and recording the send, the draft is left marked as sending, and nobody can know from the outside whether the mail went out — so the card shows it and offers no action, because one of the actions would send it twice. Check your Sent folder. There is currently no way to dismiss such a row.
 
 **A held draft does not expire.** It is your own unfinished reply, and binning it silently after a couple of hours would lose work with no trace — so unlike the inbound confirmation gate, nothing cancels it. A draft still waiting after 24 hours raises one notification (not a hundred, and never as a briefing item) naming the recipient and subject. Turning the policy off later does not auto-send anything already held.
 
@@ -187,4 +191,4 @@ alerts_channel = "room789"  # Talk room for confirmations/alerts
 outbound_approval = "all"   # tighten past the operator floor; "" follows it
 ```
 
-`outbound_approval` is also settable with `istota user ensure --outbound-approval`, which is the path Ansible uses.
+As above, `outbound_approval` here is read only when the user has no profile row yet. For an existing user set it with `istota user ensure --outbound-approval`, which is the path Ansible uses.
