@@ -1163,6 +1163,18 @@
     margin-top: calc(var(--space-3) / 2);
   }
 
+  /* A held draft is another block in the same slot, so it takes the chip
+	   slot's neighbour gap above — which also separates two cards when a turn
+	   holds more than one. Written here rather than in `DraftCard.svelte`
+	   because that component is also rendered into the loose-drafts list, which
+	   is a flex column already spacing its own children; a margin on the
+	   component would stack with that gap. `:global()` because Svelte prunes a
+	   selector whose subject it cannot see in this file, and the `.content`
+	   scope is what keeps the rule from leaking past this row. */
+  .content > :global(.draft-card) {
+    margin-top: var(--space-3);
+  }
+
   .msg.error .body,
   .cmd-output.error {
     color: var(--status-danger-fg);
@@ -1181,10 +1193,18 @@
   .external {
     width: 100%;
     max-width: var(--chat-body-max);
+    margin: 0;
     padding: var(--space-2);
     background: var(--surface-badge);
     border-left: 2px solid var(--border-hover);
     border-radius: var(--radius-sm);
+  }
+  /* Sitting in the chip slot's position, it takes the chip slot's spacing:
+	   flush at the base, and the header's half gap when a header precedes it.
+	   Below stays flush for the reason `.external-head` gives — what follows
+	   (attachments, the send marks) carries its own top margin. */
+  .meta + .external {
+    margin-top: calc(var(--space-3) / 2);
   }
   .external-head {
     display: flex;

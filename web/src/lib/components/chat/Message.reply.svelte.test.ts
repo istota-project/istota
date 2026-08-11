@@ -354,3 +354,39 @@ describe('citation quote geometry', () => {
     ).toBe(false);
   });
 });
+
+/**
+ * The citation is not the only block sharing the chip slot's position. The
+ * external-turn block and a held draft sit there too, and each is spaced by
+ * reading the chip slot's numbers rather than by a second set of its own —
+ * asserted here because this file already parses the stylesheet the chip slot's
+ * own values live in, so the two cannot be compared anywhere cheaper.
+ */
+describe('the other blocks in the chip slot’s position', () => {
+  it('gives the external block the header’s half gap, flush otherwise', () => {
+    // Anchored on the chip slot's own value as well as on the equality, since
+    // `decl` returns undefined for "rule absent" and "declaration absent" alike
+    // and a bare equality passes when the pair loses the declaration together.
+    expect(decl('.meta + .chip-slot', 'margin-top')).toBe('calc(var(--space-3) / 2)');
+    expect(decl('.meta + .external', 'margin-top')).toBe(decl('.meta + .chip-slot', 'margin-top'));
+    // Flush at the base, like the chip slot: below it, the attachments row and
+    // the send marks each carry their own top margin, so a bottom gap here
+    // would double up. The shorthand is pinned to `0` rather than left absent
+    // because the rule sets one, and `decl` reads longhands.
+    expect(decl('.external', 'margin')).toBe('0');
+    expect(decl('.external', 'margin-top')).toBeUndefined();
+  });
+
+  it('gives a held draft the chip slot’s neighbour gap above', () => {
+    expect(decl('.chip-slot.gap-above', 'margin-top')).toBe('var(--space-3)');
+    expect(decl('.content > :global(.draft-card)', 'margin-top')).toBe(
+      decl('.chip-slot.gap-above', 'margin-top'),
+    );
+    // Scoped to this row, not written on the component: `DraftCard` is also
+    // rendered into the loose-drafts list, a flex column already spacing its
+    // own children, where a margin on the card would stack with the gap.
+    expect(readFileSync(resolve(here, 'DraftCard.svelte'), 'utf8')).not.toMatch(
+      /\.draft-card\s*\{[^}]*margin/,
+    );
+  });
+});
