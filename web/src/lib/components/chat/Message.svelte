@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, Star, Trash2, Reply, Mail } from 'lucide-svelte';
+  import { Copy, Star, Trash2, Reply, Mail, Info } from 'lucide-svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
@@ -436,7 +436,15 @@
 {#if isSystem}
   <!-- Command (!…) output / delivered notifications. Left-aligned block, not a
 	     centered notice: it carries lists / code / tables that must read
-	     left-to-right. Durable system rows (msgId) are starrable too. -->
+	     left-to-right. Durable system rows (msgId) are starrable too.
+
+	     It rides the same gutter + content columns as a turn, so its card starts
+	     where every message body starts instead of spanning the avatar column as
+	     well — a notice that hangs a card into the gutter reads as a different
+	     kind of surface rather than as part of the conversation. What the gutter
+	     holds is a mark, not an avatar: a notice has no author, so the initial
+	     and the author/time header both say something false about it, and the
+	     mark is what stands in for them while keeping the column occupied. -->
   <div
     class="cmd-row"
     class:active
@@ -444,18 +452,24 @@
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
   >
-    {#if showRoomChip}
-      <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
-        {message.roomName}
-      </button>
-    {/if}
-    {#if message.searchResults}
-      <SearchResults data={message.searchResults} {onJump} />
-    {:else}
-      <div class="cmd-output markdown" class:error={message.error}>
-        {@html bodyHtml}
-      </div>
-    {/if}
+    <div class="gutter">
+      <span class="sys-mark" aria-hidden="true"><Info /></span>
+    </div>
+
+    <div class="content">
+      {#if showRoomChip}
+        <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
+          {message.roomName}
+        </button>
+      {/if}
+      {#if message.searchResults}
+        <SearchResults data={message.searchResults} {onJump} />
+      {:else}
+        <div class="cmd-output markdown" class:error={message.error}>
+          {@html bodyHtml}
+        </div>
+      {/if}
+    </div>
     {#if showStar}
       <div class="msg-actions cmd-actions">
         {@render starButton()}
@@ -1289,16 +1303,50 @@
 
   /* Command (!…) output: a left-aligned block set apart from the conversation
 	   by a subtle card, so its lists / code / tables render left-to-right.
-	   Position anchor for its own star bar (durable system rows in views). */
+	   Position anchor for its own star bar (durable system rows in views).
+
+	   Geometry is `.msg`'s, deliberately down to the padding: the two are the
+	   same row with a different left-hand column, and a notice whose card began
+	   at the row's own edge sat a whole gutter to the left of every message
+	   around it. A system row is always its own group (there is no continuation
+	   case for a notice), so it takes the fresh-group top padding unconditionally
+	   rather than through a class. */
   .cmd-row {
-    padding: 0.2rem var(--chat-row-inline) 0.5rem;
+    display: flex;
+    gap: var(--chat-avatar-gap);
+    align-items: flex-start;
+    padding: var(--space-2) var(--chat-row-inline);
     position: relative;
   }
   .cmd-row .room-chip {
     margin-bottom: var(--space-1);
   }
-  /* A command row has neither header nor gutter, so its star floats top-right
-	   on its own. (The bar is only absolute here and on continuation rows.) */
+  /* The gutter mark. Sized at the avatar's box so it occupies the same column
+	   the initials do, but drawn as a bare dim glyph rather than a filled chip —
+	   an avatar says who wrote this, and nobody wrote a notice. */
+  .sys-mark {
+    width: var(--chat-avatar);
+    height: var(--chat-avatar);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+  }
+  .sys-mark :global(svg) {
+    width: 1rem;
+    height: 1rem;
+  }
+  @media (max-width: 768px) {
+    /* The mobile gutter is 1.1rem wide, so the glyph comes down with the avatar
+			   it shares the column with. */
+    .sys-mark :global(svg) {
+      width: 0.85rem;
+      height: 0.85rem;
+    }
+  }
+  /* A command row has no header to hang its star off, so the bar floats
+	   top-right on the row. (The bar is only absolute here and on continuation
+	   rows.) */
   .msg-actions.cmd-actions {
     position: absolute;
     right: var(--chat-row-inline);

@@ -418,6 +418,55 @@ describe('system rows carry no turn action row', () => {
   });
 });
 
+describe('system rows share the turn geometry', () => {
+  // A notice sits in the same two columns a turn does, so its card starts where
+  // every message body starts. What differs is the left column's contents: a
+  // mark rather than an avatar, and no author/time header, because a notice has
+  // no author and naming one would say something false about it.
+  const systemRow = (over: Partial<ChatMessage> = {}): ChatMessage =>
+    finished({ role: 'system', msgId: 42, text: 'Backup finished.', ...over });
+
+  it('renders the gutter and content columns around the card', () => {
+    const { container } = render(Message, {
+      message: systemRow(),
+      onConfirm: noop,
+      onReject: noop,
+    });
+
+    const row = container.querySelector('.cmd-row');
+    expect(row?.querySelector(':scope > .gutter')).not.toBeNull();
+    // The card is inside the content column, not a direct child of the row —
+    // that indent is the whole alignment fix.
+    expect(row?.querySelector(':scope > .content > .cmd-output')).not.toBeNull();
+  });
+
+  it('puts a mark in the gutter, not an avatar or an author header', () => {
+    const { container } = render(Message, {
+      message: systemRow(),
+      onConfirm: noop,
+      onReject: noop,
+      botName: 'Istota',
+    });
+
+    expect(container.querySelector('.gutter .sys-mark')).not.toBeNull();
+    expect(container.querySelector('.avatar')).toBeNull();
+    expect(container.querySelector('.meta')).toBeNull();
+    expect(container.querySelector('.author')).toBeNull();
+    expect(container.querySelector('.stamp')).toBeNull();
+  });
+
+  it('keeps the room chip in the content column in an aggregate view', () => {
+    const { container } = render(Message, {
+      message: systemRow({ roomToken: 'tok-1', roomName: 'general' }),
+      onConfirm: noop,
+      onReject: noop,
+      onRoomClick: noop,
+    });
+
+    expect(container.querySelector('.cmd-row > .content > .room-chip')).not.toBeNull();
+  });
+});
+
 describe('room label chip (aggregate views)', () => {
   it('renders a clickable room chip when roomName is set and a handler is passed', async () => {
     const onRoomClick = vi.fn();
