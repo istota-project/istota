@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- System messages in web chat — alerts, delivered notifications, `!command` output — no longer offer the copy / star / reply / delete row on hover. None of them is a message anyone wrote, so replying to one quoted the bot's own notice back at it as though you were answering someone, and deleting one removed a record of something the system did. Starring still works, from the star that appears at the top right of the row.
+
 - Committing you to something is now its own decision, in the rules the bot carries. Offering a window on your behalf is not consent to a point inside it, and naming a time, place, price or duration you did not name is a confirmation point even when it falls inside something you approved — the test being whether you named the specific thing, not whether the bot feels confident you would have. An instruction to send one message no longer reads as authority over the thread that follows it, and a correspondent who keeps pinging gets an acknowledgment rather than a decision.
 
 - Operators can set the outbound approval floor from Ansible (`istota_email_outbound_approval_floor`), and a user's own policy per user. The gate shipped switched on with no supported way to turn it off, since the playbook overwrites hand edits to the config file. `istota user ensure` gained `--outbound-approval` and `--external-turn-display` to match.
