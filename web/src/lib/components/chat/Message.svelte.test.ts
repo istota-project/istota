@@ -375,6 +375,49 @@ describe('tap activation (touch)', () => {
   });
 });
 
+describe('system rows carry no turn action row', () => {
+  // A system row is an alert, a delivered notification or `!command` output —
+  // no author, nothing on the other side of it. Copy and reply read it as
+  // somebody's words, and delete offers to erase the record of something the
+  // system did. The whole row goes; the hover-bar star stays, being a mark on
+  // the row rather than an action on a turn.
+  const systemRow = (over: Partial<ChatMessage> = {}): ChatMessage =>
+    finished({ role: 'system', msgId: 42, text: 'Backup finished.', ...over });
+
+  const everyHandler = {
+    onConfirm: noop,
+    onReject: noop,
+    onToggleStar: noop,
+    onDelete: noop,
+    onReply: noop,
+    onRetry: noop,
+  };
+
+  it('renders no .turn-actions even with every handler passed', () => {
+    const { container } = render(Message, { message: systemRow(), ...everyHandler });
+
+    expect(container.querySelector('.cmd-row')).not.toBeNull();
+    expect(container.querySelector('.turn-actions')).toBeNull();
+    expect(container.querySelectorAll('.turn-action')).toHaveLength(0);
+  });
+
+  it('keeps the hover-bar star', () => {
+    const { container } = render(Message, { message: systemRow(), ...everyHandler });
+
+    expect(container.querySelector('.cmd-actions .star-btn')).not.toBeNull();
+  });
+
+  it('still gives an assistant turn its row, so the suppression is role-keyed', () => {
+    // The control: same handlers, same durable id, only the role differs.
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      ...everyHandler,
+    });
+
+    expect(container.querySelector('.turn-actions')).not.toBeNull();
+  });
+});
+
 describe('room label chip (aggregate views)', () => {
   it('renders a clickable room chip when roomName is set and a handler is passed', async () => {
     const onRoomClick = vi.fn();
