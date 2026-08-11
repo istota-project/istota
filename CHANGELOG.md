@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A newly provisioned user could not sign in until the services were restarted by hand, meeting "Access denied: user not configured" on a perfectly good account. Adding a user through the playbook in fact restarted nothing at all: the step that writes the account was marked as never changing anything, so neither the scheduler nor the web interface was ever told to pick it up. Both are now restarted when a user is actually created or changed, and left alone when nothing was.
+
 ## [0.40.0] - 2026-08-10
 
 ### Added

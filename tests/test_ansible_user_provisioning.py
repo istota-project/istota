@@ -127,6 +127,82 @@ class TestTimezoneSurvivesRedeploy:
         assert profile.timezone == "Europe/Lisbon"
 
 
+class TestAnsibleUserEnsureRestartsBothTiers:
+    """Adding a user to the inventory must restart the web tier too.
+
+    Both tiers snapshot the user set at config load: ``_apply_user_profiles``
+    creates a ``config.users`` entry for a ``user_profiles`` row with no TOML
+    counterpart, but ``config.users`` is only rebuilt by a full load — at
+    startup and on SIGHUP. A web process that has not restarted refuses the new
+    user's Nextcloud login with "Access denied: user not configured"
+    (``web_app._oauth2_callback``) even though the DB row is correct.
+
+    Nothing else in the play covers it. Per-user data no longer renders into
+    ``config.toml``, so adding a user leaves the rendered file byte-identical
+    and the "Deploy istota configuration" task — the one that does notify a web
+    restart — stays ``ok``.
+    """
+
+    @staticmethod
+    def _task() -> dict:
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        return next(
+            t for t in tasks
+            if isinstance(t, dict) and t.get("name") == "Ensure user_profiles rows"
+        )
+
+    def test_it_notifies_the_web_tier(self):
+        assert "restart istota-web" in self._task()["notify"]
+
+    def test_it_still_notifies_the_scheduler(self):
+        assert "restart istota-scheduler" in self._task()["notify"]
+
+    def test_changed_is_derived_from_the_cli_state_line(self):
+        """`changed_when: false` silently suppresses every handler above.
+
+        This is the half that is easy to get wrong: the task carried a
+        ``notify: restart istota-scheduler`` for as long as it has existed, and
+        a hardcoded ``changed_when: false`` meant it never once fired. Adding a
+        second handler under that would be equally inert, so pin the condition
+        rather than only the notify list.
+        """
+        changed_when = self._task().get("changed_when")
+        assert changed_when is not False, (
+            "changed_when: false suppresses the notify handlers, so a new user "
+            "restarts neither tier"
+        )
+        assert "noop" in str(changed_when), (
+            "changed should be derived from the CLI's own STATE: line"
+        )
+
+    def test_the_cli_emits_the_state_line_the_condition_matches(self, tmp_path, capsys):
+        """The condition and the CLI live in different files.
+
+        A reworded STATE line would leave the play reporting `changed` on every
+        deploy, restarting both tiers each run — the failure direction is noisy
+        rather than silent, but it is still wrong.
+        """
+        from istota import db
+        from istota.cli import cmd_user_ensure
+
+        from tests.test_cli_user_ensure import _FakeArgs
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\ntemp_dir = "{tmp_path / "tmp"}"\n'
+        )
+
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice"))
+        assert "STATE: created" in capsys.readouterr().out
+
+        # A redeploy that changes nothing must not report `changed`, or every
+        # play bounces the web tier.
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice"))
+        assert "STATE: noop" in capsys.readouterr().out
+
+
 class TestAnsibleOutboundApprovalSurface:
     """The outbound approval gate must be operable from the inventory.
 
@@ -288,8 +364,8 @@ class TestAnsibleOutboundApprovalSurface:
         self, flag, value, monkeypatch, tmp_path,
     ):
         """The role and the parser live in different files, and a rendered flag
-        argparse does not know fails the play at deploy time — inside a task
-        whose ``changed_when: false`` makes it easy to skim past.
+        argparse does not know fails the play at deploy time, inside a looped
+        task whose per-user output is easy to skim past.
 
         `-c` is not optional here even though the handler is stubbed: `main()`
         loads the config before dispatching, and `load_config(None)` searches

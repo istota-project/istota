@@ -986,10 +986,21 @@
     loop_var: user_item
   vars:
     user_id: "{{ user_item.key }}"
-  changed_when: false  # CLI is idempotent; DB row state already audited per call
+  register: _istota_user_ensure
+  # The CLI is idempotent and reports what it did, so report `changed` off its
+  # own STATE line rather than hardcoding false. A hardcoded false suppresses
+  # the handlers below, which is how adding a user to `istota_users` restarted
+  # nothing: per-user data no longer renders into config.toml, so the "Deploy
+  # istota configuration" task stays `ok` too and its handlers don't fire either.
+  changed_when: "'STATE: noop' not in _istota_user_ensure.stdout"
   when: not istota_web_only
+  # Both tiers snapshot the user set at config load. `config.users` is rebuilt
+  # only by a full load — at startup and on SIGHUP — so a web process that has
+  # not restarted refuses a new user's Nextcloud login with "Access denied: user
+  # not configured" (`web_app._oauth2_callback`) even though the DB row exists.
   notify:
     - "restart istota-scheduler"
+    - "restart istota-web"
 
 # Write user_resources rows into the DB via `istota resource ensure`.
 # After the Resources sunset only `folder` (an out-of-workspace sandbox
