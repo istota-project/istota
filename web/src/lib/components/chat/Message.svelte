@@ -469,20 +469,28 @@
           {@html bodyHtml}
         </div>
       {/if}
+
+      <!-- The same row a turn gets, in the same place: under the body, inside
+           the content column, so it lines up with the card above it. It was
+           withheld here for a while on the reading that a notice is not a
+           turn, but every button does something the server already supports
+           on a `role='system'` row — the body is markdown worth copying, the
+           delete endpoint takes its id, and a reply cites it through the
+           snapshot path that already names a system parent as one of its
+           cases. Replying to an alert to ask what caused it is the ordinary
+           thing to want, not a category error.
+
+           A search-results row is still carved out: it renders cards rather
+           than markdown, so there is no source worth copying. -->
+      {#if hasRowActions && !message.searchResults}
+        {@render turnActions()}
+      {/if}
     </div>
     {#if showStar}
       <div class="msg-actions cmd-actions">
         {@render starButton()}
       </div>
     {/if}
-    <!-- No turn action row here, deliberately. A system row is not a turn: it
-         is an alert, a delivered notification or the output of a `!command`,
-         with no author and nothing on the other side of it. Copy and reply
-         both read it as somebody's words — a citation of one quotes the bot's
-         own notice back at it — and delete offers to remove a record of
-         something the system did rather than a message anyone wrote. The star
-         above is the one mark that still means something on a notice, and it
-         stays. -->
   </div>
 {:else}
   <div
@@ -849,7 +857,8 @@
   .cmd-row.touch .star-btn,
   .msg.touch .meta-footer,
   .msg.touch .hover-time,
-  .msg.touch .turn-actions {
+  .msg.touch .turn-actions,
+  .cmd-row.touch .turn-actions {
     transition: none;
   }
 
@@ -879,12 +888,14 @@
 	   has no hover at all, `.touch` knows a finger was used on a device that also
 	   reports one. `.revealed` is the touch surrogate the row already computes. */
   @media (hover: hover) {
-    .msg:not(.touch):hover .turn-actions {
+    .msg:not(.touch):hover .turn-actions,
+    .cmd-row:not(.touch):hover .turn-actions {
       opacity: 1;
       pointer-events: auto;
     }
   }
   .msg.active .turn-actions.revealed,
+  .cmd-row.active .turn-actions.revealed,
   .turn-actions:focus-within {
     opacity: 1;
     pointer-events: auto;
@@ -1187,6 +1198,12 @@
 	   scope is what keeps the rule from leaking past this row. */
   .content > :global(.draft-card) {
     margin-top: var(--space-3);
+    /* The readable-width cap belongs to this placement rather than to the
+       component: here the card is one block in a turn's content column and has
+       to stop where the prose body above it stops. In the page's own
+       loose-drafts list it is pane chrome beside `PendingConfirmations`, which
+       spans the pane — so the cap travels with the slot, not the card. */
+    max-width: var(--chat-body-max);
   }
 
   .msg.error .body,
@@ -1360,7 +1377,12 @@
     background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-3);
+    /* Uniform, and the same figure `.external` and `DraftCard` use. The three
+       are the surface's filled blocks inside a turn's content column, so their
+       text has to start at one inset — a wider horizontal pad here put a
+       notice's first character a step right of an external turn's directly
+       above it. */
+    padding: var(--space-2);
     text-align: left;
     word-break: break-word;
   }

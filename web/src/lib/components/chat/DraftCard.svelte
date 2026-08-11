@@ -5,9 +5,21 @@
    *
    * Larger than `ConfirmationCard` on purpose: what is being approved is a
    * specific set of bytes going to a specific set of addresses, so the card
-   * renders the full drafted body and the whole recipient list rather than a
+   * renders the drafted body and the whole recipient list rather than a
    * summary. The single promise this feature makes is that approving sends
-   * exactly what was read — a card that abbreviated would break it.
+   * exactly what was read, which is a promise about *transformation*, not about
+   * how much is on screen at once: the body is a text node under `pre-wrap` and
+   * is never re-rendered, and `Send` and `Edit` both operate on the full stored
+   * `body` — never on `shownBody`. Collapsing a long body behind an expander is
+   * therefore a reading affordance and not an abbreviation of what is sent.
+   *
+   * `placement` is which of the two slots the card is in, and it sets how much
+   * body shows before the expander. `turn` is inline under the assistant row
+   * that composed the mail, where the reader arrived by scrolling to it and the
+   * body is the thing they came for. `banner` is the page's own list above the
+   * transcript, which is pinned chrome carrying drafts whose turn is not on
+   * screen — there the card is competing with the transcript for the top of the
+   * pane, so it previews a line or two and expands on request.
    *
    * Three shapes, checked in this order, because the later ones assume content
    * the earlier ones do not have:
@@ -38,6 +50,7 @@
     onDiscard,
     onEdit,
     onNeedsFullRow,
+    placement = 'turn',
   }: {
     draft: OutboundDraft;
     onApprove: (id: number) => Promise<boolean> | boolean;
@@ -45,6 +58,8 @@
     onEdit: (id: number, body: string) => Promise<boolean> | boolean;
     /** A stub arrived on the stream; ask for the full set. */
     onNeedsFullRow?: () => void;
+    /** Which slot this card is in. See the module comment. */
+    placement?: 'turn' | 'banner';
   } = $props();
 
   let busy = $state(false);
@@ -77,6 +92,29 @@
       : body.slice(0, PREVIEW_CHARS),
   );
   const shownBody = $derived(expanded || !longBody ? body : `${preview}…`);
+
+  // ---- The banner's compact form ------------------------------------------
+  // Shortening the preview was not enough on its own: a body carrying a blank
+  // line still renders as two paragraphs under `pre-wrap`, and the fields grid,
+  // the actions list and the button row are each a row of their own — so two
+  // held drafts still took most of the pane. Compact is a different *shape*,
+  // not a shorter one: a head line, recipients and subject on one line, one
+  // clipped line of body, and the buttons. Four rows, and it expands to the
+  // full card in place.
+  //
+  // Editing is excluded because the textarea is the full-height surface the
+  // whole card exists to offer; there is no compact way to write a reply.
+  const compact = $derived(placement === 'banner' && !expanded && !editing);
+  // Whitespace is collapsed rather than preserved, because this line is a
+  // *label* for the held message and not the message itself — the paragraph
+  // breaks are exactly what made 180 characters occupy three rows. Clipping is
+  // CSS (`text-overflow: ellipsis`), so the line fits whatever width the card
+  // has instead of guessing a character count that is wrong at one of them.
+  // The full text is one click away and is what `Send` and `Edit` operate on.
+  const peek = $derived(body.replace(/\s+/g, ' ').trim());
+  const summaryLine = $derived(
+    [recipients.join(', ') || '(none)', draft.subject || '(no subject)'].join(' · '),
+  );
 
   // A stub carries no body, so the card cannot render what is being approved.
   // Asking on arrival is what turns it back into a full row.
@@ -165,10 +203,45 @@
       This message was approved and the send did not report back, so it may already have gone out.
       Check your Sent folder before resending it.
     </p>
+  {:else if compact}
+    <!-- The banner's four rows. Everything withheld here is one click away and
+         nothing is withheld from what gets sent: `Send` and `Edit` read the
+         full stored body, exactly as they do on the expanded card. -->
+    <div class="draft-head">
+      <span class="micro-label"><Mail size={12} /> Held for approval</span>
+      <span class="caption">{reasonLabel}</span>
+    </div>
+    <p class="draft-summary">{summaryLine}</p>
+    <p class="draft-peek">{peek}</p>
+    <div class="draft-actions">
+      <Button
+        variant="primary"
+        size="sm"
+        disabled={busy}
+        onclick={() => run(() => onApprove(draft.id))}>Send</Button
+      >
+      <Button variant="secondary" size="sm" disabled={busy} onclick={startEdit}>Edit</Button>
+      <Button
+        variant="subtle"
+        size="sm"
+        disabled={busy}
+        onclick={() => run(() => onDiscard(draft.id))}>Discard</Button
+      >
+      <!-- In the actions row rather than under the body: it saves the card a
+           whole row, and it is where the hand already is. -->
+      <button class="draft-more" type="button" onclick={() => (expanded = true)}>
+        Show the whole message
+      </button>
+    </div>
   {:else}
     <div class="draft-head">
       <span class="micro-label"><Mail size={12} /> Held for approval</span>
       <span class="caption">{reasonLabel}</span>
+      {#if placement === 'banner'}
+        <button class="draft-more" type="button" onclick={() => (expanded = false)}>
+          Show less
+        </button>
+      {/if}
     </div>
 
     <dl class="draft-fields kv">
@@ -253,8 +326,18 @@
        on you", so the two read as one class of thing across the surface. */
     border-left: 3px solid var(--status-warn-fg);
     border-radius: var(--radius-card);
-    padding: var(--space-2) var(--space-3);
-    max-width: var(--chat-body-max);
+    /* Uniform, and the same figure `.external` and `.cmd-output` use in
+       `Message.svelte`: the three are the filled blocks a turn's content column
+       holds, and they have to start their text at one inset. */
+    padding: var(--space-2);
+    /* No `max-width` here, deliberately. The `--chat-body-max` cap belongs to
+       the turn placement, where the card is one block in a message's content
+       column and has to match the body above it — so it is written there
+       (`Message.svelte`), beside the spacing rule that is scoped to that slot
+       for the same reason. Carried here it also applied in the banner, which is
+       pane chrome sitting beside `PendingConfirmations`: the draft stopped
+       134px short of the confirmation card directly above it, at the one width
+       the two most obviously want to agree on. */
   }
   /* A stuck or unreadable row is a fault to look into rather than a decision to
      take, and the colour is the only thing saying so before the text is read. */
@@ -283,6 +366,28 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
+  }
+  /* The compact banner's two content lines. Both are single-line and clipped in
+     CSS rather than cut to a character count: the card's width varies with the
+     pane, and a count that fits at one width overflows or under-fills at
+     another. `.draft-summary` carries the recipients and subject the fields
+     grid would otherwise spend two rows on; `.draft-peek` stands in for the
+     body, with its whitespace collapsed — a blank line in the source is exactly
+     what made a short preview occupy three rows under `pre-wrap`. */
+  .draft-summary,
+  .draft-peek {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .draft-summary {
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+  }
+  .draft-peek {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
   }
   .draft-fields {
     margin: 0;
@@ -315,6 +420,16 @@
     border-radius: var(--radius-sm);
     padding: var(--space-2);
     resize: vertical;
+  }
+  /* `center` rather than the base `flex-start`, so that in the compact card's
+     actions row it sits on the buttons' centre line instead of riding up
+     against their top edge. Harmless where the row is a column. */
+  .draft-actions .draft-more {
+    align-self: center;
+  }
+  /* Pushed to the far end of the head row, away from the reason caption. */
+  .draft-head .draft-more {
+    margin-left: auto;
   }
   .draft-more {
     align-self: flex-start;

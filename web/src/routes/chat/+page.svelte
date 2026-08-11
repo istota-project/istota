@@ -825,6 +825,7 @@
         {#each looseDrafts as draft (draft.id)}
           <DraftCard
             {draft}
+            placement="banner"
             onApprove={draftActions.approve}
             onDiscard={draftActions.discard}
             onEdit={draftActions.edit}

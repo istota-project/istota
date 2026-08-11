@@ -6,6 +6,9 @@
  * abbreviating, not re-rendering and not offering an action that cannot work.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import type { OutboundDraft } from '$lib/api';
 import DraftCard from './DraftCard.svelte';
@@ -158,6 +161,138 @@ describe('a long body', () => {
     await fireEvent.click(buttonNamed(container, 'Edit')!);
     await fireEvent.click(buttonNamed(container, 'Save')!);
     expect(onEdit).toHaveBeenCalledWith(41, long);
+  });
+});
+
+describe('the banner placement is a compact shape, not a shorter one', () => {
+  // Shortening the preview alone did not work: a body with a blank line still
+  // renders as two paragraphs under `pre-wrap`, and the fields grid, the
+  // actions list and the button row are each a row of their own — so two held
+  // drafts still took most of the pane. Compact replaces all of that with four
+  // rows and expands to the full card in place.
+  const twoParas = 'First paragraph here.\n\nSecond paragraph here.';
+
+  it('defaults to the turn placement, which is the full card', () => {
+    const { container } = mount(draft({ body: twoParas }));
+    expect(container.querySelector('.draft-body')).not.toBeNull();
+    expect(container.querySelector('.draft-peek')).toBeNull();
+  });
+
+  it('replaces the body block with a single peek line', () => {
+    const { container } = mount(draft({ body: twoParas }), { placement: 'banner' });
+    expect(container.querySelector('.draft-body')).toBeNull();
+    expect(container.querySelector('.draft-peek')).not.toBeNull();
+  });
+
+  it('collapses the whitespace that made a short preview three rows tall', () => {
+    // The defect this shape exists for: `pre-wrap` honours the blank line, so
+    // even a clipped body occupied a paragraph per break.
+    const { container } = mount(draft({ body: twoParas }), { placement: 'banner' });
+    const peek = container.querySelector('.draft-peek')!.textContent ?? '';
+    expect(peek).not.toMatch(/\n/);
+    expect(peek).toBe('First paragraph here. Second paragraph here.');
+  });
+
+  it('folds the recipients and subject onto one line', () => {
+    // The fields grid spends a row each on To and Subject.
+    const { container } = mount(draft(), { placement: 'banner' });
+    expect(container.querySelector('.draft-fields')).toBeNull();
+    expect(container.querySelector('.draft-summary')!.textContent).toBe(
+      'stranger@example.invalid · Re: Invite',
+    );
+  });
+
+  it('withholds the actions list until expanded', () => {
+    const { container } = mount(draft({ actions_taken: ['Created calendar event: Coffee'] }), {
+      placement: 'banner',
+    });
+    expect(container.textContent).not.toContain('This task also');
+  });
+
+  it('still offers every action while compact', () => {
+    // Compact hides detail, not decisions — the point is answering without
+    // opening anything.
+    const { container } = mount(draft(), { placement: 'banner' });
+    expect(buttonNamed(container, 'Send')).toBeDefined();
+    expect(buttonNamed(container, 'Edit')).toBeDefined();
+    expect(buttonNamed(container, 'Discard')).toBeDefined();
+  });
+
+  it('expands to the full card in place, and back', async () => {
+    const { container } = mount(draft({ body: twoParas, actions_taken: ['Created an event'] }), {
+      placement: 'banner',
+    });
+    await fireEvent.click(buttonNamed(container, 'Show the whole message')!);
+
+    expect(container.querySelector('.draft-fields')).not.toBeNull();
+    expect(container.querySelector('.draft-body')!.textContent).toBe(twoParas);
+    expect(container.textContent).toContain('This task also');
+
+    await fireEvent.click(buttonNamed(container, 'Show less')!);
+    expect(container.querySelector('.draft-peek')).not.toBeNull();
+  });
+
+  it('sends the whole body from the compact card', async () => {
+    // The peek is a label for the held message, never the message. What Edit
+    // seeds and what Send releases is the full stored body.
+    const onEdit = vi.fn(() => true);
+    const { container } = mount(draft({ body: twoParas }), { placement: 'banner', onEdit });
+    await fireEvent.click(buttonNamed(container, 'Edit')!);
+    await fireEvent.click(buttonNamed(container, 'Save')!);
+    expect(onEdit).toHaveBeenCalledWith(41, twoParas);
+  });
+
+  it('renders the peek as text, never as markup', () => {
+    // Same rule as the body: it is composed from a stranger's thread.
+    const { container } = mount(draft({ body: '<img src=x onerror=alert(1)>' }), {
+      placement: 'banner',
+    });
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.draft-peek')!.textContent).toContain('<img src=x');
+  });
+
+  it('leaves a stuck or unreadable row alone', () => {
+    // Those branches are checked before `compact` and carry no body to peek at.
+    const stuck = mount(draft({ status: 'sending' }), { placement: 'banner' }).container;
+    expect(stuck.textContent).toContain('Check your Sent folder');
+    expect(stuck.querySelector('.draft-peek')).toBeNull();
+
+    const bad = mount(draft({ unreadable: true }), { placement: 'banner' }).container;
+    expect(bad.querySelector('.draft-peek')).toBeNull();
+    expect(buttonNamed(bad, 'Send')).toBeUndefined();
+  });
+});
+
+describe('the readable-width cap belongs to the slot, not the card', () => {
+  /**
+   * Asserted against the source rather than a computed style, in the idiom
+   * `Composer.sendButton.svelte.test.ts` sets out: jsdom does not apply a Svelte
+   * component's own `<style>` at all, so `getComputedStyle(card).maxWidth` reads
+   * `none` whether or not the rule is there — vacuous in exactly the direction
+   * that matters.
+   *
+   * The invariant: `--chat-body-max` is what makes a draft card stop where the
+   * prose body above it stops, which is right inline under a turn and wrong in
+   * the page's own list, where the card is chrome beside a `PendingConfirmations`
+   * card that spans the pane. Carried on the component it applied in both, and
+   * the banner draft stopped 134px short of the confirmation directly above it.
+   */
+  const here = dirname(fileURLToPath(import.meta.url));
+  const styleOf = (file: string) => {
+    const src = readFileSync(resolve(here, file), 'utf8');
+    const open = src.indexOf('>', src.indexOf('<style'));
+    return src.slice(open + 1, src.lastIndexOf('</style>')).replace(/\/\*[\s\S]*?\*\//g, '');
+  };
+
+  it('is absent from DraftCard', () => {
+    expect(styleOf('DraftCard.svelte')).not.toMatch(/max-width/);
+  });
+
+  it('is present on the turn slot in Message.svelte', () => {
+    const css = styleOf('Message.svelte');
+    const rule = css.match(/\.content\s*>\s*:global\(\.draft-card\)\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toMatch(/max-width:\s*var\(--chat-body-max\)/);
   });
 });
 

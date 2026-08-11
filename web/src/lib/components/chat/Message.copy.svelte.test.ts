@@ -138,15 +138,17 @@ describe('per-turn copy', () => {
     expect(written).toEqual(['what is 6 times 7?']);
   });
 
-  it('offers nothing on a system row', () => {
-    // A notice has a body worth reading and no author; see the system-row
-    // suppression suite below for why the whole row is withheld there.
+  it('copies a system row body', async () => {
+    const written = stubClipboard();
     const { container } = render(Message, {
       ...base,
       message: { cid: 3, role: 'system', text: '**Rooms**\n- one', segments: [], streaming: false },
     });
 
-    expect(copyButtons(container)).toHaveLength(0);
+    copyButtons(container)[0].click();
+    await Promise.resolve();
+
+    expect(written).toEqual(['**Rooms**\n- one']);
   });
 
   it('offers nothing to copy on an empty user turn', () => {
@@ -303,7 +305,9 @@ describe('per-message delete', () => {
     expect(deleteButtons(container)).toHaveLength(1);
   });
 
-  it('is withheld from a system row', () => {
+  it('is offered on a system row too', () => {
+    // The endpoint takes a system row's id like any other, and a notice you
+    // want out of the transcript is an ordinary thing to want.
     const { container } = render(Message, {
       ...base,
       message: {
@@ -317,7 +321,7 @@ describe('per-message delete', () => {
       onDelete: noop,
     });
 
-    expect(deleteButtons(container)).toHaveLength(0);
+    expect(deleteButtons(container)).toHaveLength(1);
   });
 });
 
@@ -412,9 +416,10 @@ describe('star in the turn action row', () => {
     expect(rowStars(container)).toHaveLength(1);
   });
 
-  it('is withheld from a system row, which keeps the hover-bar star', () => {
-    // The row goes; the mark does not. A notice is still worth flagging, and
-    // the hover bar's star is the one that persists at rest anyway.
+  it('is offered on a system row too, alongside the hover-bar star', () => {
+    // Both stars appear on a notice for the same reason they do on a turn: the
+    // hover bar's is the one that persists at rest, the row's is where the
+    // hand already is once the row is open.
     const { container } = render(Message, {
       ...base,
       message: {
@@ -428,7 +433,7 @@ describe('star in the turn action row', () => {
       onToggleStar: noop,
     });
 
-    expect(rowStars(container)).toHaveLength(0);
+    expect(rowStars(container)).toHaveLength(1);
     expect(container.querySelectorAll('.cmd-actions .star-btn')).toHaveLength(1);
   });
 

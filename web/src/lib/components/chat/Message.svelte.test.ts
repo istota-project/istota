@@ -375,12 +375,10 @@ describe('tap activation (touch)', () => {
   });
 });
 
-describe('system rows carry no turn action row', () => {
-  // A system row is an alert, a delivered notification or `!command` output —
-  // no author, nothing on the other side of it. Copy and reply read it as
-  // somebody's words, and delete offers to erase the record of something the
-  // system did. The whole row goes; the hover-bar star stays, being a mark on
-  // the row rather than an action on a turn.
+describe('system rows carry the turn action row', () => {
+  // Withheld for a while on the reading that a notice is not a turn. Every
+  // button does something the server already supports on a `role='system'`
+  // row, so the row is back and gated exactly as it is on a turn.
   const systemRow = (over: Partial<ChatMessage> = {}): ChatMessage =>
     finished({ role: 'system', msgId: 42, text: 'Backup finished.', ...over });
 
@@ -393,28 +391,41 @@ describe('system rows carry no turn action row', () => {
     onRetry: noop,
   };
 
-  it('renders no .turn-actions even with every handler passed', () => {
+  it('renders the same four buttons in the same order a turn gets', () => {
     const { container } = render(Message, { message: systemRow(), ...everyHandler });
 
     expect(container.querySelector('.cmd-row')).not.toBeNull();
-    expect(container.querySelector('.turn-actions')).toBeNull();
-    expect(container.querySelectorAll('.turn-action')).toHaveLength(0);
+    const labels = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.turn-actions .turn-action'),
+    ).map((b) => b.getAttribute('aria-label'));
+
+    expect(labels).toEqual(['Copy message', 'Star message', 'Reply to message', 'Delete message']);
   });
 
-  it('keeps the hover-bar star', () => {
+  it('puts the row inside the content column, not the row itself', () => {
+    // The gutter holds the mark and the content column holds everything the
+    // notice is; a third flex child would sit beside the card rather than
+    // under it, which is the layout the row was withheld over.
+    const { container } = render(Message, { message: systemRow(), ...everyHandler });
+
+    expect(container.querySelector('.cmd-row > .content > .turn-actions')).not.toBeNull();
+  });
+
+  it('keeps the hover-bar star alongside it', () => {
     const { container } = render(Message, { message: systemRow(), ...everyHandler });
 
     expect(container.querySelector('.cmd-actions .star-btn')).not.toBeNull();
   });
 
-  it('still gives an assistant turn its row, so the suppression is role-keyed', () => {
-    // The control: same handlers, same durable id, only the role differs.
+  it('withholds it from a search-results row, which has no markdown source', () => {
     const { container } = render(Message, {
-      message: finished({ msgId: 42 }),
+      message: systemRow({
+        searchResults: { kind: 'search_results', query: 'x', results: [], text: 'no hits' },
+      }),
       ...everyHandler,
     });
 
-    expect(container.querySelector('.turn-actions')).not.toBeNull();
+    expect(container.querySelector('.turn-actions')).toBeNull();
   });
 });
 
