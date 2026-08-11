@@ -23,6 +23,18 @@ from istota import db
 from istota.config import Config
 from istota.scheduler import _store_room_turn
 
+
+def _store(conn, task, body):
+    """`_store_room_turn` for a task whose own token *is* its room.
+
+    ISSUE-247 split the two apart: the room is now resolved from the routing and
+    passed in, because on an email task `conversation_token` is a thread hash.
+    For every case in this file the two coincide, and saying so once here keeps
+    these tests about what they were about.
+    """
+    return _store_room_turn(conn, task, task.conversation_token, body)
+
+
 try:
     import authlib  # noqa: F401
     import fastapi  # noqa: F401
@@ -57,7 +69,7 @@ def _email_task(token, task_id=20):
 class TestStoreWebRoomTurn:
     def test_stores_assistant_turn_with_web_origin(self, conn):
         db.register_room(conn, "cpzpcfx2", "u", origin="web")
-        _store_room_turn(conn, _email_task("cpzpcfx2"), "Reply's queued to go back")
+        _store(conn, _email_task("cpzpcfx2"), "Reply's queued to go back")
         msgs = db.get_messages(conn, "cpzpcfx2")
         assert [(m.role, m.body, m.origin_surface) for m in msgs] == [
             ("assistant", "Reply's queued to go back", "email"),
@@ -67,17 +79,17 @@ class TestStoreWebRoomTurn:
 
     def test_noop_when_room_not_registered(self, conn):
         # Room token with no registry row → deleted room, nothing to render into.
-        _store_room_turn(conn, _email_task("ghosttoken"), "reply")
+        _store(conn, _email_task("ghosttoken"), "reply")
         assert db.get_messages(conn, "ghosttoken") == []
 
     def test_noop_when_no_conversation_token(self, conn):
-        _store_room_turn(conn, _email_task(None), "x")  # nothing raised/stored
+        _store(conn, _email_task(None), "x")  # nothing raised/stored
 
     def test_idempotent_across_retries(self, conn):
         db.register_room(conn, "r", "u", origin="web")
         task = _email_task("r", task_id=42)
-        _store_room_turn(conn, task, "reply")
-        _store_room_turn(conn, task, "reply")  # retry re-completes
+        _store(conn, task, "reply")
+        _store(conn, task, "reply")  # retry re-completes
         assert len(db.get_messages(conn, "r")) == 1
 
     def test_does_not_double_store_when_native_assistant_row_exists(self, conn):
@@ -88,7 +100,7 @@ class TestStoreWebRoomTurn:
             conn, "r", role="assistant", body="answer", task_id=7,
             origin_surface="talk",
         )
-        _store_room_turn(
+        _store(
             conn, SimpleNamespace(source_type="talk", conversation_token="r", id=7),
             "answer",
         )
@@ -106,7 +118,7 @@ class TestWebReaderRendersReplyAsBubble:
         web_app._config.db_path = db_path
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpzpcfx2", "u", origin="web")
-            _store_room_turn(
+            _store(
                 conn, _email_task("cpzpcfx2"), "Reply's queued to go back",
             )
         out = web_app._chat_room_messages("u", "cpzpcfx2", 50)

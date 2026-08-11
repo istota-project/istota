@@ -52,7 +52,9 @@ Separately from every rule above, the server may hold an outgoing email instead 
 
 **The message was not sent.** It is stored as an editable draft, the user has been shown it, and they will approve, edit, or discard it. That is a successful outcome of the verb, not an error. Do not retry it, do not reword it and send again, and do not look for another way out. Tell the user the reply is drafted and waiting, and stop there.
 
-Not every outward path is held. Under the usual policy, mail to an address the user has already trusted goes straight out, and under the strictest one only their own addresses do. A threaded reply deferred through `email output` is sent when the task completes, whoever it is addressed to. So the hold covers some of the cases where nobody authorized the recipient — it is a backstop, and never a reason to relax anything above it. Do not reason from "it was not held" to "it was allowed".
+The same decision is applied to every outbound path, not only to those three verbs. A reply deferred through `email output` is checked when the server sends it, after your task has finished — so a message you handed off as sent may in fact be waiting for the user. You will not see a `held` envelope for it, because by then there is nobody to return one to.
+
+What is held depends on the policy: under the usual one, mail to an address the user has already trusted goes straight out; under the strictest, only their own addresses do. Since the check keys on the recipient alone, "it was not held" tells you the recipient was authorized and nothing else. It is never evidence that the *content* was authorized, and never a reason to relax any rule above. Do not reason from "it was not held" to "it was allowed".
 
 ## Actions requiring explicit confirmation
 

@@ -3538,9 +3538,24 @@ _AUX_COLUMNS = (
 # confirmation-gated email out: its mirror is deliberately withheld until the
 # user approves it, and these rows render `tasks.prompt`, so a bare source-type
 # widening would publish the untrusted content the gate exists to hold back.
-_AUX_SOURCE_SCOPE = (
-    "(source_type IN ('web', 'talk') OR (source_type = 'email' AND EXISTS ("
-    "SELECT 1 FROM messages m2 WHERE m2.room_token = tasks.conversation_token "
+# Which tasks a room's auxiliary (failed / cancelled / in-flight) gap-fill may
+# read. Two clauses, one per way a task belongs to a room.
+#
+# A web/talk task belongs by its own `conversation_token`. An **email** task does
+# not: since ISSUE-247 its token is a thread hash while the exchange lives in the
+# room the routing resolved, so scoping it by that column made a failed
+# first-contact turn invisible — its question in the room with no error bubble
+# under it, which is the ISSUE-136 orphan re-reached. It belongs by the mirrored
+# `role='user'` row instead, which is also what keeps the untrusted-sender gate
+# intact: a gated turn's row is withheld (`suppress_transcript_mirror`), so this
+# query cannot reach `tasks.prompt` — the attacker-supplied body the gate is
+# holding back — until the user has approved it.
+#
+# Both `?` bind the *room* token, in that order.
+_AUX_ROOM_SCOPE = (
+    "((source_type IN ('web', 'talk') AND conversation_token = ?) "
+    "OR (source_type = 'email' AND EXISTS ("
+    "SELECT 1 FROM messages m2 WHERE m2.room_token = ? "
     "AND m2.task_id = tasks.id AND m2.role = 'user')))"
 )
 
@@ -3855,13 +3870,12 @@ def _chat_room_messages(
                 t1 = msg_rows[-1]["created_at"]
                 task_rows = conn.execute(
                     _AUX_COLUMNS
-                    + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND " + _AUX_SOURCE_SCOPE + " "
+                    + "WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
                     "AND (status IN ('pending', 'locked', 'running', 'pending_confirmation') "
                     "     OR (status IN ('failed', 'cancelled') "
                     f"         AND {_AUX_TS_ABOVE} AND {_AUX_TURN_TS} >= ?)) "
                     "ORDER BY turn_ts DESC, id DESC",
-                    (token, username, t1, t1),
+                    (token, token, username, t1, t1),
                 ).fetchall()
             else:
                 # Empty-spine fallback (un-backfilled legacy / failed-only room):
@@ -3869,10 +3883,9 @@ def _chat_room_messages(
                 # recent tasks window, no cursor offered.
                 task_rows = conn.execute(
                     _AUX_COLUMNS
-                    + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND " + _AUX_SOURCE_SCOPE + " "
+                    + "WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
                     "ORDER BY turn_ts DESC, id DESC LIMIT ?",
-                    (token, username, limit),
+                    (token, token, username, limit),
                 ).fetchall()
         else:
             before_ts, before_id = before
@@ -3886,13 +3899,12 @@ def _chat_room_messages(
                 page_lo = msg_rows[-1]["created_at"]
                 task_rows = conn.execute(
                     _AUX_COLUMNS
-                    + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND " + _AUX_SOURCE_SCOPE + " "
+                    + "WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
                     "AND status IN ('failed', 'cancelled') "
                     f"AND {_AUX_TS_ABOVE} AND {_AUX_TS_BELOW} "
                     f"AND {_AUX_TURN_TS} >= ? AND {_AUX_TURN_TS} < ? "
                     "ORDER BY turn_ts DESC, id DESC",
-                    (token, username, page_lo, before_ts, page_lo, before_ts),
+                    (token, token, username, page_lo, before_ts, page_lo, before_ts),
                 ).fetchall()
             else:
                 # Aux-only tail (flaw #3): the spine is exhausted but failed/
@@ -3900,12 +3912,11 @@ def _chat_room_messages(
                 # rows). Page them directly by keyset so none are stranded.
                 task_rows = conn.execute(
                     _AUX_COLUMNS
-                    + "WHERE conversation_token = ? AND user_id = ? "
-                    "AND " + _AUX_SOURCE_SCOPE + " "
+                    + "WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
                     "AND status IN ('failed', 'cancelled') "
                     f"AND {_AUX_TS_BELOW} AND ({_AUX_TURN_TS}, id) < (?, ?) "
                     "ORDER BY turn_ts DESC, id DESC LIMIT ?",
-                    (token, username, before_ts, before_ts, before_id, limit),
+                    (token, token, username, before_ts, before_ts, before_id, limit),
                 ).fetchall()
 
         # 3. Bot-delivered system messages (alerts / logs / notifications routed
@@ -3949,10 +3960,10 @@ def _chat_room_messages(
                 (token, page_lo_ts, page_lo_id),
             ).fetchone() is not None
             aux_more = conn.execute(
-                "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
-                "AND " + _AUX_SOURCE_SCOPE + " AND status IN ('failed', 'cancelled') "
+                "SELECT 1 FROM tasks WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
+                "AND status IN ('failed', 'cancelled') "
                 f"AND {_AUX_TS_BELOW} AND {_AUX_TURN_TS} < ? LIMIT 1",
-                (token, username, page_lo_ts, page_lo_ts),
+                (token, token, username, page_lo_ts, page_lo_ts),
             ).fetchone() is not None
             has_more = spine_more or aux_more
         elif before is not None and task_rows:
@@ -3962,10 +3973,10 @@ def _chat_room_messages(
             page_lo_id = task_rows[-1]["id"]
             oldest_cursor = {"ts": page_lo_ts, "id": page_lo_id}
             has_more = conn.execute(
-                "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
-                "AND " + _AUX_SOURCE_SCOPE + " AND status IN ('failed', 'cancelled') "
+                "SELECT 1 FROM tasks WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
+                "AND status IN ('failed', 'cancelled') "
                 f"AND {_AUX_TS_BELOW} AND ({_AUX_TURN_TS}, id) < (?, ?) LIMIT 1",
-                (token, username, page_lo_ts, page_lo_ts, page_lo_id),
+                (token, token, username, page_lo_ts, page_lo_ts, page_lo_id),
             ).fetchone() is not None
 
     messages: list[dict] = []
@@ -5255,11 +5266,12 @@ def _chat_pending_confirmations(username: str) -> list[dict]:
     """Every question waiting on this user, oldest first.
 
     The API equivalent of `handle_confirmation_reply`'s Path C, and the reason
-    it is its own endpoint rather than a widening of `_AUX_SOURCE_SCOPE`: a
-    first-contact email's `conversation_token` is the synthetic thread hash, so
-    there is no room whose history query could ever surface it — and the aux
-    query renders `tasks.prompt`, which for a gated email is exactly the
-    untrusted body the gate is holding back.
+    it is its own endpoint rather than a widening of the room history query: the
+    aux gap-fill renders `tasks.prompt`, which for a gated email is exactly the
+    untrusted body the gate is holding back. `_AUX_ROOM_SCOPE` admits an email
+    task only through its mirrored `role='user'` row, and a gated turn has none
+    (`suppress_transcript_mirror`), so that stays true now the exchange has a
+    room at all (ISSUE-247).
 
     What ships is the bot-composed prompt plus the sender / subject / routing
     method off `processed_emails`. Sender and subject are still attacker

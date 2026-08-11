@@ -17,6 +17,18 @@ from istota import db
 from istota.config import Config
 from istota.scheduler import _store_room_turn
 
+
+def _store(conn, task, body):
+    """`_store_room_turn` for a task whose own token *is* its room.
+
+    ISSUE-247 split the two apart: the room is now resolved from the routing and
+    passed in, because on an email task `conversation_token` is a thread hash.
+    For every case in this file the two coincide, and saying so once here keeps
+    these tests about what they were about.
+    """
+    return _store_room_turn(conn, task, task.conversation_token, body)
+
+
 try:
     import authlib  # noqa: F401
     import fastapi  # noqa: F401
@@ -51,7 +63,7 @@ def _scheduled_task(token, task_id=10):
 class TestStoreScheduledRoomTurn:
     def test_stores_assistant_turn_with_scheduled_origin(self, conn):
         db.register_room(conn, "2ay6qic9", "u", origin="talk")
-        _store_room_turn(conn, _scheduled_task("2ay6qic9"), "you are now at home")
+        _store(conn, _scheduled_task("2ay6qic9"), "you are now at home")
         msgs = db.get_messages(conn, "2ay6qic9")
         assert [(m.role, m.body, m.origin_surface) for m in msgs] == [
             ("assistant", "you are now at home", "scheduled"),
@@ -60,18 +72,18 @@ class TestStoreScheduledRoomTurn:
     def test_noop_when_room_not_registered(self, conn):
         # A Talk room the bot only ever posts alerts to (no human turn) has no
         # registry row → not web-visible → nothing to mirror, no orphan row.
-        _store_room_turn(conn, _scheduled_task("ghosttoken"), "alert")
+        _store(conn, _scheduled_task("ghosttoken"), "alert")
         assert db.get_messages(conn, "ghosttoken") == []
 
     def test_noop_when_no_conversation_token(self, conn):
-        _store_room_turn(conn, _scheduled_task(None), "x")
+        _store(conn, _scheduled_task(None), "x")
         # nothing raised, nothing stored anywhere
 
     def test_idempotent_across_retries(self, conn):
         db.register_room(conn, "r", "u", origin="talk")
         task = _scheduled_task("r", task_id=42)
-        _store_room_turn(conn, task, "alert")
-        _store_room_turn(conn, task, "alert")  # retry re-completes
+        _store(conn, task, "alert")
+        _store(conn, task, "alert")  # retry re-completes
         msgs = db.get_messages(conn, "r")
         assert len(msgs) == 1
 
@@ -86,7 +98,7 @@ class TestWebReaderRendersScheduledPost:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "2ay6qic9", "u", origin="talk")
             db.add_room_binding(conn, "2ay6qic9", "talk", "2ay6qic9")
-            _store_room_turn(
+            _store(
                 conn, _scheduled_task("2ay6qic9"), "you are now at home",
             )
         out = web_app._chat_room_messages("u", "2ay6qic9", 50)

@@ -32,12 +32,28 @@ def db_path(tmp_path):
 
 
 def _config(db_path, tmp_path, **overrides):
+    """A Config whose default user trusts the correspondents these tests use.
+
+    The default matters: `deliver_email_result` runs every recipient through the
+    outbound approval gate, whose floor is `untrusted`, so a config naming no
+    user at all holds every reply rather than sending it. The branch tests below
+    are about send mechanics, not the gate, so the default user trusts
+    `*@example.com` and their sends go through — which also means each of them
+    exercises the gate's pass-through. The gate's *holding* behaviour has its own
+    class at the end of this file.
+    """
     base = dict(
         db_path=db_path,
         temp_dir=tmp_path,
         bot_name="Istota",
         nextcloud=NextcloudConfig(url="https://nc.example.com"),
         email=EmailConfig(enabled=True, bot_email="bot@example.com"),
+        users={
+            "alice": UserConfig(
+                email_addresses=["alice@example.com"],
+                trusted_email_senders=["*@example.com"],
+            ),
+        },
     )
     base.update(overrides)
     return Config(**base)
@@ -666,7 +682,13 @@ class TestBriefingHtmlEmail:
         """A briefing landing in an existing thread still goes multipart."""
         config = _config(
             db_path, tmp_path,
-            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+            users={"alice": UserConfig(
+                email_addresses=["alice@example.com"],
+                # The reply goes to the correspondent, not to the user, so the
+                # approval gate has an opinion about it. This test is about the
+                # multipart body.
+                trusted_email_senders=["*@example.com"],
+            )},
         )
         task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
         _link_inbound_email(db_path, task.id)
@@ -740,3 +762,470 @@ class TestBriefingHtmlEmail:
 
         assert ok is True
         assert mock_send.call_args.kwargs.get("html_body") is None
+
+
+# ---------------------------------------------------------------------------
+# The outbound approval gate on the delivery leg (ISSUE-246)
+# ---------------------------------------------------------------------------
+
+
+def _write_deferred_output(tmp_path, task, *, subject="Re: Hey", body="The answer."):
+    """The `istota-skill email output` file, as the executor would leave it."""
+    user_dir = tmp_path / task.user_id
+    user_dir.mkdir(exist_ok=True)
+    (user_dir / f"task_{task.id}_email_output.json").write_text(json.dumps({
+        "subject": subject, "body": body, "format": "plain",
+    }))
+
+
+def _drafts(db_path):
+    with db.get_db(db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM outbound_drafts ORDER BY id"
+        ).fetchall()
+
+
+class TestDeliveryLegApprovalGate:
+    """The gate has to fire where the mail actually leaves, not only in the
+    CLI verbs.
+
+    ISSUE-246: `_outbound_gate` was wired into `email send` / `email reply`
+    only, and the model replies with `email output` — which writes a deferred
+    file that the *scheduler* mails through `deliver_email_result`, a path with
+    no check at all. Two messages reached an address the user had declined to
+    trust. These drive that exact shape: an email-origin task, a deferred output
+    file, delivery by the scheduler.
+    """
+
+    @pytest.mark.asyncio
+    async def test_deferred_reply_to_untrusted_address_is_held(self, db_path, tmp_path):
+        """The reported trace. `email output` to an untrusted correspondent."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id,
+            sender="stranger@protonmail.test",
+            subject="Hey zorg",
+            message_id="<inbound-1@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task, body="Here is the todo list.")
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
+            patch("istota.transport.email.outbound.send_email") as mock_send,
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        # Nothing left the process.
+        mock_reply.assert_not_called()
+        mock_send.assert_not_called()
+        # A hold is not a task failure — the task already reported success.
+        assert ok is True
+
+        rows = _drafts(db_path)
+        assert len(rows) == 1
+        draft = rows[0]
+        assert json.loads(draft["to_addrs"]) == ["stranger@protonmail.test"]
+        assert draft["body"] == "Here is the todo list."
+        assert draft["status"] == "pending"
+        assert draft["hold_reason"] == "untrusted_recipient"
+        assert draft["task_id"] == task.id
+
+    @pytest.mark.asyncio
+    async def test_held_draft_snapshots_threading_headers(self, db_path, tmp_path):
+        """`release` sends from the row, so the row must carry the thread."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id,
+            sender="stranger@protonmail.test",
+            message_id="<inbound-2@protonmail.test>",
+            references="<root@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task, subject="Re: Plan")
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            await deliver_email_result(config, task, "")
+
+        draft = _drafts(db_path)[0]
+        assert draft["in_reply_to"] == "<inbound-2@protonmail.test>"
+        assert draft["references"] == "<root@protonmail.test> <inbound-2@protonmail.test>"
+        assert draft["subject"] == "Re: Plan"
+
+    @pytest.mark.asyncio
+    async def test_deferred_reply_to_trusted_address_is_sent(self, db_path, tmp_path):
+        """The gate keys on the recipient, so a trusted one still goes out."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(
+                email_addresses=["alice@example.com"],
+                trusted_email_senders=["*@partner.test"],
+            )},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id,
+            sender="colleague@partner.test",
+            message_id="<inbound-3@partner.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch(
+                "istota.transport.email.outbound.reply_to_email",
+                return_value="<sent@bot.example.com>",
+            ) as mock_reply,
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        assert ok is True
+        mock_reply.assert_called_once()
+        assert mock_reply.call_args.kwargs["to_addr"] == "colleague@partner.test"
+        assert _drafts(db_path) == []
+
+    @pytest.mark.asyncio
+    async def test_all_policy_holds_reply_to_trusted_correspondent(self, db_path, tmp_path):
+        """The residual the spec recorded at `:76`, closed by moving the check.
+
+        Under `all` only the user's own addresses go out unapproved. A deferred
+        reply to a *trusted* correspondent was sent anyway, because this leg had
+        no check to consult the policy at all.
+        """
+        config = _config(
+            db_path, tmp_path,
+            email=EmailConfig(
+                enabled=True, bot_email="bot@example.com",
+                outbound_approval_floor="all",
+            ),
+            users={"alice": UserConfig(
+                email_addresses=["alice@example.com"],
+                trusted_email_senders=["*@partner.test"],
+            )},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id,
+            sender="colleague@partner.test",
+            message_id="<inbound-4@partner.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        assert ok is True
+        mock_reply.assert_not_called()
+        assert _drafts(db_path)[0]["hold_reason"] == "all_mode"
+
+    @pytest.mark.parametrize("floor", ["untrusted", "all"])
+    @pytest.mark.asyncio
+    async def test_self_addressed_briefing_is_never_held(self, db_path, tmp_path, floor):
+        """Briefings and notifications pass through this function too.
+
+        Both live policies clear the user's own address, so neither holds a
+        self-addressed briefing. The entry asked for a test rather than the
+        argument.
+        """
+        config = _config(
+            db_path, tmp_path,
+            email=EmailConfig(
+                enabled=True, bot_email="bot@example.com",
+                outbound_approval_floor=floor,
+            ),
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path, source_type="briefing")
+
+        with (
+            patch(
+                "istota.transport.email.outbound.send_email",
+                return_value="<brief@bot>",
+            ) as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(config, task, _structured())
+
+        assert ok is True
+        assert mock_send.call_args.kwargs["to"] == "alice@example.com"
+        assert _drafts(db_path) == []
+
+    @pytest.mark.asyncio
+    async def test_policy_off_sends_without_touching_drafts(self, db_path, tmp_path):
+        config = _config(
+            db_path, tmp_path,
+            email=EmailConfig(
+                enabled=True, bot_email="bot@example.com",
+                outbound_approval_floor="off",
+            ),
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            message_id="<inbound-5@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch(
+                "istota.transport.email.outbound.reply_to_email",
+                return_value="<sent@bot>",
+            ) as mock_reply,
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        assert ok is True
+        mock_reply.assert_called_once()
+        assert _drafts(db_path) == []
+
+    @pytest.mark.asyncio
+    async def test_gate_that_cannot_run_refuses_to_send(self, db_path, tmp_path):
+        """A gate that fails open on a broken check is not a gate.
+
+        Reported as a delivery failure, because nothing was sent *and* nothing
+        was held — unlike a hold, there is no draft to recover from.
+        """
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            message_id="<inbound-6@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
+            patch("istota.transport.email.outbound.send_email") as mock_send,
+            patch(
+                "istota.outbound_policy.recipients_require_hold",
+                side_effect=RuntimeError("database is locked"),
+            ),
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        assert ok is False
+        mock_reply.assert_not_called()
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_refused_send_keeps_the_composed_body_on_disk(self, db_path, tmp_path):
+        """The failing check must not also destroy the message.
+
+        Nothing was sent and no draft was written, so the deferred file is the
+        only surviving copy — `task.result` holds the model's prose, not this
+        envelope. Deleting it would turn a transient database fault into
+        permanent message loss.
+        """
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            message_id="<inbound-8@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task, body="Do not lose me.")
+        path = tmp_path / "alice" / f"task_{task.id}_email_output.json"
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch("istota.transport.email.outbound.send_email"),
+            patch(
+                "istota.outbound_policy.recipients_require_hold",
+                side_effect=RuntimeError("database is locked"),
+            ),
+        ):
+            await deliver_email_result(config, task, "")
+
+        assert path.exists()
+        assert "Do not lose me." in path.read_text()
+
+    @pytest.mark.asyncio
+    async def test_a_held_reply_consumes_the_file(self, db_path, tmp_path):
+        """Once the body is in the draft, the file has done its job."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            message_id="<inbound-9@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+        path = tmp_path / "alice" / f"task_{task.id}_email_output.json"
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            await deliver_email_result(config, task, "")
+
+        assert not path.exists()
+        assert len(_drafts(db_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_hold_notifies_the_user_immediately(self, db_path, tmp_path):
+        """A hold here has no other voice.
+
+        The CLI verbs return a `held` envelope the model reports in its own
+        answer. By the time this leg runs the task has finished and its "I have
+        replied" answer is already in the room, and a first-contact thread has
+        no room for a draft card — so without this notice the hold is invisible
+        until the 24-hour stale-draft nag.
+        """
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            subject="Hey zorg",
+            message_id="<inbound-10@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task, subject="Re: Hey zorg")
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch("istota.transport.email.outbound.send_email"),
+            patch("istota.notifications.send_notification") as mock_notify,
+        ):
+            await deliver_email_result(config, task, "")
+
+        mock_notify.assert_called_once()
+        body = mock_notify.call_args[0][2]
+        assert "stranger@protonmail.test" in body
+        assert "waiting for your approval" in body
+        assert "Nothing was sent" in body
+        # Routed as an alert: it is asking the user to do something.
+        assert mock_notify.call_args[1]["purpose"] == "alert"
+
+    @pytest.mark.asyncio
+    async def test_a_notification_failure_does_not_lose_the_hold(self, db_path, tmp_path):
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            message_id="<inbound-11@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
+            patch("istota.transport.email.outbound.send_email"),
+            patch(
+                "istota.notifications.send_notification",
+                side_effect=RuntimeError("talk is down"),
+            ),
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        assert ok is True
+        mock_reply.assert_not_called()
+        assert len(_drafts(db_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_held_reply_subject_carries_the_re_prefix(self, db_path, tmp_path):
+        """`release` sends through `send_email`, which adds no `Re:` of its own."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            subject="Question about X",
+            message_id="<inbound-12@protonmail.test>",
+        )
+        # No structured subject, so the branch keeps the inbound one.
+        user_dir = tmp_path / "alice"
+        user_dir.mkdir(exist_ok=True)
+        (user_dir / f"task_{task.id}_email_output.json").write_text(json.dumps({
+            "subject": None, "body": "An answer.", "format": "plain",
+        }))
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            await deliver_email_result(config, task, "")
+
+        assert _drafts(db_path)[0]["subject"] == "Re: Question about X"
+
+    @pytest.mark.asyncio
+    async def test_an_unrecordable_recipient_refuses_rather_than_sends(self, db_path, tmp_path):
+        """The decision was made; only the recording failed. Still no send."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path)
+        # A header-injection shape `normalize_addresses` refuses at hold time.
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test\nBcc: x@y.test",
+            message_id="<inbound-13@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email") as mock_reply,
+            patch("istota.transport.email.outbound.send_email") as mock_send,
+        ):
+            ok = await deliver_email_result(config, task, "")
+
+        assert ok is False
+        mock_reply.assert_not_called()
+        mock_send.assert_not_called()
+        assert _drafts(db_path) == []
+
+    @pytest.mark.asyncio
+    async def test_hold_is_attributed_to_the_task_room(self, db_path, tmp_path):
+        """`room_token` is what makes the draft card render inline."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, token="room-abc", user_id="alice", origin="web")
+            tid = db.create_task(
+                conn, prompt="reply to them", user_id="alice",
+                source_type="email", conversation_token="room-abc",
+            )
+            task = db.get_task(conn, tid)
+        _link_inbound_email(
+            db_path, task.id, sender="stranger@protonmail.test",
+            message_id="<inbound-7@protonmail.test>",
+        )
+        _write_deferred_output(tmp_path, task)
+
+        with (
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            await deliver_email_result(config, task, "")
+
+        draft = _drafts(db_path)[0]
+        assert draft["room_token"] == "room-abc"
+        assert draft["origin_target"] == "room:room-abc"

@@ -19,6 +19,18 @@ import pytest
 from istota import db
 from istota.scheduler import _store_room_turn
 
+
+def _store(conn, task, body):
+    """`_store_room_turn` for a task whose own token *is* its room.
+
+    ISSUE-247 split the two apart: the room is now resolved from the routing and
+    passed in, because on an email task `conversation_token` is a thread hash.
+    For every case in this file the two coincide, and saying so once here keeps
+    these tests about what they were about.
+    """
+    return _store_room_turn(conn, task, task.conversation_token, body)
+
+
 try:
     import authlib  # noqa: F401
     import fastapi  # noqa: F401
@@ -65,7 +77,7 @@ class TestStoreRoomTurn:
     def test_stores_subtask_assistant_turn(self, conn):
 
         db.register_room(conn, "kvcnr723", "u", origin="talk")
-        _store_room_turn(conn, _task("kvcnr723", source_type="subtask"),
+        _store(conn, _task("kvcnr723", source_type="subtask"),
                          "Le Shrub: risk-off, trimming duration")
         msgs = db.get_messages(conn, "kvcnr723")
         assert [(m.role, m.body, m.origin_surface) for m in msgs] == [
@@ -76,31 +88,31 @@ class TestStoreRoomTurn:
         # A briefing / heartbeat / email post records its own provenance, not a
         # hardcoded surface — visibility is not gated on it under the new filter.
         db.register_room(conn, "r", "u", origin="talk")
-        _store_room_turn(conn, _task("r", source_type="briefing"), "morning brief")
-        _store_room_turn(conn, _task("r", source_type="email", task_id=11), "reply body")
+        _store(conn, _task("r", source_type="briefing"), "morning brief")
+        _store(conn, _task("r", source_type="email", task_id=11), "reply body")
         msgs = db.get_messages(conn, "r")
         assert [(m.origin_surface, m.body) for m in msgs] == [
             ("briefing", "morning brief"), ("email", "reply body"),
         ]
 
     def test_noop_when_room_not_registered(self, conn):
-        _store_room_turn(conn, _task("ghosttoken"), "alert")
+        _store(conn, _task("ghosttoken"), "alert")
         assert db.get_messages(conn, "ghosttoken") == []
 
     def test_noop_when_no_conversation_token(self, conn):
-        _store_room_turn(conn, _task(None), "x")  # nothing raised, nothing stored
+        _store(conn, _task(None), "x")  # nothing raised, nothing stored
 
     def test_idempotent_across_retries(self, conn):
         db.register_room(conn, "r", "u", origin="talk")
         task = _task("r", task_id=42)
-        _store_room_turn(conn, task, "block")
-        _store_room_turn(conn, task, "block")  # retry re-completes
+        _store(conn, task, "block")
+        _store(conn, task, "block")  # retry re-completes
         assert len(db.get_messages(conn, "r")) == 1
 
     def test_scheduled_parity(self, conn):
         # ISSUE-133 non-regression via the general helper.
         db.register_room(conn, "r", "u", origin="talk")
-        _store_room_turn(conn, _task("r", source_type="scheduled"), "you are now at home")
+        _store(conn, _task("r", source_type="scheduled"), "you are now at home")
         msgs = db.get_messages(conn, "r")
         assert [(m.role, m.body, m.origin_surface) for m in msgs] == [
             ("assistant", "you are now at home", "scheduled"),
@@ -109,9 +121,9 @@ class TestStoreRoomTurn:
     def test_helper_returns_new_id_then_none_on_dup(self, conn):
         db.register_room(conn, "r", "u", origin="talk")
         task = _task("r", task_id=7)
-        first = _store_room_turn(conn, task, "b")
+        first = _store(conn, task, "b")
         assert isinstance(first, int)
-        assert _store_room_turn(conn, task, "b") is None
+        assert _store(conn, task, "b") is None
 
     def test_old_helpers_are_gone(self):
         import istota.scheduler as sched
@@ -286,7 +298,7 @@ class TestLLMContextIsolation:
         t1 = _add_task_row(conn, "r", "q1", "a1", source_type="talk")
         db.backfill_room_messages_from_tasks(conn, "r")  # mirrors the talk turn
         # A live subtask post, assistant-only (no user row) via the producer.
-        _store_room_turn(conn, _task("r", source_type="subtask", task_id=999),
+        _store(conn, _task("r", source_type="subtask", task_id=999),
                          "cron block")
         hist = db.get_conversation_history(conn, "r", limit=10)
         assert [(m.id, m.prompt, m.result) for m in hist] == [(t1, "q1", "a1")]
@@ -296,7 +308,7 @@ class TestLLMContextIsolation:
         _add_task_row(conn, "r", "q1", "a1", source_type="talk")
         db.backfill_room_messages_from_tasks(conn, "r")
         assert db._messages_caught_up(conn, "r") is True
-        _store_room_turn(conn, _task("r", source_type="subtask", task_id=999), "block")
+        _store(conn, _task("r", source_type="subtask", task_id=999), "block")
         assert db._messages_caught_up(conn, "r") is True
 
     def test_build_db_context_excludes_subtask_and_heartbeat(self, db_path):
@@ -355,7 +367,7 @@ class TestWebReaderRendersNonconversationalPost:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "kvcnr723", "u", origin="talk")
             db.add_room_binding(conn, "kvcnr723", "talk", "kvcnr723")
-            _store_room_turn(
+            _store(
                 conn, _task("kvcnr723", source_type="subtask"), "the letter block",
             )
         out = web_app._chat_room_messages("u", "kvcnr723", 50)
@@ -374,7 +386,7 @@ class TestReadSyncStamp:
 
     def test_stamped_subtask_row_advances_talk_read_cap(self, conn):
         db.register_room(conn, "kvcnr723", "u", origin="talk")
-        mid = _store_room_turn(
+        mid = _store(
             conn, _task("kvcnr723", source_type="subtask", task_id=55),
             "the letter block",
         )
@@ -392,7 +404,7 @@ class TestCrossRoomViewExpansion:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "r", "u", origin="talk")
             db.add_room_member(conn, "r", "u")
-            mid = _store_room_turn(
+            mid = _store(
                 conn, _task("r", source_type="subtask"), "cross-room block",
             )
             rows = db.list_messages_across_rooms(conn, "u", view="all", limit=50)

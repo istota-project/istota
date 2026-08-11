@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from .. import db
 from ._types import IncomingMessage
+from .routing import transcript_room
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -203,27 +204,44 @@ def record_inbound(
     room_token = db.resolve_room_token(conn, surface, surface_ref) or surface_ref
     room_surface = surface in ROOM_SURFACES and bool(room_token)
 
-    # A non-room surface whose token already *is* a room (ISSUE-136): an email
-    # threaded back into the web/Talk room it came from. Its turn belongs in that
-    # room's transcript — the assistant half has always been stored there
-    # (`scheduler._store_room_turn`, gated on room existence), so without this
-    # the room showed a bot answer with no question above it.
+    # A non-room surface whose exchange belongs in a room (ISSUE-136): an email
+    # threaded back into the web/Talk room it came from, or — since ISSUE-247 —
+    # a first-contact email whose routing sends it to a room the user made for
+    # that mail. Its turn belongs in that room's transcript alongside the answer
+    # (`scheduler._store_room_turn`), so without this the room showed a bot
+    # answer with no question above it.
     #
-    # Existence-only, never creation: a fresh email thread carries a synthetic
-    # token that is not a room and stays task-only, so mail the bot merely
-    # receives can't mint rooms in anyone's sidebar. That also keeps this off
-    # every other room side effect below — no registration, no binding, no
-    # rename, no membership, no echo ledger, no room model default.
-    # `suppress_transcript_mirror` withholds a turn still facing an
-    # untrusted-sender gate: the row would otherwise be committed in this same
-    # transaction, i.e. published to the room *before* the user is asked, and
-    # `db.cancel_task` on a decline only touches `tasks` — so declining would
-    # leave the content there permanently.
+    # Existence, never creation: the resolver only ever returns a *registered*
+    # room, so mail the bot merely receives can't mint rooms in anyone's
+    # sidebar. That also keeps this off every other room side effect below — no
+    # registration, no binding, no rename, no membership, no echo ledger, no
+    # room model default. `suppress_transcript_mirror` withholds a turn still
+    # facing an untrusted-sender gate: the row would otherwise be committed in
+    # this same transaction, i.e. published to the room *before* the user is
+    # asked, and `db.cancel_task` on a decline only touches `tasks` — so
+    # declining would leave the content there permanently.
+    # Which room the turn is *written* to. For a room surface it is the room
+    # itself. For a non-room surface it is whatever the routing resolved, which
+    # is the token only when the token already is a room — a first-contact email
+    # carries a thread hash and its exchange belongs in the room the user's
+    # routing sends that mail to (ISSUE-247). The task keeps `room_token` as its
+    # `conversation_token` either way: a thread identifier stays a thread
+    # identifier, and that is what `References` matching needs it to be.
+    if room_surface:
+        transcript_token = room_token
+    else:
+        transcript_token = transcript_room(
+            conn, config,
+            user_id=user_id,
+            source_type=source_type,
+            conversation_token=room_token,
+            output_target=output_target,
+            talk_delivery_token=delivery_token,
+        )
     mirror_only = (
         not room_surface
-        and bool(room_token)
+        and bool(transcript_token)
         and not suppress_transcript_mirror
-        and db.get_room(conn, room_token) is not None
     )
 
     if room_surface:
@@ -361,7 +379,7 @@ def record_inbound(
         already = conn.execute(
             "SELECT 1 FROM messages WHERE room_token = ? AND task_id = ? "
             "AND role = 'user' LIMIT 1",
-            (room_token, task_id),
+            (transcript_token, task_id),
         ).fetchone()
         if not already:
             author_user_id, author_label = resolve_author(
@@ -372,7 +390,7 @@ def record_inbound(
             # both the echo ledger and the Talk→web read-sync cursor cap
             # (`room_max_talk_synced_message_id`).
             db.add_message(
-                conn, room_token, role="user", body=text,
+                conn, transcript_token, role="user", body=text,
                 origin_surface=surface, task_id=task_id,
                 author_user_id=author_user_id,
                 author_label=author_label,

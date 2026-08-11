@@ -143,7 +143,15 @@ One state needs a human rather than a button. If the process dies between claimi
 
 Recipients and threading are not editable, only the body. An editable recipient list is a gate you can be talked through.
 
-Two things the gate does not cover. A threaded reply the task defers through `email output` is sent on completion, because its recipient is always a correspondent who already cleared the inbound gate — a recipient check there has nothing to add over tightening the inbound side, where thread-matched mail is still ungated. And under `all`, that same deferred reply to a *trusted* correspondent still goes out, which is a small deviation from what `all` promises.
+The check runs twice, in two different places, and both are deliberate. The `send` and `reply` verbs check before they do anything, so the refusal reaches the model in-turn, worded so it can tell you the message is waiting instead of retrying with different arguments. The delivery leg checks again immediately before the message leaves — and that second one is what makes the guarantee true rather than conventional, because it is the only point every path passes through. A reply the task defers through `email output`, a hand-written deferred file, a scheduled job's mail: all of them arrive there.
+
+That second check is what an earlier version of this gate was missing. It covered the two verbs and not `email output`, which is the one the model actually reaches for when replying to the message that created the task — so the first adversarial exchange after the gate shipped held nothing, and two messages reached an address that had been explicitly declined.
+
+A reply held at the delivery leg raises a notification the moment it is held. That is not decoration: the assistant finished its turn believing the reply went out, and has usually already told you so, and a first-contact thread has no room for the draft card to appear in — so without the notice the hold would be invisible until the 24-hour reminder. `!drafts` releases or discards it. Approving sends the reply threaded onto the original message, from the recipients and headers snapshotted at hold time.
+
+One fidelity note. A held message stores a single body, so a briefing held on its way into an email thread is released as plain text, losing the HTML alternative with its article links. What you approve is what is sent, which is the property worth keeping; the links are the cost.
+
+One thing worth knowing about what an inbound approval means. Answering `yes` to an inbound confirmation prompt approves *reading* that one message. It writes no trust row, so it does not authorize mailing that sender back — the reply is held separately under whatever policy applies. Answering `yes trust` does authorize both, because it adds the address to your trusted list.
 
 ## Emissary threads
 
