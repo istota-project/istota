@@ -54,6 +54,7 @@ def _warn_once(key: str, message: str) -> None:
 
 from . import db
 from .brain import make_brain
+from .build_info import build_description
 from .consumers import (
     LogChannelSubscriber,
     PushNotificationSubscriber,
@@ -5114,6 +5115,10 @@ def run_daemon(
         signal.signal(signal.SIGINT, _signal_handler)
 
     logger.info("STARTUP Scheduler daemon starting (pid: %d)", os.getpid())
+    # The revision this process imported, not the one the checkout holds now.
+    # Every deploy path moves the checkout before it restarts anything, so
+    # these disagree for as long as the restart lags — see `build_info`.
+    logger.info("STARTUP Running %s", build_description())
     logger.info("STARTUP Task poll interval: %ds", config.scheduler.poll_interval)
     logger.info("STARTUP Max fg/bg workers: %d/%d", config.scheduler.max_foreground_workers, config.scheduler.max_background_workers)
     logger.info("STARTUP Worker idle timeout: %ds", config.scheduler.worker_idle_timeout)

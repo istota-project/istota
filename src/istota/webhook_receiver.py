@@ -17,6 +17,7 @@ from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import location
+from .build_info import build_description
 from .config import load_config
 from .location.models import LocationContext
 
@@ -179,6 +180,9 @@ def _reload_config_on_signal() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # The revision this process imported, not the one the checkout holds now.
+    # See `build_info`.
+    logger.info("STARTUP Running %s", build_description())
     reload_config()
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal())
     yield

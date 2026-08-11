@@ -51,6 +51,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as _db
 from . import user_profiles
+from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
 from .location_logic import (
@@ -209,6 +210,10 @@ def _reload_config_on_signal(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # The revision this process imported, not the one the checkout holds now.
+    # See `build_info`: the web service is restarted last by the Ansible deploy,
+    # so it is the one that stays stale longest.
+    logger.info("STARTUP Running %s", build_description())
     _reload_config()
     _publish_config(app)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
