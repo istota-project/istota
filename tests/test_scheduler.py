@@ -6402,6 +6402,100 @@ class TestNotifyConfirmedEmailResult:
         # destination applies (resolves to the alerts/DM Talk channel by default).
         assert call_args[1]["purpose"] == "notification"
 
+    def test_the_notice_runs_after_the_email_leg_not_before(self, db_path, tmp_path):
+        """Ordering, through `process_one_task` rather than by inspection.
+
+        The notice used to be the last line of `_drain_deferred_ops`, which runs
+        long before the `post_email` block — so it read the drafts table before
+        the outbound gate could write to it, and the "waiting" wording was
+        unreachable on the main path (ISSUE-246). A unit test of the wording
+        cannot catch that; only the order of the two calls can.
+        """
+        from istota.scheduler import process_one_task
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email from stranger", user_id="alice",
+                source_type="email", conversation_token="thread-hash",
+                output_target="email",
+            )
+            db.set_task_confirmation(conn, task_id, "Email from unknown sender")
+            db.confirm_task(conn, task_id)
+            db.mark_email_processed(
+                conn, email_id="e10", sender_email="stranger@example.com",
+                subject="Hello", thread_id="t10", message_id="<m10@x.com>",
+                references=None, user_id="alice", task_id=task_id,
+                routing_method="plus_address",
+            )
+
+        calls: list[str] = []
+        with (
+            patch(
+                "istota.scheduler.execute_task",
+                return_value=(True, "I replied.", None, None),
+            ),
+            patch("istota.scheduler.run_coro", return_value=True),
+            patch(
+                "istota.scheduler.post_result_to_email",
+                new_callable=AsyncMock, return_value=True,
+            ) as mock_email,
+            patch(
+                "istota.scheduler._notify_confirmed_email_result",
+            ) as mock_notify,
+        ):
+            mock_email.side_effect = lambda *a, **k: calls.append("deliver") or True
+            mock_notify.side_effect = lambda *a, **k: calls.append("notify")
+            process_one_task(config)
+
+        assert calls == ["deliver", "notify"], (
+            "the notice must read the drafts table after the gate has run"
+        )
+
+    def test_held_reply_is_announced_as_waiting_not_sent(self, db_path, tmp_path):
+        """A reply the outbound gate held must not be reported as sent.
+
+        ISSUE-246: the gate now fires on the delivery leg, so this notice can
+        fire for a message that is still sitting in the approval queue. Telling
+        the user it went out is the one wording that loses the message.
+        """
+        from istota.scheduler import _notify_confirmed_email_result
+        from istota import outbound_drafts
+        config = self._make_config(db_path, tmp_path)
+        config.users["alice"] = UserConfig(alerts_channel="alerts-room")
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Email from stranger@example.com",
+                user_id="alice", source_type="email",
+            )
+            db.set_task_confirmation(conn, task_id, "Email from unknown sender")
+            db.confirm_task(conn, task_id)
+            db.mark_email_processed(
+                conn, email_id="e9", sender_email="stranger@example.com",
+                subject="Hello", thread_id="t9", message_id="<m9@x.com>",
+                references=None, user_id="alice", task_id=task_id,
+                routing_method="plus_address",
+            )
+            outbound_drafts.hold(
+                conn, user_id="alice", task_id=task_id, room_token=None,
+                to_addrs=["stranger@example.com"], cc_addrs=[], bcc_addrs=[],
+                subject="Re: Hello", body="The answer.", html=False,
+                in_reply_to="<m9@x.com>", references=None, attachments=[],
+                origin_target=None, hold_reason="untrusted_recipient",
+            )
+            task = db.get_task(conn, task_id)
+
+        with patch("istota.notifications.send_notification") as mock_notify:
+            mock_notify.return_value = True
+            _notify_confirmed_email_result(config, task, "The answer.")
+
+        message = mock_notify.call_args[0][2]
+        assert "waiting for your approval" in message
+        assert "!drafts" in message
+        assert "reply sent" not in message.lower()
+
     def test_non_confirmed_email_skipped(self, db_path, tmp_path):
         """Email task that was NOT confirmed should not trigger notification."""
         from istota.scheduler import _notify_confirmed_email_result

@@ -53,6 +53,7 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from . import db
+from . import outbound_drafts
 from .brain import make_brain
 from .consumers import (
     LogChannelSubscriber,
@@ -1128,12 +1129,27 @@ def _notify_confirmed_email_result(
         email_record = db.get_email_for_task(conn, task.id)
         if email_record:
             sender = email_record.sender_email
+        # The reply may have been held by the outbound approval gate rather than
+        # sent (ISSUE-246). Saying "sent" for a message still waiting on the
+        # user's approval is worse than saying nothing. Asked about this
+        # recipient specifically, so a draft the task held for someone else does
+        # not misreport a reply that did go out.
+        held = outbound_drafts.pending_held_for_task(
+            conn, task.id,
+            to_addr=email_record.sender_email if email_record else None,
+        )
 
     # Truncate long results for the notification
     max_chars = 2000
     body = result if len(result) <= max_chars else result[:max_chars] + "\n[...]"
 
-    message = f"Email reply sent to {sender} (task #{task.id}):\n\n{body}"
+    if held:
+        message = (
+            f"Email reply to {sender} is waiting for your approval "
+            f"(task #{task.id}). Review it with `!drafts`:\n\n{body}"
+        )
+    else:
+        message = f"Email reply sent to {sender} (task #{task.id}):\n\n{body}"
 
     from .notifications import send_notification
     return send_notification(config, task.user_id, message, purpose="notification")
@@ -1584,6 +1600,13 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     subtasks / tracking / sent-emails / email-output) and warn on unconsumed
     files. The single source of truth for the post-success drain — shared by
     ``process_one_task`` and ``run_task_inline`` so the two can't drift.
+
+    **`_notify_confirmed_email_result` is deliberately not called here.** It has
+    to run after the email has actually been delivered, and on the main path
+    delivery happens in ``process_one_task``'s ``post_email`` block, long after
+    this drain. Called from here it read the drafts table before the outbound
+    gate had written to it, and so announced a held reply as sent (ISSUE-246).
+    Both callers invoke it themselves, after their own delivery.
     """
     from .executor import get_user_temp_dir
     user_temp_dir = get_user_temp_dir(config, task.user_id)
@@ -1597,7 +1620,6 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     _process_deferred_user_alerts(config, task, user_temp_dir)
     _deliver_deferred_email_output(config, task, user_temp_dir)
     _warn_unconsumed_deferred_files(task, user_temp_dir)
-    _notify_confirmed_email_result(config, task, result)
 
 
 def run_task_inline(
@@ -1677,6 +1699,10 @@ def run_task_inline(
 
     if success:
         _drain_deferred_ops(config, task, result)
+        # Inline tasks push no email of their own — the only send is the
+        # gap-case delivery inside the drain — so the drafts table is already
+        # settled by the time this reads it.
+        _notify_confirmed_email_result(config, task, result)
 
     return success, result
 
@@ -2588,6 +2614,11 @@ def process_one_task(
             with db.get_db(config.db_path) as conn:
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
+    # After the email leg, so a reply the outbound gate held is announced as
+    # waiting rather than sent (ISSUE-246). Runs whether or not the plan had an
+    # email destination: the gap-case delivery inside the drain also sends.
+    if success and not is_confirmation_request:
+        _notify_confirmed_email_result(config, task, result)
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"

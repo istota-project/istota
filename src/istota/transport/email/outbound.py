@@ -173,6 +173,196 @@ def _load_deferred_email_output(
     }
 
 
+def _consume_deferred_email_output(config: "Config", task: db.Task) -> None:
+    """Drop the deferred output file once its message is accounted for.
+
+    Called after the send has been attempted, or after a hold has stored the
+    body in ``outbound_drafts`` — never on the path where the approval check
+    itself failed, because there the file is the only surviving copy.
+    """
+    from ...executor import get_user_temp_dir
+    path = get_user_temp_dir(config, task.user_id) / f"task_{task.id}_email_output.json"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        # Losing the delete costs a stale file and a warning from
+        # `_warn_unconsumed_deferred_files`, never a resend: nothing re-reads it
+        # for a task that has already been delivered.
+        logger.warning(
+            "Could not remove deferred email output for task %d: %s", task.id, e,
+        )
+
+
+def _hold_if_unapproved(
+    config: "Config",
+    task: db.Task,
+    *,
+    to_addr: str,
+    subject: str,
+    body: str,
+    html: bool,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> tuple[bool, int | None]:
+    """``(may_send, draft_id)`` for one outbound message on the delivery leg.
+
+    ``(True, None)`` sends. ``(False, id)`` was held as a draft. ``(False,
+    None)`` means the check could not run and the send is refused.
+
+    **Why the check lives here as well as in the CLI verbs.** ``_outbound_gate``
+    in the email skill covers ``send`` / ``reply``, which are the two verbs the
+    model rarely reaches for on this path. It replies with ``email output``,
+    which writes a deferred file and returns; the mail leaves later, from this
+    function, through a branch that consulted no policy at all (ISSUE-246). The
+    spec excluded ``output`` on the reasoning that its recipient had already
+    cleared the *inbound* gate, and both halves of that fail: a plain ``yes`` at
+    an inbound prompt authorizes one message and writes no trust row, and a
+    ``thread_match`` reply never meets the inbound gate in the first place.
+
+    So this is the backstop that makes the guarantee true rather than
+    conventional. It covers ``email output``, a hand-written deferred file, the
+    scheduler's gap-case delivery, and any future path that reaches SMTP through
+    the transport. The CLI checks stay: they refuse in-turn, in words the model
+    can act on, which this one cannot do — by the time delivery runs the task has
+    already reported success.
+
+    A hold must not fail the task for that same reason, so the caller reports
+    ``True``. A check that *cannot run* is different: nothing was sent and
+    nothing was held, so there is no draft to recover from, and the caller
+    reports a genuine delivery failure. Refusing rather than sending is the
+    point — a gate that fails open on a busy database is not a gate.
+    """
+    from ...outbound_policy import effective_policy, recipients_require_hold
+
+    # Resolved before any connection is opened, so `off` costs no database —
+    # matching the skill-side gate, where the same ordering keeps an unreachable
+    # DB from failing sends on an instance that deliberately switched this off.
+    try:
+        if effective_policy(config, task.user_id) == "off":
+            return True, None
+    except Exception as e:  # noqa: BLE001 — a policy we can't resolve is not "off"
+        logger.error(
+            "Outbound gate: could not resolve the approval policy for task %d "
+            "(%s); refusing to send", task.id, e,
+        )
+        return False, None
+
+    if config.users.get(task.user_id) is None:
+        # Every authorization source hangs off the user's config, so an
+        # unhydrated user holds all their mail. Said once here because the
+        # symptom — an approval queue filling up — reads as a policy decision
+        # rather than as the config problem it is.
+        logger.warning(
+            "Outbound gate: user %s has no config entry, so no address can be "
+            "trusted and every message will be held", task.user_id,
+        )
+
+    from ... import outbound_drafts as drafts
+    from ...transport import routing
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            reason = recipients_require_hold(
+                config, conn, task.user_id, [to_addr],
+            )
+            if reason is None:
+                return True, None
+
+            origin = routing.origin_descriptor(task, conn)
+            room = (
+                origin[len("room:"):]
+                if origin and origin.startswith("room:")
+                else None
+            )
+            try:
+                draft_id = drafts.hold(
+                    conn,
+                    user_id=task.user_id,
+                    task_id=task.id,
+                    room_token=room,
+                    to_addrs=[to_addr],
+                    cc_addrs=[],
+                    bcc_addrs=[],
+                    subject=subject or "",
+                    body=body or "",
+                    html=html,
+                    # Snapshotted rather than re-derived: `release` sends from
+                    # the row, and the inbound message it threads onto may be
+                    # gone by the time the user answers.
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    attachments=[],
+                    origin_target=origin,
+                    hold_reason=reason,
+                )
+            except drafts.DraftError as e:
+                # The decision was made and only the recording failed — an
+                # unparseable recipient, most likely, since this leg's address
+                # comes from an inbound header. Logged apart from the
+                # could-not-decide case because it is deterministic: a replay
+                # fails identically, so this is a message to go and look at
+                # rather than a transient to retry.
+                logger.error(
+                    "Outbound gate: task %d's reply to %r must be held but "
+                    "could not be recorded as a draft (%s); refusing to send. "
+                    "The composed body is left in the task's deferred dir.",
+                    task.id, to_addr, e,
+                )
+                return False, None
+    except Exception as e:  # noqa: BLE001 — see the docstring: never fall through
+        logger.error(
+            "Outbound gate: the approval check could not run for task %d (%s); "
+            "refusing to send to %s", task.id, e, to_addr,
+        )
+        return False, None
+
+    logger.info(
+        "Outbound gate: held task %d's reply to %s as draft %d (%s)",
+        task.id, to_addr, draft_id, reason,
+    )
+    _announce_hold(config, task, to_addr=to_addr, subject=subject, draft_id=draft_id)
+    return False, draft_id
+
+
+def _announce_hold(
+    config: "Config", task: db.Task, *,
+    to_addr: str, subject: str, draft_id: int,
+) -> None:
+    """Tell the user their reply is waiting, at the moment it is held.
+
+    A hold in the CLI verbs returns a `held` envelope the model reads and
+    reports in its own answer. This one has no such channel: delivery runs after
+    the task finished, so the model has already told the user it replied, and
+    that answer has already been posted to the room. Without an explicit notice
+    the only remaining surfaces are `!drafts`, an inline card in a room the
+    thread may not have, and the 24-hour stale-draft nag — so a reply held on
+    the path ISSUE-246 was filed about would sit silent for a day behind an
+    answer claiming it had been sent.
+
+    Sent outside the gate's own transaction: a notification routed to the web
+    surface opens a second connection to this database and would otherwise
+    block on the write lock we were still holding. Best-effort — the draft is
+    stored either way, and failing the hold because the notice failed would be
+    the worse outcome.
+    """
+    from ...notifications import send_notification
+    line = f"Email reply to {to_addr} is waiting for your approval"
+    if subject:
+        line += f" (subject: {subject})"
+    try:
+        send_notification(
+            config, task.user_id,
+            f"{line}. Nothing was sent. Review it with `!drafts`, then "
+            f"`!drafts send {draft_id}` or `!drafts discard {draft_id}`.",
+            purpose="alert",
+        )
+    except Exception as e:  # noqa: BLE001 — the draft is already safely stored
+        logger.warning(
+            "Held draft %d for task %d but could not notify %s: %s",
+            draft_id, task.id, task.user_id, e,
+        )
+
+
 def email_transcript_body(config: "Config", task: db.Task, message: str) -> str:
     """What an email task's reply should look like in a room transcript.
 
@@ -300,7 +490,18 @@ async def deliver_email_result(
     # If neither source provides structured output, fall back to legacy briefing
     # path (raw model output stripped of markdown) for briefing tasks, or skip
     # sending for other tasks (Claude likely sent directly via `email send`).
-    parsed = _load_deferred_email_output(config, task) or _parse_email_output(message)
+    #
+    # **Peeked, not consumed.** The file is the only copy of the composed body —
+    # `task.result` holds the model's prose, not this envelope — so deleting it
+    # before the outcome is known turns a transient fault into permanent message
+    # loss. It is dropped by `_consume_deferred_email_output` once the message
+    # has either gone out or been safely recorded as a draft, and deliberately
+    # left on disk when the approval check could not run, which is the one
+    # outcome with nothing else to recover from.
+    parsed = (
+        _load_deferred_email_output(config, task, consume=False)
+        or _parse_email_output(message)
+    )
 
     if parsed is None and task.source_type == "briefing":
         # Legacy path: model output is Talk-formatted text, send directly
@@ -311,11 +512,22 @@ async def deliver_email_result(
         plain, html_body, content_type = _briefing_email_bodies(
             config, task, message, "plain",
         )
+        legacy_subject = subject or _legacy_briefing_subject(task)
+        may_send, draft_id = _hold_if_unapproved(
+            config, task,
+            to_addr=user_config.email_addresses[0],
+            subject=legacy_subject,
+            body=plain,
+            html=content_type == "html",
+        )
+        if not may_send:
+            # Held is not a failure; a gate that could not run is.
+            return draft_id is not None
         try:
             email_config = get_email_config(config)
             send_email(
                 to=user_config.email_addresses[0],
-                subject=subject or _legacy_briefing_subject(task),
+                subject=legacy_subject,
                 body=plain,
                 config=email_config,
                 from_addr=config.email.bot_email,
@@ -346,20 +558,55 @@ async def deliver_email_result(
 
     if processed_email:
         # Reply to existing email thread
+
+        # Build References: parent's references + parent's message_id (RFC 5322)
+        if processed_email.references and processed_email.message_id:
+            references = f"{processed_email.references} {processed_email.message_id}"
+        elif processed_email.message_id:
+            references = processed_email.message_id
+        else:
+            references = None
+
+        # Use parsed subject if provided, otherwise keep original
+        subject = parsed["subject"] if parsed["subject"] else (processed_email.subject or "")
+
+        # The leg ISSUE-246 was filed about: `email output` lands here, and the
+        # recipient is whoever mailed us — not necessarily anyone the user
+        # authorized. Checked before the send, with the threading headers
+        # already resolved so a hold can snapshot them.
+        #
+        # Two fidelity notes on what a hold stores. The `Re:` prefix is applied
+        # here because `reply_to_email` adds it on the direct path while
+        # `outbound_drafts.release` sends through `send_email`, which does not —
+        # so without this the card and the released mail would both differ from
+        # what an ungated reply looks like. And a multipart briefing's HTML
+        # alternative is *not* carried: the drafts row has a single body and an
+        # `html` flag, so a held briefing releases as the plain part. That is
+        # the honest degradation — what the user approves is what is sent — but
+        # it does lose the article links, and closing it needs a schema change.
+        held_subject = subject
+        if held_subject and not held_subject.lower().startswith("re:"):
+            held_subject = f"Re: {held_subject}"
+        may_send, draft_id = _hold_if_unapproved(
+            config, task,
+            to_addr=processed_email.sender_email,
+            subject=held_subject,
+            body=body_text,
+            html=content_type == "html",
+            in_reply_to=processed_email.message_id,
+            references=references,
+        )
+        if not may_send:
+            if draft_id is None:
+                # The check could not run. Leave the file: it is the only copy
+                # of the body, and no draft was written to hold it.
+                return False
+            _consume_deferred_email_output(config, task)
+            return True
+        _consume_deferred_email_output(config, task)
+
         try:
             email_config = get_email_config(config)
-
-            # Build References: parent's references + parent's message_id (RFC 5322)
-            if processed_email.references and processed_email.message_id:
-                references = f"{processed_email.references} {processed_email.message_id}"
-            elif processed_email.message_id:
-                references = processed_email.message_id
-            else:
-                references = None
-
-            # Use parsed subject if provided, otherwise keep original
-            subject = parsed["subject"] if parsed["subject"] else (processed_email.subject or "")
-
             sent_message_id = reply_to_email(
                 to_addr=processed_email.sender_email,
                 subject=subject,
@@ -391,6 +638,23 @@ async def deliver_email_result(
 
         # Use parsed subject if provided, otherwise fall back to prompt excerpt
         subject = parsed["subject"] if parsed["subject"] else f"[{config.bot_name}] {task.prompt[:80]}"
+
+        # Addressed to the user's own address, so both live policies clear it —
+        # checked anyway, because "this branch only ever mails the user" is an
+        # invariant of today's callers rather than of this function.
+        may_send, draft_id = _hold_if_unapproved(
+            config, task,
+            to_addr=user_config.email_addresses[0],
+            subject=subject,
+            body=body_text,
+            html=content_type == "html",
+        )
+        if not may_send:
+            if draft_id is None:
+                return False
+            _consume_deferred_email_output(config, task)
+            return True
+        _consume_deferred_email_output(config, task)
 
         try:
             email_config = get_email_config(config)
