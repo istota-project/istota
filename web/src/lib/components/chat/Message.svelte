@@ -461,11 +461,14 @@
         {@render starButton()}
       </div>
     {/if}
-    <!-- A search-results row renders cards, not markdown, so there is no
-         source worth copying and no durable body to remove. -->
-    {#if hasRowActions && !message.searchResults}
-      {@render turnActions()}
-    {/if}
+    <!-- No turn action row here, deliberately. A system row is not a turn: it
+         is an alert, a delivered notification or the output of a `!command`,
+         with no author and nothing on the other side of it. Copy and reply
+         both read it as somebody's words — a citation of one quotes the bot's
+         own notice back at it — and delete offers to remove a record of
+         something the system did rather than a message anyone wrote. The star
+         above is the one mark that still means something on a notice, and it
+         stays. -->
   </div>
 {:else}
   <div
@@ -832,8 +835,7 @@
   .cmd-row.touch .star-btn,
   .msg.touch .meta-footer,
   .msg.touch .hover-time,
-  .msg.touch .turn-actions,
-  .cmd-row.touch .turn-actions {
+  .msg.touch .turn-actions {
     transition: none;
   }
 
@@ -863,14 +865,12 @@
 	   has no hover at all, `.touch` knows a finger was used on a device that also
 	   reports one. `.revealed` is the touch surrogate the row already computes. */
   @media (hover: hover) {
-    .msg:not(.touch):hover .turn-actions,
-    .cmd-row:not(.touch):hover .turn-actions {
+    .msg:not(.touch):hover .turn-actions {
       opacity: 1;
       pointer-events: auto;
     }
   }
   .msg.active .turn-actions.revealed,
-  .cmd-row.active .turn-actions.revealed,
   .turn-actions:focus-within {
     opacity: 1;
     pointer-events: auto;

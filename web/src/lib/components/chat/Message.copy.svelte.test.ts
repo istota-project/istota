@@ -138,17 +138,15 @@ describe('per-turn copy', () => {
     expect(written).toEqual(['what is 6 times 7?']);
   });
 
-  it('copies a system row body', async () => {
-    const written = stubClipboard();
+  it('offers nothing on a system row', () => {
+    // A notice has a body worth reading and no author; see the system-row
+    // suppression suite below for why the whole row is withheld there.
     const { container } = render(Message, {
       ...base,
       message: { cid: 3, role: 'system', text: '**Rooms**\n- one', segments: [], streaming: false },
     });
 
-    copyButtons(container)[0].click();
-    await Promise.resolve();
-
-    expect(written).toEqual(['**Rooms**\n- one']);
+    expect(copyButtons(container)).toHaveLength(0);
   });
 
   it('offers nothing to copy on an empty user turn', () => {
@@ -305,7 +303,7 @@ describe('per-message delete', () => {
     expect(deleteButtons(container)).toHaveLength(1);
   });
 
-  it('is offered on a system row too', () => {
+  it('is withheld from a system row', () => {
     const { container } = render(Message, {
       ...base,
       message: {
@@ -319,7 +317,7 @@ describe('per-message delete', () => {
       onDelete: noop,
     });
 
-    expect(deleteButtons(container)).toHaveLength(1);
+    expect(deleteButtons(container)).toHaveLength(0);
   });
 });
 
@@ -414,7 +412,9 @@ describe('star in the turn action row', () => {
     expect(rowStars(container)).toHaveLength(1);
   });
 
-  it('is offered on a system row too', () => {
+  it('is withheld from a system row, which keeps the hover-bar star', () => {
+    // The row goes; the mark does not. A notice is still worth flagging, and
+    // the hover bar's star is the one that persists at rest anyway.
     const { container } = render(Message, {
       ...base,
       message: {
@@ -428,7 +428,8 @@ describe('star in the turn action row', () => {
       onToggleStar: noop,
     });
 
-    expect(rowStars(container)).toHaveLength(1);
+    expect(rowStars(container)).toHaveLength(0);
+    expect(container.querySelectorAll('.cmd-actions .star-btn')).toHaveLength(1);
   });
 
   it('leaves the hover-bar star in place', () => {
