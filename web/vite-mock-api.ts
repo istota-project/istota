@@ -524,6 +524,142 @@ const mockDeletedMsgIds = new Set<number>();
 const mockDeletionLog: { id: number; msg_id: number; room_token: string }[] = [];
 const mockUserMsgId = (t: MockChatTask) => t.id * 10 + 1;
 const mockAsstMsgId = (t: MockChatTask) => t.id * 10 + 2;
+
+// ---- Held outbound drafts ----
+// The approval gate's cards had no mock at all, so the one surface whose whole
+// job is to be read before it is answered could not be looked at in dev — which
+// is how a banner card came to sit 134px narrower than the confirmation card
+// above it, and how it took 360px with its own Send button clipped below a
+// scrollbar, without either being noticed.
+//
+// The set covers all four shapes the card renders, because they are checked in
+// order and the later ones assume content the earlier ones lack: a `pending`
+// draft carrying a `task_id` that matches a seeded turn (so it renders *inline*
+// under that turn), a `pending` one with no task at all (the loose list above
+// the transcript — a scheduled job mailing an external address), a `sending`
+// row stuck between the claim and the finalize, an `unreadable` row whose
+// stored JSON does not parse, and a `truncated` stub standing in for a stream
+// frame that spent its byte budget.
+//
+// Bodies are fabricated and every address is in a reserved example domain. This
+// file is committed to a public repo, and a held email is exactly the shape of
+// thing whose realistic version would be somebody's actual correspondence.
+type MockDraft = Record<string, unknown> & { id: number };
+const mockDrafts = new Map<number, MockDraft>([
+  [
+    61,
+    {
+      id: 61,
+      status: 'pending',
+      room_token: 'web-carol-general',
+      // Matches the seeded multi-round turn, so this one renders under it.
+      task_id: 201,
+      subject: 'Re: the near-expiry 401s',
+      body: 'Thanks for the report — I found it.\n\nThe middleware and the handler disagreed about when a token expires, so anything inside the five-minute grace window was accepted by one and refused by the other. Both call sites now go through one helper and the README says which window applies.\n\nI have not touched the refresh path; if you are still seeing 401s after this goes out, that is where I would look next.',
+      html: false,
+      to: ['contact@example.com'],
+      cc: [],
+      bcc: [],
+      attachments: [],
+      hold_reason: 'untrusted_recipient',
+      created_at: new Date(Date.now() - 30_000).toISOString(),
+      actions_taken: [],
+    },
+  ],
+  [
+    62,
+    {
+      id: 62,
+      status: 'pending',
+      // No task and no room: a scheduled job mailing an address of its own. This
+      // is the fallback placement — the card the page's own list has to carry,
+      // and the reason that list exists at all.
+      room_token: null,
+      task_id: null,
+      subject: 'Re: Scheduling — next week',
+      body: 'Thanks for the note — the west branch works fine for me.\n\nTuesday at two or Wednesday morning are both open, so pick whichever suits. I can come to you instead if that is easier; it is a short walk either way and I have no strong preference.\n\nOne thing worth flagging before we lock it in: the upstairs room has no projector, so if you were planning to show slides we should take the other one.',
+      html: false,
+      to: ['contact@example.com'],
+      cc: ['assistant@example.com'],
+      bcc: [],
+      attachments: [],
+      hold_reason: 'untrusted_recipient',
+      created_at: new Date(Date.now() - 90_000).toISOString(),
+      actions_taken: ['Created calendar event: Coffee, Wed 14:00'],
+    },
+  ],
+  [
+    63,
+    {
+      id: 63,
+      // Claimed, then the process died before it could finalize. The card
+      // offers nothing here on purpose — nobody can know whether it went out,
+      // and one of the two actions would send it twice.
+      status: 'sending',
+      room_token: null,
+      task_id: null,
+      subject: 'Invoice 0042',
+      body: 'Attached, as discussed.',
+      html: false,
+      to: ['billing@example.com'],
+      cc: [],
+      bcc: [],
+      attachments: ['invoice-0042.pdf'],
+      hold_reason: 'all_mode',
+      created_at: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      actions_taken: [],
+    },
+  ],
+  [
+    64,
+    {
+      id: 64,
+      // A stored column that does not parse. Named rather than dropped: held
+      // mail that silently disappears is mail the user never hears about.
+      status: 'pending',
+      room_token: null,
+      task_id: null,
+      unreadable: true,
+      created_at: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(),
+    },
+  ],
+  [
+    65,
+    {
+      id: 65,
+      // The stub a byte-budgeted stream frame carries. The card asks for the
+      // full row on arrival, which `GET /chat/drafts` answers — so in dev this
+      // one flips to a full card a moment after it appears, exactly as it does
+      // against the real backend.
+      status: 'pending',
+      room_token: null,
+      task_id: null,
+      truncated: true,
+      created_at: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+    },
+  ],
+]);
+// The stub's full row, handed over when the card asks for it. Kept apart from
+// the map so the first read really is a stub and the second really is not —
+// collapsing them would make the stub path untestable by eye, which is the one
+// thing this entry is here for.
+let mockStubFilled = false;
+const mockDraft65Full: MockDraft = {
+  id: 65,
+  status: 'pending',
+  room_token: null,
+  task_id: null,
+  subject: 'Re: the archive migration',
+  body: 'Yes — Friday works. I will have the export ready by Thursday evening so there is a day of slack.',
+  html: false,
+  to: ['contact@example.com'],
+  cc: [],
+  bcc: [],
+  attachments: [],
+  hold_reason: 'untrusted_recipient',
+  created_at: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
+  actions_taken: [],
+};
 // Everything newer than this reads as unread (assistant rows only); read-all
 // advances it to now. Seeded ~16h back so the last few turns light up.
 let mockReadCursorMs = Date.now() - 16 * 60 * 60 * 1000;
@@ -746,6 +882,38 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     return { ok: true, updated: moved };
   }
   // Cross-room aggregate views (All / Unread / Starred).
+  // Held outbound mail. The card reads this on mount and again whenever a stub
+  // arrives, so the truncated entry resolves itself on the second read.
+  if (path === '/istota/api/chat/drafts' && method === 'GET') {
+    if (mockStubFilled) mockDrafts.set(65, mockDraft65Full);
+    mockStubFilled = true;
+    return { drafts: [...mockDrafts.values()] };
+  }
+  {
+    // Approve / discard / edit. Answering removes the row, which is what lets
+    // the optimistic removal and the re-read that follows it be watched in dev.
+    // A `sending` row refuses either action with the 409 + `state` the client
+    // reads against the action it attempted — the same status means opposite
+    // things to Send and to Discard, and that branch is only reachable here.
+    const m = path.match(/^\/istota\/api\/chat\/drafts\/(\d+)(\/approve|\/discard)?$/);
+    if (m && (method === 'POST' || method === 'PATCH')) {
+      const id = Number(m[1]);
+      const row = mockDrafts.get(id);
+      if (!row) return { __status: 404, error: 'no such draft', state: 'gone' };
+      if (row.status === 'sending') {
+        return { __status: 409, error: 'already going out', state: 'sending' };
+      }
+      if (m[2] === '/approve' && row.unreadable) {
+        return { __status: 409, error: 'cannot be read', state: 'unreadable' };
+      }
+      if (method === 'PATCH') {
+        mockDrafts.set(id, { ...row, body: String((body as any)?.body ?? row.body ?? '') });
+        return { ok: true };
+      }
+      mockDrafts.delete(id);
+      return { ok: true };
+    }
+  }
   if (path === '/istota/api/chat/messages' && method === 'GET') {
     const q = new URL(`http://x${url}`).searchParams;
     const viewName = q.get('view') || 'all';
