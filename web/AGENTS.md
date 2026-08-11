@@ -2,7 +2,7 @@
 
 Rules for building and changing the SvelteKit frontend in `web/`. Read this before adding a page, a component, or a color.
 
-Root `AGENTS.md` ("Web UI" section) carries the _rationale_ — why `HintPopover` is a Popover and not a Tooltip, why composer wrap detection measures at the single-row width, why the money table shell exists. This file carries the _rules and the inventory_. When the two disagree, the source files win and both docs are stale.
+This file is the single source for the frontend design language — the inventory, the rules, and the reasoning behind each. `.claude/rules/web-ui.md` is its backend counterpart: the route and endpoint map, the admin Logs and Configuration panes, and the settings/module-services split. It does not restate anything here. When the two disagree with the tree, the source files win and both docs are stale.
 
 ## Before you write anything
 

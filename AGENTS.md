@@ -13,7 +13,7 @@ For module-specific internals, see `.claude/rules/`:
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for)
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream
-- `web-ui.md` — web UI rationale: admin panes, iOS shell, design-language enforcement, tokens
+- `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split (the design language itself lives in `web/AGENTS.md`)
 - `briefings.md` — block/source briefings, shared blocks, titles, HTML email
 - `health.md` — health module schema, documents store, OCR/explainer, surfaces
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest
@@ -81,15 +81,9 @@ src/istota/
 ├── commands.py           # surface-agnostic !command dispatch (CommandContext + registry push/stream)
 ├── cron_loader.py        # CRON.md → DB sync
 └── logging_setup.py
-
-config/                   # config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/, skills/
-deploy/ansible/           # Role + install.sh + wizard.sh + validate_config.py
-docker/                   # Full-stack compose (nginx + nextcloud + postgres + redis + istota scheduler/web/webhooks)
-web/                      # SvelteKit (adapter-static, base /istota)
-tests/                    # pytest + pytest-asyncio
-schema.sql
-pyproject.toml
 ```
+
+Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/, skills/ — read by the daemon, never bound into the sandbox), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `schema.sql`.
 
 ## Key Concepts
 
