@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-08-10
+
 ### Added
 
 - Held email is now answerable from the web dashboard without leaving the conversation. A card appears under the turn that wrote the message, showing the recipients, the subject and the full drafted text, plus anything else that task did — a calendar event it created, say, so declining does not quietly leave one behind. Send, edit the wording, or discard. A draft from a scheduled job with no conversation of its own appears above the transcript instead, so nothing is only reachable from a room you never open.
@@ -1523,7 +1525,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.39.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.40.0...main
+[0.40.0]: https://gitlab.com/cynium/istota/-/releases/v0.40.0
 [0.39.0]: https://gitlab.com/cynium/istota/-/releases/v0.39.0
 [0.38.0]: https://gitlab.com/cynium/istota/-/releases/v0.38.0
 [0.37.0]: https://gitlab.com/cynium/istota/-/releases/v0.37.0
