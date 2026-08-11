@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from . import db
+from . import user_profiles
 from .config import load_config
 from .logging_setup import setup_logging
 from .executor import execute_task
@@ -916,6 +917,38 @@ def cmd_user_ensure(args):
             )
             sys.exit(1)
         updates["email_reply_routing"] = args.email_reply_routing
+    outbound_approval = getattr(args, "outbound_approval", None)
+    if outbound_approval is not None:
+        from .outbound_policy import VALID_POLICIES
+
+        # "" is a real value: unset, meaning "follow the operator's
+        # [email] outbound_approval_floor". It is not the same as "off", which
+        # pins the user below a floor the operator may later raise. Not an
+        # argparse `choices` list, so the error can name the empty case.
+        if outbound_approval not in ("", *VALID_POLICIES):
+            print(
+                f"Error: --outbound-approval must be one of "
+                f"{', '.join(VALID_POLICIES)}, or '' to follow the operator "
+                f"floor; got {outbound_approval!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        updates["outbound_approval"] = outbound_approval
+    external_turn_display = getattr(args, "external_turn_display", None)
+    if external_turn_display is not None:
+        # Belt and braces: the parser's `choices` already rejects an unknown
+        # value, so this only fires for a caller building `args` by hand — the
+        # `_FakeArgs` shim in the tests, and any future programmatic caller.
+        values = user_profiles.EXTERNAL_TURN_DISPLAY_VALUES
+        if external_turn_display not in values:
+            print(
+                f"Error: --external-turn-display must be one of "
+                f"{', '.join(values)}, "
+                f"got {external_turn_display!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        updates["external_turn_display"] = external_turn_display
     if getattr(args, "default_briefings", None) is not None:
         updates["default_briefings"] = args.default_briefings
     if getattr(args, "briefing_email_html", None) is not None:
@@ -944,6 +977,10 @@ def cmd_user_ensure(args):
         print(f"  default_destination: {profile.default_destination}")
     if profile.email_reply_routing and profile.email_reply_routing != "origin+thread":
         print(f"  email_reply_routing: {profile.email_reply_routing}")
+    if profile.outbound_approval:
+        print(f"  outbound_approval: {profile.outbound_approval}")
+    if profile.external_turn_display and profile.external_turn_display != "collapsed":
+        print(f"  external_turn_display: {profile.external_turn_display}")
     if not profile.default_briefings:
         print("  default_briefings: off")
     if not profile.briefing_email_html:
@@ -986,6 +1023,8 @@ def cmd_user_show(args):
         "routing": profile.routing,
         "default_destination": profile.default_destination,
         "email_reply_routing": profile.email_reply_routing,
+        "outbound_approval": profile.outbound_approval,
+        "external_turn_display": profile.external_turn_display,
         "default_briefings": profile.default_briefings,
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
@@ -1706,6 +1745,33 @@ def main():
             "Where a reply to an email this bot sent is delivered: 'origin+thread' "
             "(default — origin surface and the email thread), 'origin' (origin "
             "surface only), or 'thread' (email only)."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--outbound-approval",
+        metavar="POLICY",
+        help=(
+            "Outbound email approval policy for this user: 'off' (send "
+            "everything), 'untrusted' (hold unless every recipient is trusted), "
+            "or 'all' (hold unless every recipient is one of their own "
+            "addresses). Pass '' to follow the operator's "
+            "[email] outbound_approval_floor, which is the default. The floor "
+            "is a minimum — a value weaker than it has no effect."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--external-turn-display",
+        # From the shared constant, not a literal: argparse rejects the value
+        # before `cmd_user_ensure`'s own check ever runs, so a hardcoded list
+        # here is the one that decides, and a fourth copy would make adding a
+        # display mode fail with argparse's message while the handler's own
+        # error advertised the value as valid.
+        choices=list(user_profiles.EXTERNAL_TURN_DISPLAY_VALUES),
+        help=(
+            "How much of a turn that arrived from outside the room (an email "
+            "from an external contact) is shown inline in web chat: 'full', "
+            "'collapsed' (default — sender and subject, expandable), or "
+            "'hidden'. The turn itself is always shown."
         ),
     )
     user_ensure_parser.add_argument(

@@ -481,6 +481,7 @@ smtp_host = "${ISTOTA_EMAIL_SMTP_HOST:-}"
 smtp_port = ${ISTOTA_EMAIL_SMTP_PORT:-587}
 poll_folder = "${ISTOTA_EMAIL_POLL_FOLDER:-INBOX}"
 bot_email = "${ISTOTA_EMAIL_BOT_ADDRESS:-}"
+outbound_approval_floor = "${ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR:-untrusted}"
 TOML
     fi
 

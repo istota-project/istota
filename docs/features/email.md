@@ -70,10 +70,18 @@ Two escape hatches keep it usable. An address listed in the user's `trusted_emai
 
 Two limits to know. An unanswered confirmation is auto-cancelled after `scheduler.confirmation_timeout_minutes`, so leaving the flag on with no watched Talk channel drops inbound mail rather than queuing it (an undeliverable prompt is logged as a warning). And attachments are downloaded to the user's `inbox/` before the gate runs, so declining a message holds its *processing* — the attached files have already landed and are not removed.
 
+### What trusting a sender means
+
+One list, two meanings. `trusted_email_senders` decides both that this person's mail is processed without asking you, and that mail *to* this person is sent without waiting for your approval. Trusting someone so their newsletter stops interrupting you also authorizes the bot to write to them unprompted.
+
+That is a deliberate trade — the alternative is two lists that drift apart — but it has one consequence worth knowing: every entry written before the outbound gate shipped was made under the narrower inbound-only meaning, and those entries now carry the wider one. Read your list once (`!trust` with no argument prints it) if that matters to you.
+
+A catch-all pattern (`*`, `*@*`) therefore turns the `untrusted` outbound policy off entirely. It is logged when it happens, but narrow the pattern rather than relying on the log.
+
 Trusted senders are configured at two levels:
 
 - **Config-time**: `trusted_email_senders` in per-user config (supports fnmatch patterns like `*@company.com`)
-- **Runtime**: managed via Talk commands
+- **Runtime**: managed via `!trust` from any surface with a composer — Talk, web chat, the CLI
 
 ```
 !trust sender@example.com     # add trusted sender
@@ -81,7 +89,7 @@ Trusted senders are configured at two levels:
 !trust                         # list all trusted senders
 ```
 
-Runtime trusted senders are stored in the database and checked alongside config-time patterns.
+Runtime trusted senders are stored in the database and checked alongside config-time patterns. `yes trust` at an inbound confirmation prompt is the same grant, given inline.
 
 ### Suspicious email alerts
 
@@ -92,6 +100,50 @@ During task execution, if the agent detects suspicious content in an email (soci
 Outbound emails use SMTP. The `SMTP_FROM` address is plus-addressed as `bot+user_id@domain` so replies route back to the correct user.
 
 Email output uses a deferred file pattern: Claude writes a JSON file to the temp dir, and the scheduler sends the email after task completion.
+
+### The outbound approval gate
+
+Mail to someone you have not authorized is not sent on the bot's judgement. It is composed, held as an editable draft, and shown to you; you approve, edit, or discard it, and approving sends exactly the bytes you read.
+
+The decision is made on the **recipients** and nothing else. It does not read the message, does not try to judge whether the text commits you to anything, and cannot be argued past — the check runs in the send path outside the sandbox, so the model has no way to assert around it. A single unauthorized address in To, Cc or Bcc holds the whole message; there are no partial sends.
+
+Three policies, ordered `off < untrusted < all`:
+
+| Policy | A message is sent immediately when |
+|---|---|
+| `off` | always — no holds |
+| `untrusted` | every recipient is trusted: one of your own addresses, a `trusted_email_senders` pattern, or an address you trusted at runtime |
+| `all` | every recipient is one of your own addresses |
+
+The operator sets a floor in `[email] outbound_approval_floor` (default `untrusted`). A user may tighten past it and never loosen below it, and a user who has never set their own policy follows the floor — so raising the floor reaches everyone.
+
+A user's own policy is set with `istota user ensure --outbound-approval <policy>`, which is what Ansible runs, or cleared back to following the floor with `--outbound-approval ""`. The `[users.X] outbound_approval` key in `config.toml` seeds the value **only for a user with no profile row yet**; on any instance that has already started once the DB row wins, so editing the TOML for an existing user does nothing. That is the general rule for per-user fields, and it is the one that bites here — use the CLI.
+
+An invalid floor fails the config load rather than falling back. There is no safe value to guess: `off` would disable a gate you asked for, and `untrusted` would override an operator who deliberately wrote `off`.
+
+**What is authorized is only what you said so.** The allowlist is your own addresses, your configured patterns, and addresses you trusted by hand. It is never derived from who you have corresponded with. An earlier attempt at this gate built its allowlist from observed mail and inverted itself — one message from a stranger permanently authorized mailing them back — which is exactly the wrong direction, since the addresses the gate most needs to hold are the ones that reach you.
+
+### Answering a held draft
+
+From web chat, the draft appears as a card under the turn that wrote it, showing the recipients, the subject, the whole drafted body, and anything else that task did — a calendar event it created, say, so declining does not quietly leave one behind. Send, edit the wording, or discard. A draft from a job with no conversation of its own appears in a list above the transcript, so nothing is reachable only from a room you never open.
+
+From Talk or any other surface with a composer:
+
+```
+!drafts                  # list what is waiting, with ids
+!drafts send <id>        # release one
+!drafts discard <id>     # bin one
+```
+
+With exactly one draft pending the id may be omitted. With several it is required, and the command lists them rather than guessing.
+
+One state needs a human rather than a button. If the process dies between claiming a draft and recording the send, the draft is left marked as sending, and nobody can know from the outside whether the mail went out — so the card shows it and offers no action, because one of the actions would send it twice. Check your Sent folder. There is currently no way to dismiss such a row.
+
+**A held draft does not expire.** It is your own unfinished reply, and binning it silently after a couple of hours would lose work with no trace — so unlike the inbound confirmation gate, nothing cancels it. A draft still waiting after 24 hours raises one notification (not a hundred, and never as a briefing item) naming the recipient and subject. Turning the policy off later does not auto-send anything already held.
+
+Recipients and threading are not editable, only the body. An editable recipient list is a gate you can be talked through.
+
+Two things the gate does not cover. A threaded reply the task defers through `email output` is sent on completion, because its recipient is always a correspondent who already cleared the inbound gate — a recipient check there has nothing to add over tightening the inbound side, where thread-matched mail is still ungated. And under `all`, that same deferred reply to a *trusted* correspondent still goes out, which is a small deviation from what `all` promises.
 
 ## Emissary threads
 
@@ -120,6 +172,7 @@ smtp_port = 587
 # smtp_password = ""  # defaults to imap_password
 poll_folder = "INBOX"
 bot_email = "istota@example.com"
+outbound_approval_floor = "untrusted"  # off | untrusted | all
 ```
 
 SMTP credentials fall back to IMAP credentials if not set.
@@ -135,4 +188,7 @@ Where the server advertises the `UIDPLUS` capability (most do, including Dovecot
 email_addresses = ["alice@example.com"]
 trusted_email_senders = ["*@company.com", "boss@other.com"]
 alerts_channel = "room789"  # Talk room for confirmations/alerts
+outbound_approval = "all"   # tighten past the operator floor; "" follows it
 ```
+
+As above, `outbound_approval` here is read only when the user has no profile row yet. For an existing user set it with `istota user ensure --outbound-approval`, which is the path Ansible uses.

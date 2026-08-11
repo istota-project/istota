@@ -50,6 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as _db
+from . import user_profiles
 from .brain import make_brain
 from .config import load_config
 from .location_logic import (
@@ -6658,7 +6659,7 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
     "external_turn_display":  {
-        "type": "enum", "values": ("full", "collapsed", "hidden"),
+        "type": "enum", "values": user_profiles.EXTERNAL_TURN_DISPLAY_VALUES,
     },
 }
 

@@ -793,6 +793,45 @@
     state: absent
   when: (istota_web_token_key | default('') | length == 0) and not istota_web_only
 
+# `off`, `on`, `yes` and `no` are YAML booleans, so an inventory writing the
+# documented off-switch unquoted (`istota_email_outbound_approval_floor: off`)
+# hands Jinja Python `False` and renders `outbound_approval_floor = "False"`.
+# `_validate_outbound_approval_floor` raises rather than falling back, so that
+# renders a config file the daemon cannot load — and `off` is exactly the value
+# an operator reaches for when they want the gate out of the way in a hurry.
+# Assert before the template runs so the failure names the variable instead of
+# surfacing as a TOML value nobody wrote.
+- name: Validate outbound approval floor
+  assert:
+    that:
+      - istota_email_outbound_approval_floor in ['off', 'untrusted', 'all']
+    fail_msg: >-
+      istota_email_outbound_approval_floor is
+      {{ istota_email_outbound_approval_floor | to_json }}, which is not one of
+      off / untrusted / all. Note that off, on, yes and no are YAML booleans —
+      quote the value ("off").
+    quiet: true
+  when: not istota_web_only
+
+- name: Validate per-user outbound approval policies
+  assert:
+    that:
+      - user_item.value.outbound_approval in ['', 'off', 'untrusted', 'all']
+    fail_msg: >-
+      outbound_approval for user {{ user_item.key }} is
+      {{ user_item.value.outbound_approval | to_json }}, which is not one of
+      off / untrusted / all (or "" to follow the operator floor). Note that off,
+      on, yes and no are YAML booleans — quote the value ("off").
+    quiet: true
+  loop: "{{ istota_users | dict2items }}"
+  loop_control:
+    loop_var: user_item
+    label: "{{ user_item.key }}"
+  when:
+    - not istota_web_only
+    - user_item.value.outbound_approval is defined
+    - user_item.value.outbound_approval is not none
+
 - name: Deploy istota configuration
   template:
     src: config.toml.j2
@@ -935,6 +974,8 @@
     {% for purpose, descriptor in (user_item.value.routing | default({})).items() %}--route "{{ purpose }}={{ descriptor }}" {% endfor %}
     {% if (user_item.value.default_destination | default('')) %}--default-destination "{{ user_item.value.default_destination }}"{% endif %}
     {% if (user_item.value.email_reply_routing | default('')) %}--email-reply-routing "{{ user_item.value.email_reply_routing }}"{% endif %}
+    {% if user_item.value.outbound_approval is defined and user_item.value.outbound_approval is not none %}--outbound-approval "{{ user_item.value.outbound_approval }}"{% endif %}
+    {% if (user_item.value.external_turn_display | default('')) %}--external-turn-display "{{ user_item.value.external_turn_display }}"{% endif %}
     {% if user_item.value.default_briefings is defined %}{{ '--default-briefings' if user_item.value.default_briefings else '--no-default-briefings' }}{% endif %}
     {% if user_item.value.briefing_email_html is defined %}{{ '--briefing-email-html' if user_item.value.briefing_email_html else '--no-briefing-email-html' }}{% endif %}
     {% if user_item.value.timezone_follow_location is defined %}{{ '--timezone-follow-location' if user_item.value.timezone_follow_location else '--no-timezone-follow-location' }}{% endif %}
