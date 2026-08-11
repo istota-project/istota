@@ -134,9 +134,9 @@ def _load_deferred_email_output(
     Returns parsed dict with subject/body/format keys, or None if no file exists.
 
     ``consume=False`` peeks without deleting, for a reader that must not race the
-    send: the transcript mirror (``email_transcript_body``) runs *before*
-    delivery, and consuming the file there would leave `deliver_email_result`
-    with nothing to send.
+    send: the file is the only copy of the composed body, so it is dropped by
+    `_consume_deferred_email_output` once the message has gone out or been
+    recorded as a draft, never at load time.
     """
     from ...executor import get_user_temp_dir
     user_temp_dir = get_user_temp_dir(config, task.user_id)
@@ -363,26 +363,25 @@ def _announce_hold(
         )
 
 
-def email_transcript_body(config: "Config", task: db.Task, message: str) -> str:
-    """What an email task's reply should look like in a room transcript.
+def email_transcript_body(message: str) -> str:
+    """What an email task's answer should look like in a room transcript.
 
-    An email reply is only ever *sent* when the model produced structured output
-    (`deliver_email_result` returns without sending otherwise), so a raw
-    ``task.result`` for a delivering email task is typically the
-    ``{"subject": …, "body": …, "format": …}`` envelope rather than prose.
-    Mirroring that verbatim puts a JSON blob in the room — and re-pairs it into
-    LLM history as the assistant's answer. This resolves the same structured
-    output `deliver_email_result` does and returns the body it actually mails.
+    Unwraps a result that *is* the ``{"subject": …, "body": …, "format": …}``
+    envelope — mirroring that verbatim would put a JSON blob in the room and
+    re-pair it into LLM history as the assistant's answer. Anything else is
+    returned unchanged.
 
-    Non-destructive on purpose: the mirror runs before delivery, so the deferred
-    file is peeked, never consumed. Falls back to `message` unchanged when there
-    is no structured output (a direct `email send` during execution, or the
-    legacy briefing path), which is exactly what those cases deliver.
+    It used to prefer the **deferred output file** over the result whenever both
+    existed, and that is what made Talk and web disagree about what the bot had
+    said (ISSUE-247): the two are different objects. `task.result` is the bot's
+    answer to its user; the deferred file holds the bytes it mailed to a third
+    party. On the reported task the result was a 1168-character explanation and
+    the file held a four-line note to the contact, so Talk showed the
+    explanation and the room showed the note. The room's job is to carry the
+    conversation the user is reading, so the result wins whenever there is one,
+    and the mailed body is no longer substituted for it.
     """
-    parsed = (
-        _load_deferred_email_output(config, task, consume=False)
-        or _parse_email_output(message)
-    )
+    parsed = _parse_email_output(message)
     if parsed and parsed.get("body"):
         return parsed["body"]
     return message

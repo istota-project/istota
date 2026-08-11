@@ -438,12 +438,14 @@ class TestAssistantBodyIsTheDeliveredReply:
         path) — the raw body is what was delivered."""
         from istota.transport.email.outbound import email_transcript_body
 
-        task = SimpleNamespace(id=1, user_id="testuser", source_type="email")
-        assert email_transcript_body(config, task, "plain reply") == "plain reply"
+        assert email_transcript_body("plain reply") == "plain reply"
 
-    def test_peek_does_not_consume_the_deferred_file(self, config, tmp_path):
-        """The mirror runs before delivery; consuming the file here would leave
-        `deliver_email_result` with nothing to send."""
+    def test_the_deferred_file_no_longer_overrides_a_prose_result(
+        self, config, tmp_path,
+    ):
+        """The deferred file holds the bytes mailed to a third party;
+        `task.result` holds the bot's answer to its user. Substituting the first
+        for the second is what made Talk and the room disagree (ISSUE-247)."""
         import json
 
         from istota.executor import get_user_temp_dir
@@ -460,13 +462,14 @@ class TestAssistantBodyIsTheDeliveredReply:
             {"subject": "s", "body": "from the deferred file", "format": "plain"},
         ))
 
-        assert email_transcript_body(config, task, "raw") == "from the deferred file"
-        assert path.exists(), "the mirror must not consume the send's payload"
-        # The real send still gets it, and still consumes it.
+        assert email_transcript_body("the answer I gave you") == (
+            "the answer I gave you"
+        )
+        # And the send's own payload is untouched by the transcript decision.
+        assert path.exists()
         assert _load_deferred_email_output(config, task)["body"] == (
             "from the deferred file"
         )
-        assert not path.exists()
 
 
 class TestCleanupMigrationSparesEmailRows:

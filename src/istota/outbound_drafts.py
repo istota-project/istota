@@ -347,54 +347,6 @@ def open_for_user(conn: sqlite3.Connection, user_id: str) -> DraftListing:
     return DraftListing(drafts=readable, unreadable=unreadable)
 
 
-def pending_held_for_task(
-    conn: sqlite3.Connection, task_id: int, *, to_addr: str | None = None,
-) -> bool:
-    """Whether this task's reply to ``to_addr`` is sitting in the approval queue.
-
-    Reads the state rather than threading a flag out of the delivery leg, which
-    keeps the two independent: ``deliver_email_result`` reports whether it
-    *failed*, and a hold is not a failure, so the room-facing wording asks this
-    instead. Without it a held reply is announced as "Email reply sent to …"
-    (ISSUE-246), which is the one thing the user must not be told about a
-    message that is still waiting on them.
-
-    **``to_addr`` is what makes the answer about the right message.** One task
-    can produce several outbound messages — an `email send` to a third party
-    that the skill-side gate held, and a reply to its own correspondent that
-    went out — and all of them carry this task's id. Keyed on the id alone, the
-    held third-party draft would report the delivered reply as waiting.
-    Recipients are normalized to bare lowercase addr-specs at hold time, so the
-    comparison matches. Omitted, the question widens to "did this task hold
-    anything", which is the right answer only for a caller with no particular
-    message in mind.
-
-    Only ``pending`` counts. A ``sending`` row is mid-release from an approval
-    the user has already given, and a ``sent`` one is the ordinary case.
-    """
-    rows = conn.execute(
-        "SELECT to_addrs FROM outbound_drafts WHERE task_id = ? AND status = ?",
-        (task_id, STATUS_PENDING),
-    ).fetchall()
-    if not rows:
-        return False
-    if to_addr is None:
-        return True
-
-    wanted = (to_addr or "").strip().lower()
-    for row in rows:
-        try:
-            recipients = _json_list(row["to_addrs"], column="to_addrs")
-        except DraftCorrupt:
-            # An unreadable row is still a held row for this task. Counting it
-            # errs toward telling the user something is waiting, which is the
-            # safe direction for a message we cannot confirm was sent.
-            return True
-        if wanted in {r.strip().lower() for r in recipients}:
-            return True
-    return False
-
-
 def identity(conn: sqlite3.Connection, draft_id: int) -> tuple[str, str] | None:
     """``(user_id, status)`` for a draft, or ``None`` if there is no such row.
 

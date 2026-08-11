@@ -27,6 +27,9 @@ from .routing import (
     parse_output_target,
     plan_has_surface,
     resolve_delivery_plan,
+    routed_notification_room,
+    transcript_room,
+    transcript_room_for_task,
 )
 from .talk import TalkTransport
 from .web import WebTransport
@@ -47,6 +50,9 @@ __all__ = [
     "parse_output_target",
     "plan_has_surface",
     "resolve_delivery_plan",
+    "routed_notification_room",
+    "transcript_room",
+    "transcript_room_for_task",
     "TalkTransport",
     "EmailTransport",
     "WebTransport",

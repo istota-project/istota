@@ -53,7 +53,6 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from . import db
-from . import outbound_drafts
 from .brain import make_brain
 from .consumers import (
     LogChannelSubscriber,
@@ -88,6 +87,7 @@ from .transport import (
     parse_output_target,
     plan_has_surface,
     resolve_delivery_plan,
+    transcript_room_for_task,
 )
 from .transport.ingest import ROOM_SURFACES
 from .transport.registry import _surface_for_source_type
@@ -474,7 +474,7 @@ def _strip_action_prefix(result: str) -> tuple[bool, str]:
     return True, body
 
 
-def _store_room_turn(conn, task, body: str) -> int | None:
+def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | None:
     """Store a task's delivered result as an assistant spine row in a room's
     canonical transcript — for ANY source type — when the room is web-visible.
 
@@ -488,9 +488,13 @@ def _store_room_turn(conn, task, body: str) -> int | None:
     ``_store_web_room_turn`` (ISSUE-164): one producer, not one-per-type, and
     adding a new room-posting source type needs no new helper.
 
-    The gate is **room existence**, not source type: a token with no ``rooms``
-    row isn't a web-visible room (e.g. a synthetic email-thread token), so there
-    is nothing to mirror into and the helper no-ops. ``origin_surface`` records
+    ``room_token`` is the room the exchange belongs to, resolved once by
+    ``transport.routing.transcript_room_for_task`` before any per-surface
+    branch. It is **not** ``task.conversation_token``: on an email task that
+    column is a thread hash naming no room, and reading it as one here was the
+    reason an email answer reached the room as a system note instead of a turn
+    (ISSUE-247). The gate is **room existence**, not source type: no room means
+    nothing to mirror into and the helper no-ops. ``origin_surface`` records
     the task's real source type as provenance without gating visibility — the
     generalized ``TRANSCRIPT_SURFACE_FILTER`` admits any assistant row. Only an
     assistant row is ever written, never a ``role='user'`` row, so a
@@ -498,19 +502,18 @@ def _store_room_turn(conn, task, body: str) -> int | None:
     "user rows are conversational-only" invariant). Idempotent across retries
     (``store_turn_message`` dedups on ``(room, role, task_id)``); returns the new
     message id, or None when it no-ops or the row already exists."""
-    token = task.conversation_token
-    if not token:
+    if not room_token:
         return None
-    if db.get_room(conn, token) is None:
+    if db.get_room(conn, room_token) is None:
         return None
     return db.store_turn_message(
-        conn, token, role="assistant", body=body,
+        conn, room_token, role="assistant", body=body,
         task_id=task.id, origin_surface=task.source_type,
     )
 
 
 def _room_turn_belongs_here(
-    conn, task: db.Task, task_id: int, *,
+    conn, task: db.Task, task_id: int, room_token: str | None, *,
     delivering_into_room: bool,
 ) -> bool:
     """Whether this task's answer belongs in its room's canonical transcript.
@@ -548,51 +551,62 @@ def _room_turn_belongs_here(
     where it is: narrow its `source_type in ("talk", "web")` gate and this rung
     starts writing `room_body` for those turns, which is a different body from
     the `result` that path stores.
+
+    ``room_token`` is the resolved transcript room, not
+    ``task.conversation_token`` — see `_store_room_turn`.
     """
-    token = task.conversation_token
-    if not token:
+    if not room_token:
         return False
     if delivering_into_room:
         return True
-    return db.get_turn_message_id(conn, token, task_id, "user") is not None
+    return db.get_turn_message_id(conn, room_token, task_id, "user") is not None
+
+
+def _canonical_talk_room(conn, talk_token: str) -> str:
+    """The canonical room token a Talk channel belongs to, or the channel itself.
+
+    A promoted web room's Talk ref is not its own token, so the two only compare
+    equal after this.
+    """
+    return db.resolve_room_token(conn, "talk", talk_token) or talk_token
 
 
 def _talk_result_mirror_body(
-    conn, task, talk_token: str, room_body: str, web_push_dests,
+    conn, task, talk_token: str, transcript_token: str | None,
+    body: str, web_push_dests,
 ) -> str | None:
     """The result body to mirror into the *delivered* Talk room, or None.
 
-    `_store_room_turn` keys on ``task.conversation_token``; the Talk post keys on
-    the resolved ``talk_token`` (`_talk_target_for_delivery`). For an email task
-    those are two different things — the first is a synthetic thread hash naming
-    no room, the second is the user's DM room via the resolve ladder — so the
-    reply appeared in Talk and the web view of that same room stayed blank. That
-    is the ISSUE-242 gap on the *result* rather than on a notification, and the
-    reason it survived the ISSUE-242 fix is that only `_dispatch`'s talk leg was
-    taught to mirror what it delivered.
+    `_store_room_turn` writes into the room this exchange belongs to; the Talk
+    post goes to the plan's resolved ``talk_token``. Those are normally two
+    names for one room, and then the canonical row already covers it. When they
+    genuinely differ — a task delivered to a Talk room that is not its own — the
+    web view of *that* room has nothing to show, which is the ISSUE-242 gap on
+    the result rather than on a notification.
 
-    Closing it with an assistant row is not available: the email's user turn is
-    deliberately **not** mirrored into that room (`record_inbound`'s
-    ``mirror_only`` gate is room existence, and a gated message must not publish
-    attacker text before the user answers), so the row would be an orphaned
-    bubble in a room holding no question — the ISSUE-136 defect, re-reached from
-    the other side. From that room's point of view an email reply *is* an
-    out-of-band notice, so it gets the same ``role='system'`` treatment an alert
-    already gets, and never re-pairs into LLM context.
+    An assistant row is not available there: the room holds no question, so the
+    row would be an orphaned bubble (ISSUE-136 reached from the other side). It
+    gets the ``role='system'`` treatment an alert already gets, and never
+    re-pairs into LLM context.
 
-    Two cases return None. A task whose own conversation token **is** a room was
-    already handled by `_store_room_turn` above (assistant bubble, with its
-    question above it), and a room the plan also pushes to over ``web`` would get
-    two rows for one message — the dedup `_dispatch` does against its own `web`
-    leg, applied here against the plan's.
+    **This no longer fires for an email task.** It used to be the *only* thing
+    reaching that room, because the writer above keyed on
+    ``task.conversation_token`` and an email task's is a thread hash naming no
+    room (ISSUE-247). It was also handed the transcript body while Talk was
+    posted the delivered one, so the two surfaces showed different text for the
+    same message; it is now handed exactly what Talk was posted, which is the
+    only body a mirror of a Talk post can honestly carry.
+
+    Two cases return None: the Talk post lands in the room the canonical row was
+    already written to, and a room the plan also pushes to over ``web``, which
+    would otherwise get two rows for one message.
     """
-    token = task.conversation_token
-    if token and db.get_room(conn, token) is not None:
+    canonical = _canonical_talk_room(conn, talk_token)
+    if transcript_token and canonical == transcript_token:
         return None
-    canonical = db.resolve_room_token(conn, "talk", talk_token) or talk_token
     if any(d.channel == canonical for d in web_push_dests):
         return None
-    return room_body
+    return body
 
 
 def download_talk_attachments(config: Config, attachments: list[str]) -> list[str]:
@@ -1103,56 +1117,18 @@ def _talk_target_for_delivery(config: Config, task: db.Task) -> str | None:
     return talk_channel_for_task(config, task)
 
 
-def _notify_confirmed_email_result(
-    config: Config, task: db.Task, result: str,
-) -> bool:
-    """Post the bot's email reply to the alerts channel after a confirmed email task.
-
-    When an untrusted sender's email goes through the confirmation gate, the
-    user approves it in the alerts channel. After the bot processes and replies,
-    this closes the loop by showing the user what was sent.
-
-    Returns True if notification was posted, False otherwise.
-    """
-    if task.source_type != "email" or task.confirmation_prompt is None:
-        return False
-
-    # If output_target already includes Talk, the user sees the result in
-    # their conversation — no need to duplicate it in the alerts channel.
-    from .transport import parse_output_target
-    if plan_has_surface(parse_output_target(task.output_target), "talk"):
-        return False
-
-    # Look up the sender from the processed_emails record
-    sender = "the sender"
-    with db.get_db(config.db_path) as conn:
-        email_record = db.get_email_for_task(conn, task.id)
-        if email_record:
-            sender = email_record.sender_email
-        # The reply may have been held by the outbound approval gate rather than
-        # sent (ISSUE-246). Saying "sent" for a message still waiting on the
-        # user's approval is worse than saying nothing. Asked about this
-        # recipient specifically, so a draft the task held for someone else does
-        # not misreport a reply that did go out.
-        held = outbound_drafts.pending_held_for_task(
-            conn, task.id,
-            to_addr=email_record.sender_email if email_record else None,
-        )
-
-    # Truncate long results for the notification
-    max_chars = 2000
-    body = result if len(result) <= max_chars else result[:max_chars] + "\n[...]"
-
-    if held:
-        message = (
-            f"Email reply to {sender} is waiting for your approval "
-            f"(task #{task.id}). Review it with `!drafts`:\n\n{body}"
-        )
-    else:
-        message = f"Email reply sent to {sender} (task #{task.id}):\n\n{body}"
-
-    from .notifications import send_notification
-    return send_notification(config, task.user_id, message, purpose="notification")
+# `_notify_confirmed_email_result` is gone (ISSUE-247). It posted the bot's
+# reply to a gated email task as an `Email reply sent to <sender> (task #N):`
+# notification, because there was no turn in any room to attach it to — the
+# helper existed only to compensate for `_store_room_turn` finding no room under
+# a thread hash. The answer is now an ordinary assistant turn in the room the
+# exchange was routed to, with the question above it, so the wrapper is a second
+# rendering of a message the room already holds. Its other branch — announcing a
+# reply the outbound gate held rather than sent — is not lost: every hold on the
+# delivery leg already announces itself through
+# `transport.email.outbound._announce_hold`, which names the draft id and the
+# `!drafts` verbs, and does it for *every* email task rather than only a gated
+# one.
 
 
 def _deliver_deferred_email_output(
@@ -1600,13 +1576,6 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     subtasks / tracking / sent-emails / email-output) and warn on unconsumed
     files. The single source of truth for the post-success drain — shared by
     ``process_one_task`` and ``run_task_inline`` so the two can't drift.
-
-    **`_notify_confirmed_email_result` is deliberately not called here.** It has
-    to run after the email has actually been delivered, and on the main path
-    delivery happens in ``process_one_task``'s ``post_email`` block, long after
-    this drain. Called from here it read the drafts table before the outbound
-    gate had written to it, and so announced a held reply as sent (ISSUE-246).
-    Both callers invoke it themselves, after their own delivery.
     """
     from .executor import get_user_temp_dir
     user_temp_dir = get_user_temp_dir(config, task.user_id)
@@ -1699,10 +1668,6 @@ def run_task_inline(
 
     if success:
         _drain_deferred_ops(config, task, result)
-        # Inline tasks push no email of their own — the only send is the
-        # gap-case delivery inside the drain — so the drafts table is already
-        # settled by the time this reads it.
-        _notify_confirmed_email_result(config, task, result)
 
     return success, result
 
@@ -1944,8 +1909,17 @@ def process_one_task(
         d for d in plan
         if d.kind == "push" and is_canonical_room_view(config, registry, d.surface)
     ]
-    # Split by whether the push target IS the task's own room. For a canonical
-    # room view, a push at the task's own room *is* the assistant row —
+    # The room this exchange belongs to, resolved once, before any per-surface
+    # branch and before anything is written (ISSUE-247). For every surface but
+    # email it is the task's own conversation token; for an email task that
+    # token is a thread hash and the room comes from the routing that decided
+    # where the mail surfaces. `None` means the exchange has no room — a cron
+    # job mailing an external address — and stays task-only.
+    with db.get_db(config.db_path) as _room_conn:
+        transcript_token = transcript_room_for_task(_room_conn, config, task)
+
+    # Split by whether the push target IS the exchange's own room. For a
+    # canonical room view, a push at that room *is* the assistant row —
     # delivering it as well renders the same answer a second time as a
     # role='system' cmd-output note (ISSUE-164). A different room holds no
     # question and gets no row of its own, so there a push is the only delivery
@@ -1955,10 +1929,11 @@ def process_one_task(
     # lists from *different* tests would let a destination fall into neither and
     # be silently dropped — neither stored nor pushed.
     own_room_canonical_dests = [
-        d for d in web_push_dests if d.channel == task.conversation_token
+        d for d in web_push_dests if transcript_token and d.channel == transcript_token
     ]
     web_foreign_dests = [
-        d for d in web_push_dests if d.channel != task.conversation_token
+        d for d in web_push_dests
+        if not (transcript_token and d.channel == transcript_token)
     ]
 
     # Track if we need to call istota_file handler after db connection closes.
@@ -1969,8 +1944,8 @@ def process_one_task(
 
     # Track what to post after DB transaction closes
     post_talk_message = None
-    # The same body, mirrored into the delivered Talk room's web transcript when
-    # `_store_room_turn` can't reach it. See `_talk_result_mirror_body`.
+    # The delivered body, mirrored into the Talk room's web transcript when that
+    # room is not the one the canonical row went to. See `_talk_result_mirror_body`.
     post_talk_mirror_body = None
     post_email = False
     is_failure_notify = False
@@ -2144,7 +2119,9 @@ def process_one_task(
                         db.log_task(conn, task_id, "info", "Silent scheduled job: action taken")
                         if talk_token:
                             post_talk_message = result_to_post
-                            _store_room_turn(conn, task, result_to_post)
+                            _store_room_turn(
+                                conn, task, transcript_token, result_to_post,
+                            )
                     else:
                         db.log_task(conn, task_id, "info", "Silent scheduled job: no action needed")
 
@@ -2160,18 +2137,14 @@ def process_one_task(
                     else:
                         delivery_result = result
                     # What the *room transcript* shows. Identical to the
-                    # delivered body everywhere except email, whose result is
-                    # normally the structured `{"subject","body","format"}`
-                    # envelope the send path unwraps — mirroring that verbatim
-                    # would put a JSON blob in the room and re-pair it into LLM
-                    # history as the answer. Kept separate from
-                    # `post_talk_message` so this stays a transcript fix and
-                    # changes no delivery payload.
+                    # delivered body everywhere except an email task whose
+                    # result is itself the structured
+                    # `{"subject","body","format"}` envelope the send path
+                    # unwraps — mirroring that verbatim would put a JSON blob in
+                    # the room and re-pair it into LLM history as the answer.
                     if task.source_type == "email":
                         from .transport.email.outbound import email_transcript_body
-                        room_body = email_transcript_body(
-                            config, task, delivery_result,
-                        )
+                        room_body = email_transcript_body(delivery_result)
                     else:
                         room_body = delivery_result
                     # One decision, before any per-surface branch, replacing the
@@ -2187,18 +2160,51 @@ def process_one_task(
                     # which stores only what it also posts. Both are idempotent
                     # against this one — `store_turn_message` dedups on
                     # `(room, role, task_id)`.
+                    #
+                    # The Talk rung asks whether the Talk leg lands in *this*
+                    # room. Before the room was resolved separately from
+                    # `conversation_token` the two questions could not come
+                    # apart; now they can, and a Talk post into some other room
+                    # is not evidence that the answer belongs here (ISSUE-247).
+                    #
+                    # The second clause keeps the *old* rule wherever the old
+                    # rule applied — a task whose transcript room is its own
+                    # token, i.e. everything but a routed email. A scheduled job
+                    # sitting in room A with `output_target="talk:B"` stored its
+                    # answer in A, and while ISSUE-164's rule arguably says it
+                    # should not, taking that row away is a behaviour change
+                    # this issue was not asked to make and would silently drop
+                    # a job's only transcript. Tightening it is its own change.
+                    _talk_lands_here = bool(
+                        plan_talk and talk_token and transcript_token
+                        and (
+                            _canonical_talk_room(conn, talk_token)
+                            == transcript_token
+                            or transcript_token == task.conversation_token
+                        )
+                    )
                     if _room_turn_belongs_here(
-                        conn, task, task_id,
+                        conn, task, task_id, transcript_token,
                         delivering_into_room=bool(
-                            (plan_talk and talk_token)
-                            or own_room_canonical_dests
+                            _talk_lands_here or own_room_canonical_dests
                         ),
                     ):
-                        _store_room_turn(conn, task, room_body)
+                        _store_room_turn(conn, task, transcript_token, room_body)
                     if plan_talk and talk_token:
-                        post_talk_message = delivery_result
+                        # `room_body`, not `delivery_result`: for an email task
+                        # whose result *is* the `{"subject","body","format"}`
+                        # envelope, the second is raw JSON. The room already
+                        # unwrapped it, and posting the envelope to Talk would
+                        # be this issue's symptom 2 — two surfaces given
+                        # different text for one message — in the other
+                        # direction. Identical for every non-email task, where
+                        # the two are the same string. The email leg is
+                        # unaffected: `deliver_email_result` parses the envelope
+                        # itself from the result and the deferred file.
+                        post_talk_message = room_body
                         post_talk_mirror_body = _talk_result_mirror_body(
-                            conn, task, talk_token, room_body, web_push_dests,
+                            conn, task, talk_token, transcript_token,
+                            room_body, web_push_dests,
                         )
                     if plan_email:
                         post_email = True
@@ -2498,7 +2504,20 @@ def process_one_task(
         # at ingest (post-as-user mirroring): the user turn's `talk` external-id
         # stamp is the signal. A framework-DB read — the scheduler never touches
         # the user token.
+        #
+        # An email-origin turn needs the same thing for the same reason, and did
+        # not get it: the room now holds the question as a canonical row, but
+        # Talk renders from Nextcloud rather than from that store, so Talk was
+        # left showing an answer with nothing above it and no sign of who it was
+        # answering (ISSUE-247). What used to carry that on Talk was
+        # `_notify_confirmed_email_result`'s `Email reply sent to <sender>`
+        # prefix, and only for a gated task.
+        _repost = None
         if _talk_is_mirror and task.source_type == "web" and task.prompt:
+            _repost = _format_mirror_user_repost(config, task)
+        elif task.source_type == "email" and transcript_token:
+            _repost = _format_email_user_repost(config, task, talk_token)
+        if _repost:
             _user_posted = False
             try:
                 with db.get_db(config.db_path) as conn:
@@ -2512,7 +2531,7 @@ def process_one_task(
                 )
             if not _user_posted:
                 run_coro(post_result_to_talk(
-                    config, task, _format_mirror_user_repost(config, task),
+                    config, task, _repost,
                     reference_id=f"istota:task:{task.id}:prompt",
                     target_token=talk_token,
                 ))
@@ -2614,11 +2633,6 @@ def process_one_task(
             with db.get_db(config.db_path) as conn:
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
-    # After the email leg, so a reply the outbound gate held is announced as
-    # waiting rather than sent (ISSUE-246). Runs whether or not the plan had an
-    # email destination: the gap-case delivery inside the drain also sends.
-    if success and not is_confirmation_request:
-        _notify_confirmed_email_result(config, task, result)
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"
@@ -2672,6 +2686,56 @@ def _format_mirror_user_repost(config: Config, task: db.Task) -> str:
     uc = config.get_user(task.user_id)
     display = uc.display_name if uc and uc.display_name else task.user_id
     return f"💬 {display} (via web):\n{task.prompt}"
+
+
+# A subject is an attacker-supplied header of no fixed length, and this one goes
+# into a Talk post. Same cap the web transcript's external-turn header uses.
+_TALK_SUBJECT_MAX_CHARS = 120
+
+
+def _format_email_user_repost(
+    config: Config, task: db.Task, talk_token: str | None,
+) -> str | None:
+    """Provenance header for an email answer posted into a Talk room.
+
+    The room holds the question as a canonical `role='user'` row, and the web
+    view renders it as a collapsed "External email" card. Talk renders from
+    Nextcloud instead, so without this it shows the answer alone — a bot
+    replying to nothing, with no indication that a stranger wrote in
+    (ISSUE-247). Returns None when there is nothing to attribute.
+
+    Sender and subject only, never the body. The body is the task prompt
+    verbatim, wrapper and untrusted-input guard included, which is the right
+    thing to re-pair into LLM context and the wrong thing to paste into a room;
+    the mail itself is one click away in web chat and in the mailbox. The sender
+    goes through `db.external_email_sender`, so what renders is an addr-spec or
+    the fixed unattributed sentinel and never a raw `From:` with a display name
+    in it.
+    """
+    if task.source_type != "email":
+        return None
+    try:
+        with db.get_db(config.db_path) as conn:
+            record = db.get_email_for_task(conn, task.id)
+            if record is None:
+                return None
+            own = db.own_addresses_without_config(conn, task.user_id)
+            uc = config.get_user(task.user_id)
+            if uc and uc.email_addresses:
+                own = list(uc.email_addresses)
+            sender = db.external_email_sender(record.sender_email, own)
+            subject = (record.subject or "").strip()
+    except Exception as e:
+        logger.debug("email repost header failed for task %d: %s", task.id, e)
+        return None
+    if not sender:
+        # The user's own mail to their own address — not an outside voice, so
+        # there is nothing to mark. Same line `resolve_author` draws.
+        return None
+    line = f"📧 Email from {sender}"
+    if subject:
+        line += f" — {subject[:_TALK_SUBJECT_MAX_CHARS]}"
+    return line
 
 
 async def post_result_to_talk(

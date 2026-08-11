@@ -3871,6 +3871,31 @@ def get_turn_message_id(
     return row["id"] if row else None
 
 
+def room_for_task_turn(
+    conn: sqlite3.Connection, task_id: int, role: str = "user",
+) -> str | None:
+    """The room a task's stored turn lives in, or None if it has none.
+
+    The inverse of `get_turn_message_id`: that one asks "is this task's turn in
+    *this* room", which presumes the caller already knows which room. An email
+    task does not — its `conversation_token` is a thread hash, and the room its
+    exchange landed in was resolved from the routing (ISSUE-247). Asking the
+    store where the question actually went is what makes the answer land under
+    it rather than in a second place derived a second way.
+
+    Oldest row wins. The `(room_token, role, task_id)` uniqueness is per room,
+    not global, so nothing structurally forbids a second row in a second room;
+    this being the strongest rung of the resolution ladder, an arbitrary answer
+    would be a hard bug to see.
+    """
+    row = conn.execute(
+        "SELECT room_token FROM messages WHERE task_id = ? AND role = ? "
+        "ORDER BY id ASC LIMIT 1",
+        (task_id, role),
+    ).fetchone()
+    return row["room_token"] if row else None
+
+
 def list_system_messages(
     conn: sqlite3.Connection, room_token: str, limit: int = 50,
 ) -> list[Message]:

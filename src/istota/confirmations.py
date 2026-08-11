@@ -334,21 +334,35 @@ def record_exchange(
 def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     """Publish the approved turn's question into its room, if it has one.
 
-    Existence-only, mirroring `transport.ingest.record_inbound`'s `mirror_only`
-    rule: a first-contact email carries a synthetic thread token that is not a
-    room, and approving it must not mint one in anyone's sidebar. The stored
-    body is the task prompt verbatim — wrapper and untrusted-input guard
-    included — for the same reason `record_inbound` stores it that way: it is
-    re-paired straight back into LLM context, and a prettified body would drop
-    the guard.
+    The room comes from the same resolver the inbound path used
+    (`transport.routing.transcript_room_for_task`) rather than from
+    `task.conversation_token`, which on an email task is a thread hash: reading
+    it as a room meant a first-contact approval published the question nowhere,
+    and the answer then had nothing to sit under (ISSUE-247). Existence, never
+    creation, at every rung, so approving still cannot mint a room in anyone's
+    sidebar. The stored body is the task prompt verbatim — wrapper and
+    untrusted-input guard included — for the same reason `record_inbound` stores
+    it that way: it is re-paired straight back into LLM context, and a
+    prettified body would drop the guard.
 
     Attribution is resolved here rather than inherited, because this row is
     written on a path that never saw the inbound message. With a `config` the
     task user's own addresses are authoritative; without one the resolver falls
     back to what the database can prove, which is weaker — see
     `db.own_addresses_without_config`.
+
+    Without a `config` there is no routing table to consult, so the resolution
+    is the token itself — and the existence check below is what keeps that from
+    being wrong rather than merely weaker: it is rung 1 of the same ladder, so a
+    routed email's thread hash writes nothing instead of minting or mis-filing.
+    Every live caller passes a config (`commands.cmd_confirm`, the web confirm
+    endpoint, `apply_answer`); the bare form survives for the DB-only
+    attribution path `db.author_for_email_task` documents.
     """
     room_token = task.conversation_token
+    if config is not None:
+        from .transport.routing import transcript_room_for_task
+        room_token = transcript_room_for_task(conn, config, task)
     if not room_token:
         return
     try:

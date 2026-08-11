@@ -534,6 +534,182 @@ def talk_channel_for_task(config: "Config", task: "db.Task") -> str | None:
     return resolve_conversation_token(config, task.user_id) or token
 
 
+def transcript_room(
+    conn,
+    config: "Config",
+    *,
+    user_id: str,
+    source_type: str | None,
+    conversation_token: str | None,
+    output_target: str | None,
+    talk_delivery_token: str | None = None,
+) -> str | None:
+    """The room whose transcript this exchange belongs in, or None.
+
+    One resolution, consulted by every writer of a room row, replacing three
+    readings of ``tasks.conversation_token`` as if it named a room (ISSUE-247).
+    On an email task that token is a *thread* identifier — a hash grouping
+    ``References`` — so each of those writers correctly found no room and fell
+    back to a different workaround: a ``role='system'`` note instead of a turn,
+    a Talk-only mirror carrying a different body, and no inbound row at all.
+
+    The ladder is two rungs, and neither invents a destination:
+
+    1. ``conversation_token`` when it already **is** a registered room. Every
+       talk- and web-sourced task, and an email threaded back into the room it
+       came from. This rung is the whole answer for every surface but email.
+    2. **Email only** — a room named by ``output_target``: the ``room:<token>``
+       form, or an explicit ``talk:``/``web:``/bare ``talk`` leg. This is the
+       room the plan delivers into, so the answer lands where it is being shown.
+
+    What is deliberately **not** a rung is "the room this user's notifications
+    would go to". That is :func:`routed_notification_room`, and only the email
+    poller calls it, on the routes where the message names no conversation at
+    all. Consulting it here would put an ungated `thread_match` reply — an
+    external correspondent's verbatim body, which `_conversation_history_from_
+    messages` re-pairs into that room's LLM context — into the user's alerts
+    room whenever their reply-routing policy is `thread`, which is a room the
+    thread had no relationship with. The poller resolves it once and writes the
+    answer into ``output_target``, so every later reader sees rung 2.
+
+    Existence, never creation, at both rungs: an email task naming no registered
+    room (a cron mailing an external address) stays task-only with no
+    transcript, which is the pre-existing behaviour and deliberately unchanged.
+    Never raises — a failure to resolve a transcript room must not abort
+    delivery.
+
+    ``talk_delivery_token`` is rung 0 of `talk_channel_for_task`, so a bare
+    ``talk`` leg has to see it too or the two ladders answer differently and the
+    exchange splits across two rooms again — which is this issue, reintroduced
+    one level down.
+    """
+    from .. import db
+
+    try:
+        if conversation_token and db.get_room(conn, conversation_token) is not None:
+            return conversation_token
+        if source_type != "email":
+            return None
+        for dest in parse_output_target(output_target):
+            room = _room_for_destination(
+                conn, config, user_id, dest,
+                talk_delivery_token=talk_delivery_token,
+            )
+            if room:
+                return room
+    except Exception as e:  # pragma: no cover - never abort delivery
+        logger.warning("transcript room resolution failed for %s: %s", user_id, e)
+    return None
+
+
+def routed_notification_room(
+    conn, config: "Config", user_id: str,
+) -> str | None:
+    """The registered room this user's ``notification`` route resolves to.
+
+    Where mail that names no conversation of its own surfaces. This routing
+    already decided that; it was just being consulted *inside*
+    ``send_notification``, i.e. after the content had been reduced to a system
+    note, which is why the room could never hold the exchange (ISSUE-247). The
+    email poller calls it before the task exists and writes the answer into
+    ``output_target``, so the room is a delivery destination rather than
+    something derived after the fact.
+
+    Existence, never creation: `None` when the route names no registered room,
+    and then the mail stays task-only exactly as it did.
+    """
+    try:
+        from ..notifications import resolve_destinations
+        for dest in resolve_destinations(config, user_id, "notification"):
+            room = _room_for_destination(conn, config, user_id, dest)
+            if room:
+                return room
+    except Exception as e:  # pragma: no cover - never abort ingest
+        logger.warning("notification room resolution failed for %s: %s", user_id, e)
+    return None
+
+
+def _room_for_destination(
+    conn, config: "Config", user_id: str, dest: Destination,
+    *, talk_delivery_token: str | None = None,
+) -> str | None:
+    """The registered room a single destination names, or None.
+
+    ``room:<token>`` names one outright. A ``talk``/``web`` leg names one of its
+    *views*, so the ref is resolved to the canonical token before the registry
+    is asked — a promoted room's Talk ref is not its own token, and looking the
+    room up by the raw value is the conflation this whole change is undoing. A
+    bare leg carries no channel and falls back to that surface's default for the
+    user. Any other surface (email, ntfy, istota_file, stream) is a delivery
+    target rather than a room view, and names no room.
+
+    A bare ``talk`` leg reads ``talk_delivery_token`` first because
+    `talk_channel_for_task` does: that column is rung 0 there, absolutely, and
+    is the one thing that knows about a Talk room the registry may never have
+    heard of (the legacy thread-match branch in `transport/email/inbound.py`
+    copies one onto the task). Resolving the notification ladder here instead
+    would name a different room from the one the Talk post lands in.
+    """
+    from .. import db
+
+    surface, channel = dest.surface, dest.channel
+    if surface == "room":
+        candidate = channel
+    elif surface == "talk":
+        from ..notifications import resolve_conversation_token
+        candidate = (
+            channel
+            or talk_delivery_token
+            or resolve_conversation_token(config, user_id)
+        )
+    elif surface == "web":
+        # Deliberately *not* `default_web_room_token`, which provisions a
+        # `general` room when the user has none and opens its own connection to
+        # do it. Resolving a transcript room must neither create one nor take a
+        # second write lock on a database this caller already holds.
+        if channel:
+            candidate = channel
+        else:
+            rooms = db.list_web_chat_rooms(conn, user_id, include_archived=False)
+            candidate = rooms[0].token if rooms else None
+    else:
+        return None
+    if not candidate:
+        return None
+    if surface in ("talk", "web"):
+        candidate = db.resolve_room_token(conn, surface, candidate) or candidate
+    return candidate if db.get_room(conn, candidate) is not None else None
+
+
+def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
+    """The transcript room for a task that already exists.
+
+    Asks the store first: a room already holding this task's question is the
+    room its answer belongs in, whatever the routing would say now. That is what
+    makes the two halves of an exchange agree by construction rather than by two
+    derivations of the same rule staying in step. Falls through to
+    :func:`transcript_room` when there is no question stored — a turn whose
+    inbound row is still withheld behind the confirmation gate, or a task
+    created without one.
+    """
+    from .. import db
+
+    try:
+        stored = db.room_for_task_turn(conn, task.id, "user")
+    except Exception:  # pragma: no cover - never abort delivery
+        stored = None
+    if stored:
+        return stored
+    return transcript_room(
+        conn, config,
+        user_id=task.user_id,
+        source_type=task.source_type,
+        conversation_token=task.conversation_token,
+        output_target=task.output_target,
+        talk_delivery_token=task.talk_delivery_token,
+    )
+
+
 def _talk_binding_for_task(config: "Config", task: "db.Task") -> str | None:
     """The ``surface_ref`` of the Talk binding on this task's room, or None.
 
