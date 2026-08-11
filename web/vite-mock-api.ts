@@ -152,6 +152,13 @@ interface MockChatTask {
   attachmentPaths?: (string | null)[];
   /** Canonical msg_id this turn's question replies to, if it cites one. */
   replyToMsgId?: number;
+  /** Surface the turn entered from, when it is not one the room lives on —
+   * `'email'` for mail mirrored into the thread it continues. Set together with
+   * `author` and `subject`, matching the server, which emits `origin` only for a
+   * row whose author is an external sender. */
+  origin?: string;
+  subject?: string;
+  author?: string;
 }
 
 /** Stored upload path → the workspace path `/chat/files` would take, or null
@@ -232,6 +239,20 @@ let mockChatTaskSeq = 1000;
     prompt: 'fix the near-expiry 401s in auth',
     createdAt: base + 12_000,
     variant: 'multiround',
+  });
+  // One turn from outside the room, so the external treatment and the three
+  // `external_turn_display` modes are reachable under VITE_MOCK_API=1. The
+  // prompt is the mail's own text: the server strips the wrapper before it
+  // reaches a reader, and the mock produces the payload, not the stored row.
+  mockChatTasks.set(202, {
+    id: 202,
+    roomToken: 'web-carol-general',
+    prompt:
+      'Does the west branch work for you? I need about 30 minutes.\n\nHappy to come to you instead if that is easier — let me know either way.',
+    createdAt: base + 24_000,
+    origin: 'email',
+    subject: 'Re: Scheduling',
+    author: 'contact@example.com',
   });
 })();
 
@@ -577,6 +598,13 @@ function mockFinishedTurn(t: MockChatTask): { user: any; assistant: any } {
       ...(t.attachments?.length ? { attachments: t.attachments } : {}),
       ...(t.attachmentPaths?.length ? { attachment_paths: t.attachmentPaths } : {}),
       ...(t.replyToMsgId ? { reply_to: mockReplyTo(t.replyToMsgId) } : {}),
+      // Provenance for a turn from outside the room. Emitted here for the same
+      // reason `reply_to` is: a turn that renders as external in one view and
+      // ordinary in another is worse than one that renders external in neither,
+      // and the mock is the third producer of this shape.
+      ...(t.origin ? { origin: t.origin } : {}),
+      ...(t.subject ? { subject: t.subject } : {}),
+      ...(t.author ? { author: t.author } : {}),
     },
     assistant: {
       role: 'assistant',
@@ -639,6 +667,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       max_attachment_mb: 25,
       attachment_extensions: ['pdf', 'png', 'jpg'],
       client_poll_interval_ms: 600,
+      external_turn_display: 'collapsed',
     };
   }
 
@@ -2469,6 +2498,7 @@ const handlers: MockHandler[] = [
       routing: {},
       briefing_email_html: true,
       timezone_follow_location: false,
+      external_turn_display: 'collapsed',
       purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
       delivery_surfaces: ['email', 'ntfy', 'talk'],
     };

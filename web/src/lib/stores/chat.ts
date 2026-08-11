@@ -44,9 +44,11 @@ import {
   type ChatRoom,
   type ChatHistory,
   type ChatView,
+  type ExternalTurnDisplay,
   type SendResult,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
 import {
@@ -307,6 +309,13 @@ export interface ChatSession {
   applyDraftsSnapshot: (drafts: OutboundDraft[] | undefined, unavailable?: boolean) => void;
   answerDraft: (draftId: number, action: 'approve' | 'discard') => Promise<boolean>;
   editDraft: (draftId: number, body: string) => Promise<boolean>;
+  // How much of an external-origin turn the transcript shows. Read from
+  // `/chat/config` at init and edited on /settings, so it is server state
+  // rather than a client-local preference — the reader may be on a phone one
+  // day and a laptop the next, and how much of a stranger's mail they want
+  // inline is a decision about the account, not about the browser. Seeded at
+  // the default so the first paint is never `full` by accident.
+  externalTurnDisplay: Writable<ExternalTurnDisplay>;
   teardown: () => void;
 }
 
@@ -425,6 +434,10 @@ function createSession(): ChatSession {
     text: '',
     attachments: [],
   });
+  // Seeded at the default rather than left undefined: `init` may not have
+  // answered before the first transcript paints, and the safe direction there
+  // is to show less of a stranger's mail rather than more.
+  const externalTurnDisplay = writable<ExternalTurnDisplay>('collapsed');
 
   // ---- Client-only rows -----------------------------------------------------
   //
@@ -1619,6 +1632,11 @@ function createSession(): ChatSession {
       roomName: m.room_name,
       // Server-resolved author for a user row the viewer did not write.
       author: typeof m.author === 'string' && m.author ? m.author : undefined,
+      // Provenance for a user row that entered from outside the room. Both are
+      // set here and nowhere else, so history, the aggregate panes and the live
+      // stream mark the same turns as external.
+      origin: typeof m.origin === 'string' && m.origin ? m.origin : undefined,
+      subject: typeof m.subject === 'string' && m.subject ? m.subject : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
@@ -1878,6 +1896,10 @@ function createSession(): ChatSession {
       const cfg = await getChatConfig().catch(() => null);
       if (superseded()) return;
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
+      // Normalized rather than adopted: the column takes any string a hand
+      // edit puts in it, and an unrecognized value must read as the default
+      // instead of leaving the transcript with no branch to take.
+      externalTurnDisplay.set(normalizeExternalTurnDisplay(cfg?.external_turn_display));
       const { rooms: list } = await getChatRooms();
       if (superseded()) return;
       rooms.set(sortRoomsByActivity(list));
@@ -2715,6 +2737,7 @@ function createSession(): ChatSession {
     applyDraftsSnapshot,
     answerDraft,
     editDraft,
+    externalTurnDisplay,
     teardown,
   };
 }

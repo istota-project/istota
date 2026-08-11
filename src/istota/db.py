@@ -4358,6 +4358,14 @@ _CROSS_ROOM_COLUMNS = (
     # `processed_emails` (ISSUE-226) — correct, but it answered for email alone
     # and pinned a retention rule on the ledger to stay correct.
     "  m.author_user_id AS author_user_id, m.author_label AS author_label, "
+    # Where the turn entered from. Already on the row and long dropped on the
+    # way out, so a stranger's mail reached the client as an ordinary user
+    # bubble with an unfamiliar name in it — no provenance, no collapse. The
+    # dict builder decides what to publish (see `web_app._user_row_display`);
+    # this fragment's job is only to stop losing it. Selected in the per-room
+    # spine too (`web_app._SPINE_COLUMNS`), or a turn would read as external in
+    # one view and ordinary in the other.
+    "  m.origin_surface AS origin_surface, "
     # Truncated in SQLite rather than in the dict builder: this fragment also
     # backs the live room-event stream, which is byte-budgeted, and a reply to
     # a long answer would otherwise carry that whole answer a second time.
