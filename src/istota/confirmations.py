@@ -331,72 +331,29 @@ def record_exchange(
         return (None, None)
 
 
-def _room_holds_no_copy_of_this_exchange(conn, task: db.Task, config) -> bool:
+def _room_holds_no_copy_of_this_exchange(conn, task: db.Task) -> bool:
     """Whether this email turn is one the room deliberately never mirrored.
 
     The gate's suppression means "not yet" and is undone below; ISSUE-254's
-    means "never", and approving must not hand back the copy the fix removed.
+    means "never", and approving must not hand back the copy that fix removed.
     The two co-occur only under ``confirm_sender_match``, which stops the
     own-address claim from counting as trust and so lets a self-addressed thread
     reply reach the gate at all.
 
-    Nothing records the decision directly, so it is reconstructed from its two
-    observable halves — and both have to hold, because either alone names a
-    legitimate case:
+    A column read since ISSUE-255. The poller computes the decision and now
+    records it on the task, so this asks the writer rather than reconstructing
+    the answer from two observable halves — the plan naming no room, and the
+    sender being the user — which needed a ``Config`` in scope and could only
+    ever be an inference about what some other code had already concluded.
 
-    - **The plan names no room.** Asked with ``conversation_token=None``, i.e.
-      rung 2 of the same ladder alone. Rung 1 is exactly what the suppression is
-      working around (the task inherits the origin room as its token), so
-      consulting it here would answer "yes, there is a room" every time. A
-      *first-contact* self-addressed mail keeps its ``room:<tok>,email`` plan and
-      so keeps its mirror, which is the boundary this issue deliberately did not
-      cross.
-    - **The sender is the user.** Via the same predicate the poller used, on the
-      raw header ``processed_emails`` stored — a second spelling of "is this the
-      user" would silently mirror a turn the first one suppressed.
-
-    Fails **open** on a missing ``processed_emails`` row — no sender to test, so
-    the restore proceeds as it did before this existed. That is the right
-    direction for an *unreadable* input: restoring wrongly costs one duplicated
-    turn, while suppressing wrongly hides an approved stranger's message from the
-    room the user is watching for it. Not reachable today (the row is written in
-    the task's own transaction and pruned at 90 days against a two-hour
-    confirmation timeout), so this states the direction rather than a live path.
-
-    **Without a ``config`` this answers False and the restore proceeds**, so the
-    bare form does not carry the suppression. Not an oversight, and answering on
-    the sender alone was tried and is wrong: the plan half is the *only* thing
-    separating a self-addressed thread reply from a self-addressed **first
-    contact**, which keeps its mirror by design — and resolving a destination to
-    a room needs the routing table a config carries. Suppressing on the sender
-    alone therefore swallows the first-contact case, which
-    `test_message_author.py::TestApprovedGateMirror` and this file's own
-    first-contact test both pin. Every live caller passes a config
-    (``commands.cmd_confirm``, the web confirm endpoint, ``apply_answer``); the
-    bare form survives only for the DB-only attribution path
-    ``db.author_for_email_task`` documents, which is not a route a self-reply
-    reaches. Restoring one turn too many is in any case the safer of the two
-    errors here — see the fail-open note above.
+    A task created before that column existed reads False and is restored as it
+    would have been before, which is the same direction the reconstruction's own
+    fail-open branch chose: restoring wrongly costs one duplicated turn, while
+    suppressing wrongly hides an approved stranger's message from the room the
+    user is watching for it. The exposure is a single confirmation open across
+    the upgrade, against a two-hour timeout.
     """
-    if task.source_type != "email" or config is None:
-        return False
-    record = db.get_email_for_task(conn, task.id)
-    if record is None:
-        return False
-
-    from .email_support import sender_claims_to_be_user
-    from .transport.routing import transcript_room
-
-    if transcript_room(
-        conn, config,
-        user_id=task.user_id,
-        source_type=task.source_type,
-        conversation_token=None,
-        output_target=task.output_target,
-        talk_delivery_token=task.talk_delivery_token,
-    ):
-        return False
-    return sender_claims_to_be_user(config, task.user_id, record.sender_email)
+    return task.source_type == "email" and task.withheld_from_room
 
 
 def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
@@ -434,7 +391,7 @@ def _restore_transcript_mirror(conn, task: db.Task, config=None) -> None:
     if not room_token:
         return
     try:
-        if _room_holds_no_copy_of_this_exchange(conn, task, config):
+        if _room_holds_no_copy_of_this_exchange(conn, task):
             return
         if db.get_room(conn, room_token) is None:
             return

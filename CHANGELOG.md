@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A private email exchange with the bot is now kept out of the room's context and memory, not just out of what the room shows. Keeping it off the transcript stopped it being visible there, but the room's history, its recall and its nightly summary all still counted it — so the quoted thread went on being read back into every later task in that room, which was the cost the change was meant to remove. Mail from an outside contact is unaffected in all three.
+
+- A request you email in that fails now tells you it failed. Replying from your own address is answered by mail alone, and errors are never emailed, so a failed request went nowhere at all: no message in the room, no mail, nothing. You now get a notification wherever your alerts go. A scheduled job that mails a report out stays silent as before.
+
+- An answer that can't be emailed is no longer lost. When mail is the only destination and the send fails, the reply survived only in the task record; it is now sent to you through your alerts instead, with the answer itself included.
+
 - A private email exchange with the bot is no longer copied into the room the conversation started from. Replying from your own address only needs an answer by mail — you are already reading the thread — but every message and every reply was also written into that room as an ordinary turn, quoted chain and all, so a four-message exchange left several copies of itself there. Mail from an outside contact still appears in the room, which is the case the copy exists for. Answering such a reply with a question of your own now comes back by mail rather than waiting for you in the room.
 
 ## [0.40.1] - 2026-08-12

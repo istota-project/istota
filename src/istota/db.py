@@ -45,6 +45,12 @@ class Task:
     #: Canonical `messages.id` of the cited parent. A *different namespace*
     #: from `reply_to_talk_id` — never assign one to the other.
     reply_to_message_id: int | None = None
+    #: This exchange is deliberately not part of the room `conversation_token`
+    #: names (ISSUE-255) — a self-addressed thread reply, which keeps the room as
+    #: its token for context but is never written back into it. Read by the
+    #: history fallback, the channel memory namespace, the channel sleep cycle,
+    #: and the two failure paths that would otherwise have no channel at all.
+    withheld_from_room: bool = False
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -243,6 +249,12 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("cancel_requested", "INTEGER DEFAULT 0"),
         ("worker_pid", "INTEGER"),
         ("last_heartbeat", "TEXT"),
+        # This exchange is deliberately not part of the room its
+        # `conversation_token` names (ISSUE-255); see the schema.sql comment.
+        # A constant DEFAULT, so SQLite backfills every existing row with 0 —
+        # which is the right answer for all of them: nothing before this wrote
+        # the flag, and every consumer's filter reads 0 as "part of the room".
+        ("withheld_from_room", "INTEGER DEFAULT 0"),
         ("heartbeat_silent", "INTEGER DEFAULT 0"),
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("scheduled_job_id", "INTEGER"),
@@ -1025,6 +1037,10 @@ def create_task(
     reply_to_talk_id: int | None = None,
     reply_to_content: str | None = None,
     reply_to_message_id: int | None = None,
+    # This exchange is deliberately not part of the room `conversation_token`
+    # names (ISSUE-255). Written by the one caller that knows — `record_inbound`,
+    # from the same answer that turned off the transcript mirror.
+    withheld_from_room: bool = False,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1058,11 +1074,11 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            reply_to_message_id,
+            reply_to_message_id, withheld_from_room,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1081,6 +1097,7 @@ def create_task(
             reply_to_talk_id,
             reply_to_content,
             reply_to_message_id,
+            1 if withheld_from_room else 0,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1110,7 +1127,7 @@ _TASK_COLUMNS = (
     "result, actions_taken, execution_trace, error, confirmation_prompt, "
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
-    "reply_to_content, reply_to_message_id, "
+    "reply_to_content, reply_to_message_id, withheld_from_room, "
     "heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "talk_delivery_token, skill, skill_args"
@@ -1152,6 +1169,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         reply_to_talk_id=row["reply_to_talk_id"],
         reply_to_content=row["reply_to_content"],
         reply_to_message_id=row["reply_to_message_id"],
+        withheld_from_room=bool(row["withheld_from_room"]),
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -2329,6 +2347,14 @@ def _conversation_history_from_tasks(
     user_email_addresses: Mapping[str, Sequence[str]] | None = None,
 ) -> list[ConversationMessage]:
     """Legacy path: reconstruct history from completed `tasks` rows."""
+    # `withheld_from_room` excludes an exchange that keeps this token for context
+    # but is deliberately not part of the room (ISSUE-255): a self-addressed
+    # thread reply. The `messages` path needs no equivalent — a withheld turn was
+    # never written there, which is the half ISSUE-254 already closed. This
+    # fallback is where the quoted chain was still being charged to every later
+    # task in the room, and it is not a rare path: it serves any room with no
+    # completed talk/web task left in `tasks`, i.e. a mail-only room, or one
+    # whose last chat turn aged past `task_retention_days`.
     query = f"""
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
                {EMAIL_SENDER_SUBQUERY.format(alias="tasks")}
@@ -2336,6 +2362,7 @@ def _conversation_history_from_tasks(
         WHERE conversation_token = ?
         AND status = 'completed'
         AND result IS NOT NULL
+        AND COALESCE(withheld_from_room, 0) = 0
     """
     params: list = [conversation_token]
 
@@ -2701,6 +2728,12 @@ def get_previous_tasks(
     ``get_conversation_history``'s ``exclude_source_types``). Returns up to
     ``limit`` tasks in oldest-first order. ``user_email_addresses`` drives the
     email-sender attribution described on ``get_conversation_history``.
+
+    Excludes ``withheld_from_room`` for the same reason the history reader does
+    (ISSUE-255) — and it matters more here, not less. This re-surfacing path runs
+    on **every** task in the room, with no ``_messages_caught_up`` gate above it,
+    so without the filter a withheld exchange reached LLM context even for a room
+    whose history reads cleanly from ``messages``.
     """
     query = f"""
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id,
@@ -2709,6 +2742,7 @@ def get_previous_tasks(
         WHERE conversation_token = ?
         AND status = 'completed'
         AND result IS NOT NULL
+        AND COALESCE(withheld_from_room, 0) = 0
     """
     params: list = [conversation_token]
 
@@ -5585,6 +5619,12 @@ def get_recent_conversation_skills(
 
     Returns a union of skills from the last N tasks within the time window.
     Used for skill stickiness in follow-up messages.
+
+    Excludes ``withheld_from_room`` (ISSUE-255) — the weakest of that column's
+    readers and swept for consistency rather than for cost: it carries skill
+    names, not content, so leaving it would leak nothing of the exchange. It is
+    still the same class as the rest, and an unswept reader keyed on this column
+    invites the next person to assume the sweep was exhaustive.
     """
     query = """
         SELECT selected_skills
@@ -5593,6 +5633,7 @@ def get_recent_conversation_skills(
         AND status = 'completed'
         AND selected_skills IS NOT NULL
         AND created_at > datetime('now', ?)
+        AND COALESCE(withheld_from_room, 0) = 0
     """
     params: list = [conversation_token, f"-{max_age_minutes} minutes"]
 
@@ -6921,6 +6962,11 @@ def get_completed_channel_tasks_since(
     Fetch completed tasks for a conversation token since a given datetime.
 
     Returns list of Task objects ordered by id ascending.
+
+    Excludes ``withheld_from_room`` (ISSUE-255): the channel sleep cycle distils
+    what it collects into ``CHANNEL.md``, which is durable and reaches every
+    later prompt in the room — so an exchange deliberately kept out of the room
+    must not arrive there by the back door.
     """
     query = f"""
         SELECT {_TASK_COLUMNS}
@@ -6929,6 +6975,7 @@ def get_completed_channel_tasks_since(
         AND status = 'completed'
         AND result IS NOT NULL
         AND completed_at >= ?
+        AND COALESCE(withheld_from_room, 0) = 0
     """
     params: list = [conversation_token, since_datetime]
 
@@ -6950,6 +6997,12 @@ def get_active_channel_tokens(
     Get distinct conversation tokens from recent completed tasks.
 
     Used to auto-discover active channels for sleep cycle processing.
+
+    Excludes ``withheld_from_room`` (ISSUE-255) to match the collector this feeds.
+    A room whose only recent traffic was withheld is not an active channel, and
+    discovering it anyway would run a distillation pass over the empty string
+    ``gather_channel_data`` returns — once per cycle, for as long as the mail
+    keeps arriving.
     """
     cursor = conn.execute(
         """
@@ -6959,6 +7012,7 @@ def get_active_channel_tokens(
         AND conversation_token IS NOT NULL
         AND conversation_token != ''
         AND completed_at >= ?
+        AND COALESCE(withheld_from_room, 0) = 0
         ORDER BY conversation_token
         """,
         (since_datetime,),

@@ -1557,6 +1557,13 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     fields (``output_target`` / ``talk_delivery_token`` / ``model`` / ``effort``
     / ``skill``) are copied so the retry lands on the same surface as the
     original.
+
+    ``withheld_from_room`` is copied for the same reason (ISSUE-255), and it is
+    load-bearing here rather than tidy: the retry inherits `conversation_token`,
+    so without it a withheld exchange re-enters every reader that column keys —
+    the room's history fallback, its memory namespace, its sleep cycle. A bare
+    ``!retry`` typed in the origin room can reach such a task, since
+    ``_resolve_retry_target`` picks the newest failed task for the token.
     """
     return db.create_task(
         conn,
@@ -1566,6 +1573,7 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         conversation_token=original.conversation_token,
         parent_task_id=original.id,
         is_group_chat=original.is_group_chat,
+        withheld_from_room=original.withheld_from_room,
         output_target=original.output_target,
         talk_delivery_token=original.talk_delivery_token,
         model=original.model,

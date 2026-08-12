@@ -506,35 +506,87 @@ messages are re-polled rather than silently lost.
   *suppression*. Same forgery the confirmation gate already faces, which is what
   the ISSUE-228 DMARC canary watches for; a new consequence of it, not a new class.
 
-  **What the suppression does not reach, and why that is a separate change.**
-  The task still carries the origin room as its `conversation_token` — kept
-  deliberately, so the reply continues that conversation's context — and
-  everything keyed on that *column* rather than on the transcript therefore still
-  sees the exchange. Three known: `get_conversation_history` falls back to
-  `_conversation_history_from_tasks` (a straight `SELECT … WHERE
-  conversation_token = ?`) whenever `_messages_caught_up` is False, which is any
-  room with no completed talk/web task still in `tasks` — mail-only rooms, and
-  rooms whose last chat turn aged past `task_retention_days`; `index_conversation`
-  writes the turn into `channel:<token>` memory, which `_recall_memories` serves
-  back to later tasks there; and the channel sleep cycle selects a channel's
-  completed tasks by the same column. So the transcript is clean and the context
-  bill is only *partly* gone — on the `messages` path, not the fallback. Closing
-  it means either recording the decision on the task and teaching each of those
-  readers about it, or stopping the inheritance altogether, which moves history,
-  the per-channel active-task gate, memory recall and the sleep cycle in one go.
-  That is a different question from "does the room show this" and wants its own
-  entry. `tests/test_email_self_reply_mirror.py::TestTheResidueKeyedOnConversationToken`
-  pins both halves so the limit is testable rather than folklore.
+  **The decision is recorded on the task (ISSUE-255).** The task still carries
+  the origin room as its `conversation_token` — kept deliberately, so the reply
+  continues that conversation's context — so everything keyed on that *column*
+  rather than on the transcript once saw the exchange anyway, and the suppression
+  existed only for the length of one function call. `record_inbound` now writes
+  `tasks.withheld_from_room` from the same answer that turns off the mirror, and
+  six readers consult it. **`suppress_transcript_mirror` deliberately does not
+  set it** — that one is a hold on a turn that *does* belong in the room.
 
-  Two failure paths inherit the same shape and are part of that follow-up: an
-  email-only plan has no error channel. `process_one_task` delivers a permanent
-  failure notice only under `plan_talk and talk_token` (and deliberately never
-  emails errors), and an SMTP failure flips the task to `failed` with the answer
-  left only in `tasks.result`. Both predate this change — any `email_reply_routing
-  = "thread"` user already had them — but dropping the origin leg makes an
-  email-only plan the *default* outcome for a self-reply rather than a
-  configuration, so the exposure widens. Scoping a notice to just this case needs
-  the same "this task is a self-reply" fact the residue above wants recorded.
+  - `_conversation_history_from_tasks`, the fallback `get_conversation_history`
+    serves whenever `_messages_caught_up` is False (any room with no completed
+    talk/web task left in `tasks` — a mail-only room, or one whose last chat turn
+    aged past `task_retention_days`). The `messages` path needs no equivalent: a
+    withheld turn was never written there.
+  - `get_previous_tasks`, the re-surfacing path `executor._build_db_context` runs
+    on **every** task in the room with no caught-up gate above it — so this one
+    reached LLM context even for a room reading cleanly from `messages`, which
+    makes it the wider of the two history leaks rather than the narrower.
+  - `index_conversation`'s `channel:<token>` namespace, which `_recall_memories`
+    serves back to later tasks there. The per-user index is untouched: the
+    exchange is the user's own and belongs in their own recall.
+  - `get_completed_channel_tasks_since` and `get_active_channel_tokens`, the
+    channel sleep cycle's collector and its discovery query. `CHANNEL.md` is
+    durable and reaches every later prompt, and a room whose only recent traffic
+    was withheld is not an active channel.
+  - `confirmations._room_holds_no_copy_of_this_exchange`, now a column read
+    (below).
+  - `get_recent_conversation_skills`, the 30-minute skill-stickiness window. The
+    weakest reader — skill names, not content — swept for consistency rather than
+    for cost.
+
+  Two copy paths carry the column forward, and both are load-bearing rather than
+  tidy, because each inherits `conversation_token` from the task it copies:
+  `commands._create_retry_task` (a bare `!retry` in the origin room can land on a
+  withheld task, and this issue *raises* how often that happens, since the new
+  failure alert is what tells the user to retry) and the deferred-subtask handler
+  (pinned alongside the token it already pins, and not the JSON's to choose).
+
+  **`transcript_token` is required, and is the whole difference between the
+  column and `not mirror_to_room`.** The column says "there is a room, and this
+  exchange is deliberately not part of it". The poller sets
+  `mirror_to_room=False` for *every* self-addressed thread reply, including a
+  genuine email-only thread whose `conversation_token` is a synthetic hash naming
+  no room — flagging that one makes the readers above drop the thread's own prior
+  turns from its own history, which is the only history such a thread has, since
+  there is no `messages` store to fall back to. The consequence, stated: a
+  room-less self-reply thread keeps its pre-existing silence on both failure
+  paths. That is unchanged behaviour rather than a new gap — the issue's scope
+  was the exposure ISSUE-254 *widened*, i.e. a plan that became email-only by
+  default rather than by configuration.
+
+  **The two failure paths an email-only plan has no channel for.** Dropping the
+  origin leg leaves no Talk leg either, so `process_one_task`'s `plan_talk and
+  talk_token` branch — beside the standing rule never to email errors — told the
+  user nothing when their mailed request failed permanently, and an SMTP failure
+  left the composed answer only in `tasks.result`. Both predate ISSUE-254 (any
+  `email_reply_routing = "thread"` user had them); what changed is that an
+  email-only plan became the *default* outcome for a self-reply. Both now raise
+  through `purpose="alert"`, gated on `withheld_from_room` rather than on "the
+  plan is email-only" — a cron mailing a report to an external address is
+  deliberately task-only and must stay silent — and the delivery-failure notice
+  carries the answer body itself, since the point is that the answer survives.
+  Both are buffered and sent after every DB transaction closes, for the reason
+  every other notification on this path is: routed by purpose, an alert can land
+  on `web`, whose delivery opens a second connection to the same database. The
+  delivery-failure body goes through `email_transcript_body` first: an email
+  task's `result` may *be* the `{"subject","body","format"}` envelope the send
+  path parses, and a notice promising the answer must not hand over a JSON blob
+  (the same unwrap the room transcript does, ISSUE-247).
+
+  **One accepted trade in the failure alerts.** `purpose="alert"` resolves
+  through the user's routing table, so if their `alert` route or legacy
+  `alerts_channel` names the origin room, the delivery-failure notice puts the
+  answer body into the room ISSUE-254 removed the exchange from. Accepted rather
+  than gated: it lands as a `role='system'` row, which
+  `_conversation_history_from_messages` excludes (it inner-joins user+assistant
+  pairs), so the quadratic context bill ISSUE-254 was actually about is not
+  reintroduced — only transcript visibility, on a failure, where the alternative
+  is the answer existing nowhere the user can reach. Suppressing the body when
+  the route happens to be that room would lose the answer in precisely the
+  configuration where it is most likely to be lost.
 
   **`mirror_to_room` and `suppress_transcript_mirror` are not the same flag.**
   The second is a *hold* — the turn belongs in the room and
@@ -542,14 +594,14 @@ messages are re-polled rather than silently lost.
   no restore path. They co-occur only under `confirm_sender_match` (which stops
   the own-address claim from counting as trust, so a self-addressed reply can
   reach the gate at all), and there the restore must not hand back the copy the
-  suppression removed. Nothing records the decision, so
-  `confirmations._room_holds_no_copy_of_this_exchange` reconstructs it from both
-  observable halves, and needs both: the plan names no room (`transcript_room`
-  with `conversation_token=None`, i.e. rung 2 alone — rung 1 is precisely what the
-  suppression works around) **and** the sender is the user, via the same
-  `sender_claims_to_be_user` predicate on the raw header `processed_emails`
-  stored. One predicate, shared, because two spellings of "is this the user" that
-  disagree on the display-name form would mirror a turn the other suppressed.
+  suppression removed. `confirmations._room_holds_no_copy_of_this_exchange` is
+  what stops it, and since ISSUE-255 it is a plain read of
+  `withheld_from_room` — it used to reconstruct the answer from two observable
+  halves (the plan naming no room, *and* the sender being the user), which needed
+  a `Config` in scope and could only ever infer what the poller had already
+  concluded. Both halves were load-bearing in that form, because a self-addressed
+  *first contact* keeps its `room:<tok>,email` plan and its mirror; the column
+  says so directly instead.
 
 **Who wrote a row.** `messages` records the author on two nullable columns —
 `author_user_id` (an istota user) and `author_label` (an external sender,

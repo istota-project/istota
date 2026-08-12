@@ -380,12 +380,17 @@ class TestEveryoneElseKeepsTheMirror:
 
 class TestTheResidueKeyedOnConversationToken:
     """The task still carries the origin room as its `conversation_token`, so
-    everything keyed on that column rather than on the transcript still sees this
-    exchange. Pinned rather than fixed: undoing the inheritance is a much wider
-    change (it moves history, the per-channel active-task gate, memory recall and
-    the sleep cycle all at once) and it is a different decision from "does the
-    room show this". Recorded here so the limit of the fix is testable rather
-    than folklore."""
+    everything keyed on that column rather than on the transcript once saw this
+    exchange anyway.
+
+    **Closed by ISSUE-255**, which took the option this class's original note
+    called the narrower one: the decision is recorded on the task
+    (`tasks.withheld_from_room`) and each consumer reads it, rather than the
+    inheritance being dropped — which would have moved history, the per-channel
+    active-task gate, memory recall and the sleep cycle at once, and is a
+    different question from "does the room show this". The inheritance therefore
+    stays, and the assertions below now pin both halves as closed.
+    `tests/test_email_self_reply_residue.py` covers the other four consumers."""
 
     def test_the_room_transcript_is_clean(self, db_path, config):
         """The half that *is* fixed, stated next to the half that is not: the
@@ -401,17 +406,22 @@ class TestTheResidueKeyedOnConversationToken:
         with db.get_db(db_path) as conn:
             assert db.get_messages(conn, ROOM) == []
 
-    def test_but_the_tasks_fallback_reader_still_sees_it(self, db_path, config):
+    def test_and_the_tasks_fallback_reader_no_longer_sees_it_either(
+        self, db_path, config,
+    ):
         """`get_conversation_history` serves from `messages` only when
         `_messages_caught_up` says the store is complete for the room, which
         needs a completed talk/web task still in `tasks`. A room with none — one
         used only by mail, or one whose last chat turn aged past
         `task_retention_days` — falls back to selecting straight from `tasks
-        WHERE conversation_token = ?`, and this task is still keyed there.
+        WHERE conversation_token = ?`, where this task is still keyed.
 
-        So the context cost is removed on the `messages` path and not on the
-        fallback. Asserting the fallback's *current* answer, so that closing the
-        gap is a deliberate change to this test rather than a silent one."""
+        That fallback used to serve the turn, which is why this assertion was
+        written as one rather than as a comment. ISSUE-255 closed it: the
+        fallback now excludes `withheld_from_room`, so the context cost is gone
+        on both paths. The room is still on the fallback — that half is
+        unchanged and asserted, because the fix must work *there*, not by moving
+        the room onto the `messages` path."""
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn, to_addr=USER_ADDR)
@@ -425,7 +435,7 @@ class TestTheResidueKeyedOnConversationToken:
                 conn, ROOM,
                 exclude_source_types=["scheduled", "briefing", "subtask", "heartbeat"],
             )
-        assert [h.source_type for h in history] == ["email"]
+        assert history == []
 
 
 # ---------------------------------------------------------------------------
@@ -462,13 +472,17 @@ class TestApprovalDoesNotRestoreIt:
     def test_approving_a_self_addressed_first_contact_still_restores_it(
         self, db_path, config,
     ):
-        """The guard for the `and` in `_room_holds_no_copy_of_this_exchange`.
+        """The scope boundary, which is what `_room_holds_no_copy_of_this_exchange`
+        has to keep getting right.
 
-        This is the one reachable case where its two halves disagree: the sender
-        *is* the user, but the plan names a room, because a first-contact mail
-        carries no thread to suppress and gets the `room:<tok>,email` routing
-        ISSUE-247 gave it. Drop either half and this row stops appearing — the
-        scope boundary this issue deliberately did not cross."""
+        A first-contact self-addressed mail carries no thread to suppress, so it
+        gets the `room:<tok>,email` routing ISSUE-247 gave it and keeps its
+        mirror — the sender is the user, and the room still holds the exchange.
+        It used to be the case that separated the two halves of a reconstruction;
+        since ISSUE-255 it is the case that must leave `withheld_from_room` False,
+        which is asserted directly in
+        `tests/test_email_self_reply_residue.py::TestTheDecisionIsRecorded`. Kept
+        here as the end-to-end half: the row must actually reappear on approval."""
         from istota import confirmations
 
         config.email.confirm_sender_match = True
