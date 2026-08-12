@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-08-12
+
 ### Fixed
 
 - A newly provisioned user could not sign in until the services were restarted by hand, meeting "Access denied: user not configured" on a perfectly good account. Adding a user through the playbook in fact restarted nothing at all: the step that writes the account was marked as never changing anything, so neither the scheduler nor the web interface was ever told to pick it up. Both are now restarted when a user is actually created or changed, and left alone when nothing was.
@@ -1529,7 +1531,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.40.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.40.1...main
+[0.40.1]: https://gitlab.com/cynium/istota/-/releases/v0.40.1
 [0.40.0]: https://gitlab.com/cynium/istota/-/releases/v0.40.0
 [0.39.0]: https://gitlab.com/cynium/istota/-/releases/v0.39.0
 [0.38.0]: https://gitlab.com/cynium/istota/-/releases/v0.38.0
