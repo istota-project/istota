@@ -99,6 +99,37 @@ def per_user_address(config: Config, user_id: str) -> str | None:
     return f"{local}+{user_id}@{domain}"
 
 
+def sender_claims_to_be_user(
+    config: Config, user_id: str | None, sender: str | None,
+) -> bool:
+    """Whether an envelope sender names one of ``user_id``'s own addresses.
+
+    A *claim*, never an authentication: SMTP ``From:`` is unauthenticated, so
+    this says the sender presented the user's address and nothing more. Two
+    decisions read it — the DMARC canary and the confirmation prompt's wording
+    (``transport.email.inbound``), and the origin-mirror suppression for a
+    thread reply the user sent themselves (ISSUE-254).
+
+    Checked against the **routed** user's addresses rather than
+    ``find_user_by_email``, which returns the first user holding the address: on
+    a plus-address route the two can name different users, because the recipient
+    decides the route and the sender decides the ``From:``.
+
+    A plain lowercase match on the raw header, deliberately not
+    ``parseaddr``-normalized. It lives here so the ingest decision and anything
+    reconstructing it later (``confirmations._restore_transcript_mirror``) share
+    one definition — two spellings of "is this the user" that disagree on the
+    display-name form would silently mirror a turn one of them suppressed.
+    """
+    if not sender:
+        return False
+    user_config = config.users.get(user_id or "")
+    if user_config is None:
+        return False
+    own = [a.lower() for a in (user_config.email_addresses or [])]
+    return sender.lower() in own
+
+
 def normalize_subject(subject: str) -> str:
     """Normalize subject for thread grouping (remove Re:, Fwd:, etc.)."""
     normalized = subject

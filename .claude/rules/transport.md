@@ -423,7 +423,9 @@ messages are re-polled rather than silently lost.
   Making the expiry loud and specific is the recoverable version of the same
   concern.
 
-  **Email-reply origin routing.** A thread-matched reply (recipient replies to a
+  **Email-reply origin routing** — all of which is conditioned on the sender not
+  being the routed user themselves; see "The user's own thread reply gets no
+  origin copy" below. A thread-matched reply (recipient replies to a
   mail we sent) routes back to the *conversation the original send came from*,
   not unconditionally to Talk. At send time `routing.origin_descriptor(task,
   conn)` stamps `sent_emails.origin_target`. **When the origin is a registered
@@ -460,6 +462,94 @@ messages are re-polled rather than silently lost.
   confirmations (only own-origin `source_type="web"` tasks do). Policy column lives
   in `user_profiles.email_reply_routing`; set via `istota user ensure
   --email-reply-routing`.
+
+  **The user's own thread reply gets no origin copy (ISSUE-254).** The mirror
+  above exists for the *emissary* case — an external contact replying to mail we
+  sent on the user's behalf, where the room copy is the only way the user learns
+  it arrived. A reply the user sends from their own address is not that, and
+  mirroring it duplicated a private exchange into the room: each reply quotes the
+  whole prior thread, so the N-th message wrote roughly N copies of the
+  conversation into a transcript that is then LLM context for every later task in
+  that room. The discriminator is **per-message, not per-user** — `email_reply_
+  routing = "thread"` would suppress the emissary case too — and it is
+  `email_support.sender_claims_to_be_user`, i.e. the envelope sender is one of the
+  routed user's own addresses. **Not** `not is_emissary_reply`, which is false for
+  a plus-address route as well: that is a third party writing to `bot+<user>@`,
+  and it keeps its mirror. Two legs key on the same room token, so suppressing
+  either alone changes nothing: `output_target` drops the origin leg (in *both*
+  branches — the legacy NULL-`origin_target` one hardcodes `talk,email` and is
+  live for any send with no deliverable origin, not merely pre-migration rows),
+  and `IncomingMessage.mirror_to_room` turns off `record_inbound`'s mirror, which
+  would otherwise fire on rung 1 because the task inherits the origin room as its
+  `conversation_token`. That inheritance stays — the reply still continues that
+  conversation's *context*, it just does not write itself back into it. The answer
+  side needs no third change: `_room_turn_belongs_here` wants either a delivery
+  into the room or a question already in it, and neither holds. **It does change
+  one thing beyond the transcript**: with no room leg the task is no longer a
+  `_confirmable_surface`, so an answer matching `CONFIRMATION_PATTERN` completes
+  and is mailed rather than parking. Kept deliberately, and only defensible here
+  — the rule that an email task parks and asks in the room exists because the
+  room leg is the only surface that can carry the question (the email leg would
+  mail the principal's decision to an external correspondent), and parking with
+  no such leg delivers the question nowhere and dies at
+  `expire_stale_confirmations`, the failure `process_one_task`'s
+  `is_confirmation_request` comment records fixing. On a self-reply the email leg
+  goes to the *user*, so the question reaches the only person who can answer it,
+  on the surface they are reading. The cost, stated: deferred ops a park would
+  have held until the answer now apply on completion. The outbound email approval
+  gate is unaffected — it runs on the delivery leg, not on this park. Scope
+  boundary:
+  a *first-contact* self-addressed mail keeps its `room:<tok>,email` plan and its
+  mirror — one message pair with no quoted chain, into the room the user's routing
+  chose for mail that names no conversation. Residual, and why ISSUE-249 stays
+  open: this rests on an unauthenticated `From:`, so a spoof now also buys
+  *suppression*. Same forgery the confirmation gate already faces, which is what
+  the ISSUE-228 DMARC canary watches for; a new consequence of it, not a new class.
+
+  **What the suppression does not reach, and why that is a separate change.**
+  The task still carries the origin room as its `conversation_token` — kept
+  deliberately, so the reply continues that conversation's context — and
+  everything keyed on that *column* rather than on the transcript therefore still
+  sees the exchange. Three known: `get_conversation_history` falls back to
+  `_conversation_history_from_tasks` (a straight `SELECT … WHERE
+  conversation_token = ?`) whenever `_messages_caught_up` is False, which is any
+  room with no completed talk/web task still in `tasks` — mail-only rooms, and
+  rooms whose last chat turn aged past `task_retention_days`; `index_conversation`
+  writes the turn into `channel:<token>` memory, which `_recall_memories` serves
+  back to later tasks there; and the channel sleep cycle selects a channel's
+  completed tasks by the same column. So the transcript is clean and the context
+  bill is only *partly* gone — on the `messages` path, not the fallback. Closing
+  it means either recording the decision on the task and teaching each of those
+  readers about it, or stopping the inheritance altogether, which moves history,
+  the per-channel active-task gate, memory recall and the sleep cycle in one go.
+  That is a different question from "does the room show this" and wants its own
+  entry. `tests/test_email_self_reply_mirror.py::TestTheResidueKeyedOnConversationToken`
+  pins both halves so the limit is testable rather than folklore.
+
+  Two failure paths inherit the same shape and are part of that follow-up: an
+  email-only plan has no error channel. `process_one_task` delivers a permanent
+  failure notice only under `plan_talk and talk_token` (and deliberately never
+  emails errors), and an SMTP failure flips the task to `failed` with the answer
+  left only in `tasks.result`. Both predate this change — any `email_reply_routing
+  = "thread"` user already had them — but dropping the origin leg makes an
+  email-only plan the *default* outcome for a self-reply rather than a
+  configuration, so the exposure widens. Scoping a notice to just this case needs
+  the same "this task is a self-reply" fact the residue above wants recorded.
+
+  **`mirror_to_room` and `suppress_transcript_mirror` are not the same flag.**
+  The second is a *hold* — the turn belongs in the room and
+  `confirmations.approve` publishes it once answered. The first is permanent, with
+  no restore path. They co-occur only under `confirm_sender_match` (which stops
+  the own-address claim from counting as trust, so a self-addressed reply can
+  reach the gate at all), and there the restore must not hand back the copy the
+  suppression removed. Nothing records the decision, so
+  `confirmations._room_holds_no_copy_of_this_exchange` reconstructs it from both
+  observable halves, and needs both: the plan names no room (`transcript_room`
+  with `conversation_token=None`, i.e. rung 2 alone — rung 1 is precisely what the
+  suppression works around) **and** the sender is the user, via the same
+  `sender_claims_to_be_user` predicate on the raw header `processed_emails`
+  stored. One predicate, shared, because two spellings of "is this the user" that
+  disagree on the display-name form would mirror a turn the other suppressed.
 
 **Who wrote a row.** `messages` records the author on two nullable columns —
 `author_user_id` (an istota user) and `author_label` (an external sender,
