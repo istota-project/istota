@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     worker_pid INTEGER,                  -- PID of worker process
     last_heartbeat TEXT,                 -- Liveness ping from the running worker (ISSUE-112)
 
+    -- This exchange is deliberately not part of the room `conversation_token`
+    -- names (ISSUE-255). Set at ingest for a thread reply the user sent from
+    -- their own address: the reply continues that conversation's context, so it
+    -- keeps the room as its token, but nothing about it is written back into the
+    -- room (ISSUE-254). Without the column each consumer keyed on the token —
+    -- the history fallback, the channel memory namespace, the channel sleep
+    -- cycle, and the two failure paths — had no way to tell the two apart.
+    -- Distinct from the untrusted-sender gate's hold, which withholds a turn
+    -- that *does* belong in the room until the user approves it.
+    withheld_from_room INTEGER DEFAULT 0,
+
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
 

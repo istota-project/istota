@@ -182,7 +182,13 @@ def _process_deferred_subtasks(
                 )
                 continue
             # Pin conversation_token to parent task — deferred JSON cannot
-            # override this to prevent prompt-injection-driven routing.
+            # override this to prevent prompt-injection-driven routing. The
+            # parent's `withheld_from_room` is pinned with it, and for the same
+            # reason it is not the JSON's to choose: inheriting the token without
+            # it would index the subtask's prompt and result under the origin
+            # room's memory namespace and collect it into that room's sleep
+            # cycle, which is exactly what the parent is being kept out of
+            # (ISSUE-255).
             conv_token = task.conversation_token
             output_target = entry.get("output_target")
             if not output_target and conv_token:
@@ -194,6 +200,7 @@ def _process_deferred_subtasks(
                 source_type="subtask",
                 parent_task_id=task.id,
                 conversation_token=conv_token,
+                withheld_from_room=task.withheld_from_room,
                 priority=entry.get("priority", 5),
                 queue=task.queue,
                 output_target=output_target,

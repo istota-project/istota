@@ -249,6 +249,27 @@ def record_inbound(
         and bool(transcript_token)
         and not suppress_transcript_mirror
     )
+    # Record the permanent half of that decision on the task (ISSUE-255). The
+    # poller computed it and used it twice, and it was then thrown away — so
+    # every consumer keyed on `conversation_token` rather than on the transcript
+    # (the history fallback, the channel memory namespace, the channel sleep
+    # cycle, the two failure paths) went on treating the exchange as part of a
+    # room it is deliberately absent from. `suppress_transcript_mirror` is
+    # excluded on purpose: that one is a hold on a turn that *does* belong in the
+    # room, and `confirmations.approve` publishes it once answered.
+    #
+    # **`transcript_token` is required, and is the whole difference between this
+    # column and `not mirror_to_room`.** The column says "there is a room, and
+    # this exchange is deliberately not part of it" — so with no room resolved
+    # there is nothing to be absent from and the answer is False. The poller sets
+    # `mirror_to_room=False` for *every* self-addressed thread reply, including a
+    # genuine email-only thread whose `conversation_token` is a synthetic hash
+    # naming no room; flagging that one would make the readers below drop the
+    # thread's own prior turns from its own history, which is the only history
+    # such a thread has (there is no `messages` room to fall back to).
+    withheld_from_room = (
+        not room_surface and not mirror_to_room and bool(transcript_token)
+    )
 
     if room_surface:
         # Lazy room registration on first sight (a Talk room the bot joined, a
@@ -370,6 +391,7 @@ def record_inbound(
         reply_to_talk_id=reply_to_message_id,
         reply_to_message_id=reply_to_canonical_id,
         reply_to_content=reply_to_content,
+        withheld_from_room=withheld_from_room,
         output_target=output_target,
         talk_delivery_token=delivery_token,
         model=model,

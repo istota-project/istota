@@ -1950,6 +1950,12 @@ def process_one_task(
     post_talk_mirror_body = None
     post_email = False
     is_failure_notify = False
+    # A user-facing notice for a task whose plan has no room leg to carry one
+    # (ISSUE-255). Buffered rather than sent inline for the reason every other
+    # notification on this path is: routed by purpose, it can land on `web`,
+    # whose delivery opens a second connection to the database this function is
+    # holding a write transaction on.
+    failure_alert = None
 
     # Guard: detect API errors masquerading as successful results
     # (Claude Code may exit 0 with API error text as output).
@@ -2105,8 +2111,15 @@ def process_one_task(
                         )
                         _index_conv(conn, task.user_id, task_id, task.prompt, result,
                                     speaker=_speaker)
-                        # Also index under channel namespace if in a channel
-                        if task.conversation_token:
+                        # Also index under channel namespace if in a channel.
+                        # Skipped for an exchange deliberately kept out of that
+                        # room (ISSUE-255): `_recall_memories` serves this
+                        # namespace back to every later task there, so indexing
+                        # it would put the withheld turn in front of the model
+                        # even where the transcript is clean. The per-user index
+                        # above is untouched — the exchange is the user's own and
+                        # belongs in their own recall.
+                        if task.conversation_token and not task.withheld_from_room:
                             channel_uid = f"channel:{task.conversation_token}"
                             _index_conv(conn, channel_uid, task_id, task.prompt, result,
                                         speaker=_speaker)
@@ -2343,6 +2356,26 @@ def process_one_task(
                     friendly_error = _format_error_for_user(result)
                     post_talk_message = f"🐙 {friendly_error}"
                     is_failure_notify = True
+                elif task.withheld_from_room:
+                    # An email-only plan with no error channel at all (ISSUE-255).
+                    # The rule beside this branch — never email errors — assumes
+                    # a room leg exists to carry them, and for a self-addressed
+                    # thread reply there is none: the user mails the bot, the
+                    # task fails, and nothing tells them anywhere they look.
+                    # Routed by `alert` purpose so it reaches whichever surface
+                    # the user actually reads (ISSUE-241), and buffered for
+                    # delivery after this transaction closes, since an alert
+                    # routed to `web` opens a second connection to this database.
+                    #
+                    # Scoped to the recorded fact rather than to "the plan is
+                    # email-only": a cron mailing a report to an external address
+                    # is deliberately task-only, and alerting on each of its
+                    # failures is noise nobody asked for.
+                    failure_alert = (
+                        f"⚠️ **Your emailed request failed** (task #{task.id})\n\n"
+                        f"{_format_error_for_user(result)}\n\n"
+                        "Nothing was sent in reply. Resend the mail to try again."
+                    )
                 # NOTE: We intentionally do NOT email errors to users.
                 # Failed tasks routed to email/ntfy only log the error.
                 # Receiving error emails is confusing; users can check Talk or retry.
@@ -2634,6 +2667,32 @@ def process_one_task(
             with db.get_db(config.db_path) as conn:
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
+            if task.withheld_from_room and not (plan_talk and talk_token):
+                # The answer exists and nothing carries it (ISSUE-255). With a
+                # room leg the Talk post has already landed and the assistant row
+                # is stored, so a failed send costs the mail copy alone; with an
+                # email-only plan `tasks.result` is the only copy left, and
+                # nothing puts it in front of the user. Carry the body itself
+                # rather than a pointer — the point is that the answer survives
+                # the failure, not that its loss is announced.
+                #
+                # The guard is `plan_talk and talk_token`, the same pair the
+                # permanent-failure branch keys on, not `plan_talk` alone: a plan
+                # can carry a Talk leg whose channel resolves to None, in which
+                # case nothing was posted and the answer is just as lost.
+                # Unwrapped for the same reason the room transcript unwraps it
+                # (ISSUE-247): an email task's `result` may *be* the
+                # `{"subject","body","format"}` envelope the send path parses, and
+                # a notice promising the answer must not hand over a JSON blob.
+                # `email_transcript_body` prefers `result` over the deferred file
+                # deliberately — the result is the bot's answer to its user, which
+                # is exactly what this is recovering.
+                from .transport.email.outbound import email_transcript_body
+                failure_alert = (
+                    f"⚠️ **Could not send the email reply** (task #{task.id})\n\n"
+                    "The answer is below so it is not lost:\n\n"
+                    f"{email_transcript_body(email_result)}"
+                )
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"
@@ -2670,6 +2729,19 @@ def process_one_task(
                 web_result = result
             for dest in web_foreign_dests:
                 run_coro(web_transport.deliver(dest.channel, web_result, task=task))
+
+    if failure_alert:
+        # Last, and after every DB transaction above has closed. Best-effort by
+        # construction: this is the recovery path for a task that already has
+        # nowhere to deliver, so a failure here leaves things exactly as they
+        # were before ISSUE-255 rather than making them worse.
+        try:
+            send_notification(config, task.user_id, failure_alert, purpose="alert")
+        except Exception as e:
+            logger.warning(
+                "Failed to alert user about task %d (user=%s): %s",
+                task_id, task.user_id, e,
+            )
 
     return task_id, success
 
