@@ -69,6 +69,16 @@ class IncomingMessage:
     # the user's room before they approve it — and leaving it there when they
     # decline — is exactly what the gate exists to prevent.
     suppress_transcript_mirror: bool = False
+    # Whether this turn belongs in the resolved transcript room *at all*. The
+    # sibling above is a hold — the turn belongs there and is published once
+    # approved (``confirmations.approve``); this is a permanent answer with no
+    # restore path, so the two must not be collapsed into one flag. Set False by
+    # the email poller for a thread reply the user sent from their own address:
+    # they are on the email surface by demonstration, so a room copy only
+    # duplicates the exchange and re-bills it as context on every later task in
+    # that room (ISSUE-254). Applies only to a non-room surface — a Talk or web
+    # message is a turn in its own room by construction.
+    mirror_to_room: bool = True
     # The message's own sender, as the surface reported it, when that is not
     # simply ``user_id`` — today only email's envelope sender, which names the
     # person who *wrote* the mail rather than the istota user it was routed to.

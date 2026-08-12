@@ -179,6 +179,9 @@ def record_inbound(
     external_id: str | None = None,
     client_msg_id: str | None = None,
     suppress_transcript_mirror: bool = False,
+    # Whether this turn belongs in the resolved room at all — see the flag above
+    # it, which is a hold rather than a refusal.
+    mirror_to_room: bool = True,
     # The message's own sender when it isn't `user_id` (email's envelope
     # sender). Raw and untrusted; sanitized here, never by a reader.
     sender_address: str | None = None,
@@ -219,7 +222,9 @@ def record_inbound(
     # facing an untrusted-sender gate: the row would otherwise be committed in
     # this same transaction, i.e. published to the room *before* the user is
     # asked, and `db.cancel_task` on a decline only touches `tasks` — so
-    # declining would leave the content there permanently.
+    # declining would leave the content there permanently. `mirror_to_room` is
+    # the other, permanent answer: the room is not part of this exchange, so
+    # there is nothing for an approval to publish later (ISSUE-254).
     # Which room the turn is *written* to. For a room surface it is the room
     # itself. For a non-room surface it is whatever the routing resolved, which
     # is the token only when the token already is a room — a first-contact email
@@ -240,6 +245,7 @@ def record_inbound(
         )
     mirror_only = (
         not room_surface
+        and mirror_to_room
         and bool(transcript_token)
         and not suppress_transcript_mirror
     )
@@ -441,6 +447,7 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         if msg.platform_message_id is not None
         else None,
         suppress_transcript_mirror=msg.suppress_transcript_mirror,
+        mirror_to_room=msg.mirror_to_room,
         sender_address=msg.sender_address,
     )
     return task_id

@@ -4213,9 +4213,18 @@ def _chat_create_web_task(
         # `_CLAIM_CHANNEL_GATE_SQL`, so an unanswered gate froze the room until
         # `confirmation_timeout_minutes` (ISSUE-241, via ISSUE-227).
         #
-        # Two things make it safe. It is **room-scoped**, so an email gate
-        # parked under its own synthetic thread token is untouched — only a
-        # question the user can actually see. And it is skipped on a **replay**:
+        # Two things make it safe. It is **room-scoped**, which for an email
+        # gate mostly means untouched — a first-contact thread parks under its
+        # own synthetic token. Mostly, not always: a thread-matched reply
+        # inherits the origin room as its token and so does park here, and since
+        # ISSUE-254 a *self-addressed* one has no row in the room either, so
+        # cancelling it discards mail the user cannot see in this transcript.
+        # What keeps that from being a defect is the user-scoped
+        # `/chat/confirmations` banner below, which is deliberately not
+        # room-scoped and shows the question wherever the user is looking.
+        # Tightening this to "tasks with a `role='user'` row in the room" would
+        # make the comment true of the cancel itself. And it is skipped on a
+        # **replay**:
         # a retry returns the prior task without creating anything, so
         # cancelling here would discard the confirmation that very send
         # produced, which is the durability path this key exists to serve.

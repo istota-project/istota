@@ -1070,6 +1070,11 @@ class TestPollEmailsThreadMatching:
         # origin descriptor) used to be skipped. The origin must still be
         # recovered, and the prompt stays the plain self-reply template (not the
         # external-emissary one).
+        #
+        # Recovered for *context*, not for delivery: since ISSUE-254 the reply
+        # is mailed back and nothing is written into the origin room, because the
+        # user is on the email surface by demonstration. The recovery this test
+        # was written for is what `conversation_token` still asserts.
         config = make_config()
         config.email = _email_config()
         config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
@@ -1081,12 +1086,16 @@ class TestPollEmailsThreadMatching:
             )
         task = self._poll_reply(config, sender="carol@test.com", to=("bot@test.com",))
         assert task is not None
-        assert task.output_target == "web:rm_web123,email"
+        assert task.output_target == "email"
         assert task.conversation_token == "rm_web123"
         # Self-reply → plain template, not "an external contact has replied".
         assert "Emissary email reply" not in task.prompt
 
-    def test_self_reply_respects_policy(self, make_config):
+    def test_self_reply_ignores_the_origin_policy(self, make_config):
+        """The suppression is per-message, not per-user, so it overrides the
+        policy rather than being expressible through it (ISSUE-254). `origin`
+        names the room and nothing else, and an empty plan would lose the reply
+        — so it falls back to email, where the user wrote from."""
         config = make_config()
         config.email = _email_config()
         config.users = {
@@ -1101,7 +1110,7 @@ class TestPollEmailsThreadMatching:
                 conversation_token="rm_web123", origin_target="web:rm_web123",
             )
         task = self._poll_reply(config, sender="carol@test.com", to=("bot@test.com",))
-        assert task.output_target == "web:rm_web123"  # origin-only
+        assert task.output_target == "email"
 
     def test_plus_address_reply_recovers_origin(self, make_config):
         # Dormant second path: a reply addressed to the bot's plus-address is
