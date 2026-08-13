@@ -1490,6 +1490,81 @@ class TestAdminStats:
             alice = next(u for u in resp.json()["users"] if u["username"] == "alice")
             assert alice["last_active"] == "2026-04-01T12:00:00Z"
 
+    async def test_admin_stats_last_active_ignores_automated_sources(self, tmp_path):
+        """A user whose only traffic is scheduled has never been active."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            for source in ("scheduled", "briefing", "heartbeat", "subtask"):
+                db.create_task(conn, source, "alice", source_type=source)
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            alice = next(u for u in resp.json()["users"] if u["username"] == "alice")
+            assert alice["last_active"] is None
+            # Volume is still all-sources; only presence is interactive-only.
+            assert alice["tasks_total"] == 4
+
+    async def test_admin_stats_last_active_counts_every_interactive_source(self, tmp_path):
+        """Positive control per source type, spelled as its writer spells it.
+
+        The list is deliberately duplicated rather than read off
+        ``_INTERACTIVE_SOURCES``: the point is to catch the set drifting from
+        what the tree actually stores. ``tasks_file`` sat in that set for
+        months and matched nothing, because the poller writes ``istota_file``.
+        """
+        from istota import db, web_app
+        for source in ("talk", "email", "web", "cli", "repl", "istota_file"):
+            root = tmp_path / source
+            root.mkdir()
+            config = self._config_with_admin(root)
+            with db.get_db(config.db_path) as conn:
+                tid = db.create_task(conn, "hello", "alice", source_type=source)
+                conn.execute(
+                    "UPDATE tasks SET created_at = ? WHERE id = ?",
+                    ("2026-04-01 12:00:00", tid),
+                )
+                conn.commit()
+
+            app = _patch_app(config)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+                cookies = await self._login(client, "alice")
+                resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+                alice = next(u for u in resp.json()["users"] if u["username"] == "alice")
+                assert alice["last_active"] == "2026-04-01T12:00:00Z", source
+                assert web_app._classify_source(source) == "interactive", source
+
+    async def test_admin_stats_last_active_is_oldest_interactive_row(self, tmp_path):
+        """Newer automated rows must not bury an older interactive one."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "the real one", "alice", source_type="talk")
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ("2026-04-01 12:00:00", tid),
+            )
+            for n in range(3):
+                jid = db.create_task(conn, f"poll {n}", "alice", source_type="scheduled")
+                conn.execute(
+                    "UPDATE tasks SET created_at = ? WHERE id = ?",
+                    (f"2026-05-0{n + 1} 12:00:00", jid),
+                )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            alice = next(u for u in resp.json()["users"] if u["username"] == "alice")
+            assert alice["last_active"] == "2026-04-01T12:00:00Z"
+
     async def test_admin_stats_includes_scheduled_jobs(self, tmp_path):
         from istota import db
         config = self._config_with_admin(tmp_path)

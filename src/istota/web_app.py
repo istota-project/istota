@@ -1506,7 +1506,13 @@ def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
     return count, iso
 
 
-_INTERACTIVE_SOURCES = frozenset({"talk", "email", "tasks_file", "cli", "web"})
+# The spellings here must be the ones writers actually store on ``tasks``:
+# ``istota_file`` (tasks_file_poller), not the ``tasks_file`` this set carried
+# until ISSUE-253 and which no writer has ever produced. Not the same list as
+# ``executor._INTERACTIVE_SOURCE_TYPES`` / ``transport.routing``'s — those
+# answer "can a reply be routed back to this surface", which ``cli`` and
+# ``istota_file`` fail while still being a person doing something.
+_INTERACTIVE_SOURCES = frozenset({"talk", "email", "istota_file", "cli", "web", "repl"})
 _AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
 
 
@@ -1529,24 +1535,39 @@ def _classify_source(source_type: str | None) -> str:
 def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     """Per-user task counts, joined with config metadata.
 
-    ``last_active`` reflects the user's most recent task creation, not
-    ``updated_at`` — the latter bumps on background retries and would show
-    "active 30s ago" for users who logged off hours earlier.
+    ``last_active`` reflects the user's most recent *interactive* task
+    creation. Two exclusions, for the same reason: not ``updated_at`` (the
+    latter bumps on background retries and would show "active 30s ago" for
+    users who logged off hours earlier), and not the automated source types
+    (a ``CRON.md`` job, a briefing or a module poller runs whether or not
+    anyone is there, so counting one reports the scheduler's liveness rather
+    than the user's). The placeholders are built from ``_INTERACTIVE_SOURCES``
+    rather than a second hand-typed list, so this column and the 24h
+    interactive/automated split on the same row cannot drift on what
+    "interactive" means.
+
+    A user whose only traffic is automated therefore has ``last_active =
+    None``, while the all-sources total and its 30-day average stay
+    all-sources — they measure volume, not presence, so a large total beside a
+    blank last active is the honest reading.
     """
     cutoff_24h = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    interactive = sorted(_INTERACTIVE_SOURCES)
+    placeholders = ", ".join("?" * len(interactive))
 
     rows = conn.execute(
-        """
+        f"""
         SELECT user_id,
                COUNT(*) AS total,
                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_24h,
                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_30d,
-               MAX(created_at) AS last_active
+               MAX(CASE WHEN source_type IN ({placeholders})
+                        THEN created_at END) AS last_active
         FROM tasks
         GROUP BY user_id
         """,
-        (cutoff_24h, cutoff_30d),
+        (cutoff_24h, cutoff_30d, *interactive),
     ).fetchall()
     by_user = {r["user_id"]: r for r in rows}
 

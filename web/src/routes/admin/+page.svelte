@@ -368,7 +368,11 @@
               <th class="col-24h">24h activity</th>
               <th class="num col-failed">Failed</th>
               <th class="num col-avg">Avg/day</th>
-              <th class="col-active">Last active</th>
+              <th
+                class="col-active"
+                title="Most recent interactive task. Scheduled jobs, briefings, heartbeats and subtasks don't count."
+                >Last active</th
+              >
             </tr>
           </thead>
           <tbody>
