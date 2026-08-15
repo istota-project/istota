@@ -5213,6 +5213,45 @@ def find_sent_email_by_message_id(
     )
 
 
+def list_sent_message_ids(
+    conn: sqlite3.Connection,
+    user_id: str,
+    limit: int = 50,
+) -> list[str]:
+    """Message-IDs this user's outbound mail went out under, most recent first.
+
+    Feeds the thread arm of the read-side ``--scope mine`` prefilter: a reply
+    carrying one of these in References / In-Reply-To belongs to ``user_id``
+    even though it has no plus tag and an external sender, which is the one
+    ownership route with no server-side IMAP form of its own.
+
+    ``limit`` is the only bound, and it is the real one — every id returned
+    becomes IMAP search terms, so the count is what keeps the SEARCH command a
+    sane length. There is deliberately no date window on top of it: a date cut
+    can only ever remove ids the limit would otherwise have kept, so it narrows
+    coverage without buying any further bound. Most-recent-first is the right
+    bias when the limit bites, since a reply is far likelier to quote a recent
+    send than an old one.
+
+    Grouped by ``message_id`` because the cap should mean N distinct threads
+    rather than N rows: nothing constrains the column to be unique
+    (``idx_sent_emails_message_id`` is a plain index), so a re-recorded id would
+    otherwise spend the budget twice.
+    """
+    rows = conn.execute(
+        """
+        SELECT message_id, MAX(sent_at) AS last_sent
+        FROM sent_emails
+        WHERE user_id = ? AND message_id IS NOT NULL AND message_id != ''
+        GROUP BY message_id
+        ORDER BY last_sent DESC, message_id DESC
+        LIMIT ?
+        """,
+        (user_id, int(limit)),
+    )
+    return [row["message_id"] for row in rows]
+
+
 def find_sent_email_by_references(
     conn: sqlite3.Connection,
     references: list[str],

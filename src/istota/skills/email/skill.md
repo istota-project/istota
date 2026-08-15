@@ -24,7 +24,7 @@ The bot has one shared mailbox. You can read it with these verbs (all print a JS
 
 Every read verb takes `--scope {mine,shared,all}` (default `all`):
 
-- `mine` — mail addressed to you (`bot+<you>@…`), from your own address, or replying to a thread you started.
+- `mine` — mail addressed to you (`bot+<you>@…`), from your own address, or replying to a thread you started. `list` narrows the fetch server-side, and the third of those reaches back over your last ~25 sent messages only. Use `search`, which filters the whole window client-side, when hunting a reply to something older.
 - `shared` — mail sent to the bare bot address by a stranger (owned by nobody). **Anything sent to the bare bot address is visible to every user of this instance** — mail meant for one person goes to their `bot+<user>@…` plus-address.
 - `all` — `mine` + `shared`.
 

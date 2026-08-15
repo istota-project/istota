@@ -7,6 +7,7 @@ from-senders/newsletters), including untrusted framing and the IMAP timeout.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from unittest.mock import MagicMock, patch
 
@@ -461,6 +462,217 @@ class TestListFilters:
         assert 'TO "bot+bob@example.com"' in captured["criteria"]
         assert 'FROM "bob@personal.com"' in captured["criteria"]
         assert "OR" in captured["criteria"]
+
+
+class TestScopeMineThreadArm:
+    """ISSUE-252: a reply to the bot's bare `From:` is owned via the thread arm.
+
+    It carries no plus tag and its sender is a stranger, so neither server-side
+    term matched it and the prefilter kept it out of the fetched window entirely
+    — correctly routed, correctly owned, and invisible under the one scope that
+    means "mine".
+    """
+
+    def _capture_criteria(self, skill_env, **overrides):
+        captured = {}
+
+        def fake_list(*, folder, limit, config, criteria):
+            captured["criteria"] = str(criteria)
+            return []
+
+        kwargs = dict(scope="mine", limit=5, since=None, from_addr=None, unread=False)
+        kwargs.update(overrides)
+        with patch("istota.skills.email.list_emails", side_effect=fake_list):
+            cmd_list(MagicMock(**kwargs))
+        return captured["criteria"]
+
+    def test_criteria_carry_the_users_sent_message_ids(self, skill_env, app_config):
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<s1@example.com>",
+                to_addr="client@out.com",
+            )
+        crit = self._capture_criteria(skill_env)
+        # Brackets stripped: HEADER is a substring match, so the bare form covers
+        # both `<id>` and the bare id a non-conforming sender writes.
+        assert 'HEADER "References" "s1@example.com"' in crit
+        assert 'HEADER "In-Reply-To" "s1@example.com"' in crit
+        # The other two arms are still there.
+        assert 'TO "bot+bob@example.com"' in crit
+
+    def test_another_users_sent_ids_never_enter_the_criteria(self, skill_env, app_config):
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="dana", message_id="<dana1@example.com>",
+                to_addr="client@out.com",
+            )
+        crit = self._capture_criteria(skill_env)
+        assert "<dana1@example.com>" not in crit
+
+    def test_thread_terms_are_capped(self, skill_env, app_config):
+        from istota.skills.email import _MINE_THREAD_MAX_IDS
+        with db.get_db(app_config.db_path) as conn:
+            for i in range(_MINE_THREAD_MAX_IDS + 10):
+                db.record_sent_email(
+                    conn, user_id="bob", message_id=f"<s{i}@example.com>",
+                    to_addr="client@out.com",
+                )
+        crit = self._capture_criteria(skill_env)
+        assert crit.count('HEADER "References"') == _MINE_THREAD_MAX_IDS
+
+    def test_no_sent_mail_leaves_the_criteria_unchanged(self, skill_env):
+        crit = self._capture_criteria(skill_env)
+        assert "HEADER" not in crit
+        assert 'TO "bot+bob@example.com"' in crit
+
+    def test_thread_matched_reply_survives_the_server_side_prefilter(
+        self, skill_env, app_config,
+    ):
+        """The seam: criteria the server would honour, applied for real.
+
+        The stand-in mailbox returns a message only when the criteria name one
+        of its References ids, which is what the IMAP server does. Before the
+        thread arm this returned nothing and the reply was unfindable.
+        """
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<s1@example.com>",
+                to_addr="client@out.com",
+            )
+        reply = _env("emissary", "client@out.com", to=[BOT], references="<s1@example.com>")
+
+        def fake_list(*, folder, limit, config, criteria):
+            # `HEADER References <x>` matches when x is a substring of the raw
+            # header, which is how the reply's `<s1@example.com>` is reached by
+            # the de-bracketed search term.
+            terms = re.findall(r'HEADER "References" "([^"]+)"', str(criteria))
+            return [reply] if any(t in reply.references for t in terms) else []
+
+        args = MagicMock(scope="mine", limit=20, since=None, from_addr=None, unread=False)
+        with patch("istota.skills.email.list_emails", side_effect=fake_list):
+            res = cmd_list(args)
+        assert [e["id"] for e in res["emails"]] == ["emissary"]
+
+    def test_an_old_send_is_reachable_while_it_is_within_the_cap(
+        self, skill_env, app_config,
+    ):
+        # The arm is bounded in sends, not in days: age alone never excludes an
+        # id. A date window on top of the cap could only ever remove ids the cap
+        # would have kept, so there isn't one.
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<ancient@example.com>",
+                to_addr="client@out.com",
+            )
+            conn.execute(
+                "UPDATE sent_emails SET sent_at = ? WHERE message_id = ?",
+                ("2020-01-01 00:00:00", "<ancient@example.com>"),
+            )
+        assert "ancient@example.com" in self._capture_criteria(skill_env)
+
+    def test_since_does_not_change_the_thread_arm(self, skill_env, app_config):
+        # --since filters the inbound fetch, not the sent-side lookup. Asserted
+        # so no doc grows a claim that it widens the arm: it cannot, because a
+        # wider date only admits older ids and the cap cuts those first.
+        from istota.skills.email import _MINE_THREAD_MAX_IDS
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<ancient@example.com>",
+                to_addr="client@out.com",
+            )
+            conn.execute(
+                "UPDATE sent_emails SET sent_at = ? WHERE message_id = ?",
+                ("2020-01-01 00:00:00", "<ancient@example.com>"),
+            )
+            for i in range(_MINE_THREAD_MAX_IDS):
+                db.record_sent_email(
+                    conn, user_id="bob", message_id=f"<recent{i}@example.com>",
+                    to_addr="client@out.com",
+                )
+        # The cap binds, so the old id is out — and stays out however wide --since is.
+        assert "ancient@example.com" not in self._capture_criteria(skill_env)
+        assert "ancient@example.com" not in self._capture_criteria(
+            skill_env, since="2019-01-01",
+        )
+
+    def test_a_reply_owned_by_another_user_is_still_dropped(
+        self, skill_env, app_config,
+    ):
+        """The prefilter widens; the client-side ownership filter still decides.
+
+        A reply quoting bob's message id but plus-addressed to dana is dana's
+        (plus-address outranks thread-match). Bob's own widened criteria fetch
+        it, so this is the case that proves the fetch never becomes the answer.
+        """
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<s1@example.com>",
+                to_addr="client@out.com",
+            )
+        danas = _env(
+            "danas-reply", "client@out.com", to=["bot+dana@example.com"],
+            references="<s1@example.com>",
+        )
+
+        def fake_list(*, folder, limit, config, criteria):
+            return [danas] if "s1@example.com" in str(criteria) else []
+
+        args = MagicMock(scope="mine", limit=20, since=None, from_addr=None, unread=False)
+        with patch("istota.skills.email.list_emails", side_effect=fake_list):
+            res = cmd_list(args)
+        assert res["emails"] == []
+
+    def test_thread_arm_is_skipped_when_the_db_is_unavailable(
+        self, skill_env, monkeypatch,
+    ):
+        # `mine` only ever under-includes without the DB — it must degrade to
+        # the plus + sender arms rather than error.
+        monkeypatch.setattr(
+            "istota.db.get_db", MagicMock(side_effect=RuntimeError("db down")),
+        )
+        crit = self._capture_criteria(skill_env)
+        assert "HEADER" not in crit
+        assert 'TO "bot+bob@example.com"' in crit
+
+    def test_thread_arm_degrades_when_the_query_itself_fails(
+        self, skill_env, monkeypatch,
+    ):
+        # An open DB whose read fails — an unmigrated schema, a lock timeout.
+        # The other two arms must survive it.
+        import sqlite3
+        monkeypatch.setattr(
+            "istota.db.list_sent_message_ids",
+            MagicMock(side_effect=sqlite3.OperationalError("no such table: sent_emails")),
+        )
+        crit = self._capture_criteria(skill_env)
+        assert "HEADER" not in crit
+        assert 'TO "bot+bob@example.com"' in crit
+
+    def test_an_unsearchable_message_id_is_skipped_not_fatal(
+        self, skill_env, app_config,
+    ):
+        # A message id is about to become IMAP protocol text. Non-ASCII would
+        # raise when the criteria are encoded US-ASCII, and a CRLF would break
+        # out of the SEARCH command — neither may take the verb down with it.
+        with db.get_db(app_config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<naïve@example.com>",
+                to_addr="client@out.com",
+            )
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<a@example.com>\r\nA1 LOGOUT",
+                to_addr="client@out.com",
+            )
+            db.record_sent_email(
+                conn, user_id="bob", message_id="<good@example.com>",
+                to_addr="client@out.com",
+            )
+        crit = self._capture_criteria(skill_env)
+        assert "good@example.com" in crit
+        assert "naïve" not in crit
+        assert "LOGOUT" not in crit
+        # And the criteria the server would actually be sent still encode.
+        crit.encode("ascii")
 
 
 class TestParseSince:
