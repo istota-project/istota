@@ -1169,6 +1169,66 @@ class TestSentEmails:
             assert via_refs.talk_delivery_token == "real_room"
 
 
+class TestListSentMessageIds:
+    """ISSUE-252: the message ids feeding the read-side `--scope mine` thread arm."""
+
+    def _record(self, conn, user_id, message_id, sent_at=None):
+        db.record_sent_email(
+            conn, user_id=user_id, message_id=message_id, to_addr="peer@example.com",
+        )
+        if sent_at is not None:
+            conn.execute(
+                "UPDATE sent_emails SET sent_at = ? WHERE message_id = ?",
+                (sent_at, message_id),
+            )
+
+    def test_returns_only_the_named_users_ids(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._record(conn, "carol", "<c1@example.com>")
+            self._record(conn, "dave", "<d1@example.com>")
+            ids = db.list_sent_message_ids(conn, "carol")
+            assert ids == ["<c1@example.com>"]
+
+    def test_most_recent_first_and_capped_by_limit(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._record(conn, "carol", "<old@example.com>", "2026-01-01 00:00:00")
+            self._record(conn, "carol", "<mid@example.com>", "2026-02-01 00:00:00")
+            self._record(conn, "carol", "<new@example.com>", "2026-03-01 00:00:00")
+            assert db.list_sent_message_ids(conn, "carol", limit=2) == [
+                "<new@example.com>", "<mid@example.com>",
+            ]
+
+    def test_age_alone_never_excludes_an_id(self, db_path):
+        # The limit is the only bound. A date window on top of it could only
+        # remove ids the limit would have kept, so there isn't one.
+        with db.get_db(db_path) as conn:
+            self._record(conn, "carol", "<ancient@example.com>", "2019-01-01 00:00:00")
+            assert db.list_sent_message_ids(conn, "carol") == ["<ancient@example.com>"]
+
+    def test_a_repeated_id_spends_one_slot_not_two(self, db_path):
+        # The cap should mean N distinct threads; message_id has no unique
+        # constraint, so a re-recorded id would otherwise consume the budget twice.
+        with db.get_db(db_path) as conn:
+            self._record(conn, "carol", "<dup@example.com>", "2026-01-01 00:00:00")
+            self._record(conn, "carol", "<dup@example.com>", "2026-03-01 00:00:00")
+            self._record(conn, "carol", "<other@example.com>", "2026-02-01 00:00:00")
+            assert db.list_sent_message_ids(conn, "carol", limit=2) == [
+                "<dup@example.com>", "<other@example.com>",
+            ]
+
+    def test_blank_message_ids_are_skipped(self, db_path):
+        # A blank id would become `HEADER "References" ""`, which matches every
+        # message carrying the header at all.
+        with db.get_db(db_path) as conn:
+            self._record(conn, "carol", "")
+            self._record(conn, "carol", "<real@example.com>")
+            assert db.list_sent_message_ids(conn, "carol") == ["<real@example.com>"]
+
+    def test_no_sends_returns_empty(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.list_sent_message_ids(conn, "carol") == []
+
+
 class TestTaskTalkDeliveryToken:
     """ISSUE-057: tasks carry talk_delivery_token separate from conversation_token."""
 
