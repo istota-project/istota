@@ -104,20 +104,14 @@ def _coverage_for_ref(
             status, is_overdue, days_until_due = _windowed_status(
                 next_due, today,
             )
-    elif schedule == "lifetime_after_series":
+    elif schedule in ("lifetime_after_series", "series_then_booster"):
+        # series_then_booster behaves the same as lifetime_after_series until
+        # per-vaccine booster rules land in v2 (see spec open questions).
+        # Zero doses is never_recorded, not series_incomplete: the series has
+        # not been started, so there is no partial progress to report.
         required = ref.primary_series_doses or 1
         if dose_count == 0:
-            status = STATUS_SERIES_INCOMPLETE
-        elif dose_count >= required:
-            status = STATUS_UP_TO_DATE
-        else:
-            status = STATUS_SERIES_INCOMPLETE
-    elif schedule == "series_then_booster":
-        # Same as lifetime_after_series until per-vaccine booster rules land
-        # in v2 (see spec open questions).
-        required = ref.primary_series_doses or 1
-        if dose_count == 0:
-            status = STATUS_SERIES_INCOMPLETE
+            status = STATUS_NEVER_RECORDED
         elif dose_count >= required:
             status = STATUS_UP_TO_DATE
         else:

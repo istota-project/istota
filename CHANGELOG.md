@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A vaccine you have never recorded a dose of now reads "Never recorded" instead of "Series incomplete". Any vaccine given as a series was labelled part-done from the start, so an empty immunizations page opened on ten vaccines that looked half-finished, and the health summary the bot reads listed all ten as needing action. "Series incomplete" now means what it says: you started the series and have doses left.
+
 - A reply to mail the bot sent for you now shows up in your own mailbox listing. When a correspondent answers the bot's plain address rather than your personal one, the reply was still delivered and answered normally, but listing your mail did not show it — so the one query you run when you suspect something went missing was the query that hid it. Searching your mail found it, and still does. The listing now looks for replies to your last twenty-five or so messages as well; searching remains the way to find a reply to something older than that.
 
 - "Last active" in the admin user list now means the last time the person used the bot. It counted scheduled jobs, briefings and module pollers too, so anyone with a cron entry read as active a few minutes ago whatever they had actually done — on a busy host the column reported the scheduler rather than the user. Someone whose only traffic is automated now shows a dash. Their task total is unchanged; that one counts everything on purpose.

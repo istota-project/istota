@@ -174,11 +174,24 @@ class TestRefsAndCoverageRoutes:
 
     def test_coverage_no_rows(self, client):
         resp = client.get("/istota/api/health/immunizations/coverage").json()
-        # No doses → most refs are never_recorded; series_incomplete for
-        # lifetime_after_series; risk_based for risk_based.
-        statuses = {c["status"] for c in resp["coverage"]}
-        assert "never_recorded" in statuses
+        # An empty account holds nothing, so nothing is part-done: every entry
+        # is never_recorded, apart from the risk_based schedules that opt out
+        # of flagging entirely. Nothing is series_incomplete.
+        cov = resp["coverage"]
+        assert cov
+        assert {c["status"] for c in cov} <= {"never_recorded", "risk_based"}
+        by_name = {c["name"]: c["status"] for c in cov}
+        # One of each series schedule, including the risk_based-category ref
+        # that is nonetheless a series (Shingles).
+        assert by_name["Hepatitis B"] == "never_recorded"
+        assert by_name["HPV"] == "never_recorded"
+        assert by_name["Shingles"] == "never_recorded"
         assert resp["other"] == []
+
+    def test_history_summary_no_rows_has_no_action_needed(self, client):
+        # The agent-facing summary must not report action on an empty account.
+        resp = client.get("/istota/api/health/history/summary").json()
+        assert resp["immunizations"]["action_needed"] == []
 
     def test_coverage_with_rows(self, client):
         client.post("/istota/api/health/immunizations", json={
