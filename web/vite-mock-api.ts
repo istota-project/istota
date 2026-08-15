@@ -6611,9 +6611,10 @@ const handlers: MockHandler[] = [
             ref.schedule === 'series_then_booster'
           ) {
             const required = ref.primary_series_doses ?? 1;
-            if (doseCount === 0) status = 'series_incomplete';
-            else if (doseCount >= required) status = 'up_to_date';
-            else status = 'series_incomplete';
+            // Zero doses is never_recorded, not series_incomplete — mirrors
+            // _coverage_for_ref in src/istota/health/immunizations.py.
+            if (doseCount === 0) status = 'never_recorded';
+            else status = doseCount >= required ? 'up_to_date' : 'series_incomplete';
           } else if (ref.schedule === 'travel_pre_trip') {
             if (!lastDate) status = 'never_recorded';
             else {

@@ -381,11 +381,14 @@ class TestCoverageLifetimeAfterSeries:
         assert result.status == STATUS_UP_TO_DATE
         assert result.dose_count == 3
 
-    def test_series_incomplete_with_no_doses(self):
+    def test_never_recorded_with_no_doses(self):
+        # Zero doses is "we hold nothing", not "you started and stopped" —
+        # the series has not begun.
         ref = _ref("Hepatitis B", "lifetime_after_series",
                    primary_series_doses=3)
         result = compute_coverage([ref], [], today=date(2026, 5, 16))[0]
-        assert result.status == STATUS_SERIES_INCOMPLETE
+        assert result.status == STATUS_NEVER_RECORDED
+        assert result.dose_count == 0
 
     def test_series_incomplete_with_partial_doses(self):
         ref = _ref("Hepatitis B", "lifetime_after_series",
@@ -394,6 +397,30 @@ class TestCoverageLifetimeAfterSeries:
         result = compute_coverage([ref], rows, today=date(2026, 5, 16))[0]
         assert result.status == STATUS_SERIES_INCOMPLETE
         assert result.dose_count == 1
+
+
+class TestCoverageSeriesThenBooster:
+    def test_never_recorded_with_no_doses(self):
+        ref = _ref("HPV", "series_then_booster", primary_series_doses=3)
+        result = compute_coverage([ref], [], today=date(2026, 5, 16))[0]
+        assert result.status == STATUS_NEVER_RECORDED
+        assert result.dose_count == 0
+
+    def test_series_incomplete_with_partial_doses(self):
+        ref = _ref("HPV", "series_then_booster", primary_series_doses=3)
+        rows = [_row("HPV", "2024-01-01")]
+        result = compute_coverage([ref], rows, today=date(2026, 5, 16))[0]
+        assert result.status == STATUS_SERIES_INCOMPLETE
+        assert result.dose_count == 1
+
+    def test_up_to_date_after_full_series(self):
+        ref = _ref("HPV", "series_then_booster", primary_series_doses=2)
+        rows = [
+            _row("HPV", "2024-01-01", _id=1),
+            _row("HPV", "2024-07-01", _id=2),
+        ]
+        result = compute_coverage([ref], rows, today=date(2026, 5, 16))[0]
+        assert result.status == STATUS_UP_TO_DATE
 
 
 class TestCoverageTravel:

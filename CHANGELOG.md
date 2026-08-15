@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A vaccine you have never recorded a dose of now reads "Never recorded" instead of "Series incomplete". Any vaccine given as a series was labelled part-done from the start, so an empty immunizations page opened on ten vaccines that looked half-finished, and the health summary the bot reads listed all ten as needing action. "Series incomplete" now means what it says: you started the series and have doses left.
+
 - "Last active" in the admin user list now means the last time the person used the bot. It counted scheduled jobs, briefings and module pollers too, so anyone with a cron entry read as active a few minutes ago whatever they had actually done — on a busy host the column reported the scheduler rather than the user. Someone whose only traffic is automated now shows a dash. Their task total is unchanged; that one counts everything on purpose.
 
 - A private email exchange with the bot is now kept out of the room's context and memory, not just out of what the room shows. Keeping it off the transcript stopped it being visible there, but the room's history, its recall and its nightly summary all still counted it — so the quoted thread went on being read back into every later task in that room, which was the cost the change was meant to remove. Mail from an outside contact is unaffected in all three.
