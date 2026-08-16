@@ -61,6 +61,24 @@ Deletion is not private to you: rooms are shared, so a message you delete is gon
 
 Size and type limits are the server's: the browser checks against the numbers the server publishes and refuses early with the real figure, and the server rejects anything that gets past it. See **Configuration** below.
 
+## Held outbound mail
+
+Mail the [outbound approval gate](email.md#the-outbound-approval-gate) holds appears as a card under the assistant turn that composed it, showing the recipients, the subject, the whole drafted body verbatim, and anything else that task did — so declining does not quietly leave a calendar event behind. Send, edit the body, or discard from the card; recipients and threading are not editable. A draft whose task has no room of its own (a cron job mailing an external address), or whose turn has scrolled out of the loaded history, falls to a list above the transcript, so nothing is reachable only from a room you never open.
+
+A draft stuck in `sending` is shown with no action offered — nobody can tell from outside whether the message went out, and one of the actions would send it twice. Answering the same draft from Talk (`!drafts`) or another device removes the card here on the next stream frame.
+
+## Turns from outside the room
+
+An email from an external contact that lands in a thread you started is mirrored into the room as a turn, marked with its origin and sender so a bot answer never appears without the question above it. How much of the body shows inline is a per-user setting, `external_turn_display`:
+
+| Value | Inline body |
+|---|---|
+| `full` | the whole message |
+| `collapsed` (default) | a single clipped line, expandable in place |
+| `hidden` | none; header, origin marker and sender still render |
+
+Set it with `istota user ensure --external-turn-display <value>`. Every field on such a turn is attacker-supplied and renders as plain text, never markdown.
+
 ## Web chat as a delivery surface
 
 `web` is also a *routable delivery surface* (`WebTransport`). Alerts, the verbose execution log, and any notification routed to `web` are appended to a room as unsolicited system messages — `role='system'` rows in the canonical `messages` store, distinct from task-backed turns — merged into room history by time and pushed to an open client by the room stream (below). Because it is user-routable, web appears automatically in every routing selector (default destination, alert route, briefing output) alongside Talk, email, and ntfy. Route to it with a bare `web` (the user's general room) or `web:<token>` for a specific room. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).

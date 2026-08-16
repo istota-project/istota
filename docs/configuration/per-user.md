@@ -3,7 +3,7 @@
 Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
 1. **DB tables** (authoritative)
-   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`
+   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`, `outbound_approval`, `external_turn_display`
    - `user_resources` — folder mounts (`folder`) and internal `shared_file` organizer state. Only `folder` is declarable after the Resources sunset; the other path-shaped types were retired (calendars are CalDAV-discovered, todo/reminders/notes are workspace-convention files).
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
@@ -40,8 +40,22 @@ log_channel = "room456"
 # Talk room for confirmations and security alerts
 alerts_channel = "room789"
 
-# Trusted email senders (bypass confirmation gate, supports fnmatch patterns)
+# Trusted email addresses, in both directions: their mail bypasses the inbound
+# confirmation gate, and mail to them is sent without waiting for approval.
+# Supports fnmatch patterns.
 trusted_email_senders = ["*@company.com", "boss@other.com"]
+
+# This user's outbound email approval policy: off | untrusted | all.
+# Omit (or "") to follow [email] outbound_approval_floor, which is a minimum —
+# a value weaker than it has no effect. Seed-only: read when the user has no
+# profile row yet. For an existing user the DB row wins, so set it with
+# `istota user ensure --outbound-approval`.
+outbound_approval = "all"
+
+# How much of a turn that arrived from outside the room (an external contact's
+# email) shows inline in web chat: full | collapsed (default) | hidden.
+# The turn itself always renders. Seed-only, as above.
+external_turn_display = "collapsed"
 
 # Modules to opt out of (default-on otherwise)
 disabled_modules = ["money"]

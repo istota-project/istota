@@ -72,6 +72,11 @@ All variables with defaults are in `deploy/ansible/defaults/main.yml`. Key group
 - **Users**: `istota_users` (dict), `istota_admin_users` (list)
 - **Scheduler**: `istota_scheduler_*` (poll intervals, worker limits, timeouts)
 - **Web**: `istota_web_enabled`, `istota_web_port`, `istota_web_chat_max_attachment_mb`, `istota_web_graceful_shutdown_seconds`, `istota_web_stop_timeout_seconds`
+- **Email**: `istota_email_enabled`, `istota_email_outbound_approval_floor`, plus per-user `outbound_approval` and `external_turn_display` keys inside `istota_users`
+
+`istota_email_outbound_approval_floor` (default **`"untrusted"`**) is the [outbound approval gate](../features/email.md#the-outbound-approval-gate)'s floor, and the role is the only supported place to change it — a hand edit to `config.toml` is overwritten on the next run. **Quote the value.** `off` unquoted is a YAML boolean: it renders `outbound_approval_floor = "False"`, which the daemon refuses to load. The play asserts the floor and each per-user `outbound_approval` before templating, so a bad value fails naming the variable rather than leaving an unloadable config on disk for the next restart to find.
+
+Per-user `outbound_approval` / `external_turn_display` under `istota_users` are passed to `istota user ensure`, not templated into `[users.X]` — the TOML keys seed only a user with no profile row yet, while the CLI flags update an existing one.
 
 Two web variables are worth knowing about before changing them:
 
