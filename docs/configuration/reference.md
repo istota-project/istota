@@ -99,6 +99,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `talk_poll_timeout` | `30` | Talk long-poll timeout |
 | `talk_poll_wait` | `2.0` | Max wait before processing available rooms |
 | `email_poll_interval` | `60` | Seconds between email polls |
+| `email_poll_batch_size` | `50` | Messages one email poll walks. The remainder is left for the next tick and drains in arrival order, rather than falling off the end |
 | `briefing_check_interval` | `60` | Seconds between briefing/job/cleanup checks |
 | `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls |
 | `shared_file_check_interval` | `120` | Seconds between shared file checks |

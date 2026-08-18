@@ -411,10 +411,9 @@ messages are re-polled rather than silently lost.
   `send_notification` reports "no destination configured" by returning False
   rather than raising, and stamping at decision time let one silent failure
   swallow the next 24 hours. Delivery itself (`_deliver_dmarc_alerts`) runs
-  **after** `poll_emails`' `with db.get_db(...)` block closes — an alert can route
-  to the web surface, which opens a second connection to the same DB and would
-  otherwise block on the poller's own lock until the busy timeout, stalling the
-  scheduler's dispatch loop. Ansible knobs `istota_email_dmarc_canary` /
+  **after the whole batch**, outside every per-message transaction — an alert can
+  route to the web surface, which opens a second connection to the same DB and
+  would otherwise block on the poller's own lock until the busy timeout. Ansible knobs `istota_email_dmarc_canary` /
   `istota_email_dmarc_canary_warn_on_missing`.
 
   **Three pre-existing interactions the flag made reachable**, noted under
@@ -445,10 +444,12 @@ messages are re-polled rather than silently lost.
   **The prompt is delivered after the poll transaction closes**
   (`_deliver_confirmation_prompts`, beside `_deliver_dmarc_alerts` and for the
   identical reason): routing by purpose means it can land on the *web* surface,
-  whose delivery opens a second connection to this database, and `poll_emails`
-  holds a write transaction from `create_task` onward — inline, the fix for
-  "the web user is never asked" would have become a busy-timeout stall per
-  gated email that still did not ask them. `talk_response_id` is written back
+  whose delivery opens a second connection to this database, and the message's
+  transaction is open from `create_task` onward — inline, the fix for "the web
+  user is never asked" would have become a busy-timeout stall per gated email
+  that still did not ask them. Since ISSUE-250 that transaction covers one
+  message rather than the batch, which shortens the window but does not remove
+  it. `talk_response_id` is written back
   in its own short transaction afterwards; losing it costs Path A alone.
   `run_cleanup_checks` buffers its expiry notices for the same reason.
 
@@ -491,10 +492,12 @@ messages are re-polled rather than silently lost.
   channel (`_confirmation_notice_token`), and names the sender and subject
   (`_expired_confirmation_notice`) so the message can be found again in the
   mailbox. **A gated email is still marked processed at ingest** — not deferring
-  that is deliberate: `processed_emails` is the only thing stopping the next
-  poll from re-ingesting the same message as a fresh task, and `email_id` is a
-  bare IMAP UID with no `UIDVALIDITY`, so withholding the row turns one
-  unanswered question into one new task and one new prompt per poll cycle.
+  that is deliberate: `processed_emails` is what stops the next poll from
+  re-ingesting the same message as a fresh task, so withholding the row turns
+  one unanswered question into one new task and one new prompt per poll cycle.
+  (The ledger is keyed `(uidvalidity, email_id)` since ISSUE-250, so the UID is
+  qualified now — but the poll cursor is an optimization, not a second
+  authority, and a reset cursor re-walks straight back into these rows.)
   Making the expiry loud and specific is the recoverable version of the same
   concern.
 

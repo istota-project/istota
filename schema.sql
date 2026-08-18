@@ -188,7 +188,13 @@ CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events (task_id, seq
 -- Processed emails (to avoid duplicate processing)
 CREATE TABLE IF NOT EXISTS processed_emails (
     id INTEGER PRIMARY KEY,
-    email_id TEXT NOT NULL UNIQUE,
+    -- An IMAP UID is unique only within a folder's UIDVALIDITY. Keyed on the
+    -- bare UID, a recreated or migrated mailbox restarts numbering at 1 and
+    -- every new message collides with an old row — read as "already
+    -- processed", so the mail is dropped, and an IntegrityError on insert
+    -- (ISSUE-250). 0 is the "server did not report it" namespace.
+    uidvalidity INTEGER NOT NULL DEFAULT 0,
+    email_id TEXT NOT NULL,
     sender_email TEXT NOT NULL,
     subject TEXT,
     thread_id TEXT,  -- for conversation context grouping
@@ -196,8 +202,9 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     "references" TEXT,  -- RFC 5322 References header for thread chain
     user_id TEXT,
     task_id INTEGER,
-    routing_method TEXT,  -- plus_address, sender_match, thread_match, discarded
+    routing_method TEXT,  -- plus_address, sender_match, thread_match, discarded, quiet, read_error
     processed_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
 
@@ -211,6 +218,22 @@ CREATE INDEX IF NOT EXISTS idx_processed_emails_task_id ON processed_emails(task
 -- was stood up. Without this the steady-state no-op prune is a full scan a
 -- minute, under a write transaction on the DB the dispatch loop shares.
 CREATE INDEX IF NOT EXISTS idx_processed_emails_processed_at ON processed_emails(processed_at);
+
+-- Inbound email poll cursor, one row per polled folder (ISSUE-250). The poll
+-- used to fetch the newest 50 messages in the folder and dedupe afterwards,
+-- so anything that dropped below the top 50 between two ticks was never
+-- fetched again — silent, permanent mail loss at ~50 messages per interval.
+-- The cursor makes the batch a boundary instead of a window: each tick takes
+-- the oldest `email_poll_batch_size` UIDs above `last_uid` and leaves the rest
+-- for the next one, so a backlog drains rather than truncating.
+CREATE TABLE IF NOT EXISTS email_poll_state (
+    folder TEXT PRIMARY KEY,
+    -- The namespace `last_uid` counts in. A change means the mailbox was
+    -- recreated and UIDs restarted, so the cursor is meaningless and resets.
+    uidvalidity INTEGER NOT NULL DEFAULT 0,
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 
 -- Briefing state (tracks last_run_at for config-based briefings)
 CREATE TABLE IF NOT EXISTS briefing_state (

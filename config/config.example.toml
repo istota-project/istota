@@ -377,6 +377,8 @@ talk_poll_timeout = 30
 talk_poll_wait = 2.0
 # Seconds between polling for new emails
 email_poll_interval = 60
+# Messages one email poll walks. The rest wait for the next tick and drain in order.
+email_poll_batch_size = 50
 # Seconds between checking for briefings to run
 briefing_check_interval = 60
 # Seconds between polling TASKS.md files for new tasks

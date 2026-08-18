@@ -151,6 +151,7 @@ class SchedulerConfig:
     poll_interval: int = 2  # seconds between task queue checks
     dispatch_interval: float = 0.5  # seconds between pending-task dispatch scans within a poll tick (0 or >= poll_interval = legacy single dispatch per tick)
     email_poll_interval: int = 60  # seconds between email polls
+    email_poll_batch_size: int = 50  # messages one poll tick will walk. A batch boundary, not a window: the remainder is left for the next tick and drains, rather than falling off the end (ISSUE-250)
     briefing_check_interval: int = 60  # seconds between briefing checks
     tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls
     shared_file_check_interval: int = 120  # seconds between shared file organization checks
@@ -1941,6 +1942,7 @@ def load_config(config_path: Path | None = None) -> Config:
             poll_interval=sched.get("poll_interval", 5),
             dispatch_interval=sched.get("dispatch_interval", 0.5),
             email_poll_interval=sched.get("email_poll_interval", 60),
+            email_poll_batch_size=sched.get("email_poll_batch_size", 50),
             briefing_check_interval=sched.get("briefing_check_interval", 60),
             tasks_file_poll_interval=sched.get("tasks_file_poll_interval", sched.get("istota_file_poll_interval", 30)),
             shared_file_check_interval=sched.get("shared_file_check_interval", 120),

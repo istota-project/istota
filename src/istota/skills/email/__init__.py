@@ -103,6 +103,13 @@ class EmailEnvelope:
     # Carried for the same reason as `references`: ownership resolution threads
     # on either, and a sender can emit one unreadable while the other is exact.
     in_reply_to: str | None = None
+    # The namespace `id` lives in. An IMAP UID is only unique within a folder's
+    # UIDVALIDITY, so the two together are the message's identity — a mailbox
+    # recreated or migrated restarts UIDs at 1 and every one of them collides
+    # with a previously-seen value (ISSUE-250). Stamped by `list_emails` from
+    # the same mailbox session as the fetch, so it costs no extra connection.
+    # 0 means "not reported" (a caller that built the envelope by hand).
+    uidvalidity: int = 0
 
 
 @dataclass
@@ -261,9 +268,54 @@ def _snippet_from_msg(msg, limit: int = 200) -> str:
     return collapsed[:limit]
 
 
-def _msg_to_envelope(msg) -> EmailEnvelope:
+def _uid_sort_key(uid) -> tuple[int, int, str]:
+    """Sort IMAP UIDs numerically, tolerating anything that isn't a number.
+
+    A UID is a positive integer over the wire, but `imap-tools` yields
+    whatever the server sent (and `MailMessage.uid` can be None outright), so
+    a lexicographic sort would put UID 100 before UID 99. Non-numeric values
+    sort last rather than raising — the poll skips them by other means.
+    """
+    try:
+        return (0, int(str(uid).strip()), "")
+    except (TypeError, ValueError):
+        return (1, 0, str(uid))
+
+
+def _folder_uidvalidity(mailbox, folder: str) -> int:
+    """UIDVALIDITY of the just-selected folder, or 0 if unreportable.
+
+    Read from the `SELECT` the caller has already issued: RFC 3501 makes
+    `UIDVALIDITY` a mandated untagged response to `SELECT`, and `imaplib`
+    stashes it on `client.untagged_responses`. That costs no extra command,
+    and it avoids `STATUS` on the *currently selected* mailbox, which §6.3.10
+    says SHOULD NOT be used and which some servers answer `NO` to. `STATUS`
+    survives only as a fallback for a server that omitted the untagged line.
+
+    0 means "unknown". Callers must treat it as *no information* rather than
+    as a namespace — reading it as an observed value would make one transient
+    failure look like a recreated mailbox.
+    """
+    try:
+        raw = mailbox.client.untagged_responses.get("UIDVALIDITY")
+        if raw:
+            value = raw[0]
+            if isinstance(value, bytes):
+                value = value.decode("ascii", "ignore")
+            return int(str(value).strip())
+    except Exception as e:
+        logger.debug("UIDVALIDITY absent from SELECT for %s: %s", folder, e)
+    try:
+        return int(mailbox.folder.status(folder, ["UIDVALIDITY"])["UIDVALIDITY"])
+    except Exception as e:
+        logger.warning("Could not read UIDVALIDITY for folder %s: %s", folder, e)
+        return 0
+
+
+def _msg_to_envelope(msg, uidvalidity: int = 0) -> EmailEnvelope:
     """Map an imap-tools message to an enriched EmailEnvelope."""
     return EmailEnvelope(
+        uidvalidity=uidvalidity,
         id=msg.uid,
         subject=msg.subject or "(no subject)",
         sender=msg.from_ or "unknown",
@@ -283,11 +335,29 @@ def list_emails(
     limit: int = 20,
     config: EmailConfig | None = None,
     criteria=None,
+    oldest_first: bool = False,
 ) -> list[EmailEnvelope]:
     """List email envelopes in a folder.
 
     ``criteria`` is an optional imap-tools search criteria (``AND(...)`` /
     ``OR(...)`` / raw IMAP string); when omitted, lists the most recent mail.
+
+    ``oldest_first`` walks the matched UIDs in ascending *numeric* order
+    instead of descending. It matters because ``limit`` is applied after
+    ordering, so the two directions select different messages, not just a
+    different order: the default takes the newest ``limit``, and
+    ``oldest_first`` takes the oldest ``limit``. The inbound poll wants the
+    latter — a batch it can drain forward from a cursor without anything
+    falling off the far end (ISSUE-250). Interactive callers ("show me my
+    mail") want the default.
+
+    The ``oldest_first`` path sorts the UID set itself rather than taking
+    ``fetch``'s slice of raw `SEARCH` order. `SEARCH` is not required to
+    return sorted results, and `fetch` slices with a bare ``iter``, so
+    trusting it would hand the poll an arbitrary N whose maximum then becomes
+    the cursor — advancing past mail that was never fetched, which is the loss
+    this whole change removes. The sibling IMAP retention sweep already
+    refuses the same assumption (ISSUE-230).
     """
     if config is None:
         raise ValueError("config is required")
@@ -297,10 +367,28 @@ def list_emails(
     with _get_mailbox(config) as mailbox:
         mailbox.login(config.imap_user, config.imap_password)
         mailbox.folder.set(folder)
+        uidvalidity = _folder_uidvalidity(mailbox, folder)
+
+        if oldest_first:
+            uids = sorted(mailbox.uids(fetch_criteria), key=_uid_sort_key)
+            if limit is not None:
+                uids = uids[:limit]
+            if not uids:
+                return []
+            # Refetch by the explicit UID set so ordering is ours, not the
+            # server's. One extra SEARCH round trip; SEARCH is cheap and this
+            # is the difference between a batch boundary and a lossy window.
+            fetch_criteria = AND(uid=",".join(uids))
+            limit = None
 
         envelopes = []
-        for msg in mailbox.fetch(fetch_criteria, limit=limit, reverse=True, mark_seen=False):
-            envelopes.append(_msg_to_envelope(msg))
+        for msg in mailbox.fetch(
+            fetch_criteria, limit=limit, reverse=not oldest_first, mark_seen=False,
+        ):
+            envelopes.append(_msg_to_envelope(msg, uidvalidity))
+
+        if oldest_first:
+            envelopes.sort(key=lambda e: _uid_sort_key(e.id))
 
         return envelopes
 

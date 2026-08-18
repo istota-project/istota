@@ -99,7 +99,10 @@ class ProcessedEmail:
     user_id: str | None
     task_id: int | None
     processed_at: str
-    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded
+    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded, quiet, read_error
+    # The namespace `email_id` counts in; the two together are the key
+    # (ISSUE-250). 0 means the server never reported a UIDVALIDITY.
+    uidvalidity: int = 0
 
 
 @dataclass
@@ -923,6 +926,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    _migrate_processed_emails_uidvalidity(conn)
     _migrate_unified_rooms(conn)
     _migrate_scheduled_transcript_cleanup(conn)
     _migrate_nonconversational_transcript_cleanup(conn)
@@ -4671,6 +4675,95 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
+    """Rebuild `processed_emails` so the dedupe key is (uidvalidity, email_id)
+    rather than the bare IMAP UID (ISSUE-250).
+
+    A UID identifies a message only within its folder's UIDVALIDITY. On the old
+    key, a mailbox recreation or a server migration restarted numbering at 1
+    and every new message matched an existing row: `is_email_processed` said
+    yes, so the mail was dropped, and the insert that eventually ran raised
+    IntegrityError. `UNIQUE` was declared inline on the column, which makes it
+    an implicit index no `DROP INDEX` can reach, so widening it needs a table
+    rebuild.
+
+    Self-guarding on the live DDL, like `_migrate_web_chat_rooms_peruser`: a
+    no-op on a fresh install (already composite) and on re-runs. Existing rows
+    get `uidvalidity = 0`, the same "not reported" namespace a server that will
+    not answer STATUS produces — so a deployment whose UIDVALIDITY is readable
+    starts a fresh namespace on the next poll and re-ingests nothing, because
+    the cursor starts from 0 and the rows it walks past are its own.
+    """
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'processed_emails'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return
+    sql = row[0] if row and row[0] else ""
+    if not sql or "UNIQUE (uidvalidity, email_id)" in sql:
+        return  # already migrated (or fresh install with the new DDL)
+    # Explicitly transactional. SQLite makes DDL transactional, but Python's
+    # legacy `isolation_level` only opens a transaction for DML — so left to
+    # autocommit, a failure after the RENAME leaves no `processed_emails` at
+    # all. `init_db` runs `schema.sql` immediately afterwards, whose
+    # `CREATE TABLE IF NOT EXISTS` would then recreate it *empty*, the next run
+    # would see the new DDL and no-op forever, and the first poll against an
+    # empty ledger re-ingests every message in the mailbox as a fresh task.
+    # A dropped dedupe ledger is a mail storm, so it gets a real rollback.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "ALTER TABLE processed_emails RENAME TO _processed_emails_old"
+        )
+        conn.execute("""
+            CREATE TABLE processed_emails (
+                id INTEGER PRIMARY KEY,
+                uidvalidity INTEGER NOT NULL DEFAULT 0,
+                email_id TEXT NOT NULL,
+                sender_email TEXT NOT NULL,
+                subject TEXT,
+                thread_id TEXT,
+                message_id TEXT,
+                "references" TEXT,
+                user_id TEXT,
+                task_id INTEGER,
+                routing_method TEXT,
+                processed_at TEXT DEFAULT (datetime('now')),
+                UNIQUE (uidvalidity, email_id),
+                FOREIGN KEY (task_id) REFERENCES tasks(id)
+            )
+        """)
+        # Preserve ids: `get_email_for_task` and the conversation-history
+        # readers join on task_id, but the row identity is worth keeping stable
+        # for anything holding one.
+        conn.execute("""
+            INSERT INTO processed_emails
+            (id, uidvalidity, email_id, sender_email, subject, thread_id,
+             message_id, "references", user_id, task_id, routing_method,
+             processed_at)
+            SELECT id, 0, email_id, sender_email, subject, thread_id,
+                   message_id, "references", user_id, task_id, routing_method,
+                   processed_at
+            FROM _processed_emails_old
+        """)
+        conn.execute("DROP TABLE _processed_emails_old")
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        # `sqlite3.Error`, not just OperationalError: an IntegrityError or a
+        # DatabaseError out of the INSERT…SELECT would otherwise escape and
+        # abort `init_db` outright, leaving the renamed table behind.
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        logger.warning(
+            "processed_emails uidvalidity rebuild failed and was rolled back; "
+            "the ledger is unchanged and the rebuild will be retried: %s", e,
+        )
+
+
 def _migrate_web_chat_rooms_peruser(conn: sqlite3.Connection) -> None:
     """Rebuild `web_chat_rooms` so `token` is unique per (user, token) rather
     than globally (ISSUE-134), letting every participant of a shared Talk room
@@ -5081,13 +5174,93 @@ def list_tasks(
     return [_row_to_task(row) for row in cursor.fetchall()]
 
 
-def is_email_processed(conn: sqlite3.Connection, email_id: str) -> bool:
-    """Check if an email has already been processed."""
+def is_email_processed(
+    conn: sqlite3.Connection, email_id: str, uidvalidity: int = 0,
+) -> bool:
+    """Check if an email has already been processed.
+
+    Scoped to the UID's namespace: the same UID under a different UIDVALIDITY
+    is a different message, not a duplicate (ISSUE-250).
+    """
     cursor = conn.execute(
-        "SELECT 1 FROM processed_emails WHERE email_id = ?",
-        (email_id,),
+        "SELECT 1 FROM processed_emails WHERE uidvalidity = ? AND email_id = ?",
+        (uidvalidity, email_id),
     )
     return cursor.fetchone() is not None
+
+
+def get_email_poll_cursor(
+    conn: sqlite3.Connection, folder: str,
+) -> tuple[int, int] | None:
+    """`(uidvalidity, last_uid)` for a polled folder, or None if never polled."""
+    row = conn.execute(
+        "SELECT uidvalidity, last_uid FROM email_poll_state WHERE folder = ?",
+        (folder,),
+    ).fetchone()
+    if row is None:
+        return None
+    return (row["uidvalidity"], row["last_uid"])
+
+
+def set_email_poll_cursor(
+    conn: sqlite3.Connection, folder: str, uidvalidity: int, last_uid: int,
+) -> None:
+    """Record how far the inbound poll has walked this folder."""
+    conn.execute(
+        """
+        INSERT INTO email_poll_state (folder, uidvalidity, last_uid, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(folder) DO UPDATE SET
+            uidvalidity = excluded.uidvalidity,
+            last_uid = excluded.last_uid,
+            updated_at = excluded.updated_at
+        """,
+        (folder, uidvalidity, last_uid),
+    )
+
+
+def highest_processed_uid(
+    conn: sqlite3.Connection, uidvalidity: int,
+) -> int | None:
+    """Highest UID already in the ledger for a namespace, or None if empty.
+
+    `CAST` because `email_id` is TEXT — a lexicographic MAX puts "9" above
+    "10". Rows whose id is not a number sort to 0 and cannot win.
+    """
+    row = conn.execute(
+        "SELECT MAX(CAST(email_id AS INTEGER)) AS top FROM processed_emails "
+        "WHERE uidvalidity = ?",
+        (uidvalidity,),
+    ).fetchone()
+    if row is None or row["top"] is None:
+        return None
+    return int(row["top"])
+
+
+def adopt_legacy_email_namespace(
+    conn: sqlite3.Connection, uidvalidity: int,
+) -> int:
+    """Move pre-ISSUE-250 ledger rows into the namespace they were written in.
+
+    Rows that predate the UIDVALIDITY column carry 0, the "not reported"
+    namespace. Left there, the first poll after the upgrade would find no
+    match for any real UID and re-ingest every message still in the mailbox as
+    a new task — a task storm on deploy, which is the opposite of the fix.
+
+    They were written against this same server, so the validity now observed is
+    the one they belong to. Claiming that is a one-time act, done only on the
+    first poll of a folder (no cursor row yet), which is also why it cannot
+    swallow a genuine mailbox recreation: after this runs, a later validity
+    change finds the rows namespaced and correctly treats the new UIDs as new
+    mail. Returns the number of rows adopted.
+    """
+    if not uidvalidity:
+        return 0
+    cursor = conn.execute(
+        "UPDATE processed_emails SET uidvalidity = ? WHERE uidvalidity = 0",
+        (uidvalidity,),
+    )
+    return cursor.rowcount or 0
 
 
 def mark_email_processed(
@@ -5101,15 +5274,16 @@ def mark_email_processed(
     user_id: str | None = None,
     task_id: int | None = None,
     routing_method: str | None = None,
+    uidvalidity: int = 0,
 ) -> int:
-    """Record a processed email."""
+    """Record a processed email, keyed by (uidvalidity, email_id)."""
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method),
     )
     return cursor.fetchone()[0]
 
@@ -5118,7 +5292,7 @@ def get_email_for_task(conn: sqlite3.Connection, task_id: int) -> ProcessedEmail
     """Get the original email info for a task."""
     cursor = conn.execute(
         """
-        SELECT id, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, processed_at, routing_method
+        SELECT id, uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, processed_at, routing_method
         FROM processed_emails
         WHERE task_id = ?
         """,
@@ -5139,6 +5313,7 @@ def get_email_for_task(conn: sqlite3.Connection, task_id: int) -> ProcessedEmail
         task_id=row["task_id"],
         processed_at=row["processed_at"],
         routing_method=row["routing_method"],
+        uidvalidity=row["uidvalidity"],
     )
 
 
