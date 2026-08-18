@@ -1564,15 +1564,35 @@ class TestChatTaskActions:
             db.update_task_status(c, tid, status)
         return tid
 
-    async def test_confirm_marks_pending_and_clears_events(self, chat_client):
+    async def _seed_parked_pass(self, tid):
+        """The event log a task parked at `pending_confirmation` leaves behind.
+
+        Mirrors what `scheduler` emits on that path: the work, then the question
+        and the terminal frame (`:2441`, `:2452`).
+        """
+        import istota.web_app as mod
+        kinds = ("task_started", "tool_start", "tool_end", "confirmation", "done")
+        with db.get_db(mod._config.db_path) as c:
+            for seq, kind in enumerate(kinds, start=1):
+                c.execute(
+                    "INSERT INTO task_events (task_id, seq, kind, payload)"
+                    " VALUES (?,?,?,'{}')",
+                    (tid, seq, kind),
+                )
+
+    async def test_confirm_preserves_the_parked_attempts_work(self, chat_client):
+        """Confirming keeps what the agent did before it asked (ISSUE-235).
+
+        For a task parked at `pending_confirmation` these rows are the only
+        durable record of that first pass: the park path writes no
+        `execution_trace` (only the completion path does), and the re-run
+        overwrites that column with its own. The whole log used to be deleted
+        here, which lost the pre-permission tools everywhere at once.
+        """
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="pending_confirmation")
+        await self._seed_parked_pass(tid)
         import istota.web_app as mod
-        with db.get_db(mod._config.db_path) as c:
-            c.execute(
-                "INSERT INTO task_events (task_id, seq, kind, payload) VALUES (?,1,'confirmation','{}')",
-                (tid,),
-            )
         resp = await chat_client.post(
             f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
             headers={"origin": "https://example.com"},
@@ -1580,7 +1600,64 @@ class TestChatTaskActions:
         assert resp.status_code == 200
         with db.get_db(mod._config.db_path) as c:
             assert db.get_task(c, tid).status == "pending"
-            assert db.get_task_events(c, tid) == []
+            kinds = [e["kind"] for e in db.get_task_events(c, tid)]
+        assert kinds == ["task_started", "tool_start", "tool_end"]
+
+    async def test_confirm_drops_the_frames_that_would_end_a_replay(
+        self, chat_client,
+    ):
+        """The parked attempt's `confirmation` and `done` must not survive.
+
+        A client streams a confirmed task from seq 0 — the confirm path passes
+        no `since_seq`, and neither does a reload that picks the task back up —
+        so a surviving `done` closes the stream in `chat_task_stream` before any
+        of the re-run reaches the client, and a surviving `confirmation` puts
+        the answered card back with nothing to clear it. The question itself
+        stays on `tasks.confirmation_prompt`, so nothing is lost by dropping it.
+        """
+        cookies = await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="pending_confirmation")
+        await self._seed_parked_pass(tid)
+        import istota.web_app as mod
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        # What a replaying client would be served, straight off the stream's
+        # own loader rather than a hand-built query.
+        replayed = mod._load_task_events(tid, 0)
+        assert [e["kind"] for e in replayed] == [
+            "task_started", "tool_start", "tool_end",
+        ]
+
+    async def test_confirmed_rerun_appends_above_kept_events(self, chat_client):
+        """The re-run resumes the seq counter rather than colliding with it.
+
+        This is the claim the removed `delete_task_events` call rested on, so it
+        gets pinned: `EventWriter._resume_seq` seeds from
+        `get_max_task_event_seq`, so UNIQUE(task_id, seq) holds with the prior
+        attempt's rows still in place. Restore the delete and the re-run starts
+        at 1 again.
+        """
+        from istota.events import EventWriter
+        cookies = await _login(chat_client, "alice")
+        tid = await self._seed_task("alice", status="pending_confirmation")
+        await self._seed_parked_pass(tid)
+        import istota.web_app as mod
+        resp = await chat_client.post(
+            f"/istota/api/chat/tasks/{tid}/confirm", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        # What the confirmed re-run does: a fresh writer over the same task.
+        # `_resume_seq` reads MAX(seq), so the pruned `confirmation`/`done` at 4
+        # and 5 free those numbers and the re-run takes 4 — which is only safe
+        # because they really are gone from the unique index.
+        writer = EventWriter(tid, mod._config.db_path)
+        assert writer.emit("task_started").seq == 4
+        with db.get_db(mod._config.db_path) as c:
+            assert [e["seq"] for e in db.get_task_events(c, tid)] == [1, 2, 3, 4]
 
     async def test_cancel_pending_confirmation_cancels(self, chat_client):
         cookies = await _login(chat_client, "alice")
@@ -1619,9 +1696,13 @@ class TestChatTaskActions:
         )
         assert resp.status_code == 403
 
-    async def test_confirm_on_running_task_preserves_events(self, chat_client):
-        """Confirming a task that is NOT pending_confirmation must be a no-op —
-        it must never wipe a live task's event log."""
+    async def test_confirm_on_running_task_is_a_noop(self, chat_client):
+        """Confirming a task that is NOT pending_confirmation approves nothing.
+
+        `db.confirm_task` does not check the status itself, so the gate in
+        `_chat_confirm_task` is the whole of it: without it a duplicate click on
+        a task already re-running flips a live row back to `pending`.
+        """
         cookies = await _login(chat_client, "alice")
         tid = await self._seed_task("alice", status="running")
         import istota.web_app as mod
@@ -1636,8 +1717,14 @@ class TestChatTaskActions:
         )
         assert resp.status_code == 200
         with db.get_db(mod._config.db_path) as c:
-            # Status untouched and the running task's events are intact.
+            # Status untouched, and none of `approve`'s side effects ran.
             assert db.get_task(c, tid).status == "running"
+            approvals = c.execute(
+                "SELECT COUNT(*) FROM task_logs WHERE task_id = ?"
+                " AND message = 'User confirmed task'",
+                (tid,),
+            ).fetchone()[0]
+            assert approvals == 0
             assert len(db.get_task_events(c, tid)) == 1
 
 

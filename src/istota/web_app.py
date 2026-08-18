@@ -2051,12 +2051,17 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
 def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     """Terminal backstop for the web chat stream.
 
-    A web task's event log is the bus, but it can be emptied out from under a
-    watching client: ``set_task_pending_retry`` deletes every row and resets the
-    per-task ``seq`` on each retry-eligible failure, so the final attempt's
-    ``error``/``done`` land at a ``seq`` *below* the client's resume cursor and
-    never reach it — the UI hangs on "Working…" though the task is terminal. A
-    crash that skips ``EventWriter.finish()`` leaves the same gap.
+    A web task's event log is the bus, but a client parked on a resume cursor
+    can be left without a deliverable ``done`` — a crash that skips
+    ``EventWriter.finish()`` is the way that happens — and the UI then hangs on
+    "Working…" though the task is terminal.
+
+    This used to cover a second, routine case: a retry deleted every row and
+    restarted ``seq`` at 1, so the final attempt's ``error``/``done`` landed
+    *below* the cursor and never reached the client. Neither half of that is
+    still true — ``set_task_pending_retry`` deletes nothing, and
+    ``EventWriter._resume_seq`` seeds from ``get_max_task_event_seq`` so ``seq``
+    stays monotonic across attempts. The backstop stays for the crash case.
 
     When the task is terminal but no ``done`` is deliverable to a client parked
     at ``after_seq``, synthesize the terminal frames from the task row, numbered
@@ -2122,8 +2127,9 @@ async def chat_task_events(
     await _authorize_task_access(task_id, user)
     events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
     # Polling-fallback backstop: a terminal task whose `done` the client can't
-    # reach (retry wiped the log / crash skipped finish()) gets a synthesized
-    # terminal frame so the poll loop settles instead of spinning forever.
+    # reach (a crash that skipped finish()) gets a synthesized terminal frame so
+    # the poll loop settles instead of spinning forever. Retries no longer reach
+    # this — the log survives them and `seq` stays monotonic.
     if not any(e["kind"] == "done" for e in events):
         last = max([since_seq, *(e["seq"] for e in events)])
         events = events + await asyncio.to_thread(
@@ -2166,9 +2172,10 @@ async def chat_task_stream(
                     return
             if not events:
                 # No new rows. If the task is terminal but this client will never
-                # get a `done` (retry deleted + seq-reset the log, or a crash
-                # skipped finish()), synthesize one so the stream ends instead of
-                # polling forever. No-op while the task is still running/pending.
+                # get a `done` (a crash that skipped finish()), synthesize one so
+                # the stream ends instead of polling forever. No-op while the
+                # task is still running/pending. A retry no longer lands here —
+                # the log survives it and `seq` stays monotonic across attempts.
                 synth = await asyncio.to_thread(
                     _synthetic_terminal_events, task_id, last,
                 )
@@ -5288,16 +5295,15 @@ def _chat_confirm_task(task_id: int) -> None:
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
         if task is None or task.status != "pending_confirmation":
-            # Only a parked confirmation is confirmable. Returning early keeps a
-            # stray confirm (a duplicate click, a running re-run) from wiping a
-            # live task's event log — delete_task_events is unconditional, so
-            # the status gate must live here, not just in db.confirm_task.
+            # Only a parked confirmation is confirmable. `db.confirm_task` gates
+            # on the status itself, but the rest of `confirmations.approve` does
+            # not — the `task_logs` row, a `trust_sender` write and the
+            # transcript-mirror restore all run unconditionally — so a stray
+            # confirm (a duplicate click, a running re-run) has to stop here.
             return
-        # Clear prior events so the confirmed re-run's reset seq counter can't
-        # collide on UNIQUE(task_id, seq) — the client already captured them.
-        db.delete_task_events(conn, task_id)
         # Shared with the Talk poller and `!confirm` so all three restore the
-        # transcript mirror the gate withheld (ISSUE-241).
+        # transcript mirror the gate withheld (ISSUE-241), and so all three
+        # prune the parked attempt's terminal frames the same way (ISSUE-235).
         confirmations.approve(conn, task, config=_config)
 
 

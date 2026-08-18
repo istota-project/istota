@@ -402,7 +402,56 @@ class TestTalkBurstBinding:
 
 
 # ---------------------------------------------------------------------------
-# 4. Approval restores the transcript mirror the gate withheld
+# 4. Approval prunes the parked attempt's terminal frames, on every surface
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalEventLog:
+    def test_approve_keeps_the_work_and_drops_the_terminal_frames(
+        self, make_config,
+    ):
+        """ISSUE-235, in the shared verb so no surface can answer differently.
+
+        The whole log used to be deleted by the web endpoint alone, losing the
+        only durable record of what the agent did before it asked — the park
+        path persists no `execution_trace`. It stays now. `confirmation` and
+        `done` still go: a web client streams a task from seq 0, so a surviving
+        `done` closes the re-run's stream and a surviving `confirmation`
+        re-arms the answered card. The question is kept on
+        `tasks.confirmation_prompt`, not here.
+        """
+        from istota import confirmations
+
+        config = _configured(make_config, carol=UserConfig())
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="do a thing", user_id="carol", source_type="talk",
+                conversation_token="room-1",
+            )
+            db.set_task_confirmation(conn, task_id, "May I?")
+            # The shape the scheduler leaves behind on the park path.
+            for seq, kind in enumerate(
+                ("task_started", "tool_start", "tool_end", "confirmation", "done"),
+                start=1,
+            ):
+                conn.execute(
+                    "INSERT INTO task_events (task_id, seq, kind, payload)"
+                    " VALUES (?,?,?,'{}')",
+                    (task_id, seq, kind),
+                )
+            conn.commit()
+
+            confirmations.approve(conn, db.get_task(conn, task_id))
+            conn.commit()
+
+            kinds = [e["kind"] for e in db.get_task_events(conn, task_id)]
+            prompt = db.get_task(conn, task_id).confirmation_prompt
+        assert kinds == ["task_started", "tool_start", "tool_end"]
+        assert prompt == "May I?"
+
+
+# ---------------------------------------------------------------------------
+# 5. Approval restores the transcript mirror the gate withheld
 # ---------------------------------------------------------------------------
 
 

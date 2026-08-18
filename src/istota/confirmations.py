@@ -137,6 +137,33 @@ def approve(
     db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
 
+    # Drop the parked attempt's two terminal frames, and nothing else
+    # (ISSUE-235). The work it did before it asked — `task_started`, the tool
+    # rows — stays: the park path persists no `execution_trace` (only
+    # completion does, and the re-run overwrites it), so those rows are the
+    # only durable record of what ran before permission was given. The web
+    # endpoint used to delete the *whole* log here, on the reasoning that the
+    # re-run's seq counter would collide on UNIQUE(task_id, seq); untrue since
+    # `EventWriter._resume_seq` began seeding from `get_max_task_event_seq`.
+    #
+    # `confirmation` and `done` cannot stay, because a replaying client cannot
+    # tell them from live ones: a web client opens the task stream at seq 0
+    # (the confirm path sends no `since_seq`, nor does a reload that picks the
+    # task back up), `chat_task_stream` returns on the first `done` it sends,
+    # and the reducer re-arms the confirmation card with nothing to clear it —
+    # so the re-run would stream to nobody and the answered card would come
+    # back. The question itself is not lost; it is on
+    # `tasks.confirmation_prompt`. Same kind-scoped prune the scheduler already
+    # does for `text_delta` once a terminal frame lands, and gaps in `seq` are
+    # harmless (SSE resume is `seq > last`).
+    #
+    # This lives in the shared verb rather than on the web endpoint because a
+    # task confirmed over Talk or by `!confirm` is read back on the web surface
+    # too, and a log that depends on which surface answered is exactly the
+    # drift this module exists to prevent.
+    db.delete_task_events_by_kind(conn, task.id, "confirmation")
+    db.delete_task_events_by_kind(conn, task.id, "done")
+
     trusted = False
     if trust_sender and task.source_type == "email":
         record = db.get_email_for_task(conn, task.id)
