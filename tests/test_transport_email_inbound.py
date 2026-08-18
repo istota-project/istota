@@ -10,6 +10,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig as AppEmailConfig, UserConfig
+from istota.email_ownership import thread_reply_from_correspondent
 from istota.email_support import (
     cleanup_old_emails,
     compute_thread_id,
@@ -2121,9 +2122,14 @@ class TestSenderMatchConfirmationGate:
 
         assert not [r for r in caplog.records if "could not be delivered" in r.getMessage()]
 
-    def test_gate_does_not_touch_thread_match_routing(self, make_config):
-        """Emissary replies are ungated by design; the sender-match gate must not
-        start gating them just because it became live."""
+    def test_confirm_sender_match_does_not_reach_an_emissary_reply(self, make_config):
+        """`confirm_sender_match` is about the own-address claim. Turning it on must
+        not start holding a correspondent's reply, which makes no such claim.
+
+        Named for the thread route being ungated *by design* until ISSUE-234, which
+        narrowed it to the correspondent rather than removing it — this sender is
+        the address the bot wrote to, so it stays ungated for the reason the name
+        now gives. `TestThreadMatchConfirmationGate` covers the narrowing itself."""
         config = make_config()
         config.email = _email_config()
         config.email.confirm_sender_match = True
@@ -2155,6 +2161,211 @@ class TestSenderMatchConfirmationGate:
         assert len(task_ids) == 1
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, task_ids[0]).status == "pending"
+
+class TestThreadMatchConfirmationGate:
+    """ISSUE-234 — a `Message-ID` the bot issued routes a reply *and* used to
+    authorize it. Possession is disclosed to everyone Cc'd, everyone the thread is
+    forwarded to, and every archive in the path, so the thread route now also asks
+    who sent the mail: the envelope sender must be an address the bot actually
+    wrote to on the matched thread, or the message meets the same gate the other
+    two routes meet."""
+
+    @staticmethod
+    def _seed_thread(config, to_addr="external@reply.com", user_id="alice"):
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id=user_id, message_id="<orig@test.com>",
+                to_addr=to_addr, subject="Hello",
+                conversation_token="room1",
+            )
+
+    @staticmethod
+    def _reply(sender, id="tm1", references="<orig@test.com>"):
+        envelope = _envelope(id=id, sender=sender, subject="Re: Hello")
+        email = Email(
+            id=id, subject="Re: Hello", sender=sender,
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Thanks", attachments=[],
+            message_id=f"<{id}@reply.com>", references=references,
+            to=("bot@test.com",), cc=(),
+        )
+        return envelope, email
+
+    def _poll(self, config, envelope, email, prompt_result=(True, 99)):
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_confirmation_prompt", return_value=prompt_result) as send,
+        ):
+            return poll_emails(config), send
+
+    def test_stranger_holding_the_message_id_is_gated(self, make_config):
+        """The reproduction from the entry: the only thing the attacker supplies is
+        a References header, and before the fix that alone produced a running task."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"], alerts_channel="alerts_room",
+        )}
+        self._seed_thread(config)
+
+        envelope, email = self._reply("attacker@evil.example")
+        task_ids, send = self._poll(config, envelope, email)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+            assert task.status == "pending_confirmation"
+            # Pinned because it is the one property of a gated thread reply that
+            # is inherited rather than chosen: the task keeps the origin room as
+            # its token (`inbound.py`, "Continue the originating conversation"),
+            # so unlike a gated plus-address message under a synthetic thread
+            # hash it parks that room's foreground queue and is cancellable by
+            # `cancel_pending_confirmations` on the room's next message. Not new
+            # — a gated `sender_match` reply that also matched a thread has
+            # always landed here, which is the case `web_app`'s cancel comment
+            # describes — but this route widens who reaches it, and a silent
+            # change to the token would move the blast radius without a test
+            # noticing.
+            assert task.conversation_token == "room1"
+
+        prompt = send.call_args.args[2]
+        assert "attacker@evil.example" in prompt
+        assert "thread_match" in prompt
+
+    def test_the_correspondent_we_wrote_to_is_not_gated(self, make_config):
+        """The legitimate emissary reply — the common case, and the reason the route
+        was left ungated in the first place. It must stay quiet."""
+        config = make_config()
+        config.email = _email_config()
+        config.email.confirm_sender_match = True
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        self._seed_thread(config)
+
+        envelope, email = self._reply("external@reply.com")
+        task_ids, _ = self._poll(config, envelope, email)
+
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+    def test_the_match_is_by_address_not_by_domain(self, make_config):
+        """A colleague at the correspondent's domain is exactly the population a
+        leaked Message-ID reaches first, so a domain match would wave through the
+        most likely leak rather than catch it."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        self._seed_thread(config)
+
+        envelope, email = self._reply("someone-else@reply.com")
+        task_ids, _ = self._poll(config, envelope, email)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending_confirmation"
+
+    def test_trusting_the_sender_reopens_the_thread(self, make_config):
+        """`!trust` had no effect on this route because the trust check was never
+        consulted. It is now the way a forwarded thread is let through for good."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        self._seed_thread(config)
+        with db.get_db(config.db_path) as conn:
+            db.add_trusted_sender(conn, "alice", "colleague@reply.com")
+
+        envelope, email = self._reply("colleague@reply.com")
+        task_ids, _ = self._poll(config, envelope, email)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+    def test_a_gated_thread_reply_is_not_mirrored_to_the_room(self, make_config):
+        """Same contract as the other two routes: the mirror commits in the task's
+        transaction, so attacker text must not reach the room before the answer."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        self._seed_thread(config)
+
+        captured = {}
+        real_ingest = inbound_module.ingest_message
+
+        def _spy(conn, cfg, msg):
+            captured["suppress"] = msg.suppress_transcript_mirror
+            return real_ingest(conn, cfg, msg)
+
+        envelope, email = self._reply("attacker@evil.example")
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
+            patch("istota.transport.email.inbound.ingest_message", side_effect=_spy),
+        ):
+            poll_emails(config)
+
+        assert captured["suppress"] is True
+
+    def test_a_reply_to_a_multi_recipient_send_matches_any_of_them(self, make_config):
+        """`to_addr` carries the whole recipient string when the send had several
+        (`outbound_drafts` joins them with ', '), so all of them are correspondents."""
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        self._seed_thread(config, to_addr="First <first@reply.com>, second@other.com")
+
+        envelope, email = self._reply("second@other.com")
+        task_ids, _ = self._poll(config, envelope, email)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_ids[0]).status == "pending"
+
+
+class TestThreadReplyFromCorrespondent:
+    """Unit coverage for the address comparison the thread gate rests on."""
+
+    @staticmethod
+    def _sent(to_addr):
+        return db.SentEmail(
+            id=1, user_id="alice", task_id=None, message_id="<m@test.com>",
+            to_addr=to_addr, subject=None, thread_id=None, in_reply_to=None,
+            references=None, conversation_token=None, sent_at="2026-01-01",
+        )
+
+    def test_exact_address_matches(self):
+        assert thread_reply_from_correspondent(self._sent("a@b.com"), "a@b.com")
+
+    def test_comparison_ignores_case_and_display_name(self):
+        assert thread_reply_from_correspondent(
+            self._sent("Alice Example <A@B.com>"), '"A. Example" <a@b.COM>',
+        )
+
+    def test_a_different_mailbox_at_the_same_domain_does_not_match(self):
+        assert not thread_reply_from_correspondent(self._sent("a@b.com"), "c@b.com")
+
+    def test_a_subdomain_does_not_match(self):
+        """Suffix comparison would make `b.com.evil.example` a correspondent."""
+        assert not thread_reply_from_correspondent(self._sent("a@b.com"), "a@x.b.com")
+        assert not thread_reply_from_correspondent(self._sent("a@b.com"), "a@b.com.evil.example")
+
+    def test_unicode_case_mapping_does_not_forge_a_match(self):
+        """U+212A KELVIN SIGN lowercases to "k" under `str.lower()`, so a full
+        Unicode fold would let `Kelvin@b.com` pass as `kelvin@b.com` — a
+        stranger at the correspondent's own domain, which is the population this
+        predicate exists to catch."""
+        assert not thread_reply_from_correspondent(
+            self._sent("kelvin@b.com"), "Kelvin@b.com",
+        )
+        assert thread_reply_from_correspondent(self._sent("kelvin@b.com"), "KELVIN@B.com")
+
+    def test_missing_evidence_fails_closed(self):
+        assert not thread_reply_from_correspondent(None, "a@b.com")
+        assert not thread_reply_from_correspondent(self._sent(""), "a@b.com")
+        assert not thread_reply_from_correspondent(self._sent("a@b.com"), "")
+        assert not thread_reply_from_correspondent(self._sent("a@b.com"), "not-an-address")
+
 
 class TestEmailPromptBoundaries:
     """Verify that email content is wrapped in boundary markers to mitigate prompt injection."""

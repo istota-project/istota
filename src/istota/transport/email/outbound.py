@@ -217,7 +217,9 @@ def _hold_if_unapproved(
     spec excluded ``output`` on the reasoning that its recipient had already
     cleared the *inbound* gate, and both halves of that fail: a plain ``yes`` at
     an inbound prompt authorizes one message and writes no trust row, and a
-    ``thread_match`` reply never meets the inbound gate in the first place.
+    ``thread_match`` reply from the address we wrote to clears the inbound gate
+    on the strength of that alone (ISSUE-234 narrowed the route to the
+    correspondent; clearing it was never a grant).
 
     So this is the backstop that makes the guarantee true rather than
     conventional. It covers ``email output``, a hand-written deferred file, the

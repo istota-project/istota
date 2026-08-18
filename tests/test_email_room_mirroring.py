@@ -379,21 +379,65 @@ class TestConfirmationGate:
         ingest_message(conn, config, _email_msg("webroom"))
         assert [m.role for m in db.get_messages(conn, "webroom")] == ["user"]
 
-    def test_poller_suppresses_the_mirror_for_an_untrusted_sender(self):
-        """The flag has to be resolved before ingest, not after — pin that the
-        poller wires the gate into the message it builds."""
-        import inspect
+    def test_poller_suppresses_the_mirror_for_an_untrusted_sender(self, db_path, tmp_path):
+        """The flag has to be resolved before ingest, not after: the mirror commits
+        in the task's transaction, so a gate decided afterwards has already
+        published the message it was meant to hold.
 
+        Asserted by watching the `IncomingMessage` the real poller builds. This
+        used to read `poll_emails`' source and compare string offsets, which
+        pinned the wording of one expression rather than the ordering it stands
+        for — it broke on the ISSUE-234 rewrite of that line while the property
+        it names held throughout.
+        """
+        from istota.skills.email import Email, EmailEnvelope
         from istota.transport.email import inbound as email_inbound
 
-        src = inspect.getsource(email_inbound.poll_emails)
-        gate_at = src.index("needs_confirmation = not config.is_trusted")
-        ingest_at = src.index("task_id = ingest_message(")
-        assert gate_at < ingest_at, (
-            "the untrusted-sender gate must be resolved before ingest_message, "
-            "or the mirror is committed before the user is asked"
+        config = Config(
+            db_path=db_path,
+            email=EmailConfig(
+                enabled=True, imap_host="imap.test", imap_port=993,
+                imap_user="u", imap_password="p",
+                smtp_host="smtp.test", smtp_port=587, bot_email="bot@test.com",
+                confirm_sender_match=True,
+            ),
+            scheduler=SchedulerConfig(),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            users={"testuser": UserConfig(email_addresses=["testuser@test.com"])},
         )
-        assert "suppress_transcript_mirror=needs_confirmation" in src
+        config.nextcloud_mount_path.mkdir(exist_ok=True)
+
+        envelope = EmailEnvelope(
+            id="m1", subject="Hi", sender="testuser@test.com",
+            date="Mon, 01 Jan 2026 10:00:00 +0000", is_read=False,
+        )
+        email = Email(
+            id="m1", subject="Hi", sender="testuser@test.com",
+            date="Mon, 01 Jan 2026 10:00:00 +0000",
+            body="Hello", attachments=[], message_id="<m1@test.com>",
+            references=None, to=("bot@test.com",), cc=(),
+        )
+
+        seen = {}
+        real_ingest = email_inbound.ingest_message
+
+        def _spy(c, cfg, msg):
+            seen["suppress"] = msg.suppress_transcript_mirror
+            return real_ingest(c, cfg, msg)
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_confirmation_prompt", return_value=(False, None)),
+            patch("istota.transport.email.inbound.ingest_message", side_effect=_spy),
+        ):
+            task_ids = email_inbound.poll_emails(config)
+
+        assert seen["suppress"] is True
+        with db.get_db(db_path) as c:
+            assert db.get_task(c, task_ids[0]).status == "pending_confirmation"
 
 
 class TestAssistantBodyIsTheDeliveredReply:

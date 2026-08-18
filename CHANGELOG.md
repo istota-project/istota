@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Quoting a message the bot sent no longer gets your agent to run on the strength of one header. Any such mail was processed without asking you, on the reasoning that only the recipient would hold the identifier linking it to the thread — but that identifier travels to everyone copied in, to everyone the thread is forwarded to, and into any archive the thread reaches, and it never expired. Replies from the address the bot wrote to are unaffected; anyone else on the thread now waits for your approval, and `yes trust` lets them through for good.
+
 ### Fixed
 
 - A vaccine you have never recorded a dose of now reads "Never recorded" instead of "Series incomplete". Any vaccine given as a series was labelled part-done from the start, so an empty immunizations page opened on ten vaccines that looked half-finished, and the health summary the bot reads listed all ten as needing action. "Series incomplete" now means what it says: you started the series and have doses left.
