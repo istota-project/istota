@@ -479,6 +479,7 @@ def download_attachments(
     target_dir: Path,
     folder: str = "INBOX",
     config: EmailConfig | None = None,
+    max_total_bytes: int | None = None,
 ) -> list[Path]:
     """
     Download attachments for an email directly to target_dir.
@@ -488,6 +489,20 @@ def download_attachments(
         target_dir: Directory to save attachments to
         folder: IMAP folder name
         config: Email configuration
+        max_total_bytes: Stop once this many bytes have been **written to
+            disk**, skipping the rest. ``None`` means no cap. A sender chooses
+            the size of what lands in the user's storage and gets pushed to
+            Nextcloud over WebDAV, so with no cap one message is unbounded disk
+            and upload time on the poll path (ISSUE-250). Whole attachments
+            only — a truncated file is worse than an absent one, since nothing
+            downstream would know it was cut.
+
+            This does **not** bound the IMAP transfer: ``mailbox.fetch`` below
+            materializes the whole message and decodes every MIME part before
+            any of them can be inspected, so the bytes crossing the wire and
+            the peak memory are the sender's choice regardless of this value.
+            Bounding those needs a BODYSTRUCTURE probe and a selective part
+            fetch, which this client does not do.
 
     Returns:
         List of paths to downloaded attachment files
@@ -498,6 +513,7 @@ def download_attachments(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded = []
+    written = 0
     with _get_mailbox(config) as mailbox:
         mailbox.login(config.imap_user, config.imap_password)
         mailbox.folder.set(folder)
@@ -512,7 +528,16 @@ def download_attachments(
                     file_path = target_dir / safe_name
                     if not file_path.resolve().is_relative_to(target_dir.resolve()):
                         continue
-                    file_path.write_bytes(att.payload)
+                    payload = att.payload or b""
+                    if max_total_bytes is not None and written + len(payload) > max_total_bytes:
+                        logger.warning(
+                            "Skipping attachment %s on email %s: it would take "
+                            "the download past its %d byte budget",
+                            safe_name, email_id, max_total_bytes,
+                        )
+                        continue
+                    file_path.write_bytes(payload)
+                    written += len(payload)
                     downloaded.append(file_path)
 
     return downloaded

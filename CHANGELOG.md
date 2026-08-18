@@ -11,7 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Quoting a message the bot sent no longer gets your agent to run on the strength of one header. Any such mail was processed without asking you, on the reasoning that only the recipient would hold the identifier linking it to the thread — but that identifier travels to everyone copied in, to everyone the thread is forwarded to, and into any archive the thread reaches, and it never expired. Replies from the address the bot wrote to are unaffected; anyone else on the thread now waits for your approval, and `yes trust` lets them through for good.
 
+### Added
+
+- A ceiling on how much inbound mail becomes work. The bot's mail address is public by design — it is the sender on every message it writes for you — so anyone who has ever had a reply from it can turn one email into a task on your account, and nothing limited how many. There is now a budget per hour, with a tighter one per correspondent so a single noisy sender throttles alone. Mail over the budget is filed rather than discarded: it stays in the mailbox, creates no task, and you get one summary naming the count and the senders instead of one interruption per message. Ask the bot to read the backlog and it is all still there, until the usual retention window sweeps the folder.
+
+- Held mail from an unknown sender no longer floods your notifications. The approval question was asked once per message, so fifty messages meant fifty questions to answer one at a time. Past a few from the same sender you now get a single notice covering the rest; each message is still held and still individually approvable, and that notice is sent even if you were already told about throttled mail in the same period.
+
+### Changed
+
+- Incoming mail now runs on the background queue instead of competing with your live chat. Email is the one way a stranger can create work, and nobody watches a mailbox for a reply the way they watch a chat window, so a burst of mail no longer takes the slots your own messages need. Mail turnaround is slower under load, which is the trade; `email_task_queue = "foreground"` restores the old behaviour.
+
+- Very long messages and very large attachments are now capped before they are read. The whole body went into the prompt, so one long message was expensive on its own; it is now truncated with a note saying so, and the full message stays in the mailbox. Attachments have a size budget per message and per check, and anything skipped for size is named in the message the bot reads, so it never answers as though an attachment had never been sent.
+
 ### Fixed
+
+- Work is now handed out to whoever has been waiting longest. Users were scanned in no particular order and the scan stopped once the machine was busy, so on a host with more people waiting than free slots the same person could be skipped over and over. Three users with work is enough to reach this on default settings.
 
 - Mail that arrives in a burst is no longer lost. Each check looked at the fifty newest messages in the mailbox and nothing else, so anything pushed below that line between two checks was never read — no error and no log line — and it stayed buried, because the next check looked at the same fifty. A busy mailing list or a run of notifications was enough to do it. Checks now work forward through the mailbox in arrival order and resume where they left off, so a backlog drains instead of burying what sits underneath it. This stops mail going missing from here on; it deliberately does not go back and answer mail that was already missed, since replying to months-old messages would be worse than leaving them.
 

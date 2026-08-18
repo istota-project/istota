@@ -176,6 +176,11 @@ def record_inbound(
     effort: str | None = None,
     apply_room_default: bool = True,
     priority: int = 5,
+    # The worker queue the resulting task lands on. Interactive surfaces leave
+    # it alone; the email poller passes "background" so a flood at the public
+    # `bot+user@` address cannot take the slots a live chat turn needs
+    # (ISSUE-250).
+    queue: str = "foreground",
     external_id: str | None = None,
     client_msg_id: str | None = None,
     suppress_transcript_mirror: bool = False,
@@ -397,6 +402,7 @@ def record_inbound(
         model=model,
         effort=effort,
         priority=priority,
+        queue=queue,
     )
 
     # 4. Store the user message into the canonical store — for a room surface,
@@ -464,6 +470,7 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         output_target=msg.output_target,
         model=msg.model,
         effort=msg.effort,
+        queue=msg.queue,
         apply_room_default=not msg.model_prefix_used,
         external_id=str(msg.platform_message_id)
         if msg.platform_message_id is not None

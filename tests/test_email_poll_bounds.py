@@ -56,6 +56,14 @@ def make_config(tmp_path):
             bot_email="bot@test.com",
         )
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
+        # These tests are about the poll *window* — that nothing is buried and
+        # a backlog drains in arrival order. The volume budget added later
+        # (ISSUE-250 consequence 1) is an orthogonal control on the same path,
+        # and leaving it on would silently cap the message counts here, so a
+        # cursor regression could hide behind a limiter. Its own coverage is in
+        # `test_email_volume_budget.py`.
+        config.scheduler.email_rate_limit_messages = 0
+        config.scheduler.email_sender_rate_limit_messages = 0
         for key, val in overrides.items():
             setattr(config, key, val)
         return config
