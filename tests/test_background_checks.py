@@ -443,3 +443,51 @@ class TestDaemonLoopNotBlocked:
         assert backups.wait(timeout=5.0), "backup never ran"
         assert sleeps.wait(timeout=5.0), "sleep cycle never ran"
         assert suspends == [], f"a check is still suspending the watchdog ({len(suspends)})"
+
+    def test_email_poll_does_not_block_dispatch(self, tmp_path, monkeypatch):
+        """A slow mailbox must not starve pool.dispatch() (ISSUE-250).
+
+        `poll_emails` ran inline on the loop thread, and its per-message loop
+        held the framework DB's write lock across every IMAP login and
+        attachment upload in the batch. An unreachable or merely slow IMAP
+        server therefore stalled task dispatch for every user on the instance.
+        """
+        import istota.scheduler as sched
+
+        cfg = _daemon_config(tmp_path)
+        # Keep the other periodic checks out of the way.
+        cfg.scheduler.db_health_check_interval = 10**12
+        cfg.email.enabled = True
+        cfg.scheduler.email_poll_interval = 1
+
+        started = threading.Event()
+        release = threading.Event()
+        runs: list[int] = []
+        dispatches: list[int] = []
+
+        def _wedged(config):
+            runs.append(1)
+            started.set()
+            release.wait(timeout=10.0)
+            return []
+
+        def _dispatch(self):
+            dispatches.append(1)
+            if started.is_set() and len(dispatches) > 3:
+                sched.request_shutdown()
+
+        # `run_daemon` imports the name from the package, so that is the
+        # binding the loop actually calls.
+        monkeypatch.setattr("istota.transport.email.poll_emails", _wedged)
+        t = _run_daemon_isolated(cfg, monkeypatch, _dispatch)
+        try:
+            assert started.wait(timeout=10.0), "email poll never ran"
+            t.join(timeout=10.0)
+            assert not t.is_alive(), "daemon loop was blocked by the email poll"
+            assert len(dispatches) > 3
+            # The in-flight guard, not the poll clock, prevents a re-fire.
+            assert len(runs) == 1, f"email poll re-fired while in flight: {len(runs)}"
+        finally:
+            release.set()
+            sched.request_shutdown()
+            t.join(timeout=10.0)

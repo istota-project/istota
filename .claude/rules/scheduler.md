@@ -40,7 +40,7 @@ The lock path is the module constant `DAEMON_LOCK_PATH` (default
    - Check scheduled jobs (every `briefing_check_interval`)
    - Poll the sleep-cycle crons (every `briefing_check_interval`) and run a due pass — per-user then per-channel — **off the loop thread** (`_run_sleep_cycles` = both halves as one unit) — see below
    - Follow opted-in users' timezones on travel (every `TRAVEL_TZ_CHECK_INTERVAL`, 15 min, gated on `location.enabled`) — also **off the loop thread**
-   - Poll emails (every `email_poll_interval`)
+   - Poll emails (every `email_poll_interval`) — also **off the loop thread** (`_run_email_poll`)
    - Organize shared files (every `shared_file_check_interval`)
    - Poll TASKS.md files (every `tasks_file_poll_interval`)
    - Run cleanup checks (every `briefing_check_interval`)
@@ -55,14 +55,17 @@ The lock path is the module constant `DAEMON_LOCK_PATH` (default
 
 ### Off-thread periodic checks (`_spawn_background_check`, ISSUE-144)
 
-Three periodic checks are multi-minute: the DB-health sweep and the DB-backup
+Four periodic checks can run long: the DB-health sweep and the DB-backup
 snapshot both walk every per-user DB (the backup writing to the rclone FUSE
-mount, where latency is unbounded), and the nightly sleep cycles make synchronous
-per-user LLM calls. Run synchronously they blocked `pool.dispatch()` for their
+mount, where latency is unbounded), the nightly sleep cycles make synchronous
+per-user LLM calls, and the inbound email poll makes one IMAP connection per
+message it reads plus another per message with attachments, uploading each
+attachment to Nextcloud over WebDAV — network I/O whose duration an outside
+sender can influence (ISSUE-250). Run synchronously they blocked `pool.dispatch()` for their
 whole duration, and the `LoopWatchdog.suspended()` wrapper needed to keep a
 healthy nightly run from paging left the watchdog blind to *real* stalls in the
-same window. All three now run on short-lived daemon threads (Tier 1 = the DB
-pair, Tier 2 = the sleep cycles), and **no `suspended()` call site remains in
+same window. All four now run on short-lived daemon threads (Tier 1 = the DB
+pair, Tier 2 = the sleep cycles, ISSUE-250 = the email poll), and **no `suspended()` call site remains in
 `run_daemon`** — the watchdog has full coverage.
 
 - `_spawn_background_check(name, fn, inflight, *, overlap_expected=False)` — spawns
@@ -78,6 +81,12 @@ pair, Tier 2 = the sleep cycles), and **no `suspended()` call site remains in
   nightly pass spanning several 60s ticks is by design, not an overrun.
 - `_run_db_backup(config)` — `backup_databases` + `_alert_backup_problems` as one
   unit, since the alert needs the results of the run that produced it.
+- `_run_email_poll(config)` — `poll_emails` plus its "queued N task(s)" log.
+  `overlap_expected=True`: a batch draining a backlog legitimately outlives the
+  60s poll interval, so the in-flight skip is routine rather than an overrun.
+  Also the single-pass `run_scheduler` body, synchronously — one-shot mode has
+  no dispatch loop to starve, and sharing the function keeps the two paths from
+  drifting.
 - `_run_sleep_cycles(config)` — `check_sleep_cycles` then
   `check_channel_sleep_cycles` as one unit. Bundled because both are halves of the
   same nightly pass and always came due on the same interval, so one thread
@@ -266,7 +275,7 @@ class UserWorker(threading.Thread):
 | Poller | Function | Interval Config | State Table |
 |---|---|---|---|
 | Talk | `_talk_poll_loop()` | `talk_poll_interval` | `talk_poll_state` |
-| Email | `poll_emails()` (transport/email/inbound.py) | `email_poll_interval` | `processed_emails` |
+| Email | `poll_emails()` (transport/email/inbound.py), via off-thread `_run_email_poll` | `email_poll_interval` (batch `email_poll_batch_size`) | `processed_emails`, `email_poll_state` |
 | TASKS.md | `poll_all_tasks_files()` (tasks_file_poller.py) | `tasks_file_poll_interval` | `istota_file_tasks` |
 | Heartbeat | `check_heartbeats()` (heartbeat.py) | `heartbeat_check_interval` | `heartbeat_state` |
 | DB health | `check_db_health()` → `db_health.check_and_repair()` | `db_health_check_interval` | — (logs only) |
@@ -304,6 +313,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `talk_poll_interval` | 10s | Talk poller |
 | `talk_poll_timeout` | 30s | Talk long-poll |
 | `email_poll_interval` | 60s | Email poller |
+| `email_poll_batch_size` | 50 | Messages one inbound poll tick walks (ISSUE-250). A **batch boundary, not a window**: the poll used to fetch the newest 50 in the folder and dedupe afterwards, so anything that dropped below the top 50 between two ticks was never fetched again — silent, permanent mail loss at roughly 50 messages per interval, which a mailing list or a CI storm reaches without malice. Now each tick takes the oldest N UIDs above the `email_poll_state` cursor and leaves the rest, so a backlog drains in arrival order and a full batch logs that more is waiting. `processed_emails` stays the authority on what has been handled; the cursor only says where to start looking, so a lagging or lost cursor costs a re-fetch, never a duplicate task |
 | `briefing_check_interval` | 60s | Briefings, jobs, sleep, cleanup, invoices |
 | `tasks_file_poll_interval` | 30s | TASKS.md poller |
 | `shared_file_check_interval` | 120s | Shared file organizer |
@@ -325,7 +335,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `stale_pending_fail_hours` | 2 | Ancient task auto-fail |
 | `task_retention_days` | 7 | Task cleanup |
 | `email_retention_days` | 7 | IMAP retention. `email_support.cleanup_old_emails` issues one `skills.email.delete_emails_before` sweep — an IMAP `BEFORE <date>` search plus a batched bulk delete on a single connection — so the work is proportional to what has actually expired. It used to paginate the *newest* 100 envelopes and delete whichever had aged out, which above roughly `100 / days` messages a day deletes nothing on every run while reporting a clean sweep (ISSUE-230). Ages on the IMAP internal date (arrival), not the sender-supplied `Date:`; `BEFORE` is date-granular, so a message is kept up to one extra day rather than deleted early. Deletes **everything** in the folder past the cutoff, not only mail the bot processed — as the paginated sweep it replaces also did, but that one rarely reached anything, so the first run after this fix clears a backlog. The candidate count is logged before any delete. Removal is scoped to the swept UIDs via `UID EXPUNGE` when the server advertises **UIDPLUS**; without it IMAP has no way to remove one message but a folder-wide `EXPUNGE`, which also takes anything another client flagged `\Deleted`, so the fallback logs one warning per host (`_supports_uid_expunge`). `delete_email` — the agent-reachable `delete --confirmed` verb — shares that path. **The capability must be read post-authentication** (`_server_capabilities` issues a live `CAPABILITY` and unions it with the cached tuple): `imaplib` fills `client.capabilities` once from the greeting and nothing refreshes it — imap-tools' `login` bypasses `imaplib.login` entirely — while Dovecot and Gmail advertise UIDPLUS only after login, so reading the cached tuple alone silently reverts every delete to the folder-wide path. A refused `UID EXPUNGE` never falls back; it rolls the `\Deleted` flag back so the refusal is a genuine no-op rather than a mailbox hidden from the user's client. The raw path re-applies imap-tools' `clean_uids` shape check itself, since `imaplib` splices `str` args into the command line unescaped. The sweep is bounded at `_MAX_DELETES_PER_SWEEP` (2000, fixed not a knob) because `run_cleanup_checks` runs it **synchronously on the dispatch loop** — an unbounded first-run backlog is unbounded time with no task dispatch and the stall watchdog counting. Bounded, each tick costs ~20 round trips and logs the remainder; at the 60s cleanup cadence even a six-figure backlog drains in under a day. (Note the socket `timeout` is per-operation, not a session budget — `batch_size`, not this bound, is what limits one command's work.) Oldest first, sorted numerically rather than trusting `SEARCH` order. A stopped sweep that made progress is a WARNING (the next tick re-finds the rest — `SEARCH` does not exclude `\Deleted`); only one that removed nothing is an ERROR. 0 = disable |
-| `processed_email_retention_days` | 90 | `processed_emails` prune (ISSUE-231). One row is written per *polled message* — bot self-mail, `discarded` and quiet-sender mail included — and nothing deleted from the table before this. Keyed on `processed_at`, not on whether the row's task still exists: the FK is unenforced and tasks are pruned at `task_retention_days`, so most rows hold a dangling `task_id`. Dedup is not their only remaining job, though — `_EMAIL_SENDER_SUBQUERY` recovers an email turn's envelope sender from here by `task_id` (ISSUE-226) and the canonical `messages` transcript is *not* age-pruned, so **a row still referenced by a `messages` row is never deleted**; without that exclusion an external contact's mail would start rendering in the prompt as the principal's own words. The rows that actually pile up produced no task at all (bot self-mail, `discarded`, quiet senders), so the exclusion costs the prune almost nothing. Indexed on `processed_at` (and `messages.task_id`), since the steady-state no-op prune would otherwise be a full scan a minute under a write transaction. `_effective_processed_email_retention` floors the window at `email_retention_days + 1` (one latched WARNING when it applies; +1 rather than equal because the IMAP sweep is date-granular in the *server's* zone while `processed_at` is an exact UTC timestamp) — the row is what stops a message still physically in `poll_folder` from being re-ingested as a fresh task, and `email_id` is a bare IMAP UID with no `UIDVALIDITY` or folder qualifier, so a re-ingest is indistinguishable from new mail. Floor only, never a cap. `email_retention_days = 0` means mail is never deleted from IMAP, so the message's lifetime is unbounded and the prune is **disabled outright** rather than left unfloored. 0 = disable |
+| `processed_email_retention_days` | 90 | `processed_emails` prune (ISSUE-231). One row is written per *polled message* — bot self-mail, `discarded` and quiet-sender mail included — and nothing deleted from the table before this. Keyed on `processed_at`, not on whether the row's task still exists: the FK is unenforced and tasks are pruned at `task_retention_days`, so most rows hold a dangling `task_id`. Dedup is not their only remaining job, though — `_EMAIL_SENDER_SUBQUERY` recovers an email turn's envelope sender from here by `task_id` (ISSUE-226) and the canonical `messages` transcript is *not* age-pruned, so **a row still referenced by a `messages` row is never deleted**; without that exclusion an external contact's mail would start rendering in the prompt as the principal's own words. The rows that actually pile up produced no task at all (bot self-mail, `discarded`, quiet senders), so the exclusion costs the prune almost nothing. Indexed on `processed_at` (and `messages.task_id`), since the steady-state no-op prune would otherwise be a full scan a minute under a write transaction. `_effective_processed_email_retention` floors the window at `email_retention_days + 1` (one latched WARNING when it applies; +1 rather than equal because the IMAP sweep is date-granular in the *server's* zone while `processed_at` is an exact UTC timestamp) — the row is what stops a message still physically in `poll_folder` from being re-ingested as a fresh task, and a re-ingest is indistinguishable from new mail. The key is `(uidvalidity, email_id)` since ISSUE-250, so a recreated mailbox no longer makes new UIDs collide with old rows; it is still not folder-qualified. Floor only, never a cap. `email_retention_days = 0` means mail is never deleted from IMAP, so the message's lifetime is unbounded and the prune is **disabled outright** rather than left unfloored. 0 = disable |
 | `scheduled_job_max_consecutive_failures` | 5 | Auto-disable threshold |
 | `cron_max_staleness_minutes` | 60 | Insertion-time staleness gate for `check_scheduled_jobs` + `check_briefings`. When `now - next_run > N`, skip the queue insert and bump `last_run_at` to now so the schedule resumes from the next future fire. Suppresses thundering-herd catch-up after a long outage. 0 = legacy unconditional catch-up. |
 | `max_subtasks_per_task` | 10 | Deferred subtasks created per parent task |
@@ -367,7 +377,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `user_resources` | `UserResource` | id, user_id, resource_type, resource_path, display_name, permissions |
 | `briefing_configs` | `BriefingConfig` | id, user_id, name, cron_expression, conversation_token, components (JSON), enabled |
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
-| `processed_emails` | `ProcessedEmail` | id, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method |
+| `processed_emails` | `ProcessedEmail` | id, uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method; `UNIQUE (uidvalidity, email_id)` — a UID is unique only within a folder's UIDVALIDITY (ISSUE-250) |
 | `istota_file_tasks` | `IstotaFileTask` | id, user_id, content_hash, original_line, normalized_content, status, task_id, file_path |
 | `scheduled_jobs` | `ScheduledJob` | id, user_id, name, cron_expression, prompt, conversation_token, output_target, enabled, silent_unless_action, consecutive_failures, model, effort |
 | `talk_poll_state` | — | conversation_token, last_known_message_id |

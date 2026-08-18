@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Mail that arrives in a burst is no longer lost. Each check looked at the fifty newest messages in the mailbox and nothing else, so anything pushed below that line between two checks was never read — no error and no log line — and it stayed buried, because the next check looked at the same fifty. A busy mailing list or a run of notifications was enough to do it. Checks now work forward through the mailbox in arrival order and resume where they left off, so a backlog drains instead of burying what sits underneath it. This stops mail going missing from here on; it deliberately does not go back and answer mail that was already missed, since replying to months-old messages would be worse than leaving them.
+
+- A message the mail server refuses to hand over is retried for a few minutes before being set aside, and setting it aside is now recorded rather than silent. A dropped connection mid-check used to mean the message was simply skipped, and it no longer stops the messages behind it from being read.
+
+- A slow or unreachable mail server no longer holds up everything else. Checking for mail ran on the same thread that hands work to the agents, and kept the database locked while it downloaded attachments and uploaded them to your files, so one unresponsive mailbox stopped tasks from starting for every user on the machine. The check now runs on its own, and holds the database only for the moment it records a message.
+
+- Moving to a new mail server, or having a mailbox rebuilt, no longer makes incoming mail invisible. Messages are identified by a number the server assigns, and those numbers start over when a mailbox is recreated, so every new message looked like one already handled and was skipped. The record now tracks which mailbox a number came from.
+
 - A vaccine you have never recorded a dose of now reads "Never recorded" instead of "Series incomplete". Any vaccine given as a series was labelled part-done from the start, so an empty immunizations page opened on ten vaccines that looked half-finished, and the health summary the bot reads listed all ten as needing action. "Series incomplete" now means what it says: you started the series and have doses left.
 
 - A reply to mail the bot sent for you now shows up in your own mailbox listing. When a correspondent answers the bot's plain address rather than your personal one, the reply was still delivered and answered normally, but listing your mail did not show it — so the one query you run when you suspect something went missing was the query that hid it. Searching your mail found it, and still does. The listing now looks for replies to your last twenty-five or so messages as well; searching remains the way to find a reply to something older than that.

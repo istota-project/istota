@@ -3566,6 +3566,24 @@ def _run_db_backup(config: Config) -> None:
     _alert_backup_problems(config, results)
 
 
+def _run_email_poll(config: Config) -> None:
+    """Poll inbound mail and log what it queued.
+
+    A thin wrapper so the loop can hand one callable to
+    ``_spawn_background_check``. Exceptions are contained there and logged as
+    ``background_check_failed``; the try/except is kept so the log names the
+    email poll specifically, which is what the operator greps for.
+    """
+    from .transport.email import poll_emails
+
+    try:
+        email_tasks = poll_emails(config)
+        if email_tasks:
+            logger.info("Queued %d email task(s)", len(email_tasks))
+    except Exception as e:
+        logger.error("Error polling emails: %s", e)
+
+
 def check_travel_timezone(
     config: Config, *, now: "datetime | None" = None,
 ) -> list[tuple[str, str]]:
@@ -3761,11 +3779,13 @@ def _spawn_background_check(
 ) -> bool:
     """Run a known-slow periodic check on a short-lived daemon thread.
 
-    The DB-health sweep, the DB-backup snapshot, and the nightly sleep cycles
-    are all multi-minute: the first two walk every per-user DB (the backup
-    writing to the rclone FUSE mount, where latency is unbounded), the third
-    makes synchronous per-user LLM calls. Run synchronously they blocked
-    ``pool.dispatch()`` for their whole duration, and the
+    The DB-health sweep, the DB-backup snapshot, the nightly sleep cycles and
+    the inbound email poll can all run long: the first two walk every per-user
+    DB (the backup writing to the rclone FUSE mount, where latency is
+    unbounded), the third makes synchronous per-user LLM calls, and the fourth
+    makes one IMAP connection per message it reads plus a WebDAV upload per
+    attachment — network I/O whose duration an outside sender can influence.
+    Run synchronously they blocked ``pool.dispatch()`` for their whole duration, and the
     ``LoopWatchdog.suspended()`` wrapper needed to stop them false-paging left
     the watchdog blind to *real* stalls in the same window (ISSUE-144).
 
@@ -5023,13 +5043,11 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
         except Exception as e:
             logger.error("Error checking travel timezones: %s", e)
 
-    # Poll for new emails
+    # Poll for new emails. Synchronous here: one-shot mode has no dispatch
+    # loop to starve, and it shares `_run_email_poll` with the daemon so the
+    # two paths cannot drift.
     if config.email.enabled:
-        from .transport.email import poll_emails
-
-        email_tasks = poll_emails(config)
-        if email_tasks:
-            logger.info("Queued %d email task(s)", len(email_tasks))
+        _run_email_poll(config)
 
     # Organize shared files (runs before TASKS.md polling so files are in place)
     try:
@@ -5498,15 +5516,19 @@ def run_daemon(
             )
             last_travel_tz_check = now
 
-        # Poll emails periodically
+        # Poll emails periodically, off the dispatch thread (ISSUE-250). The
+        # poll makes one IMAP connection per message it reads and another per
+        # message with attachments, and uploads each attachment to Nextcloud
+        # over WebDAV — unbounded network I/O whose duration an outside sender
+        # can influence. Inline, that starved `pool.dispatch()` for every user
+        # on the instance. `overlap_expected` because a batch legitimately
+        # outlives the poll interval when draining a backlog, so the skip is
+        # routine rather than a warning.
         if config.email.enabled and now - last_email_poll >= config.scheduler.email_poll_interval:
-            try:
-                from .transport.email import poll_emails
-                email_tasks = poll_emails(config)
-                if email_tasks:
-                    logger.info("Queued %d email task(s)", len(email_tasks))
-            except Exception as e:
-                logger.error("Error polling emails: %s", e)
+            _spawn_background_check(
+                "email-poll", lambda: _run_email_poll(config),
+                background_checks, overlap_expected=True,
+            )
             last_email_poll = now
 
         # Organize shared files periodically (before TASKS.md polling)
