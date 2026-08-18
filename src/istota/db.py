@@ -2898,9 +2898,18 @@ def get_max_task_event_seq(conn: sqlite3.Connection, task_id: int) -> int:
 def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
     """Delete all events for a task. Returns the row count.
 
-    Used by retention cleanup. (No longer called on retry — the event log now
-    spans all attempts so the live stream survives a retry; ``EventWriter``
-    resumes ``seq`` via ``get_max_task_event_seq`` instead of resetting to 1.)
+    Nothing in the daemon calls this today, and that is the intended state: a
+    task's event log spans every attempt, so the live stream survives a retry
+    (``EventWriter`` resumes ``seq`` via ``get_max_task_event_seq`` rather than
+    resetting to 1) and a confirmed re-run keeps the parked attempt's work
+    instead of erasing it (ISSUE-235 — ``confirmations.approve`` prunes that
+    attempt's ``confirmation``/``done`` by kind, and nothing else). Retention is
+    the one thing that still drops these rows wholesale, in bulk SQL over the
+    whole expired set (``cleanup_old_tasks``), not one task at a time here.
+
+    Kept as the tested single-task primitive. Before reaching for it, note that
+    ``task_events`` is the only durable record of a task parked at
+    ``pending_confirmation``: the park path persists no ``execution_trace``.
     """
     cursor = conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
     return cursor.rowcount

@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Approving a held action from web chat no longer erases the record of what led up to it. Whatever the agent had already done before it stopped to ask — the tools it ran, the steps it took — was the only lasting account of that first pass, and granting permission deleted it, so the finished task showed only what happened after you said yes. Approving the same task from a Talk room never did this. The record now stays and the resumed run adds to it.
+
 - Work is now handed out to whoever has been waiting longest. Users were scanned in no particular order and the scan stopped once the machine was busy, so on a host with more people waiting than free slots the same person could be skipped over and over. Three users with work is enough to reach this on default settings.
 
 - Mail that arrives in a burst is no longer lost. Each check looked at the fifty newest messages in the mailbox and nothing else, so anything pushed below that line between two checks was never read — no error and no log line — and it stayed buried, because the next check looked at the same fifty. A busy mailing list or a run of notifications was enough to do it. Checks now work forward through the mailbox in arrival order and resume where they left off, so a backlog drains instead of burying what sits underneath it. This stops mail going missing from here on; it deliberately does not go back and answer mail that was already missed, since replying to months-old messages would be worse than leaving them.
