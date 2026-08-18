@@ -18,10 +18,11 @@ Emails from untrusted senders require explicit user confirmation before processi
 
 - Plus-addressed emails (`bot+user_id@domain`) from senders not in the user's trusted list
 - Emails whose `From:` names one of the user's own addresses, when `confirm_sender_match` is enabled (default: false)
+- Thread-matched emails (replies to mail the bot sent) whose `From:` is not one of the addresses the bot actually wrote to on that thread
 
 When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, discard, or — for an external sender — trust them so later mail passes. Trusted senders bypass the gate.
 
-Thread-matched emails (emissary replies) are never gated — the external contact holds a `Message-ID` from mail the bot sent on the user's behalf, and that is the routing evidence.
+An emissary reply from the contact the bot wrote to is not gated: that address is the one the bot chose to correspond with, so the reply carries the same evidence the send did. Someone *else* replying on that thread is, and it takes one approval — `yes trust` after that lets their mail through for good. The `Message-ID` alone is no longer enough, because it is not a secret: it travels to everyone Cc'd, everyone the thread is forwarded to, and into any public archive the thread reaches, and it never expires.
 
 ### `confirm_sender_match`
 

@@ -565,11 +565,13 @@ def transcript_room(
     What is deliberately **not** a rung is "the room this user's notifications
     would go to". That is :func:`routed_notification_room`, and only the email
     poller calls it, on the routes where the message names no conversation at
-    all. Consulting it here would put an ungated `thread_match` reply — an
-    external correspondent's verbatim body, which `_conversation_history_from_
-    messages` re-pairs into that room's LLM context — into the user's alerts
-    room whenever their reply-routing policy is `thread`, which is a room the
-    thread had no relationship with. The poller resolves it once and writes the
+    all. Consulting it here would put an ungated `thread_match` reply — the
+    correspondent's verbatim body, which `_conversation_history_from_messages`
+    re-pairs into that room's LLM context — into the user's alerts room whenever
+    their reply-routing policy is `thread`, which is a room the thread had no
+    relationship with. (Since ISSUE-234 "ungated" on that route means the reply
+    came from an address the bot wrote to, which narrows who can do this without
+    changing that they can.) The poller resolves it once and writes the
     answer into ``output_target``, so every later reader sees rung 2.
 
     Existence, never creation, at both rungs: an email task naming no registered

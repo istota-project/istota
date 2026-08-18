@@ -201,9 +201,84 @@ messages are re-polled rather than silently lost.
   - `plus_address` / `sender_match` — gated unless `is_trusted_email_sender`,
     called with `include_own_addresses=not config.email.confirm_sender_match`.
     **One rule, both routes** — see below.
-  - `thread_match` — never gated, by design. The external contact holds a
-    `Message-ID` from mail we sent; that possession is the routing evidence. Noted
-    in ISSUE-226 as the one ungated path, deliberately left so.
+  - `thread_match` — gated unless `email_ownership.thread_reply_from_correspondent`
+    says the envelope sender is one of the addresses the bot actually wrote to on
+    the matched `sent_emails` row, and then by the same `is_trusted_email_sender`
+    call as the other two routes. **One rule, all three routes** — see below.
+
+  **Why the thread route joined the gate (ISSUE-234).** It used to be exempt on
+  the argument that possession of a `Message-ID` we issued is the routing
+  evidence. That is sound about *which thread* and says nothing about *who*: the
+  id is a bearer token, not a secret, disclosed to everyone Cc'd, everyone the
+  thread is forwarded to (most clients preserve `References`), every relay and
+  backup in the path, and to a public archive if the bot ever mails a list. There
+  is no retention on `sent_emails`, so every id stays valid indefinitely, and one
+  leak bought a permanent bidirectional agent channel scoped to a user — the
+  reply goes to `processed_emails.sender_email`, i.e. to whoever wrote in, which
+  then mints them an id of their own. One piece of evidence was answering two
+  questions with different populations.
+
+  The second question now reads a second piece of evidence. The envelope sender
+  is weak on its own — unauthenticated, same as everywhere else on this path —
+  but it is the one the forwarded / leaked / hijacked case fails, and it costs
+  the ordinary emissary reply nothing, since that sender is the correspondent by
+  construction. Everything else about the route is unchanged: it still resolves
+  the user, still recovers `origin_target`, still runs the quiet-sender filter.
+
+  **Exact address, never the domain**, and compared against the matched row
+  alone. A domain match reads well and is wrong twice: the population a leaked id
+  reaches first is the correspondent's own colleagues and shared mailboxes, which
+  is exactly what it waves through, and a correspondent on a large provider would
+  extend the credential to every account there. Widening to every `sent_emails`
+  row in the `References` chain is the other tempting relaxation, and it lets a
+  sender who legitimately holds one thread's id add a leaked id from another and
+  inherit that thread's `conversation_token` and `origin_target` — the routing
+  payload being the thing worth stealing, the sender is checked against the row
+  that supplies it. A genuine third party on the thread therefore meets one
+  prompt, and `yes trust` settles it.
+
+  Side effect worth knowing: `!trust` and `trusted_email_senders` now mean
+  something on this route, where the trust check was previously never consulted.
+  There is no matching distrust — the trust list is allow-only, so `!untrust`
+  removes a grant rather than adding a block, on this route as on the others.
+
+  Four residuals, each considered and accepted rather than missed:
+
+  - **`to_addr` is the To line only.** No writer records Cc — the skill's
+    `reply-all` sends to a Cc list and stores `orig.sender`, `outbound_drafts`
+    joins `to_addrs` while holding `cc_addrs` beside it — so a party the bot
+    genuinely wrote to on Cc reads as a third party and meets one prompt.
+    Recording the full recipient set is a schema change; the miss costs one
+    confirmation that `yes trust` settles.
+  - **Approving once makes the sender a correspondent.** `deliver_email_result`
+    replies to `processed_emails.sender_email` and `_record_sent_email` writes a
+    row naming it, so a plain `yes` plus a bot reply mints exactly the evidence
+    this predicate reads, and later mail from that address is ungated with no
+    trust row for `!untrust` to remove. Consistent with what the address now is
+    — the bot did write to it — but wider than the prompt's "process this
+    message" wording implies. Pre-existing in shape: the same `yes` had the same
+    effect when the whole route was ungated.
+  - **No age bound.** `sent_emails` still has no retention, so an address the
+    bot wrote to once stays a correspondent indefinitely — a recycled mailbox at
+    a former employer keeps the route. Bounding *who* was the fix; bounding *how
+    long* is the retention policy ISSUE-234 named as its pairing and this change
+    did not take.
+  - **The evidence is still an unauthenticated `From:`.** A spoofer who forges
+    the correspondent's address is past the gate, and the DMARC canary does not
+    watch this route — it is scoped to the self-claim, and `claims_to_be_user`
+    is structurally False here. Widening it would alert on every reply from a
+    domain that publishes no DMARC policy, i.e. on ordinary mail, so the real
+    answer is the authserv-id-scoped verdict check ISSUE-249 owns.
+
+  What this route now shares with a gated `sender_match` reply is that the held
+  task sits under a **real room token** (it inherits `sent_emails.
+  conversation_token`, not the synthetic thread hash), so it parks that room's
+  foreground queue and `cancel_pending_confirmations` discards it on the room's
+  next message. Not introduced here — a gated `sender_match` reply that also
+  matched a thread has always landed there, which is the case `web_app`'s cancel
+  comment describes and the user-scoped `/chat/confirmations` banner mitigates —
+  but this route widens who reaches it. Pinned by an assertion on
+  `conversation_token` in `TestThreadMatchConfirmationGate`.
 
   **What `confirm_sender_match` actually switches (ISSUE-227).** It turns off the
   *own-address branch* of the trust check — the branch that reads "the `From:`
