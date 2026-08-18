@@ -85,6 +85,14 @@ class IncomingMessage:
     # Raw and untrusted: ``record_inbound`` sanitizes it through
     # ``db.external_email_sender`` before it reaches ``messages.author_label``.
     sender_address: str | None = None
+    # Which worker queue this turn belongs on. A property of the *surface's*
+    # latency contract rather than of the message, which is why it has a
+    # default: an interactive surface leaves it alone. Email sets it to
+    # "background" (`[scheduler] email_task_queue`), because it is the one
+    # surface an unauthenticated stranger can create work on and the one whose
+    # turnaround nobody is watching — so a flood at the public `bot+user@`
+    # address must not take the slots the user's live chat needs (ISSUE-250).
+    queue: str = "foreground"
     raw: dict[str, Any] = field(default_factory=dict)  # original payload
 
 

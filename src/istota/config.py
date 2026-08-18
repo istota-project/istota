@@ -152,6 +152,26 @@ class SchedulerConfig:
     dispatch_interval: float = 0.5  # seconds between pending-task dispatch scans within a poll tick (0 or >= poll_interval = legacy single dispatch per tick)
     email_poll_interval: int = 60  # seconds between email polls
     email_poll_batch_size: int = 50  # messages one poll tick will walk. A batch boundary, not a window: the remainder is left for the next tick and drains, rather than falling off the end (ISSUE-250)
+    # The inbound email volume budget (ISSUE-250). `bot+{user_id}@domain` is
+    # public by construction — it is the From: on every mail the bot sends on a
+    # user's behalf — so any past correspondent can turn one SMTP transaction
+    # into a paid model invocation on someone else's account. These bound how
+    # much of that a user's account will pay for. Over-budget mail is *filed*
+    # (`routing_method="throttled"`, left in the mailbox, reachable with
+    # `email from-senders`), never dropped. 0 on either count disables it.
+    email_rate_limit_messages: int = 60  # email-origin tasks per user per window
+    email_sender_rate_limit_messages: int = 20  # …and per (user, sender), so one loud correspondent throttles alone
+    email_rate_limit_window_seconds: int = 3600  # the sliding window both counts run over
+    # Which queue inbound mail lands on. Background by default: email is the one
+    # surface an unauthenticated stranger can create work on, and the one whose
+    # latency expectation is loosest (the poll interval alone is 60s), so it
+    # should not compete with a live Talk or web-chat turn for the interactive
+    # worker slots. "foreground" restores the pre-ISSUE-250 behaviour.
+    email_task_queue: str = "background"
+    email_confirmation_prompts_per_window: int = 3  # untrusted-sender prompts per (user, sender) per window before they collapse into one notice; 0 = never collapse
+    email_max_body_chars: int = 32000  # the body is interpolated whole into the prompt, so one large message is its own amplification; truncated with a marker past this
+    email_max_attachment_bytes: int = 26214400  # 25 MiB downloaded+uploaded per message
+    email_max_attachment_bytes_per_poll: int = 104857600  # 100 MiB per poll tick, across every message in the batch
     briefing_check_interval: int = 60  # seconds between briefing checks
     tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls
     shared_file_check_interval: int = 120  # seconds between shared file organization checks
@@ -1785,6 +1805,32 @@ def _validate_outbound_approval_floor(raw: object) -> str:
     return value
 
 
+def _valid_task_queue(raw: object) -> str:
+    """Validate ``[scheduler] email_task_queue``, warning and defaulting on junk.
+
+    A typo here is invisible and expensive: ``queue`` goes into `tasks` verbatim
+    with no CHECK constraint, while `claim_task` and both dispatch scans filter
+    on the literal ``'foreground'``/``'background'``. So ``email_task_queue =
+    "backgroud"`` produces pending rows no worker is ever spawned for and no
+    claim ever matches — every inbound message on the instance sits until
+    `fail_ancient_pending_tasks` fails it hours later and tells the user their
+    task was cancelled.
+
+    Warn-and-default rather than raise (unlike `outbound_approval_floor`,
+    which is a security floor with no safe fallback): both values here are
+    safe, and the default is the one this feature exists to choose.
+    """
+    value = raw.strip() if isinstance(raw, str) else ""
+    if value in ("foreground", "background"):
+        return value
+    logger.warning(
+        "[scheduler] email_task_queue=%r is not a queue; using 'background'. "
+        "Valid values are 'foreground' and 'background'.",
+        raw,
+    )
+    return "background"
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
@@ -1943,6 +1989,16 @@ def load_config(config_path: Path | None = None) -> Config:
             dispatch_interval=sched.get("dispatch_interval", 0.5),
             email_poll_interval=sched.get("email_poll_interval", 60),
             email_poll_batch_size=sched.get("email_poll_batch_size", 50),
+            email_rate_limit_messages=sched.get("email_rate_limit_messages", 60),
+            email_sender_rate_limit_messages=sched.get("email_sender_rate_limit_messages", 20),
+            email_rate_limit_window_seconds=sched.get("email_rate_limit_window_seconds", 3600),
+            email_task_queue=_valid_task_queue(sched.get("email_task_queue", "background")),
+            email_confirmation_prompts_per_window=sched.get("email_confirmation_prompts_per_window", 3),
+            email_max_body_chars=sched.get("email_max_body_chars", 32000),
+            email_max_attachment_bytes=sched.get("email_max_attachment_bytes", 26214400),
+            email_max_attachment_bytes_per_poll=sched.get(
+                "email_max_attachment_bytes_per_poll", 104857600,
+            ),
             briefing_check_interval=sched.get("briefing_check_interval", 60),
             tasks_file_poll_interval=sched.get("tasks_file_poll_interval", sched.get("istota_file_poll_interval", 30)),
             shared_file_check_interval=sched.get("shared_file_check_interval", 120),

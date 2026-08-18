@@ -99,7 +99,7 @@ class ProcessedEmail:
     user_id: str | None
     task_id: int | None
     processed_at: str
-    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded, quiet, read_error
+    routing_method: str | None = None  # plus_address, sender_match, thread_match, discarded, quiet, read_error, throttled
     # The namespace `email_id` counts in; the two together are the key
     # (ISSUE-250). 0 means the server never reported a UIDVALIDITY.
     uidvalidity: int = 0
@@ -3224,6 +3224,59 @@ def count_recent_web_tasks(
         (user_id, f"-{int(window_seconds)} seconds"),
     ).fetchone()
     return int(row[0]) if row else 0
+
+
+def count_recent_email_tasks(
+    conn: sqlite3.Connection, user_id: str, window_seconds: int,
+) -> int:
+    """Count this user's email-origin tasks created within the last
+    ``window_seconds`` — backs the per-user inbound volume budget (ISSUE-250).
+
+    The email twin of ``count_recent_web_tasks``, and deliberately the same
+    shape: counting `tasks` rather than keeping a separate counter means the
+    budget survives a daemon restart and cannot drift from what was actually
+    created. A held (`pending_confirmation`) task counts — it cost a prompt and
+    it will cost an invocation the moment it is approved.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND source_type = 'email' "
+        "AND created_at > datetime('now', ?)",
+        (user_id, f"-{int(window_seconds)} seconds"),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_recent_email_tasks_from_sender(
+    conn: sqlite3.Connection, user_id: str, sender_email: str, window_seconds: int,
+) -> int:
+    """The same count, narrowed to one correspondent — the per-sender sub-budget.
+
+    Read off `processed_emails` rather than `tasks`, because that is where the
+    sender lives; `tasks` has no column for it. Only rows that actually produced
+    a task count: a `quiet`, `discarded` or `throttled` row cost nothing, and
+    counting the throttled ones would make throttling self-sustaining — a sender
+    over budget could never come back under it.
+
+    Compared on the addr-spec, not the raw header. The ledger stores the
+    envelope sender verbatim, so the same person arrives as
+    ``Loud <loud@example.com>`` on one message and ``loud@example.com`` on the
+    next; treating those as two senders would leave the budget trivially
+    evadable by varying the display name.
+    """
+    address = (parseaddr(sender_email or "")[1] or "").strip().lower()
+    if not address:
+        return 0
+    rows = conn.execute(
+        'SELECT sender_email FROM processed_emails WHERE user_id = ? '
+        "AND task_id IS NOT NULL AND processed_at > datetime('now', ?)",
+        (user_id, f"-{int(window_seconds)} seconds"),
+    ).fetchall()
+    count = 0
+    for row in rows:
+        other = (parseaddr(row["sender_email"] or "")[1] or "").strip().lower()
+        if other == address:
+            count += 1
+    return count
 
 
 def count_inflight_tasks_for_scheduled_job(
@@ -6964,30 +7017,44 @@ def get_users_with_pending_background_tasks(conn: sqlite3.Connection) -> list[st
     return [row[0] for row in cursor.fetchall()]
 
 
-def get_users_with_pending_fg_queue_tasks(conn: sqlite3.Connection) -> list[str]:
-    """Get users with pending foreground queue tasks."""
-    cursor = conn.execute(
-        f"""
-        SELECT DISTINCT user_id FROM tasks
+# Longest-waiting user first, for both queue scans. `dispatch` walks this list
+# and breaks at the instance cap, so the order decides who gets a worker when
+# there are more users with pending work than slots. It used to be a bare
+# `SELECT DISTINCT` with no `ORDER BY` — arbitrary — which meant a user late in
+# whatever order SQLite returned could get zero workers tick after tick while a
+# user flooding the instance reliably held theirs (ISSUE-250). With the default
+# caps, three users with pending work saturate the five foreground slots, so
+# this is reachable at very ordinary volumes and is not an attack-only concern.
+#
+# Oldest-pending-first rather than round-robin: it needs no remembered offset
+# (dispatch is called every ~0.5s and holds no scan state), and it ages
+# naturally — a user passed over on one tick has an older oldest-task on the
+# next, so they move up rather than depending on where a rotation happens to
+# be. It is not strict fairness; it is the property the per-user caps were
+# always meant to imply, which is that waiting eventually wins.
+_PENDING_USERS_SQL = """
+        SELECT user_id FROM tasks
         WHERE status = 'pending'
-        AND queue = 'foreground'
-        AND source_type NOT IN ({_INLINE_ONLY_IN})
+        AND queue = ?
+        AND source_type NOT IN ({inline_only})
         AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
+        GROUP BY user_id
+        ORDER BY MIN(created_at) ASC, user_id ASC
         """
+
+
+def get_users_with_pending_fg_queue_tasks(conn: sqlite3.Connection) -> list[str]:
+    """Users with pending foreground tasks, longest-waiting first."""
+    cursor = conn.execute(
+        _PENDING_USERS_SQL.format(inline_only=_INLINE_ONLY_IN), ("foreground",),
     )
     return [row[0] for row in cursor.fetchall()]
 
 
 def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]:
-    """Get users with pending background queue tasks."""
+    """Users with pending background tasks, longest-waiting first."""
     cursor = conn.execute(
-        f"""
-        SELECT DISTINCT user_id FROM tasks
-        WHERE status = 'pending'
-        AND queue = 'background'
-        AND source_type NOT IN ({_INLINE_ONLY_IN})
-        AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
-        """
+        _PENDING_USERS_SQL.format(inline_only=_INLINE_ONLY_IN), ("background",),
     )
     return [row[0] for row in cursor.fetchall()]
 

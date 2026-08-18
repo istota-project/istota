@@ -4230,9 +4230,13 @@ def _chat_create_web_task(
         # Sending a new message in a room means the user has moved on from any
         # question parked in it — the rule the Talk poller has always applied
         # (`transport/talk/inbound.py`, before its own `ingest_message`). Web
-        # never did, and a `pending_confirmation` task holds its room under
-        # `_CLAIM_CHANNEL_GATE_SQL`, so an unanswered gate froze the room until
-        # `confirmation_timeout_minutes` (ISSUE-241, via ISSUE-227).
+        # never did, and a foreground `pending_confirmation` task holds its room
+        # under `_CLAIM_CHANNEL_GATE_SQL`, so an unanswered gate froze the room
+        # until `confirmation_timeout_minutes` (ISSUE-241, via ISSUE-227). An
+        # *email* gate stopped holding it under ISSUE-250, which moved inbound
+        # mail to the background queue the gate does not cover — this cancel is
+        # still what clears the question itself, which is the part that matters
+        # here and is unchanged.
         #
         # Two things make it safe. It is **room-scoped**, which for an email
         # gate mostly means untouched — a first-contact thread parks under its

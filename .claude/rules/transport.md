@@ -94,6 +94,13 @@ paths). It is the only email code outside `transport/email/`.
   rather than the istota user it was routed to. Raw and untrusted;
   `record_inbound` sanitizes it through `db.external_email_sender` before it can
   reach `messages.author_label`, so no reader ever sees a raw `From:`.
+  `queue` names the worker queue the resulting task lands on — a property of the
+  *surface's* latency contract, not of the message, which is why it defaults to
+  `foreground` and interactive surfaces never set it. Email passes
+  `[scheduler] email_task_queue` (default `background`), so a flood at the
+  public `bot+user@` address cannot take the slots a live chat turn needs
+  (ISSUE-250). It threads `IncomingMessage.queue` → `record_inbound(queue=…)` →
+  `db.create_task(queue=…)`.
 - **`TransportCapabilities`** (frozen) — `supports_edit`, `supports_threading`,
   `supports_progress_ack`, `supports_typing`, `max_message_length`,
   `surface_class` (`"push"` | `"stream"`), `user_routable` (default `True`),
@@ -272,13 +279,69 @@ messages are re-polled rather than silently lost.
 
   What this route now shares with a gated `sender_match` reply is that the held
   task sits under a **real room token** (it inherits `sent_emails.
-  conversation_token`, not the synthetic thread hash), so it parks that room's
-  foreground queue and `cancel_pending_confirmations` discards it on the room's
-  next message. Not introduced here — a gated `sender_match` reply that also
+  conversation_token`, not the synthetic thread hash), so
+  `cancel_pending_confirmations` discards it on the room's next message.
+  **It no longer parks that room's foreground queue**: `_CLAIM_CHANNEL_GATE_SQL`
+  gates only foreground tasks, and inbound mail moved to the background queue
+  under ISSUE-250 (`[scheduler] email_task_queue`). Under
+  `email_task_queue = "foreground"` the park is back, exactly as described here.
+  Losing it cuts both ways and both halves are consequences of that one change:
+  an unanswered gate no longer wedges its thread for the full
+  `confirmation_timeout_minutes`, and an email turn is no longer serialized
+  against a live Talk or web turn in the same room — they are on different
+  queues, so the per-room single-active rule does not see across them. Not introduced here — a gated `sender_match` reply that also
   matched a thread has always landed there, which is the case `web_app`'s cancel
   comment describes and the user-scoped `/chat/confirmations` banner mitigates —
   but this route widens who reaches it. Pinned by an assertion on
   `conversation_token` in `TestThreadMatchConfirmationGate`.
+
+  **The inbound volume budget (ISSUE-250, consequence 1).** The gate answers
+  *who*; this answers *how much*. `bot+{user_id}@domain` is public by
+  construction — it is the `From:` on every mail the bot sends on a user's
+  behalf — so the set of parties holding a working ingest address is everyone
+  the user has ever corresponded with through the bot, plus anyone who saw one
+  of those messages. `thread_match` is ungated by design, so every external
+  contact holds a permanent ungated route. Nothing bounded how many of those
+  became paid model invocations.
+
+  Two counts, both in `poll_emails`, checked **after** owner resolution and the
+  quiet-sender filter and **before** `ingest_message`: `email_rate_limit_
+  messages` per user and the tighter `email_sender_rate_limit_messages` per
+  `(user, sender)` under it, over `email_rate_limit_window_seconds`. The sender
+  count is checked first so the log and the alert name the specific reason.
+  Placement is deliberate on both sides — quiet mail creates no task and must
+  not spend an allowance real mail needs, and an unrouted message has no budget
+  to charge.
+
+  **Over-budget mail is filed, not dropped**: `routing_method="throttled"`, no
+  task, the message left in the folder where `email from-senders` still reaches
+  it. This is the quiet-sender behaviour applied automatically, and it is the
+  same file-don't-drop shape as the `read_error` path. A budget that discarded
+  would recreate the silent mail loss the poll-cursor pass fixed, with a config
+  knob on it. The ISSUE-250 entry named `ingest.py` as where the budget "has to
+  bite" because that is where `create_task` is; that is the one place it cannot
+  go, because the budget is inseparable from what happens to the mail that
+  exceeds it and the shared ingest path has neither a ledger to write nor a
+  mailbox to leave it in.
+
+  **The prompts collapse too.** The gate turned a spam flood into a
+  *notification* flood — one undeduplicated prompt per held message, each
+  answerable alone, plus a `!confirm` backlog to clear by hand or wait out at
+  `confirmation_timeout_minutes`. Past `_MAX_PROMPTS_PER_SENDER_WINDOW` (3) per
+  `(user, sender)` per window the individual prompt is suppressed and the
+  sender's held mail is summarized in the same notice the throttle uses. The
+  **task is untouched**: still held, still withheld from the room, still
+  addressable by `!confirm <id>`. This is deliberately the cheap half — the full
+  version, one prompt resolving onto a *set* of task ids, needs `confirmations`
+  to answer several tasks at once and is its own change.
+
+  Two module dicts carry it, both in-process and unpersisted for the same reason
+  `_dmarc_alerted` is: `_throttle_alerted` (one alert per user per window) and
+  `_prompt_counts`. The DB carries the budget itself, so a restart cannot hand
+  an attacker a fresh allowance. One accepted consequence of sharing a window
+  between the two: a user already alerted about throttling in this window is not
+  alerted again when prompts start collapsing. One alert per window is the
+  contract, and the alternative is the flood.
 
   **What `confirm_sender_match` actually switches (ISSUE-227).** It turns off the
   *own-address branch* of the trust check — the branch that reads "the `From:`

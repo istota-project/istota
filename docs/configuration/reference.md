@@ -100,6 +100,14 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `talk_poll_wait` | `2.0` | Max wait before processing available rooms |
 | `email_poll_interval` | `60` | Seconds between email polls |
 | `email_poll_batch_size` | `50` | Messages one email poll walks. The remainder is left for the next tick and drains in arrival order, rather than falling off the end |
+| `email_rate_limit_messages` | `60` | Inbound email tasks one user's account will pay for per window. Over-budget mail is filed (`routing_method="throttled"`, left in the mailbox, one alert per window), never dropped. 0 disables |
+| `email_sender_rate_limit_messages` | `20` | The same budget narrowed to one correspondent, so a single loud sender throttles alone rather than consuming the user's whole allowance. 0 disables |
+| `email_rate_limit_window_seconds` | `3600` | The sliding window both counts run over, and the window the throttle alert and the collapsed confirmation prompts are deduplicated on |
+| `email_task_queue` | `background` | Which worker queue inbound mail lands on. Background by default: email is the one surface an unauthenticated stranger can create work on, and the one whose turnaround nobody is watching. `foreground` restores the previous behaviour at the cost of a flood competing with live chat |
+| `email_confirmation_prompts_per_window` | `3` | Untrusted-sender confirmation prompts per (user, sender) per window before they collapse into one summary notice. The held mail stays held and individually approvable with `!confirm <task-id>`; only the interruption collapses. 0 = never collapse |
+| `email_max_body_chars` | `32000` | The body is interpolated whole into the prompt, so a single large message is its own amplification. Truncated with a marker past this; the full mail stays in the mailbox |
+| `email_max_attachment_bytes` | `26214400` | Attachment bytes **written to disk and uploaded** per message (25 MiB). Not a bound on the IMAP transfer — the client fetches and decodes the whole message before any part can be inspected. Whole attachments only: one that would cross the budget is skipped rather than truncated, and the prompt names it. 0 = unlimited |
+| `email_max_attachment_bytes_per_poll` | `104857600` | The same budget across one whole poll tick (100 MiB). A per-message cap alone bounds one message and not a batch of fifty. 0 = unlimited |
 | `briefing_check_interval` | `60` | Seconds between briefing/job/cleanup checks |
 | `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls |
 | `shared_file_check_interval` | `120` | Seconds between shared file checks |

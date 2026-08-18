@@ -202,7 +202,7 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     "references" TEXT,  -- RFC 5322 References header for thread chain
     user_id TEXT,
     task_id INTEGER,
-    routing_method TEXT,  -- plus_address, sender_match, thread_match, discarded, quiet, read_error
+    routing_method TEXT,  -- plus_address, sender_match, thread_match, discarded, quiet, read_error, throttled
     processed_at TEXT DEFAULT (datetime('now')),
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)

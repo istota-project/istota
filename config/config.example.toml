@@ -379,6 +379,38 @@ talk_poll_wait = 2.0
 email_poll_interval = 60
 # Messages one email poll walks. The rest wait for the next tick and drain in order.
 email_poll_batch_size = 50
+# Inbound email volume budget. `bot+{user_id}@domain` is public by construction
+# — it is the From: on every mail the bot sends on a user's behalf — so anyone
+# who has ever corresponded with the bot can turn one SMTP transaction into a
+# paid model invocation on that user's account. These cap how many. Over-budget
+# mail is *filed*, not dropped: it stays in the mailbox, gets a `throttled`
+# ledger row, and the user is told once per window, so nothing is lost and it
+# can still be read on demand with `email from-senders`. 0 on either count
+# disables that half.
+email_rate_limit_messages = 60          # email tasks per user per window
+email_sender_rate_limit_messages = 20   # …and per sender, so one loud correspondent throttles alone
+email_rate_limit_window_seconds = 3600
+# Untrusted-sender confirmation prompts per (user, sender) per window before
+# they collapse into one summary notice. The held mail is still held and still
+# individually approvable with `!confirm <task-id>`; only the interruption is
+# collapsed. 0 = never collapse (one prompt per message, as before).
+email_confirmation_prompts_per_window = 3
+# Which worker queue inbound mail lands on. "background" keeps a flood from
+# taking the slots a live Talk or web-chat turn needs, at the cost of slower
+# mail turnaround; "foreground" restores the previous behaviour.
+email_task_queue = "background"
+# The body goes into the prompt whole, so one large message is its own
+# amplification. Truncated with a marker past this; the full mail stays in the
+# mailbox.
+email_max_body_chars = 32000
+# Attachment bytes written to disk and pushed to Nextcloud, per message and
+# across one whole poll. This does NOT bound the IMAP transfer: the client
+# fetches and decodes the whole message before any part can be inspected, so
+# the bytes on the wire are the sender's choice regardless. Whole attachments
+# only — one that would cross the budget is skipped rather than truncated, and
+# the prompt says which. 0 = unlimited, as with the counts above.
+email_max_attachment_bytes = 26214400
+email_max_attachment_bytes_per_poll = 104857600
 # Seconds between checking for briefings to run
 briefing_check_interval = 60
 # Seconds between polling TASKS.md files for new tasks

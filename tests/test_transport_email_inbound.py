@@ -26,6 +26,22 @@ from istota.transport.email.inbound import (
 from istota.skills.email import Email, EmailConfig, EmailEnvelope
 
 
+@pytest.fixture(autouse=True)
+def _clear_volume_state():
+    """Reset the poller's in-process volume counters between tests.
+
+    `_prompt_counts` collapses confirmation prompts past a few per
+    (user, sender) per window (ISSUE-250). It is module-level and the window is
+    an hour, so without this a test that expects a prompt fails purely because
+    earlier tests in the same worker process already spent the sender's budget.
+    Module-scoped rather than per-class: any test here that drives the gate
+    spends it.
+    """
+    inbound_module._reset_volume_state()
+    yield
+    inbound_module._reset_volume_state()
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """Create and initialize a temporary SQLite database."""
