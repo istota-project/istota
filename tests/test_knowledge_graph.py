@@ -9,6 +9,7 @@ from istota.memory.knowledge_graph import (
     AUTO_EXPIRE_PREDICATES,
     DEFAULT_EPHEMERAL_TTL_DAYS,
     EPHEMERAL_PREDICATES,
+    FUZZY_DEDUP_THRESHOLD,
     KnowledgeFact,
     SINGLE_VALUED_PREDICATES,
     TEMPORARY_PREDICATES,
@@ -717,17 +718,85 @@ class TestFuzzyDedup:
         assert id1 is not None
         assert id2 is not None
 
-    def test_predicate_variant_fuzzy_dedup(self, conn):
-        """Predicate variants caught by fuzzy dedup (word overlap)."""
+    def test_predicate_variant_inserted(self, conn):
+        """Predicate variants are never compared — the near-match query
+        filters on an equal predicate, so `is_allergic_to` and
+        `allergic_to` are different buckets and both rows insert.
+
+        This is acceptable: the extraction prompt guides consistent
+        naming. Characterization, not a regression guard — it passed
+        before the ISSUE-236 fixes too. Dropping the predicate filter
+        *from the current code* would flip it, since the objects are
+        identical and would trip the token-subset fast path, but under a
+        full revert the in-loop `row[1] == predicate` guard is back and
+        both rows insert anyway. The two tests below are the guards.
+        """
         id1 = add_fact(conn, "user1", "bob", "allergic_to", "sesame seeds")
-        # "is_allergic_to sesame seeds" vs "allergic_to sesame seeds"
-        # Words: {is_allergic_to, sesame, seeds} vs {allergic_to, sesame, seeds}
-        # Intersection: {sesame, seeds} = 2, Union: {is_allergic_to, allergic_to, sesame, seeds} = 4
-        # Jaccard = 0.5 — below 0.7, so this is NOT caught by fuzzy dedup
-        # This is acceptable — the extraction prompt guides consistent naming
         id2 = add_fact(conn, "user1", "bob", "is_allergic_to", "sesame seeds")
         assert id1 is not None
-        assert id2 is not None  # Different predicate, low Jaccard
+        assert id2 is not None
+
+    def test_opposing_predicates_on_same_object_both_insert(self, conn):
+        """`acquired X` then `disposed_of X` must both land.
+
+        Regression test for the predicate-collision bug. The near-match
+        query filters on an equal predicate and `_fact_similarity`
+        compares objects only. Fold the predicate back into the compared
+        string — the pre-fix shape — and the concatenated forms score
+        4/6 = 0.667, over the 0.6 threshold, so the disposal is dropped
+        as a near-duplicate. `add_fact` then returns None, the CLI
+        reports "Duplicate fact, skipped" as a success, and the graph
+        goes on asserting ownership of a disposed-of object.
+
+        `valid_from` is today on purpose: both predicates are in
+        AUTO_EXPIRE_PREDICATES, so a hardcoded past date sets
+        `valid_until` behind the near-match query's `valid_until > today`
+        filter. The first row would then be invisible to the second
+        call and the test would pass without exercising dedup at all.
+        """
+        today = date.today().isoformat()
+        id1 = add_fact(conn, "user1", "bob", "acquired", "brass arc desk lamp",
+                       valid_from=today)
+        id2 = add_fact(conn, "user1", "bob", "disposed_of", "brass arc desk lamp",
+                       valid_from=today)
+        assert id1 is not None
+        assert id2 is not None
+
+        # The disposal has to be readable, not merely inserted.
+        predicates = {f.predicate for f in get_current_facts(conn, "user1", subject="bob")}
+        assert predicates == {"acquired", "disposed_of"}
+
+    def test_same_predicate_partial_object_overlap_both_insert(self, conn):
+        """Objects are compared alone; the predicate is not folded back in.
+
+        This pins the *other* half of the fix. The predicate filter can't
+        catch this case — both facts share a predicate, so they land in
+        the same bucket either way — and only `_fact_similarity` being
+        called on objects rather than on `f"{predicate} {object}"` keeps
+        them apart.
+
+        Objects alone: {red, desk, lamp} vs {blue, desk, lamp} is
+        2 shared over 4 union = 0.5, under the 0.6 threshold, so both
+        insert. Fold the shared predicate into both sides and the same
+        pair becomes 3/5 = 0.6, which meets the threshold and drops the
+        blue pen. Neither object is a token subset of the other, so the
+        fast path stays out of it.
+        """
+        obj_a, obj_b = "red desk lamp", "blue desk lamp"
+
+        # The guard only bites while the threshold sits between these two
+        # scores. Tune it past either and the asserts below stay green
+        # while proving nothing, so pin the straddle rather than the pair.
+        assert _fact_similarity(obj_a, obj_b) < FUZZY_DEDUP_THRESHOLD
+        assert _fact_similarity(
+            f"acquired {obj_a}", f"acquired {obj_b}"
+        ) >= FUZZY_DEDUP_THRESHOLD
+
+        today = date.today().isoformat()
+        id1 = add_fact(conn, "user1", "bob", "acquired", obj_a, valid_from=today)
+        id2 = add_fact(conn, "user1", "bob", "acquired", obj_b, valid_from=today)
+        assert id1 is not None
+        assert id2 is not None
 
     def test_freeform_predicate_inserted(self, conn):
         """Freeform predicates not in any known set are accepted."""
