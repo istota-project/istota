@@ -19,6 +19,7 @@ from istota.money.work import (
     get_entries_for_invoice,
     get_invoice_numbers,
     get_uninvoiced_entries,
+    invoice_issue_date,
     list_work_entries,
     load_work_entries,
     record_invoice_payment,
@@ -862,6 +863,198 @@ class TestAssignInvoiceNumberByUids:
 
     def test_empty_list(self, data_dir):
         assert assign_invoice_number_by_uids(data_dir, [], "INV-000001") == 0
+
+
+class TestInvoiceDate:
+    """ISSUE-256: an invoice records when it was issued.
+
+    Before this, the only dates on a work entry were the work date and the
+    payment date, so a reader asking "when did this invoice go out?" had to
+    guess from the work billed on it.
+    """
+
+    def _invoiced(self, data_dir, when="2026-03-01"):
+        add_work_entry(data_dir, when, "acme", "dev", qty=8)
+        return load_work_entries(data_dir)[0].uid
+
+    def test_stamped_by_uid_addressed_assignment(self, data_dir):
+        uid = self._invoiced(data_dir)
+        assign_invoice_number_by_uids(
+            data_dir, [uid], "INV-000001", date(2026, 5, 1),
+        )
+        assert load_work_entries(data_dir)[0].invoice_date == date(2026, 5, 1)
+
+    def test_stamped_by_index_addressed_assignment(self, data_dir):
+        self._invoiced(data_dir)
+        assign_invoice_number(data_dir, [1], "INV-000001", date(2026, 5, 1))
+        assert load_work_entries(data_dir)[0].invoice_date == date(2026, 5, 1)
+
+    def test_defaults_to_today_when_the_caller_names_no_date(self, data_dir):
+        uid = self._invoiced(data_dir)
+        assign_invoice_number_by_uids(data_dir, [uid], "INV-000001")
+        assert load_work_entries(data_dir)[0].invoice_date == date.today()
+
+    def test_accepts_an_iso_string(self, data_dir):
+        uid = self._invoiced(data_dir)
+        assign_invoice_number_by_uids(data_dir, [uid], "INV-000001", "2026-05-01")
+        assert load_work_entries(data_dir)[0].invoice_date == date(2026, 5, 1)
+
+    def test_survives_a_write_by_an_unrelated_caller(self, data_dir):
+        """The field has to round-trip the serializer, not just live in memory."""
+        uid = self._invoiced(data_dir)
+        assign_invoice_number_by_uids(
+            data_dir, [uid], "INV-000001", date(2026, 5, 1),
+        )
+        # Any other write rewrites the whole year file from the serializer.
+        add_work_entry(data_dir, "2026-04-01", "hooli", "dev", qty=1)
+        by_client = {e.client: e for e in load_work_entries(data_dir)}
+        assert by_client["acme"].invoice_date == date(2026, 5, 1)
+
+    def test_void_clears_it_with_the_number(self, data_dir):
+        uid = self._invoiced(data_dir)
+        assign_invoice_number_by_uids(
+            data_dir, [uid], "INV-000001", date(2026, 5, 1),
+        )
+        void_invoice(data_dir, "INV-000001")
+        entry = load_work_entries(data_dir)[0]
+        assert entry.invoice == ""
+        assert entry.invoice_date is None
+
+    def test_payment_does_not_touch_it(self, data_dir):
+        uid = self._invoiced(data_dir)
+        assign_invoice_number_by_uids(
+            data_dir, [uid], "INV-000001", date(2026, 5, 1),
+        )
+        record_invoice_payment(data_dir, "INV-000001", "2026-06-01")
+        entry = load_work_entries(data_dir)[0]
+        assert entry.invoice_date == date(2026, 5, 1)
+        assert entry.paid_date == date(2026, 6, 1)
+
+    def test_an_uninvoiced_entry_has_none(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assert load_work_entries(data_dir)[0].invoice_date is None
+
+    def test_a_date_without_a_number_is_ignored(self, data_dir):
+        """It is a property of the invoice, so it cannot exist without one."""
+        add_work_entry(
+            data_dir, "2026-03-01", "acme", "dev", qty=8,
+            invoice_date=date(2026, 5, 1),
+        )
+        assert load_work_entries(data_dir)[0].invoice_date is None
+
+    def test_pre_assigned_number_carries_the_date(self, data_dir):
+        """The `invoice create` path, which never goes through an assign call."""
+        add_work_entry(
+            data_dir, "2026-05-01", "acme", "dev", qty=8,
+            invoice="INV-000001", invoice_date=date(2026, 5, 1),
+        )
+        assert load_work_entries(data_dir)[0].invoice_date == date(2026, 5, 1)
+
+    def test_a_legacy_file_loads_with_no_date(self, data_dir):
+        """Nothing can reconstruct one, so it stays absent rather than guessed."""
+        _write_raw_year(data_dir, 2026, [
+            'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+            'qty = 8', 'invoice = "INV-000001"',
+        ])
+        assert load_work_entries(data_dir)[0].invoice_date is None
+
+    def test_an_unreadable_stored_date_degrades_to_absent(self, data_dir):
+        """A hand-edited file must not take down every reader of the store."""
+        _write_raw_year(data_dir, 2026, [
+            'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+            'qty = 8', 'invoice = "INV-000001"', 'invoice_date = "not a date"',
+        ])
+        assert load_work_entries(data_dir)[0].invoice_date is None
+
+    def test_it_is_a_known_key_not_an_extra(self, data_dir):
+        """Left in `extra` it would round-trip but no reader would see it."""
+        _write_raw_year(data_dir, 2026, [
+            'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+            'qty = 8', 'invoice = "INV-000001"', 'invoice_date = 2026-05-01',
+        ])
+        entry = load_work_entries(data_dir)[0]
+        assert entry.invoice_date == date(2026, 5, 1)
+        assert "invoice_date" not in entry.extra
+
+
+class TestInvoiceDateOnHandAssignment:
+    """`work update --invoice` stamps a number without going through an assign.
+
+    A number written there without a date would read as a pre-field invoice
+    and silently fall back to the loose latest-work bound.
+    """
+
+    def test_hand_assigned_number_gets_a_date(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assert update_work_entry(data_dir, 1, invoice="INV-000001")
+        assert load_work_entries(data_dir)[0].invoice_date == date.today()
+
+    def test_by_uid_too(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        uid = load_work_entries(data_dir)[0].uid
+        result = update_work_entry_by_uid(data_dir, uid, invoice="INV-000001")
+        assert result.ok
+        assert load_work_entries(data_dir)[0].invoice_date == date.today()
+
+    def test_an_explicit_date_wins_over_today(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assert update_work_entry(
+            data_dir, 1, invoice="INV-000001", invoice_date="2026-05-01",
+        )
+        assert load_work_entries(data_dir)[0].invoice_date == date(2026, 5, 1)
+
+    def test_an_empty_number_leaves_the_entry_uninvoiced_and_undated(self, data_dir):
+        """The two fields move together, so neither can be set on its own."""
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assert update_work_entry(data_dir, 1, invoice="")
+        entry = load_work_entries(data_dir)[0]
+        assert entry.invoice == ""
+        assert entry.invoice_date is None
+
+    def test_an_already_invoiced_entry_is_refused_outright(self, data_dir):
+        """Which is why the clearing branch in `_sync_invoice_date` is unreachable."""
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        update_work_entry(data_dir, 1, invoice="INV-000001")
+        assert not update_work_entry(data_dir, 1, invoice="")
+        assert load_work_entries(data_dir)[0].invoice == "INV-000001"
+
+
+class TestInvoiceIssueDate:
+    """The one rule every reader of an invoice's date goes through."""
+
+    def _entry(self, work_day, issue_day=None):
+        from istota.money.core.models import WorkEntry
+
+        return WorkEntry(
+            date=date(2026, 1, work_day), client="acme", service="dev",
+            invoice="INV-000001",
+            invoice_date=date(2026, 5, issue_day) if issue_day else None,
+        )
+
+    def test_uses_the_stored_date_when_there_is_one(self):
+        entries = [self._entry(5, 1), self._entry(20, 1)]
+        assert invoice_issue_date(entries) == date(2026, 5, 1)
+
+    def test_falls_back_to_the_latest_work_not_the_earliest(self):
+        entries = [self._entry(5), self._entry(20)]
+        assert invoice_issue_date(entries) == date(2026, 1, 20)
+
+    def test_a_partially_stamped_invoice_uses_the_stored_date(self):
+        """A hand-edited file can leave one entry without a date."""
+        entries = [self._entry(5), self._entry(20, 1)]
+        assert invoice_issue_date(entries) == date(2026, 5, 1)
+
+    def test_disagreeing_stored_dates_take_the_earliest(self):
+        """A hand-edited file can disagree with itself.
+
+        This is a "cannot have existed before this" bound, so the earliest is
+        the reading that cannot reject a payment the invoice really caused.
+        """
+        entries = [self._entry(5, 1), self._entry(20, 9)]
+        assert invoice_issue_date(entries) == date(2026, 5, 1)
+
+    def test_no_entries(self):
+        assert invoice_issue_date([]) is None
 
 
 class TestLoaderCoercion:

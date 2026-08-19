@@ -178,10 +178,25 @@ class TestPaymentFiltering:
         assert [m.payment for m in matches] == payments
         assert matches[1].invoice_number == "INV-000001"
 
-    def test_payment_predating_the_invoice_is_not_a_match(self):
-        """An invoice issued after the money landed did not cause that credit."""
+    def test_payment_predating_the_invoice_is_reported_not_settled(self):
+        """An invoice issued after the money landed did not cause that credit.
+
+        It is still worth a line: the amount fits to the cent, so silence
+        would read as "nothing here" when the truth is "these two look
+        related and only the date says otherwise".
+        """
         matches = match_payments_to_invoices(
             [_payment(4275.00, day=1)], [_invoice("INV-000001", 4275.00, day=10)],
+        )
+        assert matches[0].status == "review"
+        assert matches[0].invoice_number is None
+        assert matches[0].candidates == ["INV-000001"]
+        assert "issued after this payment" in matches[0].note
+
+    def test_a_payment_matching_no_amount_at_all_stays_silent(self):
+        """The normal case for most credits; reporting it would bury the rest."""
+        matches = match_payments_to_invoices(
+            [_payment(99.00, day=1)], [_invoice("INV-000001", 4275.00, day=10)],
         )
         assert matches[0].status == "no_match"
 

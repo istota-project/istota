@@ -166,6 +166,11 @@ class WorkEntry:
     description: str = ""
     entity: str = ""
     invoice: str = ""
+    # When the invoice this entry belongs to was issued. Stamped at the same
+    # moment as ``invoice`` and cleared with it. ``None`` on every entry
+    # invoiced before the field existed — nothing can reconstruct those, so
+    # readers fall back to the latest work date as a lower bound.
+    invoice_date: date | None = None
     paid_date: date | None = None
     id: int | None = None  # 1-based display index, recomputed on every load
     # Stable identity, stamped by every writer. The display index shifts

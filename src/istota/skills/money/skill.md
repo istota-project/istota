@@ -113,7 +113,7 @@ Ambiguity is never resolved by guessing. Two open invoices that fit one credit, 
 
 Act on a `review` row by running `invoice paid <number> --date <date> --no-post` for the right one. `--no-match-invoices` turns the whole thing off for a run (on both `sync-monarch` and `run-scheduled` — unlike `--skip-monarch`, which would also skip the ledger sync), and `invoice unpaid <number>` undoes a match that was wrong. The `invoice_matching` key only appears when there was something to report.
 
-An invoice is left out of matching entirely when its total can't be stated exactly: partly paid, or carrying a work entry whose service is no longer in the config. Matching on a total that isn't what the client owes is how the wrong invoice gets settled. Note also that nothing records an invoice's issue date, so the date filter uses the latest work billed on it as a lower bound — it never rejects a real payment, but it does admit credits from the gap between the last work and the invoice going out.
+An invoice is left out of matching entirely when its total can't be stated exactly: partly paid, or carrying a work entry whose service is no longer in the config. Matching on a total that isn't what the client owes is how the wrong invoice gets settled. The date filter uses the invoice's own issue date, which is recorded on its work entries. An invoice raised before that field existed has none, and falls back to the latest work billed on it as a lower bound — that never rejects a real payment, but it does admit credits from the gap between the last work and the invoice going out.
 
 ## Work log commands
 

@@ -16,9 +16,11 @@ from fastapi.testclient import TestClient
 from istota.money.cli import UserContext
 from istota.money.routes import get_user_config, require_auth, router, verify_origin
 from istota.money.work import (
+    _save_entries,
     add_work_entry,
     assign_invoice_number,
     get_entries_for_invoice,
+    load_work_entries,
     record_invoice_payment,
 )
 
@@ -58,6 +60,39 @@ def _seed_invoice(data_dir: Path, number: str = "INV-000001") -> None:
     add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
     add_work_entry(data_dir, "2026-03-02", "acme", "dev", qty=4)
     assign_invoice_number(data_dir, [1, 2], number)
+
+
+class TestInvoiceListDate:
+    """ISSUE-256: the `date` column is the invoice's date, not its first work.
+
+    It used to be the *earliest* work billed, which on a month invoiced in
+    arrears is weeks off and is not the invoice's date under any reading.
+    """
+
+    def test_shows_the_stored_issue_date(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
+        add_work_entry(tmp_path, "2026-03-20", "acme", "dev", qty=4)
+        assign_invoice_number(tmp_path, [1, 2], "INV-000001", date(2026, 4, 1))
+
+        client = make_client(_write_invoicing_config(tmp_path, "invoices"))
+        resp = client.get("/api/money/invoices")
+        assert resp.status_code == 200
+        invoices = resp.json()["invoices"]
+        assert invoices[0]["date"] == "2026-04-01"
+
+    def test_a_legacy_invoice_shows_its_latest_work(self, make_client, tmp_path):
+        """No stored date to show, and the earliest work is the wrong guess."""
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
+        add_work_entry(tmp_path, "2026-03-20", "acme", "dev", qty=4)
+        assign_invoice_number(tmp_path, [1, 2], "INV-000001")
+        entries = load_work_entries(tmp_path)
+        for entry in entries:
+            entry.invoice_date = None
+        _save_entries(tmp_path, entries)
+
+        client = make_client(_write_invoicing_config(tmp_path, "invoices"))
+        invoices = client.get("/api/money/invoices").json()["invoices"]
+        assert invoices[0]["date"] == "2026-03-20"
 
 
 class TestMarkPaid:
