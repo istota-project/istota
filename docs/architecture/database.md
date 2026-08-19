@@ -29,7 +29,8 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `talk_messages` | Poller-fed message cache for conversation context |
 | `processed_emails` | Email dedup with RFC 5322 thread tracking |
 | `sent_emails` | Outbound email tracking for emissary thread matching |
-| `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate |
+| `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate, read in both directions (inbound confirmation and outbound approval) |
+| `outbound_drafts` | Outbound mail held by the approval gate: recipients, subject, body, headers and origin surface snapshotted at hold time, plus `status` (`pending` \| `sending` \| `sent` \| `discarded`), the room it belongs to and the task that composed it. Released rows carry `sent_message_id`. Never expired — see [answering a held draft](../features/email.md#answering-a-held-draft) |
 | `task_events` | Task-event-streaming log: `id, task_id, seq, kind, payload (JSON), created_at`, `UNIQUE(task_id, seq)`. One persisted, typed event stream per task feeding Talk / SSE / log / push consumers. `seq` is monotonic per task (writer-assigned, resumed across retries via `get_max_task_event_seq`); rows are deleted only by `cleanup_old_tasks` (retention) |
 
 ### Web chat (per-user rooms)

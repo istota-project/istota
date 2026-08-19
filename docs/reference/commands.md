@@ -26,8 +26,11 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!skills NAME` | Show details for a specific skill |
 | `!more #TASK_ID` | Show execution trace for a completed task |
 | `!search QUERY` | Search conversation history via memory index + Talk API |
-| `!trust [EMAIL]` | List trusted email senders, or add one |
-| `!untrust EMAIL` | Remove a runtime trusted email sender |
+| `!trust [EMAIL]` | List trusted email addresses, or add one — trust runs in both directions (see below) |
+| `!untrust EMAIL` | Remove a runtime trusted email address, in both directions |
+| `!drafts` | List outbound mail held for your approval, with ids |
+| `!drafts send ID` | Release one held draft (id optional when exactly one is waiting) |
+| `!drafts discard ID` | Bin one held draft |
 
 ## Steering a running task
 
@@ -59,7 +62,13 @@ Formats: `markdown` (default) or `text`.
 
 ## Trust
 
-`!trust` manages runtime trusted email senders (stored in the database, checked alongside config-time `trusted_email_senders` patterns). See [email](../features/email.md) for the full confirmation gate flow.
+`!trust` manages runtime trusted email addresses (stored in the database, checked alongside config-time `trusted_email_senders` patterns). One list, two meanings: mail **from** a trusted address is processed without asking, and mail **to** it is sent without waiting for your approval under the `untrusted` outbound policy. `!untrust` reverses both. See [email](../features/email.md) for the full confirmation gate flow and [what trusting a sender means](../features/email.md#what-trusting-a-sender-means).
+
+## Drafts
+
+`!drafts` is the composer-surface half of the [outbound approval gate](../features/email.md#the-outbound-approval-gate) — mail to a recipient you have not authorized is held as an editable draft rather than sent. `!drafts` lists what is waiting with ids and recipients (Bcc by count, not by address, since the reply may land in a shared room), `!drafts send <id>` releases one and `!drafts discard <id>` bins it. With exactly one draft pending the id may be omitted; with several it is required.
+
+The command lists `pending` rows only. A draft left marked `sending` — the process died between claiming it and recording the send — is terminal and appears on the web surface alone, shown with no action offered because nobody can tell from the outside whether the mail went out. Web chat shows the same drafts as cards; see [answering a held draft](../features/email.md#answering-a-held-draft).
 
 ## Search
 
