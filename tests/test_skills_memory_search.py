@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 from istota.skills.memory_search import (
     build_parser,
@@ -658,6 +660,9 @@ class TestCmdAddFact:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         args = MagicMock()
         args.subject = "bob"
@@ -680,6 +685,9 @@ class TestCmdAddFact:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         args = MagicMock()
         args.subject = "bob"
@@ -704,6 +712,9 @@ class TestCmdInvalidateFact:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         args = MagicMock()
         args.fact_id = fact_id
@@ -718,6 +729,9 @@ class TestCmdInvalidateFact:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         args = MagicMock()
         args.fact_id = 9999
@@ -739,6 +753,9 @@ class TestCmdDeleteFact:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         args = MagicMock()
         args.fact_id = fact_id
@@ -752,12 +769,216 @@ class TestCmdDeleteFact:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         args = MagicMock()
         args.fact_id = 9999
 
         result = cmd_delete_fact(args)
         assert result["status"] == "error"
+
+
+class TestKgSkillDeferred:
+    """Sandbox mode: the KG write verbs queue an op instead of hitting the DB.
+
+    This is the only way a sandboxed agent can write a knowledge-graph
+    fact at all — the framework DB is not bound into the sandbox, and
+    its directory is masked with an empty tmpfs. Every test here deletes
+    ISTOTA_DB_PATH, so any fall-through to the direct path would exit(1)
+    in `_get_conn` rather than quietly passing.
+
+    The op envelopes are asserted whole because `_process_deferred_kg_ops`
+    in scheduler_deferred.py reads these exact keys; a rename on either
+    side is a silently dropped write.
+    """
+
+    @pytest.fixture
+    def sandbox_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        monkeypatch.setenv("ISTOTA_TASK_ID", "42")
+        return tmp_path
+
+    def test_add_fact_deferred(self, sandbox_env):
+        args = MagicMock()
+        args.subject = "bob"
+        args.predicate = "knows"
+        args.object = "python"
+        args.valid_from = None
+
+        result = cmd_add_fact(args)
+        assert result == {"status": "ok", "deferred": True}
+
+        ops = json.loads((sandbox_env / "task_42_kg_ops.json").read_text())
+        assert ops == [{
+            "op": "add_fact",
+            "subject": "bob",
+            "predicate": "knows",
+            "object": "python",
+            "valid_from": None,
+            "source_type": "user_stated",
+        }]
+
+    def test_invalidate_deferred(self, sandbox_env):
+        args = MagicMock()
+        args.fact_id = 7
+        args.ended = "2026-04-08"
+
+        result = cmd_invalidate_fact(args)
+        assert result == {"status": "ok", "deferred": True}
+
+        ops = json.loads((sandbox_env / "task_42_kg_ops.json").read_text())
+        assert ops == [{"op": "invalidate", "fact_id": 7, "ended": "2026-04-08"}]
+
+    def test_delete_fact_deferred(self, sandbox_env):
+        args = MagicMock()
+        args.fact_id = 7
+
+        result = cmd_delete_fact(args)
+        assert result == {"status": "ok", "deferred": True}
+
+        ops = json.loads((sandbox_env / "task_42_kg_ops.json").read_text())
+        assert ops == [{"op": "delete", "fact_id": 7}]
+
+    def test_ops_accumulate_in_one_file(self, sandbox_env):
+        add_args = MagicMock()
+        add_args.subject = "bob"
+        add_args.predicate = "knows"
+        add_args.object = "python"
+        add_args.valid_from = None
+        cmd_add_fact(add_args)
+
+        del_args = MagicMock()
+        del_args.fact_id = 7
+        cmd_delete_fact(del_args)
+
+        ops = json.loads((sandbox_env / "task_42_kg_ops.json").read_text())
+        assert [op["op"] for op in ops] == ["add_fact", "delete"]
+
+    def test_no_task_id_falls_through_to_direct_write(self, tmp_path, monkeypatch):
+        """A deferred dir without a task id can't name an op file, so the
+        write must go direct rather than being dropped."""
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+
+        args = MagicMock()
+        args.subject = "bob"
+        args.predicate = "knows"
+        args.object = "python"
+        args.valid_from = None
+
+        result = cmd_add_fact(args)
+        assert "fact_id" in result
+        assert not list(tmp_path.glob("*_kg_ops.json"))
+
+    def test_deferred_ops_replay_through_the_scheduler(self, tmp_path, monkeypatch):
+        """The file the CLI writes is the file the scheduler reads.
+
+        The envelope assertions above are hand-copied literals, so a
+        rename applied to both the producer and those literals still
+        leaves the consumer dropping writes — silently, since the
+        unknown-op branch of `_process_deferred_kg_ops` only warns. This
+        runs the real seam for all three verbs: the CLI writes, the
+        scheduler replays, and the effects have to land in the DB.
+
+        The env claims a different user than the task owns, because
+        `_process_deferred_kg_ops` takes identity from the task and never
+        from the file. Making both "alice" would leave that undefended.
+        """
+        from istota import db
+        from istota.config import Config
+        from istota.memory.knowledge_graph import (
+            add_fact as kg_add_fact, ensure_table, get_current_facts,
+        )
+        from istota.scheduler_deferred import _process_deferred_kg_ops
+
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="test", user_id="alice")
+            task = db.get_task(conn, task_id)
+            ensure_table(conn)
+            doomed_id = kg_add_fact(conn, "alice", "bob", "uses_tech", "svelte")
+            conn.commit()
+
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        # The CLI half, exactly as a sandboxed agent reaches it.
+        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+        monkeypatch.setenv("ISTOTA_USER_ID", "mallory")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(user_temp))
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+
+        add_args = MagicMock()
+        add_args.subject = "bob"
+        add_args.predicate = "knows"
+        add_args.object = "python"
+        add_args.valid_from = None
+        assert cmd_add_fact(add_args) == {"status": "ok", "deferred": True}
+
+        del_args = MagicMock()
+        del_args.fact_id = doomed_id
+        assert cmd_delete_fact(del_args) == {"status": "ok", "deferred": True}
+
+        assert _process_deferred_kg_ops(Config(db_path=db_path), task, user_temp) == 2
+
+        with db.get_db(db_path) as conn:
+            facts = get_current_facts(conn, "alice", subject="bob")
+            # Identity comes from the task, never from the CLI's env.
+            assert get_current_facts(conn, "mallory", subject="bob") == []
+        assert [(f.predicate, f.object) for f in facts] == [("knows", "python")]
+        assert facts[0].source_task_id == task_id
+
+        # Replayed ops are consumed, so a retry can't double-apply them.
+        assert not (user_temp / f"task_{task_id}_kg_ops.json").exists()
+
+    def test_deferred_invalidate_replays_through_the_scheduler(self, tmp_path, monkeypatch):
+        """`invalidate` carries `ended` across the seam, not just `fact_id`."""
+        from istota import db
+        from istota.config import Config
+        from istota.memory.knowledge_graph import (
+            add_fact as kg_add_fact, ensure_table, get_fact,
+        )
+        from istota.scheduler_deferred import _process_deferred_kg_ops
+
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="test", user_id="alice")
+            task = db.get_task(conn, task_id)
+            ensure_table(conn)
+            fact_id = kg_add_fact(conn, "alice", "bob", "lives_in", "lisbon")
+            conn.commit()
+
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(user_temp))
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+
+        args = MagicMock()
+        args.fact_id = fact_id
+        args.ended = "2026-04-08"
+        assert cmd_invalidate_fact(args) == {"status": "ok", "deferred": True}
+
+        assert _process_deferred_kg_ops(Config(db_path=db_path), task, user_temp) == 1
+
+        with db.get_db(db_path) as conn:
+            fact = get_fact(conn, fact_id)
+        assert fact.valid_until == "2026-04-08"
 
 
 class TestStatsIncludesKG:
@@ -803,6 +1024,9 @@ class TestMainKG:
 
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        # Direct path: the deferred dir must be absent, or this test
+        # silently exercises the sandbox queue instead.
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
         main(["add-fact", "bob", "knows", "python"])
 

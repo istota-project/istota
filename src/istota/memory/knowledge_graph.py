@@ -86,6 +86,13 @@ AUTO_EXPIRE_PREDICATES = frozenset({
 # stop these crowding every prompt forever.
 DEFAULT_EPHEMERAL_TTL_DAYS = 90
 
+# Word-level Jaccard score at or above which two same-predicate facts about the
+# same subject are treated as near-duplicates and the second is dropped. Module
+# level so the dedup tests can pin it: the guards in TestFuzzyDedup are built on
+# object pairs that straddle this value, and a tune that moved it past them
+# would leave those tests green while silently defanging them.
+FUZZY_DEDUP_THRESHOLD = 0.6
+
 
 @dataclass
 class KnowledgeFact:
@@ -329,10 +336,9 @@ def add_fact(
     #      the other's. Catches "python" ⊂ "python 3" and "acme" ⊂
     #      "acme corp"; rejects substring-only collisions like "tech_1"
     #      inside "tech_10" (different tokens, neither a subset).
-    #   2. Word-level Jaccard on objects ≥ 0.6 (paired with audit
-    #      logging via op="fuzzy_dedup_skip" so dedup quality is
-    #      observable and tunable, not silent).
-    FUZZY_DEDUP_THRESHOLD = 0.6
+    #   2. Word-level Jaccard on objects ≥ FUZZY_DEDUP_THRESHOLD (paired
+    #      with audit logging via op="fuzzy_dedup_skip" so dedup quality
+    #      is observable and tunable, not silent).
     near_matches = conn.execute(
         "SELECT id, predicate, object FROM knowledge_facts "
         "WHERE user_id = ? AND subject = ? AND predicate = ? "
