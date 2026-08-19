@@ -697,6 +697,10 @@ def sync_monarch(
     # Build beancount entries for new transactions
     entries = []
     synced_data = []
+    # ISSUE-083: what this run actually booked, in ledger sign convention
+    # (positive = money in). The invoice matcher reads this rather than
+    # re-parsing the staging file to find the new credits.
+    imported: list[dict] = []
 
     for txn in new_transactions:
         txn_date_str = txn.get("date", "")
@@ -730,6 +734,11 @@ def sync_monarch(
             metadata=entry_metadata,
         )
         entries.append(entry)
+        imported.append({
+            "date": txn_date.isoformat(),
+            "amount": amount,
+            "payee": merchant,
+        })
 
         if txn_id:
             synced_data.append({
@@ -869,6 +878,7 @@ def sync_monarch(
         "category_changed_count": len(category_change_entries),
         "edited_respected_count": len(edited_respected),
         "dry_run": dry_run,
+        "imported": imported,
     }
     if edited_respected:
         result["edited_respected_ids"] = edited_respected

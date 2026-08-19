@@ -52,18 +52,18 @@ istota-skill money edit-transaction --id <id> [--account Expenses:Food:Restauran
 istota-skill money backfill-ids [--ledger NAME]
 
 # Sync from Monarch Money (syncs all configured profiles by default)
-istota-skill money sync-monarch [--dry-run] [--ledger NAME]
+istota-skill money sync-monarch [--dry-run] [--ledger NAME] [--no-match-invoices] [--tolerance 5]
 
 # Import from CSV
 istota-skill money import-csv /path/to/export.csv --account Assets:Bank:Checking [--tag TAG] [--exclude-tag TAG] [--ledger NAME]
 
 # Run periodic money tasks (Monarch sync + invoice scheduler) — invoked by cron, but usable ad hoc
-istota-skill money run-scheduled [--dry-run] [--skip-monarch]
+istota-skill money run-scheduled [--dry-run] [--skip-monarch] [--no-match-invoices] [--tolerance 5]
 ```
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/void/create`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/create`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
 
 ## Adding transactions
 
@@ -89,11 +89,31 @@ istota-skill money invoice paid INV-000001 --date 2026-02-15 [--bank Assets:Bank
 istota-skill money invoice create acme --service consulting --qty 40
 istota-skill money invoice create acme --item "Travel expenses 340.50"
 
+# Reopen a paid invoice, keeping the invoice number (inverse of `invoice paid`)
+istota-skill money invoice unpaid INV-000001
+
 # Void an invoice (clears work entries, optionally deletes PDF)
 istota-skill money invoice void INV-000001 [--force] [--delete-pdf]
 ```
 
 Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`. Use `--no-post` when the bank transaction was already imported.
+
+### Payments matched automatically
+
+`sync-monarch` and `run-scheduled` close the loop for the obvious case: a newly synced credit that fits **exactly one** open invoice marks that invoice paid, without a ledger posting — the sync already booked the income. An invoice is a candidate when its total matches the credit to the cent (or within `--tolerance`, in dollars) and it was issued no later than the payment.
+
+Ambiguity is never resolved by guessing. Two open invoices that fit one credit, or two credits that fit one invoice, are reported and left alone:
+
+```json
+{"invoice_matching": {
+  "matched": [{"date": "2026-05-05", "amount": 4275.0, "payee": "Northwind Ltd", "invoice_number": "INV-000123", "client": "northwind"}],
+  "review":  [{"date": "2026-05-06", "amount": 500.0, "payee": "Acme Corp", "candidates": ["INV-000124", "INV-000125"], "candidate_clients": ["acme", "globex"], "reason": "2 open invoices fit this payment"}]
+}}
+```
+
+Act on a `review` row by running `invoice paid <number> --date <date> --no-post` for the right one. `--no-match-invoices` turns the whole thing off for a run (on both `sync-monarch` and `run-scheduled` — unlike `--skip-monarch`, which would also skip the ledger sync), and `invoice unpaid <number>` undoes a match that was wrong. The `invoice_matching` key only appears when there was something to report.
+
+An invoice is left out of matching entirely when its total can't be stated exactly: partly paid, or carrying a work entry whose service is no longer in the config. Matching on a total that isn't what the client owes is how the wrong invoice gets settled. Note also that nothing records an invoice's issue date, so the date filter uses the latest work billed on it as a lower bound — it never rejects a real payment, but it does admit credits from the gap between the last work and the invoice going out.
 
 ## Work log commands
 

@@ -264,6 +264,12 @@ class TestCommandDispatch:
         assert "--force" in args
         assert "--delete-pdf" in args
 
+    def test_invoice_unpaid(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "unpaid", "INV-000001"])
+        assert captured[-1] == ["invoice", "unpaid", "INV-000001"]
+
     def test_work_add(self, captured):
         from istota.skills.money import main
 
@@ -285,6 +291,33 @@ class TestCommandDispatch:
 
         with pytest.raises(SystemExit):
             main(["nonexistent-command"])
+
+    def test_sync_monarch_defaults_to_matching_invoices(self, captured):
+        """ISSUE-083: matching is on unless the caller opts out."""
+        from istota.skills.money import main
+
+        main(["sync-monarch"])
+        assert captured[-1] == ["sync-monarch"]
+
+    def test_sync_monarch_invoice_matching_flags(self, captured):
+        from istota.skills.money import main
+
+        main(["sync-monarch", "--no-match-invoices", "--tolerance", "5"])
+        args = captured[-1]
+        assert args[0] == "sync-monarch"
+        assert "--no-match-invoices" in args
+        assert "--tolerance" in args and "5.0" in args
+
+    def test_run_scheduled_invoice_matching_flags(self, captured):
+        """The cron path needs its own off switch; --skip-monarch is not one."""
+        from istota.skills.money import main
+
+        main(["run-scheduled", "--no-match-invoices", "--tolerance", "5"])
+        args = captured[-1]
+        assert args[0] == "run-scheduled"
+        assert "--skip-monarch" not in args
+        assert "--no-match-invoices" in args
+        assert "--tolerance" in args and "5.0" in args
 
     def test_portfolio_import(self, captured):
         from istota.skills.money import main

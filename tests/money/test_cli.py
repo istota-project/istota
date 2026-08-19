@@ -424,6 +424,57 @@ class TestInvoicePaid:
         assert output["invoices"][0]["status"] == "paid"
 
 
+class TestInvoiceUnpaid:
+    """The inverse of `invoice paid`, and the way back from a wrong auto-match.
+
+    `invoice void` is not that inverse — it clears the invoice number too,
+    un-invoicing the work rather than reopening the invoice.
+    """
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_unpaid_reopens_a_paid_invoice(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        _invoke(runner, [
+            "invoice", "paid", "INV-000001", "-d", "2026-04-15", "--no-post",
+        ], tmp_path=tmp_path, obj=invoicing_ctx)
+
+        result = _invoke(runner, ["invoice", "unpaid", "INV-000001"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.output)
+        assert output["status"] == "ok"
+        assert output["entries_cleared"] == 1
+
+        listed = json.loads(_invoke(runner, ["invoice", "list"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert listed["invoices"][0]["status"] == "outstanding"
+        # The work stays invoiced — only the payment was undone.
+        work = json.loads(_invoke(runner, ["work", "list", "--invoiced"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert work["count"] == 1
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_unpaid_on_an_outstanding_invoice_is_an_error(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+
+        result = _invoke(runner, ["invoice", "unpaid", "INV-000001"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert "not marked paid" in output["error"]
+
+    def test_unpaid_unknown_invoice_is_an_error(self, runner, tmp_path, invoicing_ctx):
+        result = _invoke(runner, ["invoice", "unpaid", "INV-999999"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert "not found" in output["error"]
+
+
 class TestInvoiceVoid:
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_void_unpaid_invoice(self, mock_pdf, runner, tmp_path, invoicing_ctx):
@@ -570,6 +621,503 @@ class TestSyncMonarchProfiles:
                 mock_sync.assert_called_once()
                 call_kwargs = mock_sync.call_args
                 assert call_kwargs[1]["profile"] == "business"
+
+
+class TestSyncMonarchInvoiceMatching:
+    """ISSUE-083: a synced credit settles the one open invoice it fits.
+
+    These go through the real ``sync-monarch`` command with only the Monarch
+    fetch stubbed, so they cover the wiring between the core sync's
+    ``imported`` list, the matcher, and the work-entry store.
+    """
+
+    _MONARCH_TOML = (
+        '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
+        '[monarch.sync]\nlookback_days = 30\n\n'
+        '[monarch.profiles.default]\nledger = "default"\n'
+    )
+
+    def _ctx(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        obj = _make_context(tmp_path, ledgers=[{"name": "default", "path": ledger}])
+        _seed_invoicing(
+            obj.db_path,
+            'accounting_path = "."\n'
+            'invoice_output = "invoices"\n'
+            'next_invoice_number = 1\n\n'
+            '[company]\nname = "Test Co"\n\n'
+            '[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
+            # Deliberately left on: with posting disabled, the "no double
+            # booking" assertion below would hold no matter what the matcher
+            # did, and would prove nothing.
+            '[clients.acme.invoicing]\nledger_posting = true\n\n'
+            '[services.dev]\ndisplay_name = "Development"\nrate = 150.0\ntype = "hours"\n'
+            'income_account = "Income:Dev"\n',
+        )
+        _seed_monarch(obj.db_path, self._MONARCH_TOML)
+        return obj
+
+    def _credit(self, amount, payee="Acme Corp", days_after=0, tags=()):
+        from datetime import date, timedelta
+        return {
+            "id": f"mon-{payee}-{amount}-{days_after}",
+            "date": (date.today() + timedelta(days=days_after)).isoformat(),
+            "merchant": {"name": payee},
+            "category": {"name": "Consulting"},
+            "account": {"displayName": "Checking"},
+            "amount": amount, "notes": "",
+            "tags": [{"name": t} for t in tags],
+        }
+
+    def _sync(self, runner, tmp_path, obj, txns, extra_args=()):
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as fetch:
+            fetch.return_value = txns
+            result = _invoke(runner, ["sync-monarch", *extra_args],
+                tmp_path=tmp_path, obj=obj)
+        assert result.exit_code == 0, result.output
+        return json.loads(result.output)
+
+    def _invoice_status(self, runner, tmp_path, obj, number="INV-000001"):
+        result = _invoke(runner, ["invoice", "list", "--all"],
+            tmp_path=tmp_path, obj=obj)
+        invoices = json.loads(result.output)["invoices"]
+        return next(i for i in invoices if i["invoice_number"] == number)["status"]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_matching_credit_marks_the_invoice_paid(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+        matching = out["profiles"][0]["invoice_matching"]
+        assert [m["invoice_number"] for m in matching["matched"]] == ["INV-000001"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_no_ledger_posting_on_the_auto_match(self, mock_pdf, runner, tmp_path):
+        """The sync already booked the income; matching must not book it again.
+
+        The client has ``ledger_posting = true``, so routing the auto-match
+        through `invoice paid`'s posting path would add a second transaction
+        here and fail this.
+        """
+        obj = self._ctx(tmp_path)
+        ledger = tmp_path / "main.beancount"
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+        # One transaction in the ledger: the synced credit. No income posting
+        # from the payment recording on top of it. Count transaction headers
+        # rather than the payee, which also appears in the monarch-id.
+        assert ledger.read_text().count('* "') == 1
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_non_matching_credit_leaves_the_invoice_open(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(999.00)])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_ambiguous_amount_is_flagged_not_guessed(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        for _ in range(2):
+            _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+                tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+        matching = out["profiles"][0]["invoice_matching"]
+        assert "matched" not in matching
+        assert matching["review"][0]["candidates"] == ["INV-000001", "INV-000002"]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+        assert self._invoice_status(runner, tmp_path, obj, "INV-000002") == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_dry_run_does_not_mark_anything_paid(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)],
+            extra_args=["--dry-run"])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_no_match_invoices_flag_disables_it(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)],
+            extra_args=["--no-match-invoices"])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_tolerance_option_widens_the_match(self, mock_pdf, runner, tmp_path):
+        """A wire fee shaves a few dollars off what lands in the account."""
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1185.00)],
+            extra_args=["--tolerance", "15"])
+        assert out["profiles"][0]["invoice_matching"]["matched"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_debit_of_the_same_size_never_matches(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(-1200.00)])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_second_sync_does_not_rematch_a_paid_invoice(self, mock_pdf, runner, tmp_path):
+        """Dedup keeps the credit out of ``imported``, and the invoice is closed."""
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        credit = self._credit(1200.00)
+        self._sync(runner, tmp_path, obj, [credit])
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    def test_matching_is_skipped_without_invoicing_config(self, runner, tmp_path):
+        """Monarch configured, invoicing not — the sync must still succeed."""
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("")
+        obj = _make_context(tmp_path, ledgers=[{"name": "default", "path": ledger}])
+        _seed_monarch(obj.db_path, self._MONARCH_TOML)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+        assert out["status"] == "ok"
+        assert "invoice_matching" not in out["profiles"][0]
+
+    def _add_work(self, runner, tmp_path, obj, when, qty="8"):
+        _invoke(runner, [
+            "work", "add", "--date", when, "--client", "acme",
+            "--service", "dev", "--qty", qty,
+        ], tmp_path=tmp_path, obj=obj)
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_credit_before_the_last_billed_work_is_not_a_match(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """The date bound is the latest work on the invoice, not the earliest.
+
+        Nothing records an issue date, so the latest work is the closest sound
+        lower bound. Taking the earliest instead would let a credit that
+        landed mid-period settle an invoice raised at the end of it.
+        """
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+
+        # $1,200 total; the credit lands between the two work entries.
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-01-10"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_credit_after_the_last_billed_work_matches(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-02-01"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert out["profiles"][0]["invoice_matching"]["matched"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_partly_paid_invoice_is_not_offered_at_its_gross_total(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """Its total is no longer what the client owes, so it must not match."""
+        from datetime import date as _date
+        from istota.money.work import _save_entries, load_work_entries
+
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        self._add_work(runner, tmp_path, obj, "2026-01-06", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+
+        # Mark one of the two entries paid, leaving the invoice half-settled.
+        entries = load_work_entries(tmp_path)
+        entries[0].paid_date = _date(2026, 1, 31)
+        _save_entries(tmp_path, entries)
+
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-02-01"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert "invoice_matching" not in out["profiles"][0]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_invoice_with_an_unknown_service_is_not_matchable(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """`build_line_items` skips unknown services, understating the total.
+
+        A $1,200 invoice whose $600 of work lost its service key would
+        otherwise look like a $600 invoice and be settled by an unrelated
+        $600 credit.
+        """
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        self._add_work(runner, tmp_path, obj, "2026-01-06", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+
+        # Drop one entry's service out of the config's known set.
+        from istota.money.work import _save_entries, load_work_entries
+        entries = load_work_entries(tmp_path)
+        entries[0].service = "retired-service"
+        _save_entries(tmp_path, entries)
+
+        credit = self._credit(600.00)
+        credit["date"] = "2026-02-01"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert "invoice_matching" not in out["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_race_that_settles_the_invoice_first_is_reported_not_claimed(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """Open invoices are read without the work lock, so this gap is real."""
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        with patch("istota.money.work.record_invoice_payment", return_value=0):
+            out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+
+        matching = out["profiles"][0]["invoice_matching"]
+        assert "matched" not in matching
+        assert "already settled or voided" in matching["review"][0]["reason"]
+
+    def test_non_finite_tolerance_is_refused_before_anything_runs(
+        self, runner, tmp_path,
+    ):
+        obj = self._ctx(tmp_path)
+        for bad in ("nan", "inf", "-1"):
+            result = _invoke(runner, ["sync-monarch", "--tolerance", bad],
+                tmp_path=tmp_path, obj=obj)
+            output = json.loads(result.output)
+            assert output["status"] == "error", bad
+            assert "tolerance" in output["error"], bad
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_run_scheduled_can_turn_matching_off(self, mock_pdf, runner, tmp_path):
+        """Without this the only off switch also skips the ledger sync."""
+        obj = self._ctx(tmp_path)
+        obj.users["default"].monarch_config_path = tmp_path / "monarch.toml"
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as fetch:
+            fetch.return_value = [self._credit(1200.00)]
+            result = _invoke(runner, ["run-scheduled", "--no-match-invoices"],
+                tmp_path=tmp_path, obj=obj)
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        # The ledger sync still ran.
+        assert out["monarch"]["profiles"][0]["transaction_count"] == 1
+        assert "invoice_matching" not in out["monarch"]["profiles"][0]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_broken_work_file_does_not_fail_the_scheduled_run(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """Matching runs before invoice generation; it must not abort the run."""
+        obj = self._ctx(tmp_path)
+        obj.users["default"].monarch_config_path = tmp_path / "monarch.toml"
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        with patch("istota.money.work.load_work_entries",
+                   side_effect=ValueError("malformed year file")), \
+             patch("istota.money.core.transactions.fetch_monarch_transactions") as fetch:
+            fetch.return_value = [self._credit(1200.00)]
+            result = _invoke(runner, ["run-scheduled"], tmp_path=tmp_path, obj=obj)
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["monarch"]["profiles"][0]["transaction_count"] == 1
+        assert "invoice_matching" not in out["monarch"]["profiles"][0]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_locked_work_store_does_not_fail_the_sync(self, mock_pdf, runner, tmp_path):
+        """A ledger sync that succeeded must not report failure over this."""
+        from istota.money.work import WorkStoreLocked
+
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        with patch("istota.money.work.record_invoice_payment",
+                   side_effect=WorkStoreLocked("held")):
+            out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+
+        assert out["status"] == "ok"
+        matching = out["profiles"][0]["invoice_matching"]
+        assert "matched" not in matching
+        assert "held" in matching["review"][0]["reason"]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_flat_result_shape_carries_the_matching(self, mock_pdf, runner, tmp_path):
+        """`--ledger` naming a ledger no profile targets returns a flat result.
+
+        `_sync_results` handles that shape, but every other test here seeds a
+        matching profile and reads `out["profiles"][0]`.
+        """
+        other = tmp_path / "other.beancount"
+        other.write_text("")
+        obj = self._ctx(tmp_path)
+        obj.users["default"].ledgers.append({"name": "other", "path": other})
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)],
+            extra_args=["--ledger", "other"])
+        assert "profiles" not in out
+        assert [m["invoice_number"] for m in out["invoice_matching"]["matched"]] \
+            == ["INV-000001"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_imported_is_not_part_of_the_output(self, mock_pdf, runner, tmp_path):
+        """Plumbing for the matcher, not a per-transaction dump into a prompt."""
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+        assert "imported" not in out["profiles"][0]
+        # Still reported, just as a count.
+        assert out["profiles"][0]["transaction_count"] == 1
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_imported_is_stripped_when_matching_is_off(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)],
+            extra_args=["--no-match-invoices"])
+        assert "imported" not in out["profiles"][0]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_quarantined_work_file_does_not_fail_the_sync(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """The read side gets the same best-effort guarantee as the write side."""
+        from istota.money.work import WorkFileQuarantined
+
+        obj = self._ctx(tmp_path)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        with patch("istota.money.work.get_invoice_numbers",
+                   side_effect=WorkFileQuarantined("bad row")):
+            out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
+
+        assert out["status"] == "ok"
+        assert out["profiles"][0]["transaction_count"] == 1
+        assert "invoice_matching" not in out["profiles"][0]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_one_invoice_contested_across_two_profiles_is_not_settled(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """Two profiles, each booking a different credit that fits one invoice.
+
+        Tag filters route one credit to each profile. Matching per profile
+        would let whichever ran first settle the invoice and leave the other
+        silently unreported, with profile order deciding which.
+        """
+        biz = tmp_path / "biz.beancount"
+        biz.write_text("")
+        personal = tmp_path / "personal.beancount"
+        personal.write_text("")
+        obj = _make_context(tmp_path, ledgers=[
+            {"name": "biz", "path": biz}, {"name": "personal", "path": personal},
+        ])
+        _seed_invoicing(
+            obj.db_path,
+            'accounting_path = "."\n'
+            'invoice_output = "invoices"\n'
+            'next_invoice_number = 1\n\n'
+            '[company]\nname = "Test Co"\n\n'
+            '[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
+            '[clients.acme.invoicing]\nledger_posting = false\n\n'
+            '[services.dev]\ndisplay_name = "Development"\nrate = 150.0\ntype = "hours"\n'
+            'income_account = "Income:Dev"\n',
+        )
+        _seed_monarch(
+            obj.db_path,
+            '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
+            '[monarch.sync]\nlookback_days = 30\n\n'
+            '[monarch.profiles.business]\nledger = "biz"\n\n'
+            '[monarch.profiles.business.tags]\ninclude = ["business"]\n\n'
+            '[monarch.profiles.personal]\nledger = "personal"\n\n'
+            '[monarch.profiles.personal.tags]\ninclude = ["personal"]\n',
+        )
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        out = self._sync(runner, tmp_path, obj, [
+            self._credit(1200.00, payee="Acme Corp", tags=["business"]),
+            self._credit(1200.00, payee="Northwind Ltd", tags=["personal"]),
+        ])
+
+        # One credit booked per profile, and both fit INV-000001.
+        assert [p["transaction_count"] for p in out["profiles"]] == [1, 1]
+        for profile in out["profiles"]:
+            matching = profile["invoice_matching"]
+            assert "matched" not in matching
+            assert "2 payments fit INV-000001" in matching["review"][0]["reason"]
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_run_scheduled_matches_too(self, mock_pdf, runner, tmp_path):
+        """The daily cron path is where this matters most."""
+        obj = self._ctx(tmp_path)
+        obj.users["default"].monarch_config_path = tmp_path / "monarch.toml"
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        with patch("istota.money.core.transactions.fetch_monarch_transactions") as fetch:
+            fetch.return_value = [self._credit(1200.00)]
+            result = _invoke(runner, ["run-scheduled"], tmp_path=tmp_path, obj=obj)
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        matching = out["monarch"]["profiles"][0]["invoice_matching"]
+        assert [m["invoice_number"] for m in matching["matched"]] == ["INV-000001"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
 
 
 class TestRunScheduled:

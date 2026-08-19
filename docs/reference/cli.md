@@ -209,11 +209,11 @@ istota money add-transaction -u USER ...      # append a transaction
 istota money edit-transaction -u USER ...     # edit a transaction in place by id
 istota money backfill-ids -u USER             # backfill stable transaction ids
 istota money import-csv -u USER ...           # import transactions from CSV
-istota money sync-monarch -u USER             # sync from Monarch Money
+istota money sync-monarch -u USER             # sync from Monarch Money (auto-matches payments to open invoices)
 istota money debug-monarch -u USER            # health-check Monarch credentials
 istota money run-scheduled -u USER            # periodic sync + invoice scheduler
 istota money users                            # users visible to the money CLI
-istota money invoice -u USER <generate|list|paid|create|void> ...
+istota money invoice -u USER <generate|list|paid|unpaid|create|void> ...
 istota money work -u USER <list|add|update|remove> ...
 istota money portfolio -u USER <import|snapshots|summary|history|diff|accounts|classify> ...
 istota money lots -u USER                     # tax lots (experimental: money_tax)
