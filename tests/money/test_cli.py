@@ -577,6 +577,29 @@ class TestInvoiceVoid:
         assert output["entries_voided"] == 1
 
 
+class TestInvoiceListDate:
+    """ISSUE-256: `invoice list` reports the invoice's date, not its first work."""
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_reports_the_issue_date_not_the_earliest_work(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        from datetime import date as _date
+
+        for when in ("2026-01-05", "2026-01-20"):
+            _invoke(runner, [
+                "work", "add", "--date", when, "--client", "acme",
+                "--service", "dev", "--qty", "4",
+            ], tmp_path=tmp_path, obj=invoicing_ctx)
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+
+        result = _invoke(runner, ["invoice", "list"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        invoice = json.loads(result.output)["invoices"][0]
+        assert invoice["date"] == _date.today().isoformat()
+
+
 class TestSyncMonarchProfiles:
     def test_sync_no_ledger_calls_sync_all_profiles(self, runner, tmp_path):
         """sync-monarch without --ledger calls sync_all_profiles."""
@@ -813,42 +836,184 @@ class TestSyncMonarchInvoiceMatching:
             "--service", "dev", "--qty", qty,
         ], tmp_path=tmp_path, obj=obj)
 
+    def _strip_issue_date(self, tmp_path):
+        """Make an invoice look like one raised before issue dates were stored.
+
+        Nothing can reconstruct the issue date of an existing invoice, so the
+        latest-work fallback has to keep working indefinitely. This is the only
+        way to build a record in that shape.
+        """
+        from istota.money.work import _save_entries, load_work_entries
+
+        entries = load_work_entries(tmp_path)
+        for entry in entries:
+            entry.invoice_date = None
+        _save_entries(tmp_path, entries)
+
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
-    def test_credit_before_the_last_billed_work_is_not_a_match(
+    def test_legacy_invoice_falls_back_to_the_latest_work_billed(
         self, mock_pdf, runner, tmp_path,
     ):
-        """The date bound is the latest work on the invoice, not the earliest.
+        """No stored issue date: the bound is the latest work, not the earliest.
 
-        Nothing records an issue date, so the latest work is the closest sound
-        lower bound. Taking the earliest instead would let a credit that
-        landed mid-period settle an invoice raised at the end of it.
+        Taking the earliest instead would let a credit that landed mid-period
+        settle an invoice raised at the end of it.
         """
         obj = self._ctx(tmp_path)
         self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
         self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
         _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
             tmp_path=tmp_path, obj=obj)
+        self._strip_issue_date(tmp_path)
 
         # $1,200 total; the credit lands between the two work entries.
         credit = self._credit(1200.00)
         credit["date"] = "2026-01-10"
         out = self._sync(runner, tmp_path, obj, [credit])
-        assert "invoice_matching" not in out["profiles"][0]
         assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+        matching = out["profiles"][0]["invoice_matching"]
+        assert "matched" not in matching
+        assert "issued after this payment" in matching["review"][0]["reason"]
 
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
-    def test_credit_after_the_last_billed_work_matches(self, mock_pdf, runner, tmp_path):
+    def test_legacy_invoice_still_matches_a_credit_after_its_last_work(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """The fallback must stay usable, not just safe.
+
+        Under the stored issue date this credit would be rejected — the
+        invoice was really raised today. With no date recorded, the loose
+        bound is all there is and the match still has to land.
+        """
         obj = self._ctx(tmp_path)
         self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
         self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
         _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
             tmp_path=tmp_path, obj=obj)
+        self._strip_issue_date(tmp_path)
 
         credit = self._credit(1200.00)
         credit["date"] = "2026-02-01"
         out = self._sync(runner, tmp_path, obj, [credit])
         assert out["profiles"][0]["invoice_matching"]["matched"]
         assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_credit_before_the_invoice_was_issued_is_not_a_match(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """ISSUE-256: the bound is the issue date, not the last work billed.
+
+        January work invoiced months later. A credit that landed in February
+        is in the gap between the last work and the issue date: the invoice
+        did not exist yet, so it cannot be what that credit paid for. Before
+        the stored issue date this was admitted, and being the only open
+        invoice at that amount was enough to settle it.
+        """
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
+        # Generation stamps today, which is well after the billed work.
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-02-10"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+        # Not settled, but not silent either: the amount fits to the cent.
+        matching = out["profiles"][0]["invoice_matching"]
+        assert "matched" not in matching
+        assert "issued after this payment" in matching["review"][0]["reason"]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_credit_on_the_issue_date_matches(self, mock_pdf, runner, tmp_path):
+        """The bound is inclusive: a credit the day the invoice went out fits.
+
+        The issue date is moved back to a day *before* the latest work billed,
+        which is a shape the old latest-work bound could not produce. A credit
+        on that day would have been rejected under the old rule, so this can
+        only pass off the stored date.
+        """
+        from datetime import date as _date
+        from istota.money.work import _save_entries, load_work_entries
+
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+        entries = load_work_entries(tmp_path)
+        for entry in entries:
+            entry.invoice_date = _date(2026, 1, 10)
+        _save_entries(tmp_path, entries)
+
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-01-10"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert out["profiles"][0]["invoice_matching"]["matched"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_an_entry_hand_added_to_an_issued_invoice_keeps_its_date(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """`work update --invoice` must not drag the invoice forward to today.
+
+        Stamping today would push the bound past a payment that really did
+        settle the invoice — the one way this change could reject a real
+        payment, which the bound it replaced never could.
+        """
+        from datetime import date as _date
+        from istota.money.work import _save_entries, load_work_entries
+
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+        entries = load_work_entries(tmp_path)
+        for entry in entries:
+            entry.invoice_date = _date(2026, 1, 31)
+        _save_entries(tmp_path, entries)
+
+        # A forgotten entry, attached to the invoice that already went out.
+        self._add_work(runner, tmp_path, obj, "2026-01-06", qty="4")
+        uninvoiced = [e for e in load_work_entries(tmp_path) if not e.invoice]
+        assert len(uninvoiced) == 1
+        _invoke(runner, ["work", "update", str(uninvoiced[0].id),
+            "--invoice", "INV-000001"], tmp_path=tmp_path, obj=obj)
+        assert {e.invoice_date for e in load_work_entries(tmp_path)} == {_date(2026, 1, 31)}
+
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-02-01"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert out["profiles"][0]["invoice_matching"]["matched"]
+        assert self._invoice_status(runner, tmp_path, obj) == "paid"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_an_entry_hand_added_to_a_legacy_invoice_stays_undated(
+        self, mock_pdf, runner, tmp_path,
+    ):
+        """There is no date to inherit, and a guess must not be recorded."""
+        from istota.money.work import load_work_entries
+
+        obj = self._ctx(tmp_path)
+        self._add_work(runner, tmp_path, obj, "2026-01-05", qty="4")
+        _invoke(runner, ["invoice", "generate", "--period", "2026-01"],
+            tmp_path=tmp_path, obj=obj)
+        self._strip_issue_date(tmp_path)
+
+        self._add_work(runner, tmp_path, obj, "2026-01-20", qty="4")
+        uninvoiced = [e for e in load_work_entries(tmp_path) if not e.invoice]
+        _invoke(runner, ["work", "update", str(uninvoiced[0].id),
+            "--invoice", "INV-000001"], tmp_path=tmp_path, obj=obj)
+        assert all(e.invoice_date is None for e in load_work_entries(tmp_path))
+
+        # Still on the legacy fallback: the latest work billed.
+        credit = self._credit(1200.00)
+        credit["date"] = "2026-02-01"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert out["profiles"][0]["invoice_matching"]["matched"]
 
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_partly_paid_invoice_is_not_offered_at_its_gross_total(
@@ -869,9 +1034,9 @@ class TestSyncMonarchInvoiceMatching:
         entries[0].paid_date = _date(2026, 1, 31)
         _save_entries(tmp_path, entries)
 
-        credit = self._credit(1200.00)
-        credit["date"] = "2026-02-01"
-        out = self._sync(runner, tmp_path, obj, [credit])
+        # Dated today, so the date filter admits it and the exclusion below is
+        # the only thing that can reject it.
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
         assert "invoice_matching" not in out["profiles"][0]
 
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
@@ -896,9 +1061,9 @@ class TestSyncMonarchInvoiceMatching:
         entries[0].service = "retired-service"
         _save_entries(tmp_path, entries)
 
-        credit = self._credit(600.00)
-        credit["date"] = "2026-02-01"
-        out = self._sync(runner, tmp_path, obj, [credit])
+        # Dated today, so the date filter admits it and the understated total
+        # below is the only thing that can reject it.
+        out = self._sync(runner, tmp_path, obj, [self._credit(600.00)])
         assert "invoice_matching" not in out["profiles"][0]
         assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
 

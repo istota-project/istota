@@ -480,7 +480,9 @@ def generate_invoices_for_period(
                 # since shifted every index past it.
                 entry_uids = [e.uid for e in billable_entries if e.uid]
                 stamped = (
-                    assign_invoice_number_by_uids(data_dir, entry_uids, number_str)
+                    assign_invoice_number_by_uids(
+                        data_dir, entry_uids, number_str, invoice_date,
+                    )
                     if entry_uids
                     else 0
                 )

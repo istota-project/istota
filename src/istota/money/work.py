@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # WorkEntry.extra and written back verbatim.
 _KNOWN_ENTRY_KEYS = frozenset({
     "uid", "date", "client", "service", "qty", "amount",
-    "discount", "description", "entity", "invoice", "paid_date",
+    "discount", "description", "entity", "invoice", "invoice_date", "paid_date",
 })
 
 # Fields a caller may never set through the generic update path.
@@ -233,6 +233,7 @@ def _load_year(path: Path) -> list[WorkEntry]:
             description=_coerce_text(raw.get("description", "")) or "",
             entity=_coerce_text(raw.get("entity", "")) or "",
             invoice=_coerce_text(raw.get("invoice", "")) or "",
+            invoice_date=_coerce_date(raw.get("invoice_date")),
             paid_date=_coerce_date(raw.get("paid_date")),
             uid=_coerce_text(raw.get("uid", "")) or "",
             extra={k: v for k, v in raw.items() if k not in _KNOWN_ENTRY_KEYS},
@@ -339,6 +340,8 @@ def _serialize_entry(entry: WorkEntry) -> str:
         lines.append(f'entity = "{_escape(entry.entity)}"')
     if entry.invoice:
         lines.append(f'invoice = "{_escape(entry.invoice)}"')
+    if entry.invoice_date is not None:
+        lines.append(f"invoice_date = {entry.invoice_date.isoformat()}")
     if entry.paid_date is not None:
         lines.append(f"paid_date = {entry.paid_date.isoformat()}")
     for key in sorted(entry.extra):
@@ -492,6 +495,7 @@ def add_work_entry(
     description: str = "",
     entity: str = "",
     invoice: str = "",
+    invoice_date: str | date | None = None,
     uid: str = "",
 ) -> int:
     """Append entry to correct year file, return display index.
@@ -500,12 +504,19 @@ def add_work_entry(
     find the entry it just created (the web API) generates one, passes it,
     and looks the entry back up by it, since the returned display index is
     already stale the moment another writer inserts something earlier.
+
+    ``invoice_date`` is only meaningful alongside ``invoice`` — the one caller
+    that pre-assigns a number (``invoice create``) passes the date it put on
+    the PDF, so the record and the document agree. It defaults to today when a
+    number is given without one, and is ignored entirely without a number.
     """
     d = _parse_date(entry_date)
+    stamped = _coerce_stamp_date(invoice_date) if invoice else None
     new_entry = WorkEntry(
         date=d, client=client.lower(), service=service,
         qty=qty, amount=amount, discount=discount,
         description=description, entity=entity, invoice=invoice,
+        invoice_date=stamped,
         uid=uid or new_txn_id(),
     )
     with _work_lock(data_dir):
@@ -539,6 +550,25 @@ def list_work_entries(
     return entries
 
 
+def _coerce_stamp_date(value: str | date | None) -> date:
+    """The issue date to stamp: what the caller passed, or today.
+
+    Anything that isn't a date is refused here rather than assigned. The
+    serializer calls ``.isoformat()`` on it, and ``_save_entries`` writes year
+    files one at a time, so a bad value raises part-way through and leaves
+    some years written and some not.
+    """
+    if value is None:
+        return date.today()
+    if isinstance(value, str):
+        return _parse_date(value)
+    if isinstance(value, datetime):
+        return value.date()
+    if not isinstance(value, date):
+        raise TypeError(f"invoice_date must be a date or ISO string, got {type(value).__name__}")
+    return value
+
+
 def _apply_fields(entry: WorkEntry, fields: dict) -> None:
     """Assign updatable fields onto an entry, coercing date/client as the CLI does."""
     for key, value in fields.items():
@@ -548,8 +578,44 @@ def _apply_fields(entry: WorkEntry, fields: dict) -> None:
             value = _parse_date(value)
         if key == "client" and isinstance(value, str):
             value = value.lower()
+        if key == "invoice_date" and value is not None:
+            value = _coerce_stamp_date(value)
         if hasattr(entry, key):
             setattr(entry, key, value)
+
+
+def _sync_invoice_date(entry: WorkEntry, entries: list[WorkEntry], fields: dict) -> None:
+    """Keep ``invoice_date`` tied to the number a hand-assignment just wrote.
+
+    ``work update --invoice`` is the one path that stamps a number without
+    going through an assign call, and what it should stamp depends on whether
+    the number is new:
+
+    * **An invoice that already went out** — inherit its date. Stamping today
+      would drag the whole invoice forward (readers take the earliest stored
+      date, but the entry would still disagree with the document) and could
+      push the matcher's bound past a payment that really did settle it.
+    * **An invoice raised before this field existed** — leave it unstamped, so
+      the invoice keeps its legacy fallback. There is no date to inherit and a
+      synthesized one would be a guess recorded as a fact.
+    * **A number nothing else carries** — today, the same as any other
+      first-time assignment.
+
+    Clearing the number clears the date. That is unreachable today, since both
+    update paths refuse an entry that already carries an invoice, but it keeps
+    the two fields tied together here rather than resting on a caller's guard.
+    """
+    if "invoice" not in fields or "invoice_date" in fields:
+        return
+    if not entry.invoice:
+        entry.invoice_date = None
+        return
+    siblings = [e for e in entries if e is not entry and e.invoice == entry.invoice]
+    if not siblings:
+        entry.invoice_date = _coerce_stamp_date(None)
+        return
+    stamped = [e.invoice_date for e in siblings if e.invoice_date is not None]
+    entry.invoice_date = min(stamped) if stamped else None
 
 
 def update_work_entry(data_dir: Path, index: int, **fields) -> bool:
@@ -569,6 +635,7 @@ def update_work_entry(data_dir: Path, index: int, **fields) -> bool:
         if entry.invoice:
             return False
         _apply_fields(entry, fields)
+        _sync_invoice_date(entry, entries, fields)
         _save_entries(data_dir, entries)
         return True
 
@@ -610,6 +677,7 @@ def update_work_entry_by_uid(
         if expect_etag and entry_etag(entry) != expect_etag:
             return WorkMutationResult("conflict", entry)
         _apply_fields(entry, fields)
+        _sync_invoice_date(entry, entries, fields)
         _save_entries(data_dir, entries)
         # Re-read so the caller gets a correct display index (a date change
         # may have moved the entry) rather than the pre-save one.
@@ -703,6 +771,7 @@ def assign_invoice_number_by_uids(
     data_dir: Path,
     uids: list[str],
     invoice_number: str,
+    invoice_date: str | date | None = None,
 ) -> int:
     """Stamp an invoice number on the entries with these ``uid``s. Returns count.
 
@@ -716,10 +785,16 @@ def assign_invoice_number_by_uids(
 
     Entries that already carry an invoice are skipped, so a concurrent stamp
     wins rather than being overwritten.
+
+    ``invoice_date`` is stamped in the same lock acquisition as the number, so
+    the two cannot diverge. Pass the date the caller already committed to —
+    invoice generation renders one onto the PDF before it stamps, and a fresh
+    ``date.today()`` here would disagree with the document across midnight.
     """
     wanted = [u for u in uids if u]
     if not wanted:
         return 0
+    stamp = _coerce_stamp_date(invoice_date)
     with _work_lock(data_dir):
         entries = load_work_entries(data_dir)
         count = 0
@@ -732,6 +807,7 @@ def assign_invoice_number_by_uids(
             if entry is None or entry.invoice:
                 continue
             entry.invoice = invoice_number
+            entry.invoice_date = stamp
             count += 1
         if count:
             _save_entries(data_dir, entries)
@@ -742,15 +818,18 @@ def assign_invoice_number(
     data_dir: Path,
     indices: list[int],
     invoice_number: str,
+    invoice_date: str | date | None = None,
 ) -> int:
-    """Stamp invoice number on entries at given display indices. Returns count.
+    """Stamp invoice number and issue date on entries at display indices.
 
     Index-addressed, so only safe when the caller resolved the indices and
     stamps immediately. Anything holding a reference across time — invoice
     generation, the web UI — must use :func:`assign_invoice_number_by_uids`.
+    Returns the number of entries stamped.
     """
     if not indices:
         return 0
+    stamp = _coerce_stamp_date(invoice_date)
     with _work_lock(data_dir):
         entries = load_work_entries(data_dir)
         count = 0
@@ -761,6 +840,7 @@ def assign_invoice_number(
             if entry.invoice:
                 continue
             entry.invoice = invoice_number
+            entry.invoice_date = stamp
             count += 1
         if count:
             _save_entries(data_dir, entries)
@@ -811,8 +891,33 @@ def get_entries_for_invoice(data_dir: Path, invoice_number: str) -> list[WorkEnt
     return [e for e in load_work_entries(data_dir) if e.invoice == invoice_number]
 
 
+def invoice_issue_date(entries: list[WorkEntry]) -> date | None:
+    """When an invoice was issued, or the closest sound estimate.
+
+    Every path that stamps an invoice number now stamps the date with it, so
+    for anything invoiced since that landed this is the real issue date.
+    Invoices raised before it have no stored date and nothing can reconstruct
+    one, so they fall back to the *latest* work billed — an invoice cannot
+    predate the last work on it. That fallback is the legacy path, not the
+    design: it is a lower bound, weeks early on a period invoiced in arrears,
+    and it stays only because those records exist.
+
+    Returns ``None`` for an empty list.
+    """
+    if not entries:
+        return None
+    stamped = [e.invoice_date for e in entries if e.invoice_date is not None]
+    if stamped:
+        # Entries on one invoice are stamped together, so these normally agree.
+        # A hand-edited file can disagree with itself; take the earliest, since
+        # this is a "cannot have existed before this" bound and the earliest is
+        # the reading that cannot reject a payment the invoice really caused.
+        return min(stamped)
+    return max(e.date for e in entries)
+
+
 def void_invoice(data_dir: Path, invoice_number: str) -> int:
-    """Clear invoice and paid_date fields on all entries for an invoice.
+    """Clear invoice, issue date and paid_date on all entries for an invoice.
 
     Returns the number of entries modified.
     """
@@ -822,6 +927,7 @@ def void_invoice(data_dir: Path, invoice_number: str) -> int:
         for entry in entries:
             if entry.invoice == invoice_number:
                 entry.invoice = ""
+                entry.invoice_date = None
                 entry.paid_date = None
                 count += 1
         if count:

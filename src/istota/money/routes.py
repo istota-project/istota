@@ -432,7 +432,9 @@ async def api_invoices(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money.core.invoicing import build_line_items
-    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
+    from istota.money.work import (
+        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
+    )
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -465,7 +467,9 @@ async def api_invoices(
         client_key = inv_entries[0].client
         client_config = config.clients.get(client_key)
         client_name = client_config.name if client_config else client_key
-        inv_date = min(e.date for e in inv_entries)
+        # The invoice's own date, not the earliest work on it — which is what
+        # this used to show under the same `date` label.
+        inv_date = invoice_issue_date(inv_entries)
 
         invoice_info = {
             "invoice_number": inv_num,
@@ -692,9 +696,9 @@ async def api_invoice_pdf(
 # =============================================================================
 
 # Fields a client may set on create/update. Identity (``uid``) and the
-# invoicing lifecycle (``invoice`` / ``paid_date``) are owned by the store and
-# the invoicing path respectively — an edit form must not be able to stamp an
-# invoice number or mark work paid.
+# invoicing lifecycle (``invoice`` / ``invoice_date`` / ``paid_date``) are owned
+# by the store and the invoicing path respectively — an edit form must not be
+# able to stamp an invoice number, date it, or mark work paid.
 _WORK_WRITABLE_FIELDS = (
     "date", "client", "service", "qty", "amount", "discount", "description", "entity",
 )

@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An invoice now records the date it went out, and payment auto-matching uses it. Nothing stored an issue date, so the guard against a bank credit settling an invoice that did not exist yet fell back to the last work billed — weeks early on a month invoiced in arrears, which let any credit from that gap through. Invoice lists also showed the *earliest* work on an invoice under a column labelled its date. Both now read the real date. Invoices raised before this have no date to read and nothing can reconstruct one, so they keep an estimate — the latest work billed, which is also what the listed date now shows for them instead of the earliest. A payment that fits an old invoice to the cent but predates it is no longer settled silently either; it is reported for you to decide.
+
 - Approving a held action from web chat no longer erases the record of what led up to it. Whatever the agent had already done before it stopped to ask — the tools it ran, the steps it took — was the only lasting account of that first pass, and granting permission deleted it, so the finished task showed only what happened after you said yes. Approving the same task from a Talk room never did this. The record now stays and the resumed run adds to it.
 
 - Work is now handed out to whoever has been waiting longest. Users were scanned in no particular order and the scan stopped once the machine was busy, so on a host with more people waiting than free slots the same person could be skipped over and over. Three users with work is enough to reach this on default settings.

@@ -726,18 +726,18 @@ def _open_invoices(config, data_dir: Path) -> list:
       than what was billed and a smaller unrelated credit could match it.
     * Fully paid, or with no billable lines at all.
 
-    ``date`` is a *lower bound* on the issue date, not the issue date. Nothing
-    records when an invoice was issued (`generate_invoices_for_period` uses
-    `date.today()` and keeps it only in the PDF filename), so the latest work
-    on an invoice is the closest thing available: an invoice cannot have been
-    issued before the last work it bills. That makes the matcher's date filter
-    sound — it never rejects a real payment — but weak, since work billed
-    weeks later still admits credits from the gap. Amount uniqueness, not this
-    bound, is what keeps a match honest.
+    ``date`` is the invoice's issue date where one was recorded, and a lower
+    bound on it otherwise — see :func:`work.invoice_issue_date`. Invoices
+    raised before the issue date was stored fall back to the latest work
+    billed, which never rejects a real payment but admits credits from the gap
+    between the last work and the actual issue. For those, amount uniqueness
+    rather than the date is what keeps a match honest.
     """
     from istota.money.core.invoice_matching import OpenInvoice
     from istota.money.core.invoicing import build_line_items
-    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
+    from istota.money.work import (
+        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
+    )
 
     invoices = []
     for number in get_invoice_numbers(data_dir):
@@ -750,7 +750,7 @@ def _open_invoices(config, data_dir: Path) -> list:
         invoices.append(OpenInvoice(
             number=number,
             client=entries[0].client,
-            date=max(e.date for e in entries),
+            date=invoice_issue_date(entries),
             total=sum(item.amount for item in items),
         ))
     return invoices
@@ -1017,7 +1017,9 @@ def invoice_generate(ctx, period, client, entity, dry_run):
 def invoice_list(ctx, client, show_all):
     """List invoices (outstanding by default)."""
     from istota.money.core.invoicing import build_line_items
-    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
+    from istota.money.work import (
+        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
+    )
 
     try:
         config, _, _ = _load_invoicing_config(ctx)
@@ -1049,7 +1051,9 @@ def invoice_list(ctx, client, show_all):
         client_key = inv_entries[0].client
         client_config = config.clients.get(client_key)
         client_name = client_config.name if client_config else client_key
-        inv_date = min(e.date for e in inv_entries)
+        # The invoice's own date, not the earliest work on it — which is what
+        # this used to show under the same `date` label.
+        inv_date = invoice_issue_date(inv_entries)
 
         invoice_info = {
             "invoice_number": inv_num,
@@ -1249,7 +1253,7 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
         add_work_entry(
             data_dir, invoice_date.isoformat(), client_key, svc_key,
             qty=svc_qty, description=svc_desc, entity=svc_entity,
-            invoice=number_str,
+            invoice=number_str, invoice_date=invoice_date,
         )
 
     # Insert manual items with invoice pre-assigned
@@ -1257,7 +1261,7 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
         add_work_entry(
             data_dir, invoice_date.isoformat(), client_key, "_manual",
             amount=amt, description=desc, entity=entity or "",
-            invoice=number_str,
+            invoice=number_str, invoice_date=invoice_date,
         )
 
     # Build line items from the entries we just created

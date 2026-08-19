@@ -40,10 +40,12 @@ class Payment:
 class OpenInvoice:
     """An unpaid invoice, reduced to what matching needs.
 
-    ``date`` is a lower bound on when the invoice was issued, not the issue
-    date — see ``cli._open_invoices``, which is the only thing that builds
-    these. The matcher treats it as "the invoice cannot have existed before
-    this", which is all the bound supports.
+    ``date`` is when the invoice was issued, for anything raised since the
+    issue date became a stored field. Older invoices have no recorded date and
+    fall back to the latest work billed, which is a lower bound rather than the
+    date itself — see ``work.invoice_issue_date`` and ``cli._open_invoices``,
+    the only thing that builds these. The matcher treats the value as "the
+    invoice cannot have existed before this", which both readings support.
     """
     number: str
     client: str
@@ -117,14 +119,24 @@ def match_payments_to_invoices(
             continue
 
         paid = _cents(payment.amount)
-        candidates = [
+        # Amount first, date second, so the two can be reported apart. A credit
+        # that fits an invoice to the cent and is rejected only on the date is
+        # worth a line; one that fits nothing is the normal case and is not.
+        by_amount = [
             inv for inv in open_invoices
-            # An invoice issued after the money arrived did not cause it.
-            if inv.date <= payment.date and abs(_cents(inv.total) - paid) <= slack
+            if abs(_cents(inv.total) - paid) <= slack
         ]
+        # An invoice issued after the money arrived did not cause it.
+        candidates = [inv for inv in by_amount if inv.date <= payment.date]
         numbers = sorted(inv.number for inv in candidates)
 
-        if not numbers:
+        if not numbers and by_amount:
+            matches.append(PaymentMatch(
+                payment=payment, status="review",
+                candidates=sorted(inv.number for inv in by_amount),
+                note="every open invoice at this amount was issued after this payment",
+            ))
+        elif not numbers:
             matches.append(PaymentMatch(
                 payment=payment, status="no_match",
                 note="no open invoice at this amount",
