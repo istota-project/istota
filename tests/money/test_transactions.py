@@ -940,3 +940,74 @@ class TestLedgerHasPosting:
         )
         synced = self._txn()
         assert _ledger_has_posting(ledger, synced, "Income:Consulting") is True
+
+
+class TestSyncMonarchImportedPayments:
+    """ISSUE-083: the sync reports what it booked so invoices can be matched.
+
+    ``result["imported"]`` is the seam the invoice matcher reads. Without it
+    the CLI would have to re-parse the staging file to learn which credits
+    were new this run.
+    """
+
+    def _config(self):
+        return MonarchConfig(
+            credentials=MonarchCredentials(session_id="s", csrftoken="c"),
+            sync=MonarchSyncSettings(default_account="Assets:Bank:Checking"),
+            accounts={}, categories={}, tags=MonarchTagFilters(),
+        )
+
+    def _ledger(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("2024-01-01 open Assets:Bank:Checking\n")
+        return ledger
+
+    def test_imported_lists_booked_transactions(self, tmp_path):
+        txns = [{
+            "id": "mon-1", "date": "2026-05-05",
+            "merchant": {"name": "Northwind Ltd"},
+            "category": {"name": "Consulting"},
+            "account": {"displayName": "Checking"},
+            "amount": 6400.00, "notes": "", "tags": [],
+        }]
+        result = sync_monarch(self._ledger(tmp_path), self._config(), transactions=txns)
+        assert result["imported"] == [{
+            "date": "2026-05-05", "amount": 6400.00, "payee": "Northwind Ltd",
+        }]
+
+    def test_debits_are_reported_too(self, tmp_path):
+        """``imported`` mirrors what was booked; filtering is the matcher's job."""
+        txns = [{
+            "id": "mon-2", "date": "2026-05-06",
+            "merchant": {"name": "Corner Store"},
+            "category": {"name": "Meals"},
+            "account": {"displayName": "Checking"},
+            "amount": -12.00, "notes": "", "tags": [],
+        }]
+        result = sync_monarch(self._ledger(tmp_path), self._config(), transactions=txns)
+        assert [r["amount"] for r in result["imported"]] == [-12.00]
+
+    def test_skipped_transactions_are_not_imported(self, tmp_path):
+        """A pending row is never booked, so it never reaches the matcher."""
+        txns = [{
+            "id": "mon-3", "date": "2026-05-07",
+            "merchant": {"name": "Northwind Ltd"},
+            "category": {"name": "Consulting"},
+            "account": {"displayName": "Checking"},
+            "amount": 6400.00, "notes": "", "tags": [], "pending": True,
+        }]
+        result = sync_monarch(self._ledger(tmp_path), self._config(), transactions=txns)
+        assert result["imported"] == []
+
+    def test_dry_run_reports_what_it_would_book(self, tmp_path):
+        txns = [{
+            "id": "mon-4", "date": "2026-05-08",
+            "merchant": {"name": "Northwind Ltd"},
+            "category": {"name": "Consulting"},
+            "account": {"displayName": "Checking"},
+            "amount": 500.00, "notes": "", "tags": [],
+        }]
+        result = sync_monarch(
+            self._ledger(tmp_path), self._config(), transactions=txns, dry_run=True,
+        )
+        assert [r["amount"] for r in result["imported"]] == [500.00]

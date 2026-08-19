@@ -202,6 +202,10 @@ def cmd_sync_monarch(args):
         cli_args.append("--dry-run")
     if args.ledger:
         cli_args += ["--ledger", args.ledger]
+    if args.no_match_invoices:
+        cli_args.append("--no-match-invoices")
+    if args.tolerance is not None:
+        cli_args += ["--tolerance", str(args.tolerance)]
     _output(_run(cli_args))
 
 
@@ -228,6 +232,10 @@ def cmd_run_scheduled(args):
         cli_args.append("--dry-run")
     if args.skip_monarch:
         cli_args.append("--skip-monarch")
+    if args.no_match_invoices:
+        cli_args.append("--no-match-invoices")
+    if args.tolerance is not None:
+        cli_args += ["--tolerance", str(args.tolerance)]
     _output(_run(cli_args))
 
 
@@ -283,6 +291,10 @@ def cmd_invoice_create(args):
         for i in args.item:
             cli_args += ["--item", i]
     _output(_run(cli_args))
+
+
+def cmd_invoice_unpaid(args):
+    _output(_run(["invoice", "unpaid", args.invoice_number]))
 
 
 def cmd_invoice_void(args):
@@ -511,6 +523,14 @@ def build_parser():
     p_sync = sub.add_parser("sync-monarch", help="Sync from Monarch Money")
     p_sync.add_argument("--dry-run", action="store_true", help="Preview without writing")
     p_sync.add_argument("--ledger", "-l", help="Ledger name")
+    p_sync.add_argument(
+        "--no-match-invoices", action="store_true",
+        help="Don't mark an open invoice paid when a synced credit uniquely fits it",
+    )
+    p_sync.add_argument(
+        "--tolerance", type=float,
+        help="Dollar slack allowed between a credit and an invoice total (default exact)",
+    )
 
     sub.add_parser(
         "debug-monarch",
@@ -527,6 +547,14 @@ def build_parser():
     p_run = sub.add_parser("run-scheduled", help="Run periodic money tasks (monarch sync + invoice scheduler)")
     p_run.add_argument("--dry-run", action="store_true", help="Preview without generating files")
     p_run.add_argument("--skip-monarch", action="store_true", help="Skip the monarch sync step")
+    p_run.add_argument(
+        "--no-match-invoices", action="store_true",
+        help="Don't mark an open invoice paid when a synced credit uniquely fits it",
+    )
+    p_run.add_argument(
+        "--tolerance", type=float,
+        help="Dollar slack allowed between a credit and an invoice total (default exact)",
+    )
 
     # --- Invoice commands (nested subparser) ---
     p_inv = sub.add_parser("invoice", help="Invoice management")
@@ -556,6 +584,11 @@ def build_parser():
     p_inv_create.add_argument("--description", help="Description")
     p_inv_create.add_argument("--entity", "-e", help="Entity key")
     p_inv_create.add_argument("--item", action="append", help="Manual item: \"description\" amount")
+
+    p_inv_unpaid = inv_sub.add_parser(
+        "unpaid", help="Reopen a paid invoice (inverse of `invoice paid`)",
+    )
+    p_inv_unpaid.add_argument("invoice_number", help="Invoice number")
 
     p_inv_void = inv_sub.add_parser("void", help="Void an invoice")
     p_inv_void.add_argument("invoice_number", help="Invoice number")
@@ -686,6 +719,7 @@ def main(argv=None):
             "list": cmd_invoice_list,
             "paid": cmd_invoice_paid,
             "create": cmd_invoice_create,
+            "unpaid": cmd_invoice_unpaid,
             "void": cmd_invoice_void,
         }
         fn = invoice_commands.get(getattr(args, "invoice_command", None))

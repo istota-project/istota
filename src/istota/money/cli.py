@@ -591,12 +591,37 @@ def import_csv(ctx, file, account, tag, exclude_tag, ledger):
             db_conn.close()
 
 
-def _run_monarch_sync(ctx, dry_run: bool, ledger: str | None) -> dict:
-    """Shared monarch sync implementation. Returns a result dict.
+def _run_monarch_sync(
+    ctx,
+    dry_run: bool,
+    ledger: str | None,
+    *,
+    match_invoices: bool = True,
+    tolerance: float = 0.0,
+) -> dict:
+    """Sync from Monarch, then settle the invoices the new credits pay for.
 
     Used by the ``sync-monarch`` command and folded into ``run-scheduled``
     so periodic syncs happen as part of the daily run.
+
+    Matching (ISSUE-083) runs after the ledger write and never on a dry run.
+    It is reported under ``invoice_matching`` on whichever result carries the
+    transactions — the flat result, or each profile's.
     """
+    result = _sync_monarch_ledgers(ctx, dry_run, ledger)
+    if match_invoices and not dry_run:
+        _apply_invoice_matching(ctx, result, tolerance)
+    # ``imported`` is plumbing for the matcher, not output. Every other
+    # row-level detail in this result is a count, and this one would put a
+    # record per booked transaction into a skill response that goes straight
+    # into a prompt — hundreds of rows on a first 30-day sync.
+    for sync_result in _sync_results(result):
+        sync_result.pop("imported", None)
+    return result
+
+
+def _sync_monarch_ledgers(ctx, dry_run: bool, ledger: str | None) -> dict:
+    """Run the Monarch sync itself, across profiles or a single ledger."""
     from istota.money import config_store
     from istota.money.core.transactions import (
         sync_all_profiles,
@@ -653,18 +678,223 @@ def _run_monarch_sync(ctx, dry_run: bool, ledger: str | None) -> dict:
             db_conn.close()
 
 
+def _sync_results(result: dict) -> list[dict]:
+    """The per-ledger sync results inside a ``_sync_monarch_ledgers`` return.
+
+    Three shapes come back from that function: a flat ``sync_monarch`` result,
+    and two ``{"profiles": [...]}`` envelopes. Normalising here keeps the
+    matcher from caring which one it got.
+    """
+    if result.get("status") != "ok":
+        return []
+    profiles = result.get("profiles")
+    if isinstance(profiles, list):
+        return [p for p in profiles if isinstance(p, dict) and p.get("status") == "ok"]
+    return [result]
+
+
+def _tolerance_error(tolerance: float) -> str | None:
+    """Reject a `--tolerance` the matcher can't use, before anything runs.
+
+    Click's `type=float` accepts `nan` and `inf`, and both slip past a plain
+    `< 0` test — NaN because every comparison with it is False. Caught here so
+    the failure is a JSON error envelope rather than a traceback out of a sync
+    that has already written the ledger.
+    """
+    import math
+
+    if math.isnan(tolerance):
+        return "--tolerance must be a number, got nan"
+    if math.isinf(tolerance):
+        return "--tolerance must be finite"
+    if tolerance < 0:
+        return "--tolerance must not be negative"
+    return None
+
+
+def _open_invoices(config, data_dir: Path) -> list:
+    """Wholly unpaid invoices whose total can be stated exactly.
+
+    Three kinds of invoice are deliberately left out, because matching on a
+    total that isn't the amount the client owes is how a wrong invoice gets
+    settled:
+
+    * **Partly paid** — some entries carry a `paid_date` and some don't. The
+      total of all its entries is no longer the outstanding balance.
+    * **Partly unrecognised** — `build_line_items` silently skips an entry
+      whose service is missing from the config, so the total would be less
+      than what was billed and a smaller unrelated credit could match it.
+    * Fully paid, or with no billable lines at all.
+
+    ``date`` is a *lower bound* on the issue date, not the issue date. Nothing
+    records when an invoice was issued (`generate_invoices_for_period` uses
+    `date.today()` and keeps it only in the PDF filename), so the latest work
+    on an invoice is the closest thing available: an invoice cannot have been
+    issued before the last work it bills. That makes the matcher's date filter
+    sound — it never rejects a real payment — but weak, since work billed
+    weeks later still admits credits from the gap. Amount uniqueness, not this
+    bound, is what keeps a match honest.
+    """
+    from istota.money.core.invoice_matching import OpenInvoice
+    from istota.money.core.invoicing import build_line_items
+    from istota.money.work import get_invoice_numbers, get_entries_for_invoice
+
+    invoices = []
+    for number in get_invoice_numbers(data_dir):
+        entries = get_entries_for_invoice(data_dir, number)
+        if not entries or any(e.paid_date is not None for e in entries):
+            continue
+        items = build_line_items(entries, config.services)
+        if not items or len(items) != len(entries):
+            continue
+        invoices.append(OpenInvoice(
+            number=number,
+            client=entries[0].client,
+            date=max(e.date for e in entries),
+            total=sum(item.amount for item in items),
+        ))
+    return invoices
+
+
+def _apply_invoice_matching(ctx, result: dict, tolerance: float) -> None:
+    """Settle the invoices this sync's credits pay for, in place on ``result``.
+
+    Best-effort, and the whole body is guarded to make that true. By the time
+    this runs the ledger has already been appended to, the staging file
+    written and the dedup rows committed; raising here would report a failure
+    for work that succeeded, and on the ``run-scheduled`` cron path would also
+    stop the invoice generation that follows. A malformed work-entry TOML must
+    not be able to break a bank sync. Everything is logged and skipped.
+    """
+    try:
+        _match_invoices_unguarded(ctx, result, tolerance)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("istota.money.cli").warning(
+            "auto-match: skipped after a successful sync: %s", exc, exc_info=True,
+        )
+
+
+def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
+    """The body of :func:`_apply_invoice_matching`. Never call directly."""
+    from istota.money.core.invoice_matching import (
+        Payment, match_payments_to_invoices, summarize_matches,
+    )
+    from istota.money.work import record_invoice_payment
+
+    log = logging.getLogger("istota.money.cli")
+
+    sync_results = _sync_results(result)
+    if not any(r.get("imported") for r in sync_results):
+        return
+    if ctx.data_dir is None:
+        return
+
+    try:
+        config, _, _ = _load_invoicing_config(ctx)
+    except click.ClickException:
+        return  # invoicing isn't configured for this user; nothing to match
+
+    open_invoices = _open_invoices(config, ctx.data_dir)
+    if not open_invoices:
+        return
+
+    # Every profile's credits are matched in one pass, not per profile.
+    # ``sync_all_profiles`` fetches from Monarch once and hands the same
+    # transaction list to each profile, and dedup is per profile, so one
+    # credit can legitimately land in two profiles' ``imported`` lists.
+    # Matching per profile would let the first one settle an invoice and
+    # leave the second silently unreported — and which one won would depend
+    # on profile order. One pass makes the whole run's contention visible.
+    owner_of_payment: list[int] = []  # index into sync_results, per payment
+    payments: list = []
+    for index, sync_result in enumerate(sync_results):
+        for row in sync_result.get("imported") or []:
+            try:
+                paid_on = datetime.strptime(row["date"], "%Y-%m-%d").date()
+            except (KeyError, TypeError, ValueError):
+                # Can't happen today — `imported` always carries an ISO date
+                # from a `date`. Logged rather than passed over silently
+                # because if the shape of `imported` ever changes, the failure
+                # mode is every credit becoming invisible to the matcher.
+                log.warning("auto-match: unusable date on an imported row: %r",
+                            row.get("date"))
+                continue
+            owner_of_payment.append(index)
+            payments.append(Payment(
+                date=paid_on, amount=row.get("amount") or 0.0,
+                payee=row.get("payee", ""),
+            ))
+
+    matches = match_payments_to_invoices(payments, open_invoices, tolerance)
+    for match in matches:
+        if match.status != "matched" or not match.invoice_number:
+            continue
+        try:
+            stamped = record_invoice_payment(
+                ctx.data_dir, match.invoice_number, match.payment.date,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto-match: could not mark %s paid: %s",
+                        match.invoice_number, exc)
+            match.status = "review"
+            match.note = f"could not record payment: {exc}"
+            match.invoice_number = None
+            continue
+
+        # Open invoices were read without the work lock, so a web-UI payment
+        # or a void can land in the gap before this write. `record_invoice_
+        # payment` only touches entries that are still unpaid, so a zero count
+        # means someone else got there first — reporting it as settled by this
+        # credit would be a plain lie about where the money went.
+        if stamped == 0:
+            log.warning("auto-match: %s was already settled or voided "
+                        "before this run could stamp it", match.invoice_number)
+            match.status = "review"
+            match.note = "already settled or voided by something else mid-sync"
+            match.invoice_number = None
+
+    # The matcher returns one verdict per payment, in order, so verdicts pair
+    # with `owner_of_payment` by position and each profile reports only its
+    # own credits.
+    matches_per_owner: list[list] = [[] for _ in sync_results]
+    for owner_index, match in zip(owner_of_payment, matches):
+        matches_per_owner[owner_index].append(match)
+
+    for sync_result, owned in zip(sync_results, matches_per_owner):
+        summary = summarize_matches(owned, open_invoices)
+        if summary:
+            summary["tolerance"] = tolerance
+            sync_result["invoice_matching"] = summary
+
+
 @cli.command("sync-monarch")
 @click.option("--dry-run", is_flag=True, help="Preview without writing")
 @click.option("--ledger", "-l", help="Ledger name")
+@click.option("--match-invoices/--no-match-invoices", default=True,
+              help="Mark an open invoice paid when a synced credit uniquely fits it")
+@click.option("--tolerance", type=float, default=0.0, show_default=True,
+              help="Dollar slack allowed between a credit and an invoice total")
 @pass_ctx
-def sync_monarch(ctx, dry_run, ledger):
+def sync_monarch(ctx, dry_run, ledger, match_invoices, tolerance):
     """Sync transactions from Monarch Money API.
 
     Without --ledger, syncs all configured profiles (or the default ledger
     if no profiles are defined). With --ledger, syncs only profiles targeting
     that ledger.
+
+    A credit that uniquely fits one open invoice marks it paid without
+    posting to the ledger — the sync already booked the income. Two invoices
+    that fit, or two credits that fit one invoice, are reported under
+    ``invoice_matching.review`` instead of guessed at.
     """
-    _output(_run_monarch_sync(ctx, dry_run, ledger))
+    error = _tolerance_error(tolerance)
+    if error:
+        _output({"status": "error", "error": error})
+        return
+    _output(_run_monarch_sync(
+        ctx, dry_run, ledger,
+        match_invoices=match_invoices, tolerance=tolerance,
+    ))
 
 
 @cli.command("debug-monarch")
@@ -1082,6 +1312,41 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     })
 
 
+@invoice.command("unpaid")
+@click.argument("invoice_number")
+@pass_ctx
+def invoice_unpaid(ctx, invoice_number):
+    """Reopen a paid invoice, keeping the invoice number.
+
+    The inverse of ``invoice paid``, and the way back from an auto-match the
+    sync got wrong. ``invoice void`` is not that inverse — it clears the
+    invoice number too, un-invoicing the work itself.
+
+    Any ledger posting made when the payment was recorded is left alone;
+    reverse it with ``edit-transaction`` if there was one.
+    """
+    from istota.money.work import clear_invoice_payment, get_entries_for_invoice
+
+    data_dir = _require_data_dir(ctx)
+    entries = get_entries_for_invoice(data_dir, invoice_number)
+    if not entries:
+        _output({"status": "error", "error": f"Invoice {invoice_number} not found"})
+        return
+    if all(e.paid_date is None for e in entries):
+        _output({
+            "status": "error",
+            "error": f"Invoice {invoice_number} is not marked paid",
+        })
+        return
+
+    count = clear_invoice_payment(data_dir, invoice_number)
+    _output({
+        "status": "ok",
+        "invoice_number": invoice_number,
+        "entries_cleared": count,
+    })
+
+
 @invoice.command("void")
 @click.argument("invoice_number")
 @click.option("--force", is_flag=True, help="Void even if invoice has been paid")
@@ -1173,8 +1438,12 @@ def _apply_monarch_status(out: dict, monarch_result: dict | None) -> None:
 @cli.command("run-scheduled")
 @click.option("--dry-run", is_flag=True, help="Preview without generating files")
 @click.option("--skip-monarch", is_flag=True, help="Skip the monarch sync step")
+@click.option("--match-invoices/--no-match-invoices", default=True,
+              help="Mark an open invoice paid when a synced credit uniquely fits it")
+@click.option("--tolerance", type=float, default=0.0, show_default=True,
+              help="Dollar slack allowed between a credit and an invoice total")
 @pass_ctx
-def run_scheduled(ctx, dry_run, skip_monarch):
+def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     """Run periodic money tasks: monarch sync (if configured) + invoice schedule check.
 
     Meant to be called periodically by cron. The monarch sync runs first
@@ -1182,13 +1451,26 @@ def run_scheduled(ctx, dry_run, skip_monarch):
     client's invoicing schedule and generates invoices when due. Either
     half is optional — users with only one feature configured get only
     that step.
+
+    This is the unattended path, so it carries the same auto-matching
+    controls as ``sync-monarch``: ``--no-match-invoices`` turns off marking
+    invoices paid without also skipping the ledger sync, which is what
+    ``--skip-monarch`` would do.
     """
     from istota.money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
     from istota.money.db import set_invoice_schedule_generation
 
+    error = _tolerance_error(tolerance)
+    if error:
+        _output({"status": "error", "error": error})
+        return
+
     monarch_result: dict | None = None
     if ctx.monarch_config_path and not skip_monarch:
-        monarch_result = _run_monarch_sync(ctx, dry_run=dry_run, ledger=None)
+        monarch_result = _run_monarch_sync(
+            ctx, dry_run=dry_run, ledger=None,
+            match_invoices=match_invoices, tolerance=tolerance,
+        )
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
