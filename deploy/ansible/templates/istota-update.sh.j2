@@ -26,6 +26,14 @@ flock -n 200 || exit 0
 
 cd "$REPO_DIR"
 
+# ISSUE-258: the clone token now comes from a credential helper rather than
+# from remote.origin.url, so a missing or revoked token makes git ask for a
+# username instead of failing. There is no terminal here and stdin is not
+# closed, so a prompt would hang this run forever while holding the flock —
+# every later run would then exit silently at the lock and updates would stop
+# with nothing reported. Fail fast instead and leave the reason in the log.
+export GIT_TERMINAL_PROMPT=0
+
 git fetch origin --tags --quiet
 
 if [ -n "$REPO_TAG" ]; then
