@@ -346,8 +346,16 @@ class TestStreamingExecution:
         mock = MagicMock()
         mock.stdout = iter(stdout_lines)
         mock.stderr = iter(stderr_lines or [])
-        mock.returncode = returncode
-        mock.wait.return_value = returncode
+        mock.pid = 4242
+        # Unreaped until wait(), so the kill paths' "has this been reaped"
+        # guard sees what it would see against a live process (ISSUE-257).
+        mock.returncode = None
+
+        def _wait(*_a, **_kw):
+            mock.returncode = returncode
+            return returncode
+
+        mock.wait.side_effect = _wait
         mock.kill = MagicMock()
         return mock
 
@@ -607,9 +615,12 @@ class TestStreamingExecution:
             def cancel(self):
                 pass
 
+        killed = []
         patches = _patch_executor() + [
             patch("istota.executor.subprocess.Popen", return_value=mock_process),
             patch("istota.executor.threading.Timer", InstantTimer),
+            patch("istota.brain.claude_code.kill_process_group",
+                  side_effect=lambda pid, *a, **k: killed.append(pid) or "group"),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(
@@ -618,7 +629,10 @@ class TestStreamingExecution:
 
         assert success is False
         assert "timed out" in result.lower()
-        mock_process.kill.assert_called_once()
+        # The timeout kills the CLI's whole process group since ISSUE-257, so
+        # a bare process.kill() would leave its children running.
+        assert killed == [4242]
+        mock_process.kill.assert_not_called()
 
     def test_fallback_to_result_file(self, tmp_path):
         """When no ResultEvent is parsed in stream, falls back to result file."""

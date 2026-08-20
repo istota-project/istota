@@ -12,13 +12,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import signal
 import tempfile
 import time
 from pathlib import Path
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
+from istota.process_group import kill_process_group
 
 from .env import ToolEnv
 
@@ -241,11 +241,7 @@ def _kill_process_group(proc) -> None:
     still fires while a CancelledError is unwinding the coroutine."""
     if proc.returncode is not None:
         return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
+    kill_process_group(proc.pid)
 
 
 async def _reap(proc) -> None:

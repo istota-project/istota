@@ -31,6 +31,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from ..process_group import kill_process_group
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
 from ._types import BrainRequest, BrainResult
@@ -1010,6 +1011,18 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _execute_simple_once(cmd: list[str], req: BrainRequest) -> BrainResult:
+        # Still subprocess.run, and so still killing only the direct child on
+        # timeout — the non-streaming path's grandchildren are orphaned the way
+        # the streaming path's used to be (ISSUE-257, deferred half). Fixing it
+        # means spawning via Popen so the group can be killed, and roughly
+        # ninety tests across six files patch `subprocess.run` to keep the brain
+        # from spawning at all, so they would each have to move to Popen first.
+        # Narrower than the streaming path in the meantime: `_execute_simple_once`
+        # never calls `req.on_pid`, so no `worker_pid` is recorded and neither
+        # `!stop` nor the web cancel endpoint reaches this path at all — its own
+        # timeout is the only killer, and nothing here wedges a worker (on POSIX
+        # `subprocess.run` kills the child and `wait()`s, it does not re-drain
+        # the pipes).
         result = subprocess.run(
             cmd,
             input=req.prompt,
@@ -1131,6 +1144,13 @@ class ClaudeCodeBrain:
             text=True,
             cwd=str(req.cwd),
             env=req.env,
+            # Own process group so a timeout, a `!stop` or a web cancel can
+            # signal the whole tree. The CLI's bash grandchildren are where the
+            # work actually is — a `pytest -n auto` run survived a bare
+            # process.kill() and finished on a saturated host (ISSUE-257).
+            # This also makes the pid handed to on_pid below a group leader,
+            # which is what lets the two cancel endpoints reach the group.
+            start_new_session=True,
         )
 
         # Feed the prompt to stdin on a dedicated thread, started immediately
@@ -1173,9 +1193,19 @@ class ClaudeCodeBrain:
         # Timeout via timer
         timed_out = threading.Event()
 
+        def _kill_group_if_live() -> None:
+            # `process.kill()` used to go through Popen.send_signal, which
+            # no-ops once the child is reaped. A raw pid carries no such check,
+            # and the reap happens at `process.wait()` below while this timer
+            # can still fire during the two 5s thread joins that follow it —
+            # long enough for the OS to hand the number to someone else, whose
+            # group we would then kill. Mirrors the guard bash.py already has.
+            if process.returncode is None:
+                kill_process_group(process.pid)
+
         def _kill() -> None:
             timed_out.set()
-            process.kill()
+            _kill_group_if_live()
 
         timer = threading.Timer(req.timeout_seconds, _kill)
         timer.start()
@@ -1244,7 +1274,7 @@ class ClaudeCodeBrain:
                     try:
                         if req.cancel_check():
                             logger.info("Cancellation requested, killing subprocess")
-                            process.kill()
+                            _kill_group_if_live()
                             cancelled = True
                             break
                     except Exception:

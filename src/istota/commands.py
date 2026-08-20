@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING
 from . import db
 from .brain import Brain, EFFORT_LEVELS, make_brain
 from .memory import search as memory_search_mod
+from .process_group import kill_process_group
 from .config import Config
 
 if TYPE_CHECKING:
@@ -393,13 +395,14 @@ async def cmd_stop(ctx: CommandContext):
         "SELECT worker_pid FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     if pid_row and pid_row["worker_pid"]:
-        try:
-            import os
-            import signal
-
-            os.kill(pid_row["worker_pid"], signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        # The whole group, not the pid alone: the CLI's children are where the
+        # work is, and a bare kill leaves them running after the user has
+        # visibly stopped the task (ISSUE-257). kill_process_group falls back
+        # to the single process when the pid leads no group of its own, so a
+        # recorded pid that is somebody else's child can never resolve to their
+        # group. Both of today's writers record leaders, tmux panes included, so
+        # a tmux `!stop` now takes the pane's whole command tree.
+        kill_process_group(pid_row["worker_pid"], signal.SIGTERM)
 
     preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
     return f"Cancelling task #{task_id}: {preview}"
