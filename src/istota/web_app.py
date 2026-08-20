@@ -61,6 +61,7 @@ from .location_logic import (
     _location_place_stats,
     _location_restore_dismissed,
 )
+from .process_group import kill_process_group
 
 logger = logging.getLogger("istota.web_app")
 
@@ -5775,11 +5776,14 @@ def _chat_cancel_task(task_id: int) -> None:
         )
     # Best-effort subprocess kill; the scheduler's cancel_check ends the task
     # and emits cancelled/done so the SSE stream closes cleanly.
-    if row and row["worker_pid"]:
-        try:
-            os.kill(row["worker_pid"], signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+    # The group, not the pid alone — see cmd_stop / ISSUE-257. Gated on a status
+    # that can still own a subprocess, which `cmd_stop` already selects on and
+    # this path did not: `worker_pid` is cleared on every transition out of
+    # `running`, but a cancel racing a task that has just finished would read the
+    # pre-clear row and signal a pid the OS may since have reused — and a group
+    # kill makes that mistake cost a whole group rather than one process.
+    if row and row["worker_pid"] and status in ("running", "locked"):
+        kill_process_group(row["worker_pid"], signal.SIGTERM)
 
 
 @api_router.post("/chat/tasks/{task_id}/confirm")

@@ -218,7 +218,26 @@ Wraps the `claude` CLI subprocess. Owns:
    bubblewrap.
 3. **Subprocess** — `Popen` (streaming) or `subprocess.run` (simple),
    prompt via stdin (avoids E2BIG on large prompts), stderr drained on
-   a background thread to prevent deadlock.
+   a background thread to prevent deadlock (streaming only; `communicate()`
+   drains both pipes on the simple path). The **streaming** spawn passes
+   `start_new_session=True` so the CLI leads its own process group and every
+   kill path can take its bash grandchildren with it (ISSUE-257 — a
+   `pytest -n auto` run outlived a bare `process.kill()` and finished on a
+   saturated host). Two consequences worth knowing: the pid handed to `on_pid`
+   is now a group leader, which is what lets `!stop` and the web cancel
+   endpoint reach the group; and the CLI has left the daemon's process group,
+   so under the local `istota serve` shape (no cgroup) a Ctrl-C reaches the
+   daemon but not an in-flight task's `claude`, which then runs to its own
+   timeout. Under systemd this is covered — `KillMode=mixed` SIGKILLs the whole
+   cgroup after `TimeoutStopSec`.
+
+   The **simple** path still spawns via `subprocess.run`, so its timeout still
+   kills only the direct child and orphans the tree — the deferred half of
+   ISSUE-257. Narrower than the streaming path was: `_execute_simple_once`
+   never calls `req.on_pid`, so no `worker_pid` is recorded and neither cancel
+   endpoint reaches it at all. Fixing it means spawning via `Popen` so the
+   group can be killed, and roughly ninety tests across six files patch
+   `subprocess.run` to keep the brain from spawning, so those move first.
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from
    `_events.py`, dispatching ResultEvent → final result, ToolUseEvent /
    TextEvent → trace + on_progress, ContextManagementEvent → `cm_boundary`
@@ -228,8 +247,15 @@ Wraps the `claude` CLI subprocess. Owns:
    records the trace and is deduped against the deltas executor-side.
 5. **Cancellation** — polls `req.cancel_check()` between events; final
    re-check after subprocess exit catches SIGTERM-style external kills.
-6. **Timeout** — `threading.Timer` kills the process after
-   `req.timeout_seconds`; result tagged `stop_reason="timeout"`.
+   The in-loop kill goes through `process_group.kill_process_group`, not
+   `process.kill()`.
+6. **Timeout** — `threading.Timer` kills the process group after
+   `req.timeout_seconds` (same helper); result tagged `stop_reason="timeout"`.
+   Both kill sites skip a process that has already been reaped
+   (`process.returncode is None`): the timer can still fire during the two 5s
+   thread joins that follow `process.wait()`, and a raw pid carries none of the
+   protection `Popen.send_signal` gave — the number may by then belong to
+   someone else, whose group would be killed.
 7. **Signal deaths** — a negative returncode means the subprocess died on
    signal `-rc` (`_signal_result`, both exec paths, checked after the
    cancellation/timeout branches so `!stop` still reports as a cancellation).

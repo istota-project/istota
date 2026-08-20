@@ -89,6 +89,7 @@ from .executor import (
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .notifications import effective_log_destinations, send_notification
+from .process_group import kill_process_group
 from .transport import (
     Destination,
     is_canonical_room_view,
@@ -1292,15 +1293,10 @@ def _run_garmin_sync_inprocess(
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
     """SIGKILL a subprocess and every descendant in its process group."""
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        # Group already gone, or no getpgid (e.g. not a session leader) —
-        # fall back to killing the direct child.
-        try:
-            proc.kill()
-        except OSError:
-            pass
+    # Every caller here spawns with start_new_session=True, so the child leads
+    # its own group and the shared helper takes the group path; the
+    # single-process fallback covers a group that is already gone.
+    kill_process_group(proc.pid)
 
 
 def _run_capture(
