@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The token the server uses to fetch its own updates is no longer written into the repository's git config or passed on a command line. It was stored there when the server was first set up, which also put it in the argument list of every update check — one every two minutes — where anyone with root on the box could read it in passing. A deploy now keeps it in a root-only file that git asks for it when needed, and rewrites the old value out of servers already set up this way; rotate the token afterwards, since anything provisioned before this had it sitting in a file and in process arguments.
+
 - Quoting a message the bot sent no longer gets your agent to run on the strength of one header. Any such mail was processed without asking you, on the reasoning that only the recipient would hold the identifier linking it to the thread — but that identifier travels to everyone copied in, to everyone the thread is forwarded to, and into any archive the thread reaches, and it never expired. Replies from the address the bot wrote to are unaffected; anyone else on the thread now waits for your approval, and `yes trust` lets them through for good.
 
 ### Added

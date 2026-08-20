@@ -707,32 +707,175 @@
   changed_when: "'UPDATED' in claude_update_result.stdout"
   when: not istota_web_only
 
-- name: Build authenticated repo URL
-  set_fact:
-    istota_repo_url_auth: "{{ istota_repo_url | regex_replace('^https://', 'https://oauth2:' + istota_repo_clone_token + '@') }}"
-  when: istota_repo_clone_token | length > 0
-  no_log: true
-
 - name: Configure git safe.directory
   community.general.git_config:
     name: safe.directory
     value: "{{ istota_repo_dir }}"
     scope: global
 
+# ISSUE-258. The clone token used to be interpolated into the clone URL, which
+# git then persisted as remote.origin.url — so the token sat in the checkout's
+# .git/config and was expanded into the argument vector of git-remote-https on
+# every fetch, including the auto-update cron's, every two minutes. It now
+# reaches git through a credential helper that reads a 0600 root-only file,
+# registered against this repository's host alone. Still plaintext at rest,
+# which is the trade; what it buys is that nothing carrying the token is
+# written into the checkout or onto a command line, and that rotating it is a
+# single file write rather than a git-config rewrite.
+#
+# Only https remotes are in scope. An ssh remote carries no token, and its
+# scp-style form (git@host:path) legitimately contains an '@' — treating that
+# as a credential would rewrite the remote on every run and fail the play.
+- name: Resolve the repository host and credential applicability
+  set_fact:
+    # Verbatim host[:port], case preserved: git presents the host to a helper
+    # exactly as the URL spells it and matches config subsections by exact
+    # string, so `urlsplit('hostname')` — which lowercases — would silently
+    # produce a key git can never match on an uppercase host. `netloc` keeps
+    # the case and the port; splitting on '@' drops any userinfo already
+    # present so it cannot end up doubled.
+    _istota_repo_host: "{{ (istota_repo_url | urlsplit('netloc')).split('@') | last }}"
+    _istota_repo_is_https: "{{ istota_repo_url.startswith('https://') }}"
+
+- name: Decide whether a clone credential applies
+  set_fact:
+    _istota_clone_credential: "{{ (istota_repo_clone_token | length > 0) and (_istota_repo_is_https | bool) }}"
+
+- name: Ensure the credential directory exists
+  file:
+    path: "/etc/{{ istota_namespace }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the clone credential helper
+  template:
+    src: git-credential-istota.sh.j2
+    dest: "/usr/local/bin/{{ istota_namespace }}-git-credential"
+    owner: root
+    group: root
+    mode: '0755'
+  when: _istota_clone_credential | bool
+
+- name: Install the repository clone token
+  copy:
+    dest: "/etc/{{ istota_namespace }}/clone-token"
+    owner: root
+    group: root
+    mode: '0600'
+    # The bare token, nothing else. Deliberately not a URL: git's own
+    # credential-store format percent-decodes the userinfo, which mangles any
+    # token containing '%', '@', ':' or '/'. The helper reads this verbatim.
+    content: "{{ istota_repo_clone_token }}"
+  when: _istota_clone_credential | bool
+  no_log: true
+
+- name: Register the clone credential helper
+  # System scope, not global: /etc/gitconfig is read whichever user and
+  # whatever HOME the fetch ends up running under, and the auto-update fetch
+  # runs from cron rather than from this play. Scoped to the repository host
+  # so the helper is never consulted for anything else git talks to.
+  community.general.git_config:
+    name: "credential.https://{{ _istota_repo_host }}.helper"
+    value: "/usr/local/bin/{{ istota_namespace }}-git-credential"
+    scope: system
+  when: _istota_clone_credential | bool
+
+# Clearing istota_repo_clone_token must actually remove the credential, or a
+# token the operator believes retired stays readable on disk until someone
+# deletes it by hand — which matters most right after a rotation.
+- name: Remove the clone token when none is configured
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/{{ istota_namespace }}/clone-token"
+    - "/usr/local/bin/{{ istota_namespace }}-git-credential"
+  when: not (_istota_clone_credential | bool)
+
+- name: Unregister the clone credential helper when no token is configured
+  community.general.git_config:
+    name: "credential.https://{{ _istota_repo_host }}.helper"
+    scope: system
+    state: absent
+  when:
+    - not (_istota_clone_credential | bool)
+    - _istota_repo_is_https | bool
+
+- name: Check the existing repository remote for a persisted credential
+  command: "git -C {{ istota_repo_dir }} config --get remote.origin.url"
+  register: _istota_existing_remote
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Strip a persisted credential from the repository remote
+  # Remediation for every host provisioned before this change: the token is
+  # already in .git/config there, and a corrected clone task alone would not
+  # remove it. Ordered ahead of the clone so the clone's own fetch is the
+  # first one that runs clean, rather than one last exposure per deploy.
+  #
+  # Gated on a credential being available to replace it with — a run without
+  # the vault loaded would otherwise strip the host's only working credential
+  # and leave nothing behind. Matched on a userinfo *password* rather than a
+  # bare '@', so a legitimate `https://oauth2@host/…` (a username, no secret)
+  # is left alone instead of being rewritten on every run forever.
+  command: "git -C {{ istota_repo_dir }} remote set-url origin {{ istota_repo_url }}"
+  when:
+    - _istota_clone_credential | bool
+    - _istota_existing_remote.rc | default(1) == 0
+    - (_istota_existing_remote.stdout | default('') | urlsplit('password') | default('', true)) | length > 0
+
 - name: Clone or update istota repository (branch checkout)
   git:
-    repo: "{{ istota_repo_url_auth | default(istota_repo_url) }}"
+    repo: "{{ istota_repo_url }}"
     dest: "{{ istota_repo_dir }}"
     version: "{{ istota_repo_branch }}"
     force: yes
-  no_log: "{{ istota_repo_clone_token | length > 0 }}"
+  # With the token out of the URL, a missing or wrong credential makes git ask
+  # for a username instead of failing. The git module does not set this itself
+  # — its own docs tell you to — and an interactive prompt here hangs the play.
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
   notify:
     - "restart istota-scheduler"
     - "restart istota-browser"
     - "restart istota-web"
     - "restart istota-webhooks"
 
+- name: Read back the repository remote URL
+  command: "git -C {{ istota_repo_dir }} config --get remote.origin.url"
+  register: _istota_remote_url
+  changed_when: false
+  # An unreadable remote is not evidence of a credential, and this task's
+  # output is suppressed — letting it abort the play would produce a failure
+  # with no rc, no stderr and nothing to go on. The assert below fails closed
+  # on what it can actually read.
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Assert the repository remote carries no embedded credential
+  # The regression guard the deployment carries itself, so a reintroduction is
+  # caught by a failing play rather than by an operator running `ps` during an
+  # incident — which is how this was found. Tests a userinfo password rather
+  # than a bare '@' so an ssh remote and a bare-username https remote both
+  # pass; neither carries a secret.
+  assert:
+    that:
+      - (_istota_remote_url.stdout | default('') | urlsplit('password') | default('', true)) | length == 0
+    fail_msg: >-
+      remote.origin.url in {{ istota_repo_dir }} still embeds a credential.
+      ISSUE-258: the clone token must reach git through the credential helper,
+      never through the remote URL. The value is deliberately not printed.
+    success_msg: "repository remote carries no embedded credential"
+
 - name: Resolve and checkout tag
+  # Same reason as the clone: never let a credential problem become a prompt.
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
   block:
     - name: Fetch tags
       command: git fetch origin --tags
