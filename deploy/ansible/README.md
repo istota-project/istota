@@ -72,6 +72,36 @@ All variables with defaults are documented in `defaults/main.yml`. Key groups:
 | Developer/GitLab | `istota_developer_enabled` | `false` |
 | Database backups | `istota_backup_enabled` | `true` |
 | Bubblewrap sandbox | `istota_security_sandbox_enabled` | `true` |
+| zram swap | `istota_zram_enabled` | `true` |
+| Second-tier disk swapfile | `istota_swapfile_enabled` | `false` |
+
+## Swap and memory limits
+
+The role gives the host a compressed in-RAM swap device (`systemd-zram-generator`,
+half of RAM, zstd) and puts soft memory ceilings on the three istota units. The
+box previously ran with no swap at all, which is what turned an ordinary memory
+shortfall into a 41-minute outage: without swap the kernel cannot evict cold
+tmpfs/shmem pages, so it takes the page cache to nothing instead and every
+process ends up re-reading its own executable off disk.
+
+Run just this part with `--tags swap`. Swap is live at the end of the play —
+no reboot — and the play fails rather than reporting success if `/proc/swaps`
+does not show the device afterwards.
+
+**`istota_zram_enabled: false` leaves the host alone.** Every task in the group
+is skipped, so a machine where you arranged swap another way is not fought
+with. It does **not** undo a device the role previously created; to remove one,
+`systemctl disable --now dev-zram0.swap` and delete
+`/etc/systemd/zram-generator.conf`.
+
+**Changing `istota_zram_size` or `istota_zram_algorithm` on a running host** is
+applied by tearing the device down and rebuilding it, which is skipped when
+zram0 holds more than 64 MB — `swapoff` has to fault every page back into RAM,
+and doing that on a box that is short of memory is the failure this exists to
+prevent. The play prints a warning naming the manual command when it skips.
+
+The optional disk swapfile (`istota_swapfile_enabled`) sits *below* zram in
+priority, so it only takes pages too cold for compression to be worth it.
 
 ## Inlined dependencies
 

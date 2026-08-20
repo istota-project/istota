@@ -224,6 +224,74 @@ istota_scheduler_stats_interval: 60              # scheduler_stats health line i
 istota_scheduler_host_pressure_enabled: true     # Master switch for host-pressure sampling
 istota_scheduler_host_pressure_breadcrumb_interval: 300  # Breadcrumb cadence in seconds (0 = disabled)
 
+# ---------------------------------------------------------------------------
+# Host memory headroom (host-and-scheduler-robustness spec, Track A)
+# ---------------------------------------------------------------------------
+# The production host ran with Total swap = 0, and that is what turned a memory
+# shortfall into a thrash-to-death. Two things follow from having no swap and
+# both bit: anonymous pages can never be evicted, so the page cache absorbs the
+# entire shortfall (it was squeezed to 1.5 MB, after which every process
+# faulted its own executable text back from disk continuously); and
+# tmpfs/shmem pages, which are swap-backed by design, become permanently
+# unevictable. Swap makes cold shmem reclaimable *without anyone knowing what
+# created it*, which is why this does not wait on attribution.
+#
+# zram rather than a disk swapfile because the disk was already the saturated
+# resource — roughly 1.7 GB/s of forced re-reads. zram compresses cold pages in
+# RAM (zstd, around 3:1 on this kind of content) and adds no disk traffic.
+#
+# Sizing, stated carefully because the spec got it wrong: zram-size sets the
+# device's *uncompressed* logical capacity, and compression happens beneath it.
+# `ram / 2` on a 7.9 GB box is therefore a ~4 GB swap device that costs ~1.3 GB
+# of real RAM at 3:1 — NOT the "~10-12 GB effective" the spec claims, which
+# would need `ram * 1.5`. 4 GB is kept deliberately: it comfortably covers the
+# 4.6 GB of cold shmem that killed the host, while the worst case (incompressible
+# pages) commits only 4 GB of the 7.9. Over-provisioning to 12 GB would make
+# that worst case fatal on its own.
+#
+# Treat this as a mitigation with an expiry date, not a fix: something reaching
+# 4.2 GB in five days reaches 8 GB in ten, with or without swap. The Stage 1
+# breadcrumb is what names the source.
+istota_zram_enabled: true                # Install systemd-zram-generator and enable a zram swap device
+istota_zram_size: "ram / 2"              # The device's UNCOMPRESSED capacity, not its RAM cost: ~4 GB of swap for ~1.3 GB of real RAM at 3:1
+istota_zram_algorithm: "zstd"            # Compression algorithm
+istota_zram_priority: 100                # Swap priority. Linux prefers the HIGHER number, so this must stay above the swapfile
+
+# Setting istota_zram_enabled: false makes every zram task a no-op, so a host
+# where the operator arranged swap another way is left exactly as it is. Note
+# the asymmetry: false means "this role does not manage swap", NOT "tear down
+# the swap this role previously set up". Flipping true -> false on a host that
+# already has the device leaves it running; remove it by hand with
+# `systemctl disable --now systemd-zram-setup@zram0` and deleting
+# /etc/systemd/zram-generator.conf.
+
+# Optional second tier: a disk swapfile at a LOWER priority than zram, for
+# pages cold enough that even compression is wasted. Off by default — it is
+# listed so the shape is decided here rather than invented ad hoc later, and
+# because on this host the disk is the resource to protect. Assumes ext4;
+# fallocate-backed swap needs different handling on btrfs.
+istota_swapfile_enabled: false           # Second-tier disk swapfile
+istota_swapfile_size_mb: 2048            # Its size
+istota_swapfile_path: /swapfile          # Where it lives
+istota_swapfile_priority: 10             # Below istota_zram_priority, so zram is filled first
+
+# Soft throttling on the istota units. MemoryHigh, NOT MemoryMax: past the
+# limit the kernel puts the cgroup under heavy reclaim pressure and slows it,
+# where a hard cap would kill it — and killing the daemon takes everything
+# down. Nothing in the incident showed istota exceeding a sane budget (its
+# whole footprint was around 1.2 GB), so this is a guard against a future
+# regression rather than a fix for the observed failure. Empty string omits the
+# directive entirely.
+istota_scheduler_memory_high: "5G"       # MemoryHigh= on the scheduler unit ("" = no throttle). Covers the daemon PLUS every claude subprocess and its children — see the unit template for the arithmetic; the spec's 3G was sized against the daemon alone
+istota_web_memory_high: "1G"             # MemoryHigh= on the web and webhooks units ("" = no throttle)
+
+# Below the systemd default of 100, so every other unit wins under contention.
+# A hard CPUQuota is deliberately NOT set: PSI recorded `cpu full avg10=0`
+# against `memory full avg10=60`, so the cores were idle-waiting on memory, not
+# oversubscribed, and a quota would have slowed the work without preventing the
+# outage. CPUWeight is kept because it is free and helps under real contention.
+istota_scheduler_cpu_weight: 50          # CPUWeight= on the scheduler unit ("" = systemd default of 100)
+
 # Local-disk root for per-user module DBs (feeds/health/location/money). MUST be
 # local disk, NOT the Nextcloud mount (WAL -shm SIGBUSes on FUSE). Only the .db
 # relocates here; user-facing module files stay in the workspace on the mount.

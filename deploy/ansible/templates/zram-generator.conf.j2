@@ -1,0 +1,42 @@
+# {{ ansible_managed | default('Managed by Ansible') }}
+# /etc/systemd/zram-generator.conf
+#
+# A compressed swap device in RAM. Read by systemd-zram-generator at boot,
+# which synthesises systemd-zram-setup@zram0.service from it — there is no unit
+# to template beyond this file.
+#
+# Why swap at all: with Total swap = 0 the kernel cannot evict an anonymous
+# page, and tmpfs/shmem pages are swap-backed by design, so they become
+# permanently unevictable. The only reclaim target left is the page cache. On
+# 2026-08-20 that is exactly what happened — 4.6 GB of cold shmem the kernel
+# could not touch, the page cache taken down to 1.5 MB, and every process then
+# faulting its own executable text back from disk continuously.
+#
+# Why zram and not a disk swapfile: the disk was already the saturated
+# resource, doing roughly 1.7 GB/s of forced re-reads. Compressing cold pages
+# in RAM adds no disk traffic at all, and an unused zram device costs nothing —
+# real memory is only allocated as pages are written.
+#
+# zram-size is the device's UNCOMPRESSED logical capacity; compression happens
+# beneath it. `ram / 2` on a 7.9 GB box gives a ~4 GB swap device costing about
+# 1.3 GB of real RAM at zstd's ~3:1 on this kind of content. Compression makes
+# the device cheap, it does not multiply its size.
+#
+# None of the three values below is nullable. Unlike the MemoryHigh/CPUWeight
+# directives in the unit templates, an empty value here is not "omit the
+# setting" — zram-generator rejects the file.
+
+[zram0]
+zram-size = {{ istota_zram_size }}
+compression-algorithm = {{ istota_zram_algorithm }}
+
+# Explicit rather than relying on the default. zram-generator already defaults
+# fs-type to swap when no mount-point is set (and to ext2 when one is), so this
+# changes nothing today — it states the intent so that adding a mount-point
+# later cannot silently turn the swap device into a filesystem.
+fs-type = swap
+
+# Linux prefers the HIGHER priority number, so this sits above the optional
+# disk swapfile (istota_swapfile_priority). Inverted, every cold page would go
+# to the disk this device exists to spare.
+swap-priority = {{ istota_zram_priority }}

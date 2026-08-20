@@ -40,6 +40,81 @@ KillMode=mixed
 # "All connection attempts failed" bursts (EMFILE).
 LimitNOFILE=65536
 
+# Resource limits (host-and-scheduler-robustness spec, Track A).
+#
+# MemoryHigh, deliberately not MemoryMax: past the limit the kernel puts this
+# cgroup under heavy reclaim pressure and slows it down, where a hard cap would
+# OOM-kill it outright. What that buys is that istota's own growth self-limits
+# before the host reaches global OOM. What it costs is that the daemon can get
+# slow rather than failing loudly, so a genuine leak here shows up as latency
+# first. That trade is the right way round: killing the daemon takes down every
+# user's tasks, the web UI and the pollers at once. Note honestly that nothing
+# in the 2026-08-20 incident showed istota exceeding a sane budget — its whole
+# footprint was around 1.2 GB — so this is a guard against a future regression,
+# not a fix for the observed failure.
+#
+# Sizing note, because the obvious number is the wrong one: this applies to the
+# WHOLE cgroup, not the daemon. Every `claude` subprocess and everything those
+# spawn is inside it. At user_max_foreground_workers = 2 that is roughly
+# 1.2 GB daemon + 2 x ~0.5 GB claude + whatever a task's own build or test run
+# costs, and the incident's own workload (a full pytest suite under xdist)
+# clears 3 GB on its own. The spec's 3G was picked against the daemon
+# footprint alone. Set too low, memory.high does not fail — it applies an
+# allocation-time sleep penalty to every process in the cgroup, including the
+# dispatch loop and the Talk poller, so the symptom is "everything gets slow
+# and nothing logs", which is indistinguishable from the hang this whole spec
+# exists to fix. Hence 5G: high enough not to throttle ordinary work on a
+# 7.9 GB box, low enough to catch a genuine runaway before the host does.
+# Nothing reads memory.events yet, so a throttle is currently invisible —
+# Stage 3 should have host_pressure surface the `high` counter.
+{% if istota_scheduler_memory_high %}
+MemoryHigh={{ istota_scheduler_memory_high }}
+{% endif %}
+
+# CPUWeight below the systemd default of 100, so every other unit on the box
+# wins under contention. What it buys is that a runaway test suite under a task
+# yields to sshd and nginx, which is the difference between a slow host and an
+# unreachable one. What it costs is nothing while the machine is idle — weight
+# only applies when something else actually wants the CPU. A hard CPUQuota is
+# deliberately *not* set here: PSI recorded `cpu full avg10=0` against
+# `memory full avg10=60` during the incident, so the cores were idle-waiting on
+# memory rather than oversubscribed, and a quota would have slowed legitimate
+# work without preventing the outage.
+{% if istota_scheduler_cpu_weight %}
+CPUWeight={{ istota_scheduler_cpu_weight }}
+{% endif %}
+
+# Accounting is implied by MemoryHigh, but Stage 5's per-task cgroups depend on
+# it and a directive another feature relies on should be visible in the unit
+# rather than an inherited side effect of a different one.
+MemoryAccounting=yes
+
+# Delegate hands this unit's cgroup subtree to its own User=, which is what
+# lets the daemon create a cgroup per task and cap it there. What it buys is
+# that a task tree exceeding its budget is OOM-killed *inside its own cgroup* —
+# one failed task instead of a global OOM that picks an unrelated victim (the
+# incident's OOM killer chose chrome eight times and reclaimed almost nothing
+# each time, because chrome was never the consumer). What it costs is that
+# systemd stops managing the sub-hierarchy and chowns it to the service user.
+# Inert until Stage 5 creates a cgroup; the executor fails open when the
+# subtree is not delegated, so a host still running the previous unit file
+# keeps working.
+Delegate=memory pids cpu
+
+# Delegate= alone is NOT enough, and the gap is silent. cgroup v2 forbids a
+# non-root cgroup from both holding processes and enabling controllers for its
+# children — the write to cgroup.subtree_control returns EBUSY. This unit is
+# Type=simple, so the daemon's own process sits directly in the unit cgroup,
+# and Stage 5 would create task-<id>/ successfully and then find no memory.max
+# inside it. A6's fail-open rule would swallow that, so containment would never
+# engage and nothing would report it. DelegateSubgroup= moves the payload into
+# a leaf so the unit cgroup is free to enable controllers.
+#
+# systemd 252+ (Debian 13 ships 257). On anything older this is an unknown key:
+# systemd logs a warning and carries on, degrading to the EBUSY case rather
+# than refusing to start the unit.
+DelegateSubgroup=supervisor
+
 # Environment
 Environment=PATH={{ istota_home }}/.venv/bin:{{ istota_home }}/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{ istota_home }}
