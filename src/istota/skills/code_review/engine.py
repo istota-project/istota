@@ -10,21 +10,28 @@ is bound read-write into the admin sandbox, so a worktree that `resolve_under_
 repos` approves cleanly can still be a repository whose *configuration* the
 model wrote. Three escapes were demonstrated against exactly such a path:
 
-- `.git/config` setting `diff.external`, a textconv filter or `core.fsmonitor`
-  makes a plain `git diff` run a command as the daemon user — the user holding
-  `GITLAB_TOKEN` and `GITHUB_TOKEN`. That is the feature turning into remote
-  code execution, not a read primitive.
+- `.git/config` setting `diff.external`, a `.gitattributes` textconv or diff
+  driver, `core.fsmonitor`, or `log.showSignature` together with `gpg.program`
+  makes a plain `git diff` or `git log` run a command as the daemon user — the
+  user holding `GITLAB_TOKEN` and `GITHUB_TOKEN`. That is the feature turning
+  into remote code execution, not a read primitive.
 - A plain directory with no `.git` sends git searching *upward*, so a contained
   argument operates on a repository above the root.
-- A `.git` file containing `gitdir: <outside>` redirects the repository out of
-  the root while `rev-parse --show-toplevel` still reports the contained path,
-  so the obvious hardening does not catch it.
+- A `.git` file containing `gitdir: <outside>`, or a linked-worktree git dir
+  inside the root whose `commondir` points outside it, moves the repository out
+  of the root. `rev-parse --show-toplevel` reports the contained path in the
+  first case and `--absolute-git-dir` reports one in the second, so neither
+  check alone catches both.
+- A caller-supplied range is a bare argv element, so `--output=<path>` is an
+  arbitrary daemon-side write and `--ext-diff` turns a driver back on.
 
-`_git` answers the first two (config overrides on the command line, which beat
-the repository's own values, plus a discovery ceiling at the root), and
-`git_dir` answers the third by putting `rev-parse --absolute-git-dir` back
-through `resolve_under_repos`. Call `git_dir` before any content-producing
-command; `resolve_range` and `collect_diff` both do.
+`_git` answers the config routes (overrides on the command line, which beat the
+repository's own values, plus the flags that cover the per-attribute drivers),
+the upward search (a discovery ceiling at the root), and the option injection
+(`--end-of-options` before every revision). `git_dir` answers the relocations,
+by putting both `--absolute-git-dir` and `--git-common-dir` back through
+`resolve_under_repos`. Call `git_dir` before any content-producing command —
+`resolve_range`, `collect_diff` and all four collectors do.
 
 **Content comes out of the object store, never off the filesystem.** A symlink
 planted in a worktree makes `(worktree / path).read_text()` read straight out of
@@ -47,7 +54,10 @@ import fnmatch
 import json
 import os
 import re
+import select
 import subprocess
+import tempfile
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -168,9 +178,17 @@ class Finding:
 
 # Repo-local `.git/config` cannot be switched off by environment variable,
 # which is why these are `-c` overrides: a later `-c` beats the repository's
-# own value. The three that matter are the three demonstrated escapes;
-# `diff.noprefix`, `diff.mnemonicPrefix` and `core.quotePath` are pinned so a
-# repository cannot reshape output this module parses.
+# own value.
+#
+# Every entry here is a config key that either runs a command or reshapes
+# output this module parses. `core.fsmonitor`, `diff.external` and the `gpg.*`
+# programs are the run-a-command ones — `gpg.program` is reached from a plain
+# `git log` whenever `log.showSignature` is on, which is itself just a
+# repo-local boolean, and that pair was a working escape past the first three.
+# `color.ui` is not an execution route but is just as load-bearing: with colour
+# forced on, every diff header arrives wrapped in ANSI escapes, `_split_
+# sections` matches none of them, and the reviewer is handed an empty diff with
+# nothing anywhere reporting a loss.
 GIT_HARDENING = (
     "-c",
     "core.fsmonitor=",
@@ -179,6 +197,18 @@ GIT_HARDENING = (
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
+    "log.showSignature=false",
+    "-c",
+    "gpg.program=/nonexistent",
+    "-c",
+    "gpg.openpgp.program=/nonexistent",
+    "-c",
+    "gpg.ssh.program=/nonexistent",
+    "-c",
+    "gpg.x509.program=/nonexistent",
+    "-c",
+    "color.ui=false",
+    "-c",
     "diff.noprefix=false",
     "-c",
     "diff.mnemonicPrefix=false",
@@ -186,10 +216,31 @@ GIT_HARDENING = (
     "core.quotePath=false",
 )
 
-# Content-producing commands take these too. `diff.external` is neutralised
-# above, but a `.gitattributes` textconv entry is a second route to the same
-# place and only the flag turns it off.
-NO_FILTERS = ("--no-ext-diff", "--no-textconv")
+# Flags, because a flag is the only thing that covers the per-attribute route.
+# `-c diff.external=` clears the global external driver but does nothing about
+# a `.gitattributes` line naming a driver plus a `[diff "name"] command=` or
+# `textconv=` entry; `--no-ext-diff` and `--no-textconv` are what close those.
+NO_FILTERS = ("--no-ext-diff", "--no-textconv", "--no-color")
+
+# `--end-of-options` after the flags means every following argument is read as
+# a revision or a path, never as an option. Without it a range of
+# `--output=/etc/x` is an arbitrary daemon-side write and `--ext-diff` turns
+# the attribute driver back on — both verified, both exit 0. Rejecting a
+# leading dash in `resolve_range` is the first line; this is the one that holds
+# even when a caller reaches a collector directly.
+END_OF_OPTIONS = "--end-of-options"
+
+# One git call may not eat the daemon. The worktree is model-writable, so the
+# size of a diff is chosen by the same party that chose the path, and
+# `subprocess.run(capture_output=True)` would hold all of it in the daemon
+# before any of this module's caps got a look at it.
+MAX_GIT_OUTPUT_BYTES = 32 * 1024 * 1024
+
+# And may not hold the worker slot forever. Several git subcommands read
+# revisions from stdin when asked to (`rev-list --stdin`), so an inherited
+# stdin plus no timeout is a hang with no diagnosis; stdin is closed below and
+# this is the backstop for everything else.
+GIT_TIMEOUT_SECONDS = 120
 
 
 def _git_env(root: Path) -> dict[str, str]:
@@ -240,20 +291,83 @@ def _git(
     """Run one hardened git command in `worktree` and return its stdout.
 
     `allow_codes` exists for `git grep`, which exits 1 to mean "no match".
+
+    stdout is read incrementally against `MAX_GIT_OUTPUT_BYTES` rather than
+    collected whole, and stderr goes to a temporary file rather than a pipe.
+    Both are about the same thing: a pipe that nobody drains blocks the child,
+    and a child that nobody bounds fills the daemon.
     """
     root = _repos_root()
-    proc = subprocess.run(
-        ["git", *GIT_HARDENING, *args],
-        cwd=str(worktree),
-        capture_output=True,
-        text=True,
-        errors="replace",
-        env=_git_env(root),
-    )
+    argv = ["git", *GIT_HARDENING, *args]
+    with tempfile.TemporaryFile() as errfile:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(worktree),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=errfile,
+            env=_git_env(root),
+        )
+        try:
+            out, over_limit = _read_bounded(proc, MAX_GIT_OUTPUT_BYTES)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise ReviewError(
+                f"git {' '.join(args)}: timed out after {GIT_TIMEOUT_SECONDS}s",
+                reason="git_timeout",
+            ) from None
+        errfile.seek(0)
+        stderr = errfile.read(8192).decode("utf-8", "replace").strip()
+
+    if over_limit:
+        # Reported rather than silently truncated, and reported here rather
+        # than left to surface as the SIGKILL this function just sent —
+        # "git exited -9" is not a diagnosis anyone can act on.
+        raise ReviewError(
+            f"git {' '.join(args)}: output exceeded {MAX_GIT_OUTPUT_BYTES} bytes",
+            reason="git_output_too_large",
+        )
     if proc.returncode not in allow_codes:
-        stderr = proc.stderr.strip() or f"git exited {proc.returncode}"
-        raise ReviewError(f"git {' '.join(args)}: {stderr}", reason=reason)
-    return proc.stdout
+        raise ReviewError(
+            f"git {' '.join(args)}: {stderr or f'git exited {proc.returncode}'}",
+            reason=reason,
+        )
+    return out
+
+
+def _read_bounded(proc: subprocess.Popen, max_bytes: int) -> tuple[str, bool]:
+    """Drain a child's stdout up to `max_bytes`, then stop it.
+
+    Returns the output and whether the bound was hit.
+
+    `select` rather than a plain `read`, because a blocking read on a child
+    that has produced nothing and does not intend to exit never comes back to
+    check a deadline — which is the one case the deadline is for.
+    """
+    deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    total = 0
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    while total < max_bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, GIT_TIMEOUT_SECONDS)
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            raise subprocess.TimeoutExpired(proc.args, GIT_TIMEOUT_SECONDS)
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk[: max_bytes - total])
+        total += len(chunk)
+    over_limit = total >= max_bytes
+    if over_limit:
+        proc.kill()
+    proc.stdout.close()
+    proc.wait(timeout=GIT_TIMEOUT_SECONDS)
+    return b"".join(chunks).decode("utf-8", "replace"), over_limit
 
 
 def git_dir(worktree: Path) -> Path:
@@ -262,18 +376,41 @@ def git_dir(worktree: Path) -> Path:
     This is the check `--show-toplevel` cannot make. A `.git` file holding
     `gitdir: <outside>` leaves the toplevel reporting the contained path while
     the repository itself lives elsewhere; `--absolute-git-dir` reports where
-    the repository really is, and putting *that* through `resolve_under_repos`
-    is what refuses the redirect.
+    the repository really is.
+
+    **`--absolute-git-dir` alone is not enough either**, and the second
+    spelling is the one that looks legitimate. A linked worktree's git dir is a
+    small directory holding `HEAD`, `gitdir` and `commondir`, where `commondir`
+    names the *real* repository — objects, refs and config all live there. The
+    model can create such a directory inside the root and point `commondir`
+    outside it: `--absolute-git-dir` then reports a contained path, the check
+    passes, and `git show` reads a repository the operator never put in the
+    root, under a `config` file the model wrote. Verified end to end, which is
+    why `--git-common-dir` goes through the same check.
 
     Call it before any content-producing command, not once per run.
     """
-    raw = _git(worktree, ["rev-parse", "--absolute-git-dir"], reason="not_a_repository")
-    resolved, error = resolve_under_repos(raw.strip())
-    if error is not None:
-        raise ReviewError(
-            f"The repository for {worktree} is outside DEVELOPER_REPOS_DIR: {error}",
-            reason="git_dir_not_allowed",
-        )
+    resolved: Path | None = None
+    for flag, slug in (
+        ("--absolute-git-dir", "git_dir_not_allowed"),
+        ("--git-common-dir", "common_dir_not_allowed"),
+    ):
+        raw = _git(worktree, ["rev-parse", flag], reason="not_a_repository").strip()
+        # `--git-common-dir` answers `.git` for an ordinary repository, relative
+        # to the command's working directory rather than to the git dir. It
+        # only comes back absolute for a linked worktree.
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = worktree / candidate
+        checked, error = resolve_under_repos(candidate)
+        if error is not None:
+            raise ReviewError(
+                f"The repository for {worktree} reaches outside DEVELOPER_REPOS_DIR "
+                f"via {flag}: {error}",
+                reason=slug,
+            )
+        if resolved is None:
+            resolved = checked
     assert resolved is not None
     return resolved
 
@@ -285,9 +422,32 @@ def git_dir(worktree: Path) -> Path:
 _DEFAULT_BASE_CANDIDATES = ("origin/main", "origin/master", "main", "master")
 
 
+def _reject_option_shaped(value: str, label: str) -> str:
+    """Refuse a revision argument git would read as an option.
+
+    A range is a bare argv element, so `--output=/etc/cron.d/x` is an arbitrary
+    daemon-side write and `--ext-diff` re-enables the `.gitattributes` diff
+    driver that `-c diff.external=` does not cover. Both exit 0. Relying on the
+    validating command to reject each one is not a boundary — the option sets
+    differ per subcommand, so a spelling `rev-list` rejects can still be a
+    spelling `diff` accepts. `END_OF_OPTIONS` is the structural fix and this is
+    the one that gives the caller a comprehensible error.
+    """
+    stripped = value.strip()
+    if stripped.startswith("-"):
+        raise ReviewError(
+            f"{label} {stripped!r} starts with '-', which git would read as an option.",
+            reason="bad_range",
+        )
+    return stripped
+
+
 def _ref_exists(worktree: Path, ref: str) -> bool:
     try:
-        _git(worktree, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+        _git(
+            worktree,
+            ["rev-parse", "--verify", "--quiet", END_OF_OPTIONS, f"{ref}^{{commit}}"],
+        )
     except ReviewError:
         return False
     return True
@@ -301,7 +461,11 @@ def _default_base(worktree: Path) -> str:
         ).strip()
     except ReviewError:
         tracked = ""
-    if tracked:
+    # A dangling `origin/HEAD` is ordinary — it survives the upstream default
+    # branch being renamed — so it has to earn the same existence check as
+    # every other candidate rather than being handed back to fail four lines
+    # later as a bad range.
+    if tracked and _ref_exists(worktree, tracked):
         return tracked
     for candidate in _DEFAULT_BASE_CANDIDATES:
         if _ref_exists(worktree, candidate):
@@ -332,14 +496,14 @@ def resolve_range(
     """
     git_dir(worktree)
     if explicit and explicit.strip():
-        rng = explicit.strip()
+        rng = _reject_option_shaped(explicit, "range")
     elif base and base.strip():
-        rng = f"{base.strip()}...HEAD"
+        rng = f"{_reject_option_shaped(base, 'base')}...HEAD"
     else:
         rng = f"{_default_base(worktree)}...HEAD"
     # Cheap validation, so a bad ref fails here with git's own diagnosis rather
     # than four commands later inside context assembly.
-    _git(worktree, ["rev-list", "--count", rng, "--"], reason="bad_range")
+    _git(worktree, ["rev-list", "--count", END_OF_OPTIONS, rng, "--"], reason="bad_range")
     return rng
 
 
@@ -487,18 +651,57 @@ def _fit_sections(sections: list[tuple[str, str]], max_chars: int) -> tuple[str,
     return "".join(pieces), truncated
 
 
+MAX_STAT_CHARS = 20_000
+
+
+def _range_head(worktree: Path, rng: str) -> str:
+    """The commit the range ends at.
+
+    Not always HEAD: `resolve_range` produces `<base>...HEAD`, but an explicit
+    `--range` need not end there, and every part of the context — whole-file
+    bodies, conventions, callers — is read at this commit. Reading them at HEAD
+    for a range that ends elsewhere hands the reviewer a different tree than
+    the diff, with nothing saying so.
+    """
+    right = "HEAD"
+    for separator in ("...", ".."):
+        if separator in rng:
+            _, _, tail = rng.partition(separator)
+            right = tail.strip() or "HEAD"
+            break
+    # `--verify` and not a bare `rev-parse`: without it rev-parse echoes the
+    # arguments it did not consume, so `--end-of-options` comes back as the
+    # first line of output and lands in the next command's argv as a revision.
+    return _git(
+        worktree,
+        ["rev-parse", "--verify", END_OF_OPTIONS, f"{right}^{{commit}}"],
+        reason="bad_range",
+    ).strip()
+
+
 def collect_diff(worktree: Path, rng: str, max_chars: int) -> DiffBundle:
     """The diff for `rng`, bounded at `max_chars` and with binaries stripped."""
     git_dir(worktree)
-    head = _git(worktree, ["rev-parse", "HEAD"]).strip()
-    stat = _git(worktree, ["diff", *NO_FILTERS, "--stat", rng, "--"], reason="bad_range")
-    numstat = _parse_numstat(
-        _git(worktree, ["diff", *NO_FILTERS, "--numstat", "-z", rng, "--"], reason="bad_range")
-    )
-    statuses = _parse_name_status(
-        _git(worktree, ["diff", *NO_FILTERS, "--name-status", "-z", rng, "--"], reason="bad_range")
-    )
-    raw_body = _git(worktree, ["diff", *NO_FILTERS, rng, "--"], reason="bad_range")
+    # Re-checked rather than trusted: this is public, the tests call it
+    # directly, and Stage 4's CLI is not the only possible caller.
+    rng = _reject_option_shaped(rng, "range")
+    max_chars = max(0, max_chars)
+    head = _range_head(worktree, rng)
+
+    def diff(*extra: str) -> str:
+        return _git(
+            worktree, ["diff", *NO_FILTERS, *extra, END_OF_OPTIONS, rng, "--"], reason="bad_range"
+        )
+
+    stat = diff("--stat")
+    if len(stat) > MAX_STAT_CHARS:
+        # `--stat` prints a line per changed path with no count limit, and it
+        # goes into the prompt verbatim. A mass rename or a vendored-tree
+        # deletion would otherwise defeat every other budget in the module.
+        stat = stat[:MAX_STAT_CHARS] + "\n... [stat truncated]\n"
+    numstat = _parse_numstat(diff("--numstat", "-z"))
+    statuses = _parse_name_status(diff("--name-status", "-z"))
+    raw_body = diff()
 
     files = [path for _, _, path in numstat]
     binary = [path for added, _, path in numstat if added == "-"]
@@ -511,7 +714,18 @@ def collect_diff(worktree: Path, rng: str, max_chars: int) -> DiffBundle:
 
     # Binary hunks are noise in a text prompt and can be megabytes. The names
     # stay in `--stat`, which is where a reviewer would look for them anyway.
-    sections = [(path, text) for path, text in _split_sections(raw_body, files) if path not in binary]
+    all_sections = _split_sections(raw_body, files)
+    if raw_body.strip() and not all_sections:
+        # The parser found no `diff --git` header in output that has one. That
+        # is the module losing the diff, and the failure mode is silent and
+        # ugly: an empty body, `truncated` still False, and a reviewer handed a
+        # change with nothing in it. Fail loudly instead of reviewing nothing.
+        raise ReviewError(
+            "The diff body could not be split into per-file sections; "
+            "the repository may be reshaping git's output.",
+            reason="unparsable_diff",
+        )
+    sections = [(path, text) for path, text in all_sections if path not in binary]
     body, truncated_files = _fit_sections(sections, max_chars)
 
     return DiffBundle(
@@ -540,9 +754,14 @@ def _show(worktree: Path, rev: str, path: str) -> str | None:
     filesystem read would be a different and much worse thing.
     """
     try:
-        return _git(worktree, ["show", "--no-textconv", f"{rev}:{path}"])
+        return _git(worktree, ["show", *NO_FILTERS, END_OF_OPTIONS, f"{rev}:{path}"])
     except ReviewError:
         return None
+
+
+# Long enough for a three-digit count, which is well past the point where a
+# reviewer would care about the exact number.
+_OMITTED_NOTICE_CHARS = len("[999 more changed file(s) omitted for space]\n")
 
 
 def collect_file_bodies(
@@ -559,6 +778,8 @@ def collect_file_bodies(
     A file over `max_file_chars` gets a note instead of a body: its hunks are
     already in the prompt, so repeating them would spend the budget twice.
     """
+    git_dir(worktree)
+    max_total_chars = max(0, max_total_chars)
     parts: list[str] = []
     used = 0
     omitted = 0
@@ -567,6 +788,10 @@ def collect_file_bodies(
             continue
         text = _show(worktree, bundle.head, path)
         if text is None:
+            # A path git listed but would not show — an encoding the decode
+            # mangled, a mode-only entry. Counted, so the reviewer is told the
+            # body is missing rather than left to assume it never existed.
+            omitted += 1
             continue
         if len(text) > max_file_chars:
             block = (
@@ -574,14 +799,16 @@ def collect_file_bodies(
             )
         else:
             block = f"--- {path} (whole file) ---\n{text}\n"
-        if used + len(block) > max_total_chars:
+        # The closing notice is charged up front, so the returned string is
+        # inside the cap it was given rather than a few dozen characters over.
+        if used + len(block) > max_total_chars - _OMITTED_NOTICE_CHARS:
             omitted += 1
             continue
         parts.append(block)
         used += len(block)
     if omitted:
         parts.append(f"[{omitted} more changed file(s) omitted for space]\n")
-    return "".join(parts)
+    return "".join(parts)[:max_total_chars]
 
 
 _SYMBOL_PATTERNS = (
@@ -626,12 +853,25 @@ def collect_callers(worktree: Path, symbols: list[str], caps: Caps, rev: str) ->
     Grepping the tree object rather than the working tree keeps the one read
     rule intact — nothing here touches the filesystem.
     """
+    git_dir(worktree)
     parts: list[str] = []
     used = 0
     for symbol in symbols:
         raw = _git(
             worktree,
-            ["grep", "-n", "-I", "--no-textconv", "-F", "-e", symbol, rev, "--"],
+            [
+                "grep",
+                "-n",
+                "-I",
+                "--no-textconv",
+                "--no-color",
+                "-F",
+                "-e",
+                symbol,
+                END_OF_OPTIONS,
+                rev,
+                "--",
+            ],
             allow_codes=(0, 1),
         )
         hits: list[str] = []
@@ -645,11 +885,28 @@ def collect_callers(worktree: Path, symbols: list[str], caps: Caps, rev: str) ->
         if not hits:
             continue
         block = f"callers of {symbol}:\n" + "\n".join(hits) + "\n"
+        # Skip rather than stop. One symbol with more callers than fit must not
+        # cost every symbol after it — the same starvation argument
+        # `_fit_sections` makes for the diff.
         if used + len(block) > caps.total_chars:
-            break
+            continue
         parts.append(block)
         used += len(block)
-    return "".join(parts)[: caps.total_chars]
+    return "".join(parts)[: max(0, caps.total_chars)]
+
+
+def _clamp(text: str, max_chars: int, note: str) -> str:
+    """`text` inside `max_chars`, notice included rather than added on top.
+
+    Every cap in this module is a promise to the prompt budget above it, so a
+    truncation notice that pushes the result past the cap is not a rounding
+    detail — it is the one place each budget is guaranteed to be wrong.
+    """
+    max_chars = max(0, max_chars)
+    if len(text) <= max_chars:
+        return text
+    marker = f"\n... [{note}]\n"
+    return (text[: max(0, max_chars - len(marker))] + marker)[:max_chars]
 
 
 _FRONTMATTER_INLINE = re.compile(r"^paths:\s*\[(?P<items>.*)\]\s*$")
@@ -692,6 +949,8 @@ def collect_conventions(
     `.claude/rules/` is an Istota convention, so its absence is normal and
     silent — most repositories the bot works in will not have one.
     """
+    git_dir(worktree)
+    max_chars = max(0, max_chars)
     parts: list[str] = []
     for name in ("AGENTS.md", "CLAUDE.md"):
         text = _show(worktree, rev, name)
@@ -699,7 +958,10 @@ def collect_conventions(
             parts.append(f"--- {name} ---\n{text}\n")
 
     try:
-        listing = _git(worktree, ["ls-tree", "-r", "--name-only", rev, "--", ".claude/rules/"])
+        listing = _git(
+            worktree,
+            ["ls-tree", "-r", "--name-only", END_OF_OPTIONS, rev, "--", ".claude/rules/"],
+        )
     except ReviewError:
         listing = ""
     for path in sorted(line for line in listing.splitlines() if line.endswith(".md")):
@@ -712,10 +974,7 @@ def collect_conventions(
         if any(fnmatch.fnmatch(changed_path, glob) for changed_path in changed for glob in globs):
             parts.append(f"--- {path} ---\n{text}\n")
 
-    out = "".join(parts)
-    if len(out) > max_chars:
-        out = out[:max_chars] + "\n... [conventions truncated]\n"
-    return out
+    return _clamp(("".join(parts)), max_chars, "conventions truncated")
 
 
 def assemble_context(worktree: Path, bundle: DiffBundle, cfg: ReviewConfig) -> str:
@@ -725,6 +984,7 @@ def assemble_context(worktree: Path, bundle: DiffBundle, cfg: ReviewConfig) -> s
     pool in order, so a repository with a 90 KB `AGENTS.md` cannot leave the
     reviewers with no file bodies and no callers.
     """
+    git_dir(worktree)
     budget = max(0, cfg.max_context_chars)
     parts: list[str] = []
 
@@ -743,7 +1003,22 @@ def assemble_context(worktree: Path, bundle: DiffBundle, cfg: ReviewConfig) -> s
 
     try:
         commits = _git(
-            worktree, ["log", "--format=%s%n%b%n--", _log_range(bundle.rng), "--"]
+            worktree,
+            [
+                "log",
+                "--format=%s%n%b%n--",
+                # Not decoration. `log.showSignature` is a repo-local boolean
+                # and `gpg.program` a repo-local path, so a plain `git log`
+                # over a signed commit runs a chosen command as the daemon
+                # user. The `-c` overrides in GIT_HARDENING cover it too; this
+                # is the flag that does not depend on getting the key list
+                # exhaustively right.
+                "--no-show-signature",
+                *NO_FILTERS,
+                END_OF_OPTIONS,
+                _log_range(bundle.rng),
+                "--",
+            ],
         )
     except ReviewError:
         commits = ""
@@ -759,10 +1034,7 @@ def assemble_context(worktree: Path, bundle: DiffBundle, cfg: ReviewConfig) -> s
     if callers:
         parts.append("## Direct callers of changed symbols\n\n" + callers)
 
-    out = "\n\n".join(parts)
-    if len(out) > cfg.max_context_chars:
-        out = out[: cfg.max_context_chars] + "\n... [context truncated]\n"
-    return out
+    return _clamp("\n\n".join(parts), cfg.max_context_chars, "context truncated")
 
 
 # --------------------------------------------------------------------------
@@ -785,6 +1057,13 @@ def size_review(
         return both, "both agents requested"
     if forced in (CONFORMANCE, "one"):
         return [CONFORMANCE], "conformance alone requested"
+    if forced == BUGHUNT:
+        return [BUGHUNT], "bughunt alone requested"
+    if forced is not None:
+        # Falling through to automatic sizing would answer a request nobody
+        # made and then report a threshold decision as the reason, so the
+        # caller would have no way to see that its choice was dropped.
+        raise ReviewError(f"Unknown --agents value {forced!r}", reason="unknown_agent")
 
     for path in bundle.files:
         lowered = path.lower()
@@ -1031,6 +1310,16 @@ def merge_findings(
             if SEVERITIES.index(finding.severity) < SEVERITIES.index(existing.severity):
                 existing.severity = finding.severity
             existing.sources = sorted(set(existing.sources) | set(finding.sources))
+            # Two reviewers at one line is as often two different defects as
+            # one corroborated defect. The claim of the second is folded into
+            # the evidence rather than dropped, so a merged entry never reads
+            # as agreement about something only one of them said.
+            if finding.claim and finding.claim != existing.claim:
+                existing.evidence = (
+                    f"{existing.evidence}\n{finding.sources[0]} also reports: {finding.claim}"
+                    if existing.evidence
+                    else f"{finding.sources[0]} also reports: {finding.claim}"
+                )
             if finding.evidence and finding.evidence not in existing.evidence:
                 existing.evidence = (
                     f"{existing.evidence}\n{finding.evidence}"

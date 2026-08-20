@@ -136,7 +136,66 @@ class TestResolveRange:
         with pytest.raises(ReviewError) as excinfo:
             resolve_range(repo, base="no-such-ref")
         assert "no-such-ref" in str(excinfo.value)
+        # Something only git says, so the test cannot pass against an
+        # implementation that echoes the command and drops stderr.
+        assert "bad revision" in str(excinfo.value)
         assert excinfo.value.reason == "bad_range"
+
+    def test_a_dangling_origin_head_falls_through_to_a_local_branch(self, repo):
+        """Ordinary after the upstream default branch is renamed."""
+        branch_with_change(repo)
+        run_git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
+
+        assert resolve_range(repo) == "main...HEAD"
+
+    def test_an_option_shaped_range_is_refused_before_git_sees_it(self, repo, tmp_path):
+        """A range is a bare argv element, so an option is what git reads.
+
+        `--output=<path>` is an arbitrary daemon-side write and `--ext-diff`
+        turns the attribute diff driver back on. Both exit 0, so nothing
+        downstream reports a problem. Leaving this to the validating command is
+        not a boundary either: the option sets differ per subcommand, so a
+        spelling `rev-list` rejects can still be one `diff` accepts.
+        """
+        branch_with_change(repo)
+        target = tmp_path / "written_by_git"
+
+        # Positive control: git really does honour it, and really does write.
+        subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--no-textconv", f"--output={target}", "--"],
+            cwd=str(repo),
+            capture_output=True,
+            env={**os.environ, **GIT_ISOLATION},
+        )
+        assert target.exists(), "fixture is wrong: --output did not write"
+        target.unlink()
+
+        for bad in (f"--output={target}", "--ext-diff", "--textconv", "--stdin", "--all"):
+            with pytest.raises(ReviewError) as excinfo:
+                resolve_range(repo, explicit=bad)
+            assert excinfo.value.reason == "bad_range"
+            with pytest.raises(ReviewError):
+                collect_diff(repo, bad, 200_000)
+        assert not target.exists()
+
+    def test_an_option_shaped_base_is_refused(self, repo):
+        branch_with_change(repo)
+        with pytest.raises(ReviewError) as excinfo:
+            resolve_range(repo, base="--ext-diff")
+        assert excinfo.value.reason == "bad_range"
+
+    def test_a_git_command_cannot_read_the_daemons_stdin(self, repo):
+        """`rev-list --stdin` would otherwise block on an inherited stdin.
+
+        Hashing empty input rather than hanging is the proof that stdin is
+        closed; a test that actually hangs proves the same thing far too slowly.
+        """
+        from istota.skills.code_review.engine import _git
+
+        # The hash of the empty blob. Reached only if stdin gave EOF at once.
+        assert _git(repo, ["hash-object", "--stdin"]).strip() == (
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        )
 
     def test_a_base_only_commit_is_not_attributed_to_the_branch(self, repo):
         """The regression that motivated the three-dot form.
@@ -236,6 +295,209 @@ class TestGitHardening:
             git_dir(wt)
         assert excinfo.value.reason == "git_dir_not_allowed"
 
+    def test_a_commondir_redirect_out_of_the_root_is_refused(self, repos_root, tmp_path):
+        """The `gitdir:` escape's second spelling, and the one that looks legitimate.
+
+        A linked worktree's git dir is a small directory holding `HEAD`,
+        `gitdir` and `commondir`, and `commondir` names the *real* repository —
+        objects, refs and config all live there. The model can create such a
+        directory inside the root and point `commondir` outside it. Then
+        `--absolute-git-dir` reports a contained path and the obvious check
+        passes, while every read comes from a repository the operator never put
+        in the root, under a config file the model wrote.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        run_git(outside, "init", "-q", "-b", "main", ".")
+        (outside / "outside_secret.py").write_text("OUTSIDE_SENTINEL = 1\n")
+        commit(outside, "outside")
+
+        main_repo = repos_root / "proj"
+        main_repo.mkdir()
+        run_git(main_repo, "init", "-q", "-b", "main", ".")
+        (main_repo / "f").write_text("x\n")
+        commit(main_repo, "base")
+
+        evil = main_repo / ".git" / "worktrees" / "evil"
+        evil.mkdir(parents=True)
+        (evil / "commondir").write_text(f"{outside / '.git'}\n")
+        (evil / "gitdir").write_text(f"{repos_root / 'wt' / '.git'}\n")
+        (evil / "HEAD").write_text("ref: refs/heads/main\n")
+        wt = repos_root / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(f"gitdir: {evil}\n")
+
+        # Positive control: the contained-looking answer really is contained,
+        # and the outside repository really is readable through it. Without
+        # this the assertion below would pass against a check that refused for
+        # some unrelated reason.
+        reported = run_git(wt, "rev-parse", "--absolute-git-dir").strip()
+        assert Path(reported).resolve() == evil.resolve()
+        assert str(repos_root) in reported
+        assert "OUTSIDE_SENTINEL" in run_git(wt, "show", "main:outside_secret.py")
+
+        with pytest.raises(ReviewError) as excinfo:
+            git_dir(wt)
+        assert excinfo.value.reason == "common_dir_not_allowed"
+
+    def test_log_show_signature_does_not_run_a_repo_local_gpg_program(self, repo, tmp_path):
+        """`git log` is a content command too, and it had none of the flags.
+
+        `log.showSignature` is a plain repo-local boolean and `gpg.program` a
+        plain repo-local path, so a `git log` over a signed commit runs a
+        chosen command as the daemon user — past `-c diff.external=` and
+        `--no-ext-diff`, neither of which has anything to do with signatures.
+        """
+        sentinel = tmp_path / "gpg_sentinel"
+        fake_gpg = tmp_path / "gpg.sh"
+        fake_gpg.write_text(f"#!/bin/sh\necho pwned > {sentinel}\nexit 0\n")
+        fake_gpg.chmod(0o755)
+
+        # A commit object carrying a gpgsig header, built by hand: making a
+        # real `commit -S` succeed needs a program that speaks gpg's status
+        # protocol, and the header is all `--show-signature` needs to bite.
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "app.py").write_text("def existing():\n    return 2\n")
+        commit(repo, "ordinary")
+        tree = run_git(repo, "rev-parse", "HEAD^{tree}").strip()
+        parent = run_git(repo, "rev-parse", "HEAD").strip()
+        raw = (
+            f"tree {tree}\n"
+            f"parent {parent}\n"
+            "author Test <test@example.invalid> 1700000000 +0000\n"
+            "committer Test <test@example.invalid> 1700000000 +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n"
+            " \n"
+            " ZmFrZQ==\n"
+            " -----END PGP SIGNATURE-----\n"
+            "\n"
+            "signed commit\n"
+        )
+        proc = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=str(repo),
+            input=raw,
+            capture_output=True,
+            text=True,
+            env={**os.environ, **GIT_ISOLATION},
+        )
+        assert proc.returncode == 0, proc.stderr
+        run_git(repo, "update-ref", "refs/heads/feature", proc.stdout.strip())
+        run_git(repo, "config", "log.showSignature", "true")
+        run_git(repo, "config", "gpg.program", str(fake_gpg))
+
+        # Positive control: the attack is live against a log invocation that
+        # carries the diff hardening but nothing about signatures.
+        subprocess.run(
+            ["git", "-c", "diff.external=", "log", "--format=%s", "--no-ext-diff", "main..HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            env={**os.environ, **GIT_ISOLATION},
+        )
+        assert sentinel.exists(), "fixture is wrong: gpg.program never fired"
+        sentinel.unlink()
+
+        bundle = collect_diff(repo, "main...HEAD", 200_000)
+        context = assemble_context(repo, bundle, ReviewConfig())
+
+        assert not sentinel.exists()
+        assert "signed commit" in context
+
+    def test_forced_colour_does_not_silently_empty_the_diff(self, repo):
+        """`color.ui = always` is not execution, and is just as load-bearing.
+
+        With colour forced on, every diff header arrives wrapped in ANSI
+        escapes, the section splitter matches none of them, and the reviewer is
+        handed an empty diff — with `truncated` still False and nothing
+        anywhere reporting a loss. A review of nothing that says it reviewed
+        something is the worst output this module could produce.
+        """
+        branch_with_change(repo)
+        run_git(repo, "config", "color.ui", "always")
+
+        # Positive control: colour really is forced for a plain invocation.
+        plain = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--no-textconv", "main...HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            env={**os.environ, **GIT_ISOLATION},
+        )
+        assert "\x1b[" in plain.stdout
+
+        bundle = collect_diff(repo, "main...HEAD", 200_000)
+
+        assert "\x1b[" not in bundle.body
+        assert "\x1b[" not in bundle.stat
+        assert "def added_helper" in bundle.body
+        assert bundle.files == ["app.py"]
+
+    def test_an_attribute_driven_textconv_does_not_execute(self, repo, tmp_path):
+        """The second route to a command, which the `-c` overrides do not cover.
+
+        `-c diff.external=` clears the global external driver and does nothing
+        about a `.gitattributes` line naming a driver plus a `[diff "name"]
+        textconv=` entry. Only `--no-textconv` closes that.
+        """
+        sentinel = tmp_path / "textconv_sentinel"
+        script = tmp_path / "tc.sh"
+        script.write_text(f"#!/bin/sh\necho pwned > {sentinel}\necho converted\n")
+        script.chmod(0o755)
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        (repo / ".gitattributes").write_text("*.py diff=evil\n")
+        (repo / "app.py").write_text("def existing():\n    return 2\n")
+        commit(repo, "attribute driver")
+        run_git(repo, "config", "diff.evil.textconv", str(script))
+
+        # Positive control: the attribute driver fires when the flag is absent.
+        # (Not run with `-c diff.external=` — an empty external command is one
+        # git tries to execute, so it dies on the first file and proves
+        # nothing. That is itself why `--no-ext-diff` carries the weight here.)
+        subprocess.run(
+            ["git", "diff", "--textconv", "main...HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            env={**os.environ, **GIT_ISOLATION},
+        )
+        assert sentinel.exists(), "fixture is wrong: the textconv driver never fired"
+        sentinel.unlink()
+
+        bundle = collect_diff(repo, "main...HEAD", 200_000)
+        collect_file_bodies(repo, bundle, max_file_chars=20_000, max_total_chars=60_000)
+
+        assert not sentinel.exists()
+        assert "converted" not in bundle.body
+
+    def test_core_fsmonitor_is_neutralised(self, repo, tmp_path):
+        """Pinned as defence in depth, not as a hole that was open.
+
+        `core.fsmonitor` fires when git refreshes the index, which a
+        working-tree diff does and a range diff does not — and this module only
+        ever diffs ranges. So the positive control below uses the working-tree
+        form to show the config is live; the `-c core.fsmonitor=` override is
+        what keeps that true if a later verb ever reads the working tree.
+        """
+        sentinel = tmp_path / "fsm_sentinel"
+        script = tmp_path / "fsm.sh"
+        script.write_text(f"#!/bin/sh\necho fired > {sentinel}\nexit 1\n")
+        script.chmod(0o755)
+        branch_with_change(repo)
+        run_git(repo, "config", "core.fsmonitor", str(script))
+        (repo / "app.py").write_text("def existing():\n    return 99\n")
+
+        subprocess.run(
+            ["git", "diff", "--stat", "--"],
+            cwd=str(repo),
+            capture_output=True,
+            env={**os.environ, **GIT_ISOLATION},
+        )
+        assert sentinel.exists(), "fixture is wrong: core.fsmonitor never fired"
+        sentinel.unlink()
+
+        collect_diff(repo, "main...HEAD", 200_000)
+
+        assert not sentinel.exists()
+
     def test_a_legitimate_worktree_resolves_its_git_dir(self, repo):
         assert git_dir(repo) == (repo / ".git").resolve()
 
@@ -305,6 +567,26 @@ class TestCollectDiff:
         assert bundle.body == ""
         assert bundle.lines == 0
 
+    def test_the_head_is_the_ranges_endpoint_not_always_HEAD(self, repo):
+        """Everything in the context is read at `bundle.head`.
+
+        `resolve_range` produces `<base>...HEAD`, but an explicit range need
+        not end there, and reading the file bodies, conventions and callers at
+        HEAD for a range that ends elsewhere hands the reviewer a different
+        tree than the diff with nothing saying so.
+        """
+        branch_with_change(repo)
+        (repo / "app.py").write_text("def existing():\n    return 1\n\n\nLATER_SENTINEL = 1\n")
+        commit(repo, "a later commit")
+        earlier = run_git(repo, "rev-parse", "HEAD~1").strip()
+
+        bundle = collect_diff(repo, f"main..{earlier}", 200_000)
+        bodies = collect_file_bodies(repo, bundle, max_file_chars=20_000, max_total_chars=60_000)
+
+        assert bundle.head == earlier
+        assert "def added_helper" in bodies
+        assert "LATER_SENTINEL" not in bodies
+
     def test_a_bad_range_raises_with_the_git_stderr(self, repo):
         with pytest.raises(ReviewError) as excinfo:
             collect_diff(repo, "nope...HEAD", 200_000)
@@ -332,7 +614,7 @@ class TestCollectFileBodies:
 
         assert "caller.py" not in bodies
 
-    def test_a_file_over_the_per_file_cap_falls_back_to_its_hunks(self, repo):
+    def test_a_file_over_the_per_file_cap_is_replaced_by_a_pointer_to_the_diff(self, repo):
         run_git(repo, "checkout", "-q", "-b", "feature")
         (repo / "big.py").write_text(
             "HEAD_SENTINEL = 0\n"
@@ -371,8 +653,12 @@ class TestCollectFileBodies:
 
         bodies = collect_file_bodies(repo, bundle, max_file_chars=20_000, max_total_chars=1200)
 
-        assert len(bodies) <= 1400  # the cap, plus the closing notice
+        # The exact cap, not the cap plus slack. A notice appended on top of a
+        # budget is the one place that budget is guaranteed to be wrong, so the
+        # assertion has to be the bound itself or it pins nothing.
+        assert len(bodies) <= 1200
         assert "VALUE_0" in bodies
+        assert "omitted for space" in bodies
 
 
 class TestChangedSymbols:
@@ -499,7 +785,8 @@ class TestCollectConventions:
 
         out = collect_conventions(repo, head, ["AGENTS.md"], 500)
 
-        assert len(out) <= 700
+        assert len(out) <= 500
+        assert "conventions truncated" in out
 
 
 class TestSizeReview:
@@ -554,6 +841,25 @@ class TestSizeReview:
         agents, reason = size_review(bundle, ReviewConfig(), "conformance")
         assert agents == ["conformance"]
         assert "requested" in reason
+
+    def test_forcing_bughunt_gets_the_bug_hunter(self, monkeypatch):
+        """Falling through would answer a request nobody made.
+
+        `bughunt` is a member of the module's own agent tuple, so silently
+        sizing automatically would hand back the conformance reviewer and then
+        report a threshold decision as the reason — leaving the caller no way
+        to see its choice was dropped.
+        """
+        bundle = self._bundle(monkeypatch, lines=3, files=["app.py"])
+        agents, reason = size_review(bundle, ReviewConfig(), "bughunt")
+        assert agents == ["bughunt"]
+        assert "requested" in reason
+
+    def test_an_unrecognised_agents_value_is_an_error(self, monkeypatch):
+        bundle = self._bundle(monkeypatch, lines=3, files=["app.py"])
+        with pytest.raises(ReviewError) as excinfo:
+            size_review(bundle, ReviewConfig(), "skinner")
+        assert excinfo.value.reason == "unknown_agent"
 
 
 class TestBuildPrompt:
@@ -710,6 +1016,26 @@ class TestMergeFindings:
         assert "rule says no" in merged[0].evidence
         assert "races with the writer" in merged[0].evidence
 
+    def test_two_different_claims_at_one_line_do_not_lose_the_second(self):
+        """The ordinary case, not an edge one.
+
+        Conformance reporting "wrong error type" and bughunt reporting "null
+        deref" at the same line is two defects, not corroboration of one. The
+        entry still merges — a caller acts on a location — but the second
+        claim has to survive, or the merged finding reads as two reviewers
+        agreeing about something only one of them said.
+        """
+        first = self._f("high", "a.py", 5, "conformance")
+        first.claim = "wrong error type raised"
+        second = self._f("high", "a.py", 5, "bughunt")
+        second.claim = "null deref on the same line"
+
+        merged = merge_findings([[first], [second]])
+
+        assert len(merged) == 1
+        assert "null deref on the same line" in merged[0].evidence
+        assert merged[0].sources == ["bughunt", "conformance"]
+
     def test_a_merge_keeps_the_higher_severity(self):
         merged = merge_findings(
             [
@@ -795,4 +1121,19 @@ class TestAssembleContext:
 
         context = assemble_context(repo, bundle, ReviewConfig(max_context_chars=300))
 
-        assert len(context) <= 500
+        assert len(context) <= 300
+
+    def test_a_negative_cap_yields_nothing_rather_than_a_negative_slice(self, repo):
+        """`text[:-5]` is not an empty string, it is most of the string.
+
+        Every cap here reaches a slice, and a config field a TOML edit can make
+        negative would otherwise turn each one into "drop the last five
+        characters" — a budget that grows the output it was meant to bound.
+        """
+        branch_with_change(repo)
+        bundle = collect_diff(repo, "main...HEAD", -5)
+
+        assert bundle.body == ""
+        assert assemble_context(repo, bundle, ReviewConfig(max_context_chars=-5)) == ""
+        assert collect_conventions(repo, bundle.head, bundle.files, -5) == ""
+        assert collect_file_bodies(repo, bundle, max_file_chars=10, max_total_chars=-5) == ""
