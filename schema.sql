@@ -1026,7 +1026,7 @@ CREATE INDEX IF NOT EXISTS idx_task_steers_pending
 -- these connections, matching every other FK in this schema.
 CREATE TABLE IF NOT EXISTS code_review_calls (
     task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    calls      INTEGER NOT NULL DEFAULT 0,   -- successful model rounds only
+    calls      INTEGER NOT NULL DEFAULT 0,   -- rounds charged, parsed or not
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (task_id)
 );

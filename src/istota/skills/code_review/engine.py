@@ -8,7 +8,7 @@ ordinary threat-model sense, and two rules follow that shape the whole module.
 **Every git invocation is hardened, not just the first.** `DEVELOPER_REPOS_DIR`
 is bound read-write into the admin sandbox, so a worktree that `resolve_under_
 repos` approves cleanly can still be a repository whose *configuration* the
-model wrote. Three escapes were demonstrated against exactly such a path:
+model wrote. Four escapes were demonstrated against exactly such a path:
 
 - `.git/config` setting `diff.external`, a `.gitattributes` textconv or diff
   driver, `core.fsmonitor`, or `log.showSignature` together with `gpg.program`
