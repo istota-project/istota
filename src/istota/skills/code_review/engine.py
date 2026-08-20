@@ -53,6 +53,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import posixpath
 import re
 import select
 import subprocess
@@ -142,6 +143,10 @@ class ReviewConfig:
     max_context_chars: int = 60_000
     max_file_chars: int = 20_000
     max_callers_per_symbol: int = 8
+    # Files a reviewer may ask for on its one re-invocation. 0 disables the
+    # round trip, and the offer is then kept out of the prompt entirely rather
+    # than made and refused.
+    max_need_files: int = 6
 
 
 @dataclass
@@ -812,6 +817,226 @@ def collect_file_bodies(
     return "".join(parts)[:max_total_chars]
 
 
+@dataclass
+class NeededFiles:
+    """What one `need_files` request produced.
+
+    `refused` is not bookkeeping. A reviewer that asked for four files, got
+    three, and is told nothing about the fourth will read the silence as an
+    empty file and file a finding on it — so the refusals go into `text` as
+    well, named, and the caller reports them in the envelope.
+    """
+
+    text: str = ""
+    served: list[str] = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
+
+
+# A reviewer's request list is model-written and its refusals are echoed back
+# into the reviewer's own prompt and into the caller's envelope, so the number
+# of entries considered and the length of any one echoed path are both bounded.
+# Neither is a security boundary; both stop a reviewer inflating its own prompt.
+MAX_NEED_FILE_REQUESTS = 32
+MAX_REFUSED_PATH_CHARS = 120
+
+# A blob larger than this is refused unread rather than read and truncated. Well
+# above any source file a reviewer has a reason to ask for, and far below
+# `MAX_GIT_OUTPUT_BYTES` — the point is that reading 32 MiB to produce a
+# 20 000-char excerpt is the daemon doing a model's request the expensive way.
+# Ordinary large files are still served, truncated to `max_file_chars`.
+MAX_NEED_FILE_BYTES = 2 * 1024 * 1024
+
+
+def _refusal_label(raw) -> str:
+    """How a refused request is named back to the reviewer and the caller.
+
+    Truncated, because the path is model-written and gets echoed twice.
+    """
+    label = raw if isinstance(raw, str) else repr(raw)
+    if len(label) > MAX_REFUSED_PATH_CHARS:
+        return label[:MAX_REFUSED_PATH_CHARS] + "…"
+    return label
+
+
+def _object_info(worktree: Path, rev: str, path: str) -> tuple[str, int] | None:
+    """`(type, size in bytes)` for an object, or None when `rev` has no such path.
+
+    Asked before the content is read, and that ordering is the point. `_show`
+    goes through `_git`, which reads up to `MAX_GIT_OUTPUT_BYTES` (32 MiB)
+    before it gives up — so without a size check first, a reviewer naming
+    `MAX_NEED_FILE_REQUESTS` oversized blobs makes the daemon read and UTF-8
+    decode a gigabyte to produce a few excerpts it mostly then discards, none of
+    it charged against the agent's timeout, both agents at once.
+    """
+    try:
+        kind = _git(
+            worktree, ["cat-file", "-t", END_OF_OPTIONS, f"{rev}:{path}"]
+        ).strip()
+        size = _git(
+            worktree, ["cat-file", "-s", END_OF_OPTIONS, f"{rev}:{path}"]
+        ).strip()
+    except ReviewError:
+        return None
+    try:
+        return kind, int(size)
+    except ValueError:
+        return None
+
+
+def _safe_repo_path(raw) -> str | None:
+    """A model-supplied path, normalised, or None if it may not be served.
+
+    This is the one place in the module where a *model* chooses which blob gets
+    read, so the rules are deliberately narrow: a plain relative path, inside
+    the repository, that git will not read as an option.
+
+    Containment here is defence in depth rather than the boundary. The body is
+    read with `git show <rev>:<path>` like everything else, so a path that
+    slipped through would still resolve against the object store and not the
+    filesystem — a planted symlink comes back as its own link text. Both rules
+    are cheap and the failure modes they cover are different, so both stay.
+    """
+    if not isinstance(raw, str):
+        return None
+    path = raw.strip()
+    if not path:
+        return None
+    if path.startswith("-"):
+        # Defence in depth rather than the thing that closes option injection:
+        # `_show` embeds the path in `f"{rev}:{path}"` behind `END_OF_OPTIONS`,
+        # so git cannot read it as an option today whatever it starts with. The
+        # check is here for the caller that passes a path as its own argv
+        # element — do not delete `END_OF_OPTIONS` believing this covers it.
+        return None
+    if "\x00" in path or "\n" in path:
+        return None
+    if path.startswith("/"):
+        return None
+    normalised = posixpath.normpath(path)
+    if normalised == "." or normalised == ".." or normalised.startswith("../"):
+        return None
+    if normalised.startswith("/"):
+        return None
+    # Re-tested after normalising, because normalising can *create* the shape:
+    # `./-output=x` collapses to `-output=x`. The check above catches what the
+    # reviewer wrote and this one catches what the caller would be handed.
+    if normalised.startswith("-"):
+        return None
+    return normalised
+
+
+def collect_needed_files(
+    worktree: Path,
+    rev: str,
+    requested,
+    *,
+    max_files: int,
+    max_file_chars: int,
+    max_total_chars: int = 60_000,
+) -> NeededFiles:
+    """Serve the files one reviewer asked for, from the object store.
+
+    Requests are taken in the order they were made and stop at `max_files`, so
+    a reviewer that asks for twenty gets the first `max_files` rather than an
+    arbitrary slice — the order is the reviewer's own ranking and there is no
+    better one available here.
+
+    Three bounds, not one, because every part of this is model-chosen and every
+    part of it flows back into a prompt and into the caller's envelope.
+    `max_files` bounds how many are served; `max_total_chars` bounds what they
+    add up to, the way `collect_file_bodies` next door is bounded, since
+    `max_files * max_file_chars` otherwise exceeds the whole context budget; and
+    `MAX_NEED_FILE_REQUESTS` bounds how many entries are looked at at all, since
+    refusals are echoed back and a list of ten thousand would be a reviewer
+    inflating its own prompt.
+
+    A path that cannot be served is refused rather than served empty, and the
+    reason set is deliberately merged: outside the repository, unknown at this
+    revision, not a file, and over a cap all arrive as "not served".
+    Distinguishing them for the reviewer would tell a model that wrote a path on
+    purpose which of its guesses landed closest.
+    """
+    # The same validation `collect_file_bodies` does before it reads a blob: a
+    # `.git` file with a `gitdir:` redirect points the repository out of the
+    # root while `--show-toplevel` still reports the contained path.
+    git_dir(worktree)
+
+    result = NeededFiles()
+    if max_files <= 0 or not requested:
+        return result
+
+    # Materialised once. Consuming `requested` twice would make the overflow
+    # count negative for any one-shot iterable, and `requested` is untyped here.
+    items = list(requested)
+    entries = items[:MAX_NEED_FILE_REQUESTS]
+    over_request_cap = len(items) - len(entries)
+
+    blocks: list[str] = []
+    seen: set[str] = set()
+    used = 0
+    for raw in entries:
+        label = _refusal_label(raw)
+        safe = _safe_repo_path(raw)
+        if safe is None:
+            result.refused.append(label)
+            continue
+        if safe in seen:
+            # A duplicate is dropped silently rather than refused: the reviewer
+            # asked for it and is getting it, once.
+            continue
+        if len(result.served) >= max_files:
+            result.refused.append(label)
+            continue
+        # Type and size before content. A tree is not a file — `git show
+        # <rev>:<dir>` prints a listing quite happily, and labelling that
+        # "(whole file)" is how a reviewer comes to believe a directory is a
+        # two-line module. `collect_file_bodies` never meets either case because
+        # its paths come from `--name-only`; here they come from the model.
+        info = _object_info(worktree, rev, safe)
+        if info is None or info[0] != "blob" or info[1] > MAX_NEED_FILE_BYTES:
+            result.refused.append(label)
+            continue
+        text = _show(worktree, rev, safe)
+        if text is None:
+            result.refused.append(label)
+            continue
+        if len(text) > max_file_chars:
+            block = (
+                f"--- {safe} (truncated to {max_file_chars} chars) ---\n"
+                f"{text[:max_file_chars]}\n"
+            )
+        else:
+            block = f"--- {safe} (whole file) ---\n{text}\n"
+        if used + len(block) > max_total_chars:
+            # Refused rather than truncated to the remaining budget: half a file
+            # served as a whole one is the confident-wrong-finding case this
+            # function exists to prevent.
+            result.refused.append(label)
+            continue
+        seen.add(safe)
+        result.served.append(safe)
+        blocks.append(block)
+        used += len(block)
+
+    if not result.served and not result.refused:
+        return result
+
+    parts = ["## Files you asked for\n\n", *blocks]
+    if result.refused or over_request_cap:
+        note = (
+            "\nThese paths were not served — outside the repository, unknown at "
+            f"this revision, not a file, or past a cap: {', '.join(result.refused)}"
+        )
+        if over_request_cap:
+            note += (
+                f"\n{over_request_cap} further requested path(s) were not looked "
+                f"at: no more than {MAX_NEED_FILE_REQUESTS} are considered."
+            )
+        parts.append(note + "\nDo not report a finding that rests on one of them.\n")
+    result.text = "".join(parts)
+    return result
+
+
 _SYMBOL_PATTERNS = (
     re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\("),
     re.compile(r"^\s*class\s+([A-Za-z_]\w*)\b"),
@@ -1154,8 +1379,43 @@ Distinguish a proven defect from speculation, and say which you have.
 
 _FOCUS = {CONFORMANCE: _CONFORMANCE_FOCUS, BUGHUNT: _BUGHUNT_FOCUS}
 
+# Offered only when there is a round to pay for it — see `build_prompt`. The
+# instruction to return findings *alongside* the request is what makes the
+# fallback work: if the re-invocation fails or comes back unparseable, the first
+# answer is all there is, and a reviewer that answered "wait" and nothing else
+# would leave the review empty for the sake of an optional improvement.
+_NEED_FILES_OFFER = """\
+If a file you were not given would settle a finding, you may ask for it — once.
+Add a "need_files" key to your JSON object naming up to {limit} paths, relative
+to the repository root, and you will be called again with those bodies added to
+this prompt.
 
-def build_prompt(agent: str, bundle: DiffBundle, context: str, intent: str) -> str:
+There is no second request. Ask only for what would change a finding, and
+return the findings you already have in the same object: if a file cannot be
+served, what you return now is the whole review.
+"""
+
+# The re-invocation's own closing instruction. The offer above is left out of
+# this prompt entirely rather than repeated with a "no really, this time it is
+# final" — a reviewer reading the offer twice has been told it may ask twice.
+_FINAL_ANSWER = """\
+The files you asked for are above. This is your final answer: there is no
+further request, and a "need_files" key in what you return now is ignored.
+
+Return the complete findings list, not a delta. Repeat every finding from your
+previous answer that still stands — what you return now replaces it. If reading
+these files retracted one, leave it out and say so in the evidence of another
+finding, or return an empty list if it retracted all of them.
+"""
+
+
+def build_prompt(
+    agent: str,
+    bundle: DiffBundle,
+    context: str,
+    intent: str,
+    max_need_files: int = 0,
+) -> str:
     """The whole prompt one reviewer sees.
 
     Assembled here rather than by the caller: the model that asks for a review
@@ -1180,6 +1440,15 @@ def build_prompt(agent: str, bundle: DiffBundle, context: str, intent: str) -> s
         "\n".join(header),
         _FOCUS[agent],
         _NO_TOOLS,
+    ]
+    if max_need_files > 0:
+        # Only when there is a round to pay for it. The caller passes 0 when
+        # `max_need_files` is off *or* when the task's call budget has no room
+        # for a second round, so an offer in the prompt is a promise the CLI
+        # can keep rather than one it will refuse after the reviewer spent its
+        # answer on the request.
+        sections.append(_NEED_FILES_OFFER.format(limit=max_need_files))
+    sections += [
         "## Diff stat\n\n" + (bundle.stat or "(empty)"),
         "## Diff\n\n" + (bundle.body or "(empty)"),
     ]
@@ -1410,10 +1679,19 @@ class AgentOutcome:
     reason: str = ""  # "" | "malformed" | "call_failed"
     calls: int = 0
     dropped: int = 0
+    # The `need_files` round trip. `round_trip` records that a re-invocation was
+    # *made* rather than that it helped — it is what the second model round is
+    # charged on, and a re-invocation that failed still cost one.
+    round_trip: bool = False
+    served: list[str] = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
+    # Why a round trip did not improve the answer, when one was asked for and
+    # the first answer is what stands. Empty on the ordinary paths.
+    note: str = ""
 
 
 def _parse_payload(raw: str, source: str):
-    """`(findings, dropped)`, or `None` when the response carried no usable JSON.
+    """`(findings, dropped, need_files)`, or `None` when there was no usable JSON.
 
     Two different failures hide behind `parse_findings` returning `[]`. One is a
     clean review; the other is a response that has to be retried. The shape
@@ -1429,16 +1707,30 @@ def _parse_payload(raw: str, source: str):
     malformed instead of clean.
     """
     payload = _extract_json(raw)
+    need_files: list = []
     if isinstance(payload, dict):
         items = payload.get("findings")
+        requested = payload.get("need_files")
+        if isinstance(requested, list):
+            need_files = requested
+        elif isinstance(requested, str):
+            # A reviewer that names one file often writes it bare rather than in
+            # a list. Cheaper to accept than to spend a retry teaching it.
+            need_files = [requested]
     elif isinstance(payload, list):
         items = payload
     else:
         return None
     if not isinstance(items, list):
+        # A response that is *only* a request — `{"need_files": [...]}` with no
+        # findings key — is the shape the offer invites from a reviewer that has
+        # nothing to report yet. Retrying it as malformed would spend a whole
+        # model call teaching it a key it was never told was mandatory.
+        if need_files:
+            return [], 0, need_files
         return None
     findings = parse_findings(raw, source)
-    return findings, len(items) - len(findings)
+    return findings, len(items) - len(findings), need_files
 
 
 def _attempt(agent: str, raw: str):
@@ -1446,22 +1738,181 @@ def _attempt(agent: str, raw: str):
     parsed = _parse_payload(raw, agent)
     if parsed is None:
         return None
-    findings, dropped = parsed
+    findings, dropped, _ = parsed
     if not findings and dropped:
         # Well-shaped envelope, nothing survivable in it. Treated as malformed
         # rather than clean, because "the reviewer found nothing" and "every
         # finding the reviewer wrote was unusable" are opposite outcomes and
         # only one of them is safe to report as a passing review.
         return None
-    return findings, dropped
+    return parsed
 
 
-def _run_agent(agent: str, prompt: str, invoke, timeout_seconds: int) -> AgentOutcome:
-    """One reviewer, with its single retry.
+def _remaining(started: float, timeout_seconds: int) -> tuple[int, int]:
+    """`(seconds left, the floor below which a further call is not worth making)`.
+
+    The floor scales with the configured budget: a hard 15s would report "no
+    budget left" against a 10s timeout that had not been spent at all.
+    """
+    floor = min(MIN_RETRY_SECONDS, max(1, timeout_seconds // 2))
+    return int(timeout_seconds - (time.monotonic() - started)), floor
+
+
+def _round_trip(
+    agent: str,
+    outcome: AgentOutcome,
+    requested: list,
+    *,
+    serve,
+    build_final_prompt,
+    invoke,
+    started: float,
+    timeout_seconds: int,
+) -> AgentOutcome:
+    """The one `need_files` re-invocation, or the reason there wasn't one.
+
+    `outcome` already carries a usable answer, and this can only improve it —
+    so every failure path below returns that answer rather than replacing it
+    with an error. Discarding a review that is already paid for because an
+    optional extra round did not work would be the expensive way to be wrong.
+
+    There is deliberately no retry here and no second request honoured. "One
+    re-invocation, never a loop" is the whole rule: a reviewer that answers the
+    served files with another `need_files` gets its findings taken and its
+    request ignored.
+
+    Both outward calls are wrapped, and that is load-bearing rather than
+    defensive habit. `run_review` turns an escaping exception into a *failed
+    reviewer*, so a `serve` that raises (`git_dir` refuses a repository) or an
+    `invoke` that raises (`make_brain` or `brain.execute` — neither returns an
+    `AgentReply` for that) would take the first answer down with it: `ok` would
+    become `error`, which the workflow reads as "block the push". Losing a paid
+    review to a failed optional extra is the exact inversion of this function's
+    purpose.
+    """
+    # Checked before the gather, not only after it. Serving runs `git_dir` plus
+    # two `cat-file`s and a `show` per candidate, none of it charged against the
+    # agent's clock — so a budget tested only afterwards lets a slow serve push
+    # the thread past `run_review`'s join deadline and report a negative
+    # remaining. An agent with no budget left has nothing to spend the files on.
+    remaining, floor = _remaining(started, timeout_seconds)
+    if remaining < floor:
+        outcome.note = (
+            f"{agent} asked for files but only {max(0, remaining)}s of its "
+            f"{timeout_seconds}s budget remained, below the {floor}s floor"
+        )
+        return outcome
+
+    try:
+        needed = serve(requested)
+    except Exception as exc:
+        outcome.note = (
+            f"{agent} asked for {len(requested)} file(s) and they could not be "
+            f"gathered ({type(exc).__name__}: {exc}); its first answer stands"
+        )
+        return outcome
+    outcome.served = needed.served
+    outcome.refused = needed.refused
+    if not needed.served:
+        # Re-invoking with nothing added would ask the same question of the same
+        # prompt and charge a round for the answer.
+        outcome.note = (
+            f"{agent} asked for {len(requested)} file(s), none could be served, "
+            "so it was not called again"
+        )
+        return outcome
+
+    # Again, because the gather itself took time off the same clock.
+    remaining, floor = _remaining(started, timeout_seconds)
+    if remaining < floor:
+        outcome.note = (
+            f"{agent} asked for files and gathering them left only "
+            f"{max(0, remaining)}s of its {timeout_seconds}s budget, below the "
+            f"{floor}s floor"
+        )
+        return outcome
+
+    # Charged before the call is made, not after it returns. A brain that
+    # raises part-way may still have been billed, and the alternative reading
+    # lets a reviewer whose re-invocation always raises spend two invocations
+    # for every round it is charged.
+    outcome.calls += 1
+    outcome.round_trip = True
+    try:
+        reply = invoke(
+            agent,
+            "\n\n".join([build_final_prompt(), needed.text, _FINAL_ANSWER]),
+            remaining,
+        )
+    except Exception as exc:
+        outcome.note = (
+            f"{agent} was re-invoked with {len(needed.served)} requested file(s) "
+            f"and it raised {type(exc).__name__}: {exc}; its first answer stands"
+        )
+        return outcome
+    if not reply.ok:
+        outcome.note = (
+            f"{agent} was re-invoked with {len(needed.served)} requested file(s) "
+            f"and the call failed ({reply.error or 'no reason given'}); its first "
+            "answer stands"
+        )
+        return outcome
+
+    second = _attempt(agent, reply.text)
+    if second is None:
+        outcome.note = (
+            f"{agent} returned unparseable output on its re-invocation; its first "
+            "answer stands"
+        )
+        return outcome
+
+    # The second answer replaces the first, because a reviewer that has read the
+    # file is better informed — retracting a finding it could not verify is a
+    # real outcome of the round trip and the `unverified` flag exists for
+    # exactly that. But a *net loss* is never allowed to be silent. The
+    # dangerous shape is a reviewer answering `{"findings": []}` because it
+    # believes it already reported them: the envelope would then be
+    # byte-identical to a genuinely clean review, which is the workflow's signal
+    # to let the push through. Retraction and forgetfulness cannot be told apart
+    # from out here, so the note carries the loss and the gate reads it.
+    before = len(outcome.findings or [])
+    findings, dropped, _ = second
+    if len(findings) < before:
+        outcome.note = (
+            f"{agent} returned {len(findings)} finding(s) after reading "
+            f"{len(needed.served)} requested file(s), down from {before} before. "
+            "Either it retracted findings the files disproved, or it did not "
+            "repeat them — treat the drop as unexplained unless its evidence "
+            "says which."
+        )
+    outcome.findings, outcome.dropped = findings, dropped
+    return outcome
+
+
+def _run_agent(
+    agent: str,
+    prompt: str,
+    invoke,
+    timeout_seconds: int,
+    *,
+    serve=None,
+    build_final_prompt=None,
+) -> AgentOutcome:
+    """One reviewer: its single malformed-output retry, then its single round trip.
+
+    The two are different mechanisms with different causes and neither consumes
+    the other's chance. A malformed first answer is retried with a nudge, and if
+    the retry comes back asking for files it still gets them — the reviewer that
+    could not format its answer is not thereby forbidden from reading the code.
 
     The error carries the head of the raw output when the cause was malformed
-    JSON — a caller staring at "malformed" with no sample cannot tell a
-    truncated response from a chatty one.
+    JSON: a caller staring at "malformed" with no sample cannot tell a truncated
+    response from a chatty one.
+
+    `serve(requested) -> NeededFiles` is None when the round trip is off, and
+    `build_final_prompt()` returns the same prompt without the request offer
+    in it. A callable rather than a string because most runs never round trip,
+    and building it is a second pass over a diff that can run to `max_diff_chars`.
     """
     started = time.monotonic()
     reply = invoke(agent, prompt, timeout_seconds)
@@ -1471,40 +1922,51 @@ def _run_agent(agent: str, prompt: str, invoke, timeout_seconds: int) -> AgentOu
         )
 
     attempt = _attempt(agent, reply.text)
-    if attempt is not None:
-        findings, dropped = attempt
-        return AgentOutcome(findings=findings, calls=1, dropped=dropped)
+    calls = 1
+    if attempt is None:
+        # The retry runs against what is left of this agent's budget, never a
+        # fresh one, so a reviewer cannot double the wall time by answering
+        # badly.
+        remaining, floor = _remaining(started, timeout_seconds)
+        if remaining < floor:
+            return AgentOutcome(
+                error=(
+                    f"{agent} returned unparseable output and only {remaining}s of "
+                    f"its {timeout_seconds}s budget remained, below the {floor}s "
+                    f"retry floor: {reply.text[:500]}"
+                ),
+                reason="malformed",
+                calls=1,
+            )
+        retry = invoke(agent, f"{prompt}\n\n{_RETRY_NUDGE}", remaining)
+        calls = 2
+        if not retry.ok:
+            return AgentOutcome(
+                error=retry.error or f"{agent} retry failed",
+                reason="call_failed",
+                calls=2,
+            )
+        attempt = _attempt(agent, retry.text)
+        if attempt is None:
+            return AgentOutcome(
+                error=f"{agent} returned unparseable output twice: {reply.text[:500]}",
+                reason="malformed",
+                calls=2,
+            )
 
-    # The retry runs against what is left of this agent's budget, never a fresh
-    # one, so a reviewer cannot double the wall time by answering badly. The
-    # floor scales with the configured budget: a hard 15s would report "no
-    # budget left" against a 10s timeout that had not been spent at all.
-    floor = min(MIN_RETRY_SECONDS, max(1, timeout_seconds // 2))
-    remaining = int(timeout_seconds - (time.monotonic() - started))
-    if remaining < floor:
-        return AgentOutcome(
-            error=(
-                f"{agent} returned unparseable output and only {remaining}s of its "
-                f"{timeout_seconds}s budget remained, below the {floor}s retry "
-                f"floor: {reply.text[:500]}"
-            ),
-            reason="malformed",
-            calls=1,
-        )
-
-    retry = invoke(agent, f"{prompt}\n\n{_RETRY_NUDGE}", remaining)
-    if not retry.ok:
-        return AgentOutcome(
-            error=retry.error or f"{agent} retry failed", reason="call_failed", calls=2
-        )
-    attempt = _attempt(agent, retry.text)
-    if attempt is not None:
-        findings, dropped = attempt
-        return AgentOutcome(findings=findings, calls=2, dropped=dropped)
-    return AgentOutcome(
-        error=f"{agent} returned unparseable output twice: {reply.text[:500]}",
-        reason="malformed",
-        calls=2,
+    findings, dropped, requested = attempt
+    outcome = AgentOutcome(findings=findings, calls=calls, dropped=dropped)
+    if serve is None or not requested:
+        return outcome
+    return _round_trip(
+        agent,
+        outcome,
+        requested,
+        serve=serve,
+        build_final_prompt=build_final_prompt or (lambda: prompt),
+        invoke=invoke,
+        started=started,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -1518,6 +1980,7 @@ def run_review(
     cfg: ReviewConfig | None = None,
     invoke=None,
     timeout_seconds: int = 120,
+    allow_need_files: bool = True,
 ) -> dict:
     """Assemble a review, run the reviewers, and return the envelope.
 
@@ -1526,9 +1989,18 @@ def run_review(
     engine stay free of `config` and `brain` imports, and lets the tests draw
     their boundary where the sleep-cycle tests draw theirs.
 
-    The returned dict carries a `rounds` key the CLI uses to decide whether to
-    charge the task's budget: 1 when at least one model invocation returned,
-    0 when none did. Charging on invocations rather than on clean results is
+    `allow_need_files` is the caller's answer to "can the task's budget pay for
+    a second round?". False keeps the offer out of the prompt entirely rather
+    than making it and refusing — a reviewer that spends its answer on a request
+    nothing will serve has been charged for nothing.
+
+    The returned dict carries a `rounds` key the CLI uses to decide how much to
+    charge the task's budget: 0 when no model invocation returned, 1 for the
+    ordinary run, 2 when any reviewer took its `need_files` round trip. A round
+    is a *wave* of calls rather than one call — the two agents run concurrently
+    and either may retry once, so one round is up to four invocations and the
+    round trip adds one wave, not one per agent. Charging on invocations rather
+    than on clean results is
     deliberate in both directions — a run refused by a guard or short-circuited
     by the breaker spent nothing and must be free, while a reviewer that answers
     in prose twice has spent real money and must not be, or a malformed-output
@@ -1558,6 +2030,9 @@ def run_review(
         "counts": _counts([]),
         "findings": [],
         "dropped_findings": 0,
+        "files_served": [],
+        "files_refused": [],
+        "need_files_note": "",
         "partial": False,
         "partial_reason": "",
         "empty": False,
@@ -1584,10 +2059,47 @@ def run_review(
 
     outcomes: dict[str, AgentOutcome] = {}
 
+    # 0 when the feature is off *or* the caller's budget has no room for the
+    # second round, and either way the offer stays out of the prompt. Clamped
+    # rather than passed through: nothing validates the TOML value, and a
+    # negative one must read as "off" everywhere rather than as off in the
+    # prompt and on in the plumbing.
+    need_limit = max(0, cfg.max_need_files) if allow_need_files else 0
+
+    def serve(requested):
+        return collect_needed_files(
+            worktree,
+            bundle.head,
+            requested,
+            max_files=need_limit,
+            max_file_chars=cfg.max_file_chars,
+            # Half the context budget, not another whole one. The re-invocation
+            # carries the entire first prompt — diff plus assembled context —
+            # and adding a second full `max_context_chars` on top would make it
+            # substantially larger than the prompt those caps were sized
+            # against.
+            max_total_chars=cfg.max_context_chars // 2,
+        )
+
     def _one(agent: str) -> None:
         try:
-            prompt = build_prompt(agent, bundle, context, intent)
-            outcomes[agent] = _run_agent(agent, prompt, invoke, timeout_seconds)
+            prompt = build_prompt(
+                agent, bundle, context, intent, max_need_files=need_limit
+            )
+            # The re-invocation's base: identical but for the offer, which must
+            # not be repeated to a reviewer that has already used it. Built
+            # lazily, because most runs never round trip and this is a second
+            # pass over a diff that can run to `max_diff_chars`.
+            outcomes[agent] = _run_agent(
+                agent,
+                prompt,
+                invoke,
+                timeout_seconds,
+                serve=serve if need_limit > 0 else None,
+                build_final_prompt=lambda a=agent: build_prompt(
+                    a, bundle, context, intent
+                ),
+            )
         except Exception as exc:
             # A brain that raises is one failed reviewer, not a failed review.
             # Letting it out of the thread would lose the other agent's work and
@@ -1604,7 +2116,14 @@ def run_review(
     else:
         # Concurrently, so wall time is max(t1, t2) rather than the sum — which
         # is why each agent gets the whole `timeout_seconds` and not half of it.
-        threads = [threading.Thread(target=_one, args=(agent,)) for agent in agents]
+        # Daemon threads, so "abandoned" below is true rather than aspirational.
+        # A non-daemon straggler blocks interpreter shutdown, so `_emit`'s
+        # `sys.exit` would hang until it finished — past the proxy ceiling the
+        # timeout clamp exists to respect, having already reported it abandoned.
+        threads = [
+            threading.Thread(target=_one, args=(agent,), daemon=True)
+            for agent in agents
+        ]
         for thread in threads:
             thread.start()
         # Bounded, because `timeout_seconds` is enforced inside the brain and a
@@ -1628,9 +2147,25 @@ def run_review(
             )
 
     rounds = 1 if any(o.calls for o in outcomes.values()) else 0
+    # Both agents re-invoking is one extra wave, not two — see the docstring.
+    if rounds and any(o.round_trip for o in outcomes.values()):
+        rounds = 2
     succeeded = [a for a in agents if outcomes[a].findings is not None]
     failed = [a for a in agents if outcomes[a].findings is None]
     dropped = sum(outcomes[a].dropped for a in succeeded)
+
+    # Reported from every return path, including the error one: a review that
+    # dropped a file a reviewer asked for and said nothing about it is the same
+    # silent-loss failure as a truncated diff nothing flags.
+    served = sorted({p for a in agents for p in outcomes[a].served})
+    refused = sorted({p for a in agents for p in outcomes[a].refused})
+    need_files_note = "; ".join(outcomes[a].note for a in agents if outcomes[a].note)
+
+    envelope.update(
+        files_served=served,
+        files_refused=refused,
+        need_files_note=need_files_note,
+    )
 
     if not succeeded:
         # Every reviewer failed, so there is no partial answer to salvage.

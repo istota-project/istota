@@ -49,6 +49,7 @@ from istota.skills.code_review.engine import (
     collect_conventions,
     collect_diff,
     collect_file_bodies,
+    collect_needed_files,
     git_dir,
     merge_findings,
     parse_findings,
@@ -916,6 +917,23 @@ class TestBuildPrompt:
         with pytest.raises(ReviewError):
             build_prompt("skinner", self._bundle(), "", "x")
 
+    def test_it_offers_the_need_files_round_trip_when_one_is_available(self):
+        prompt = build_prompt("conformance", self._bundle(), "", "x", max_need_files=6)
+
+        assert "need_files" in prompt
+        assert "6" in prompt
+
+    def test_it_never_offers_a_round_trip_it_cannot_serve(self):
+        """`max_need_files = 0`, or a call budget with no room for a second
+        round. Advertising a facility that will be refused spends the
+        reviewer's attention on a request nothing answers."""
+        prompt = build_prompt("conformance", self._bundle(), "", "x", max_need_files=0)
+
+        assert "need_files" not in prompt
+
+    def test_the_round_trip_is_off_by_default_for_callers_that_do_not_ask(self):
+        assert "need_files" not in build_prompt("conformance", self._bundle(), "", "x")
+
 
 class TestParseFindings:
     PAYLOAD = {
@@ -1137,3 +1155,355 @@ class TestAssembleContext:
         assert assemble_context(repo, bundle, ReviewConfig(max_context_chars=-5)) == ""
         assert collect_conventions(repo, bundle.head, bundle.files, -5) == ""
         assert collect_file_bodies(repo, bundle, max_file_chars=10, max_total_chars=-5) == ""
+
+
+class TestCollectNeededFiles:
+    """The `need_files` round trip's file server.
+
+    A reviewer names paths and the engine serves them, which makes this the one
+    place in the module where a *model* chooses which blob gets read. Two rules
+    hold it: the path must be a plain relative path inside the repository, and
+    the body still comes out of the object store rather than off the filesystem.
+    The second is what makes the first defence in depth rather than the whole
+    boundary — see `test_a_symlink_yields_its_target_text_not_the_file` below.
+    """
+
+    def test_a_requested_file_arrives_whole(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["caller.py"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == ["caller.py"]
+        assert served.refused == []
+        assert "from app import existing" in served.text
+        assert "caller.py" in served.text
+
+    def test_a_file_the_diff_never_touched_is_servable(self, repo):
+        """The whole point: the reviewer is asking for something it was not given."""
+        branch_with_change(repo)
+        bundle = collect_diff(repo, "main...HEAD", 200_000)
+        assert "caller.py" not in bundle.files
+
+        served = collect_needed_files(
+            repo, bundle.head, ["caller.py"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == ["caller.py"]
+
+    def test_a_path_outside_the_worktree_is_dropped_and_the_rest_still_served(
+        self, repo, tmp_path
+    ):
+        outside = tmp_path / "outside_secret.txt"
+        outside.write_text("OUTSIDE_SENTINEL\n")
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo,
+            "HEAD",
+            ["../outside_secret.txt", "app.py"],
+            max_files=6,
+            max_file_chars=20_000,
+        )
+
+        assert served.served == ["app.py"]
+        assert "../outside_secret.txt" in served.refused
+        assert "OUTSIDE_SENTINEL" not in served.text
+        assert "def existing" in served.text, "one bad path must not sink the rest"
+
+    def test_a_deeply_escaping_path_is_refused(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo,
+            "HEAD",
+            ["src/../../etc/passwd", "a/b/../../../outside"],
+            max_files=6,
+            max_file_chars=20_000,
+        )
+
+        assert served.served == []
+        assert len(served.refused) == 2
+
+    def test_an_absolute_path_is_refused(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["/etc/passwd"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert served.refused == ["/etc/passwd"]
+
+    def test_an_option_shaped_path_is_refused(self, repo):
+        """Defence in depth, not the thing that closes option injection: `_show`
+        embeds the path behind `END_OF_OPTIONS`, so git cannot read it as an
+        option today. Pinned for the caller that passes one as its own argv."""
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo,
+            "HEAD",
+            ["--output=/tmp/pwned", "-c"],
+            max_files=6,
+            max_file_chars=20_000,
+        )
+
+        assert served.served == []
+        assert len(served.refused) == 2
+
+    def test_a_symlink_yields_its_target_text_not_the_file(self, repo, tmp_path):
+        """The containment check is defence in depth; this is the real boundary.
+
+        A link planted inside the worktree passes every path rule — it *is* a
+        contained relative path — so if the body came off the filesystem it
+        would read straight out of the root. Coming out of the object store, it
+        reads as the link text, which is harmless.
+        """
+        outside = tmp_path / "outside_secret.txt"
+        outside.write_text("OUTSIDE_SENTINEL\n")
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "link.txt").symlink_to(outside)
+        commit(repo, "plant a link")
+
+        served = collect_needed_files(
+            repo, "HEAD", ["link.txt"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == ["link.txt"]
+        assert "OUTSIDE_SENTINEL" not in served.text
+        assert str(outside) in served.text
+
+    def test_the_cap_truncates_the_request(self, repo):
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        for n in range(5):
+            (repo / f"mod{n}.py").write_text(f"VALUE_{n} = {n}\n")
+        commit(repo, "five modules")
+
+        served = collect_needed_files(
+            repo,
+            "HEAD",
+            [f"mod{n}.py" for n in range(5)],
+            max_files=2,
+            max_file_chars=20_000,
+        )
+
+        assert served.served == ["mod0.py", "mod1.py"]
+        assert served.refused == ["mod2.py", "mod3.py", "mod4.py"]
+
+    def test_a_cap_of_zero_serves_nothing(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["app.py"], max_files=0, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert served.text == ""
+
+    def test_an_unknown_path_is_refused_rather_than_served_empty(self, repo):
+        """A reviewer told nothing about a file it asked for would take the
+        silence for an empty file and file a finding on it."""
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["no/such/file.py"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert served.refused == ["no/such/file.py"]
+
+    def test_a_duplicate_request_is_served_once(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo,
+            "HEAD",
+            ["app.py", "app.py", "./app.py"],
+            max_files=6,
+            max_file_chars=20_000,
+        )
+
+        assert served.served == ["app.py"]
+        assert served.text.count("(whole file)") == 1
+
+    def test_a_file_over_the_per_file_cap_is_truncated_rather_than_dropped(self, repo):
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "big.py").write_text(
+            "HEAD_SENTINEL = 0\n" + "".join(f"BIG_{n} = {n}\n" for n in range(2000))
+        )
+        commit(repo, "big file")
+
+        served = collect_needed_files(
+            repo, "HEAD", ["big.py"], max_files=6, max_file_chars=200
+        )
+
+        assert served.served == ["big.py"]
+        assert "HEAD_SENTINEL" in served.text
+        assert "truncated" in served.text
+        assert len(served.text) < 1000
+
+    def test_a_refusal_is_named_in_the_text_the_reviewer_sees(self, repo):
+        """A dropped request the reviewer is not told about is a finding resting
+        on a file it believes it was given."""
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["app.py", "/etc/passwd"], max_files=6, max_file_chars=20_000
+        )
+
+        assert "/etc/passwd" in served.text
+        assert "not served" in served.text.lower()
+
+    def test_an_empty_request_produces_nothing(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", [], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert served.refused == []
+        assert served.text == ""
+
+
+    def test_a_directory_is_refused_rather_than_served_as_a_file(self, repo):
+        """`git show <rev>:<dir>` prints a tree listing quite happily, and
+        labelling that "(whole file)" is how a reviewer comes to believe a
+        directory is a two-line module."""
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "pkg").mkdir()
+        (repo / "pkg" / "mod.py").write_text("VALUE = 1\n")
+        commit(repo, "add a package")
+
+        served = collect_needed_files(
+            repo, "HEAD", ["pkg"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert served.refused == ["pkg"]
+        assert "mod.py" not in served.text
+
+    def test_the_request_list_itself_is_bounded(self, repo):
+        """The list is model-written and every refusal is echoed back into the
+        reviewer's own prompt, so an enormous one must not become an enormous
+        prompt."""
+        branch_with_change(repo)
+        requested = ["app.py"] + [f"no/such/file{n}.py" for n in range(500)]
+
+        served = collect_needed_files(
+            repo, "HEAD", requested, max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == ["app.py"]
+        assert len(served.refused) < 500
+        assert "not looked at" in served.text
+        assert len(served.text) < 20_000
+
+    def test_an_absurdly_long_path_is_truncated_before_it_is_echoed(self, repo):
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["z" * 50_000], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert len(served.refused[0]) < 200
+        assert len(served.text) < 1000
+
+    def test_the_total_cap_stops_the_gather(self, repo):
+        """`max_files * max_file_chars` otherwise exceeds the whole context
+        budget, so the round trip would be the one context source that ignores
+        it — `collect_file_bodies` next door is bounded the same way."""
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        for n in range(4):
+            (repo / f"mod{n}.py").write_text(f"VALUE_{n} = {n}\n" * 60)
+        commit(repo, "four modules")
+
+        served = collect_needed_files(
+            repo,
+            "HEAD",
+            [f"mod{n}.py" for n in range(4)],
+            max_files=6,
+            max_file_chars=20_000,
+            max_total_chars=1500,
+        )
+
+        assert served.served, "the first file must still fit"
+        assert len(served.served) < 4
+        assert served.refused, "and what did not fit must be named, not dropped"
+        assert len(served.text) < 3000
+
+
+    def test_a_dash_created_by_normalising_is_refused(self, repo):
+        """Normalising can *create* the option shape: `./-output=x` collapses to
+        `-output=x`, so the check that runs before it would let the caller be
+        handed exactly what it was meant to refuse."""
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", ["./-output=x"], max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == []
+        assert served.refused == ["./-output=x"]
+
+    def test_an_oversized_blob_is_refused_unread(self, repo):
+        """`_show` would read up to MAX_GIT_OUTPUT_BYTES before giving up, so a
+        request naming oversized blobs is the daemon reading a gigabyte to
+        produce a few excerpts. The size is asked for before the content."""
+        from istota.skills.code_review import engine
+
+        run_git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "huge.bin").write_text("x" * 4000)
+        (repo / "small.py").write_text("VALUE = 1\n")
+        commit(repo, "one large file, one small")
+
+        # Not a real 2 MiB file — the bound is what is under test, not git.
+        original = engine.MAX_NEED_FILE_BYTES
+        engine.MAX_NEED_FILE_BYTES = 1000
+        try:
+            served = collect_needed_files(
+                repo,
+                "HEAD",
+                ["huge.bin", "small.py"],
+                max_files=6,
+                max_file_chars=20_000,
+            )
+        finally:
+            engine.MAX_NEED_FILE_BYTES = original
+
+        assert served.served == ["small.py"]
+        assert served.refused == ["huge.bin"]
+        assert "xxxx" not in served.text
+
+    def test_a_one_shot_iterable_does_not_produce_a_negative_overflow(self, repo):
+        """`requested` is untyped and this function is called directly. Consuming
+        it twice made the overflow count negative and the note nonsense."""
+        branch_with_change(repo)
+
+        served = collect_needed_files(
+            repo, "HEAD", iter(["app.py"]), max_files=6, max_file_chars=20_000
+        )
+
+        assert served.served == ["app.py"]
+        assert "further requested path(s)" not in served.text
+
+    def test_a_gitdir_redirect_is_refused_here_too(self, repos_root, tmp_path):
+        """`collect_file_bodies` validates the git directory before it reads a
+        blob, and this reads blobs the same way for a model-chosen path list."""
+        outside = tmp_path / "outside_repo"
+        outside.mkdir()
+        run_git(outside, "init", "-q", "-b", "main", ".")
+        (outside / "secret.py").write_text("OUTSIDE_SENTINEL = 1\n")
+        commit(outside, "outside")
+
+        contained = repos_root / "redirected"
+        contained.mkdir()
+        (contained / ".git").write_text(f"gitdir: {outside}/.git\n")
+
+        with pytest.raises(ReviewError):
+            collect_needed_files(
+                contained, "HEAD", ["secret.py"], max_files=6, max_file_chars=20_000
+            )

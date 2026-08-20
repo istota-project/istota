@@ -798,8 +798,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                     # re-invocation; 0 disables the round trip
 # timeout_seconds = 120               # per agent; both run concurrently, so this is
 #                                     # wall time, not half of it
-# max_calls_per_task = 8              # review rounds per task (one round is up to four
-#                                     # model invocations: two agents, each retrying once).
+# max_calls_per_task = 8              # review rounds per task. A round is a wave of model
+#                                     # calls, not a run: a run charges 1, or 2 when a
+#                                     # reviewer takes its max_need_files round trip. One
+#                                     # wave is up to four invocations (two agents, each
+#                                     # retrying a malformed answer once), so a run is at
+#                                     # most two rounds and six calls.
 #                                     # 0 or less permits none — use enabled = false to
 #                                     # switch the feature off. At the cap the review
 #                                     # degrades to skipped rather than erroring

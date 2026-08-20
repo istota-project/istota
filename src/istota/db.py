@@ -8130,23 +8130,28 @@ def code_review_calls_get(conn: sqlite3.Connection, task_id: int) -> int:
     return int(row["calls"]) if row else 0
 
 
-def code_review_calls_increment(conn: sqlite3.Connection, task_id: int) -> int:
-    """Count one successful review round. Returns the new total.
+def code_review_calls_increment(
+    conn: sqlite3.Connection, task_id: int, count: int = 1
+) -> int:
+    """Count `count` review rounds against a task. Returns the new total.
 
-    Upsert rather than read-then-write: two reviews for one task should not be
-    able to interleave into a single increment. Commits in its own transaction,
-    like the other control-signal writes — the caller is a short-lived CLI
-    process and the count must survive it.
+    `count` is not always 1: a review whose reviewers took the `need_files`
+    round trip spent two model rounds and charges both in one call. Doing it in
+    one statement rather than looping is what keeps the upsert's guarantee —
+    two reviews for one task cannot interleave into a single increment.
+
+    Commits in its own transaction, like the other control-signal writes: the
+    caller is a short-lived CLI process and the count must survive it.
     """
     row = conn.execute(
         """
         INSERT INTO code_review_calls (task_id, calls, updated_at)
-        VALUES (?, 1, datetime('now'))
+        VALUES (?, ?, datetime('now'))
         ON CONFLICT(task_id) DO UPDATE
-            SET calls = calls + 1, updated_at = datetime('now')
+            SET calls = calls + excluded.calls, updated_at = datetime('now')
         RETURNING calls
         """,
-        (task_id,),
+        (task_id, count),
     ).fetchone()
     conn.commit()
     return int(row["calls"])
