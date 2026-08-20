@@ -8108,3 +8108,44 @@ def cache_reverse_geocode(
             json.dumps(result.get("raw", {})),
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# code_review call budget
+# ---------------------------------------------------------------------------
+
+
+def code_review_calls_get(conn: sqlite3.Connection, task_id: int) -> int:
+    """Successful review rounds this task has already spent.
+
+    Zero for a task that has never run one, which is also what a deleted task
+    reads as — the row is `ON DELETE CASCADE`, so a counter cannot outlive the
+    task it was budgeting.
+    """
+    row = conn.execute(
+        "SELECT calls FROM code_review_calls WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    return int(row["calls"]) if row else 0
+
+
+def code_review_calls_increment(conn: sqlite3.Connection, task_id: int) -> int:
+    """Count one successful review round. Returns the new total.
+
+    Upsert rather than read-then-write: two reviews for one task should not be
+    able to interleave into a single increment. Commits in its own transaction,
+    like the other control-signal writes — the caller is a short-lived CLI
+    process and the count must survive it.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO code_review_calls (task_id, calls, updated_at)
+        VALUES (?, 1, datetime('now'))
+        ON CONFLICT(task_id) DO UPDATE
+            SET calls = calls + 1, updated_at = datetime('now')
+        RETURNING calls
+        """,
+        (task_id,),
+    ).fetchone()
+    conn.commit()
+    return int(row["calls"])

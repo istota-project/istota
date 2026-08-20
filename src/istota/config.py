@@ -483,6 +483,54 @@ class PlaybooksConfig:
 
 
 @dataclass
+class ReviewConfig:
+    """`[developer.review]` — the code_review CLI's models, caps and budget.
+
+    Distinct from `skills.code_review.engine.ReviewConfig`, which carries only
+    the sizing and caps the engine works from. Keeping them apart is what lets
+    every engine function be tested without importing this module; the CLI
+    builds the engine's from this one.
+
+    Defaults are chosen so an operator who sets nothing gets a working review on
+    a repository they have already enabled `[developer]` for. `enabled = false`
+    is the off switch — there is no separate feature flag, because the skill is
+    already gated by `developer.enabled` and an admin check.
+    """
+
+    enabled: bool = True
+    # Role aliases. A `:effort` modifier is honoured: the CLI splits it off with
+    # `split_effort` and passes it as `BrainRequest.effort`, because
+    # `resolve_model_name` strips the modifier and keeps only the base, so a
+    # value handed to it whole would silently run at default effort.
+    conformance_model: str = "general"
+    bughunt_model: str = "smart:high"
+    both_agents_threshold_lines: int = 150
+    # Matched against changed paths as case-insensitive substrings. A hit puts
+    # both reviewers on the diff however small it is.
+    boundary_patterns: list[str] = field(default_factory=lambda: [
+        "auth", "secret", "credential", "token", "password",
+        "migration", "schema.sql", "billing", "payment", "money",
+        "crypto", "sandbox", "proxy", "deploy", "ansible",
+    ])
+    max_diff_chars: int = 200_000
+    max_context_chars: int = 60_000
+    # Per changed file, for whole-body inclusion; over it, that file falls back
+    # to its own hunks.
+    max_file_chars: int = 20_000
+    max_callers_per_symbol: int = 8
+    # Files a reviewer may request on the one re-invocation; 0 disables the
+    # round trip. Consumed in Stage 5.
+    max_need_files: int = 6
+    # Per agent. Both agents run concurrently, so this is wall time and not half
+    # of it.
+    timeout_seconds: int = 120
+    # Successful model rounds per task. At the cap the review degrades to
+    # `skipped` rather than erroring: a blocking cap would stop a task that had
+    # already finished its work from landing it.
+    max_calls_per_task: int = 8
+
+
+@dataclass
 class DeveloperConfig:
     """Developer skill configuration for git + GitLab/GitHub workflows."""
     enabled: bool = False
@@ -539,6 +587,7 @@ class DeveloperConfig:
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
 
 @dataclass
@@ -2508,6 +2557,27 @@ def load_config(config_path: Path | None = None) -> Config:
             extra["gitlab_api_allowlist"] = dev["gitlab_api_allowlist"]
         if "github_api_allowlist" in dev:
             extra["github_api_allowlist"] = dev["github_api_allowlist"]
+        # Unknown keys are ignored rather than fatal, matching the rest of the
+        # loader: only the fields named here are read off the block.
+        rev = dev.get("review", {})
+        review_kwargs = {
+            name: rev[name]
+            for name in (
+                "enabled",
+                "conformance_model",
+                "bughunt_model",
+                "both_agents_threshold_lines",
+                "boundary_patterns",
+                "max_diff_chars",
+                "max_context_chars",
+                "max_file_chars",
+                "max_callers_per_symbol",
+                "max_need_files",
+                "timeout_seconds",
+                "max_calls_per_task",
+            )
+            if name in rev
+        }
         config.developer = DeveloperConfig(
             enabled=dev.get("enabled", False),
             repos_dir=dev.get("repos_dir", ""),
@@ -2521,10 +2591,17 @@ def load_config(config_path: Path | None = None) -> Config:
             github_username=dev.get("github_username", ""),
             github_default_owner=dev.get("github_default_owner", ""),
             github_reviewer=dev.get("github_reviewer", ""),
+            # Never parsed before this: the field existed and both the env spec
+            # in skills/developer/skill.md and config.example.toml advertised
+            # it, but the branch dropped the key, so `author_credit` was always
+            # "" and DEVELOPER_AUTHOR_CREDIT never got set. The `commit` skill
+            # makes that variable the one permitted commit trailer.
+            author_credit=dev.get("author_credit", ""),
             api_timeout_seconds=dev.get("api_timeout_seconds", 30),
             devbox_proxy_enabled=dev.get("devbox_proxy_enabled", True),
             devbox_proxy_socket_dir=dev.get("devbox_proxy_socket_dir", "/var/run/istota"),
             devbox_proxy_audit_log=dev.get("devbox_proxy_audit_log", ""),
+            review=ReviewConfig(**review_kwargs),
             **extra,
         )
 

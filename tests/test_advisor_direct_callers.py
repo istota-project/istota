@@ -1,17 +1,18 @@
 """Advisor-model spec — direct-caller coverage (Stage 1).
 
-Six of the seven ``BrainRequest`` construction sites (sleep cycle, shared-block
-synthesis, health explainer, and the three health OCR paths) build their env
-from ``dict(os.environ)`` and run unsandboxed, so they'd otherwise inherit the
-host's ``~/.claude/settings.json`` ``advisorModel`` the same way the sandboxed
-executor path did before Stage 1. None of them ever sets ``BrainRequest.advisor``
+Seven of the eight ``BrainRequest`` construction sites (sleep cycle,
+shared-block synthesis, health explainer, the three health OCR paths, and the
+code_review CLI) build their env from ``dict(os.environ)`` and run unsandboxed,
+so they'd otherwise inherit the host's ``~/.claude/settings.json``
+``advisorModel`` the same way the sandboxed executor path did before Stage 1.
+None of them ever sets ``BrainRequest.advisor``
 — the fix at the brain layer (Stage 1) covers them "for free" because the
 suppression predicate lives in ``ClaudeCodeBrain.execute`` / ``TmuxClaudeBrain``,
 not at any of these call sites.
 
 This file proves that structurally, not by importing and running each module
 (which would drag in health/memory/briefings fixtures unrelated to the advisor):
-it grep-counts the call sites (so an eighth caller is a loud test failure, not a
+it grep-counts the call sites (so a new caller is a loud test failure, not a
 silent gap — the spec's own requirement), then exercises the two request
 *shapes* those sites actually construct through the real brain.
 """
@@ -27,8 +28,8 @@ from istota.brain.claude_code import ClaudeCodeBrain
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "istota"
 
-# The seven sites named in the spec (executor.py is the one that sets
-# `advisor`; the other six keep the `""` default). Path is relative to `SRC`.
+# The sites named in the spec (executor.py is the one that sets `advisor`; the
+# rest keep the `""` default). Path is relative to `SRC`.
 _KNOWN_SITES = {
     "executor.py",
     "memory/sleep_cycle.py",
@@ -37,6 +38,13 @@ _KNOWN_SITES = {
     "health/ocr.py",
     "health/encounter_ocr.py",
     "health/immunization_ocr.py",
+    # The code_review CLI's reviewers. `advisor=""` is not an oversight here
+    # but the point: the reviewers are text-only by construction
+    # (`allowed_tools=[]`), and the empty default is also what makes
+    # ClaudeCodeBrain suppress the settings-file advisor channel — so a host's
+    # ~/.claude/settings.json cannot hand a tool to a reviewer that is
+    # specified not to have one.
+    "skills/code_review/__init__.py",
 }
 
 
@@ -51,10 +59,10 @@ def _grep_brain_request_sites() -> list[str]:
     return sorted(hits)
 
 
-class TestSevenSites:
-    def test_exactly_the_known_seven_construct_a_brain_request(self):
-        # A new eighth caller must fail this test until someone has thought
-        # about whether it needs an explicit `advisor=` (advisor-model spec,
+class TestKnownSites:
+    def test_exactly_the_known_sites_construct_a_brain_request(self):
+        # A new caller must fail this test until someone has thought about
+        # whether it needs an explicit `advisor=` (advisor-model spec,
         # Tests section — "Direct-caller coverage").
         found = set(_grep_brain_request_sites())
         assert found == _KNOWN_SITES, (
@@ -64,11 +72,11 @@ class TestSevenSites:
 
 
 class TestDirectCallerShapesStayAdvisorFree:
-    """The two request shapes the six direct callers actually build: text-only
-    (sleep cycle, shared blocks, explainer) and Read-only (the three OCR
-    paths). Both leave `advisor` at its `""` default; run each through the
-    real ClaudeCodeBrain and confirm neither emits `--advisor` nor leaves the
-    settings-file channel open."""
+    """The two request shapes the direct callers actually build: text-only
+    (sleep cycle, shared blocks, explainer, code_review) and Read-only (the
+    three OCR paths). Both leave `advisor` at its `""` default; run each
+    through the real ClaudeCodeBrain and confirm neither emits `--advisor`
+    nor leaves the settings-file channel open."""
 
     def _execute_capturing(self, tmp_path, *, allowed_tools):
         req = BrainRequest(

@@ -1001,3 +1001,25 @@ CREATE TABLE IF NOT EXISTS task_steers (
 );
 CREATE INDEX IF NOT EXISTS idx_task_steers_pending
     ON task_steers (task_id, status, seq);
+
+-- Per-task budget for `istota-skill code_review run`. A loop that re-reviews
+-- its own diff spends the operator's money one model round at a time, so the
+-- count is capped per task.
+--
+-- In the framework database rather than a file under the task's temp dir on
+-- purpose: `ISTOTA_DEFERRED_DIR` is bound read-write into the sandbox, so a
+-- loop that reached a file-backed cap could delete the counter and carry on.
+-- The CLI runs host-side with `ISTOTA_DB_PATH` (a proxy-only var the model
+-- never holds) and the framework DB is masked out of the sandbox entirely.
+--
+-- Only *successful* model rounds are counted: a run refused by a guard, one
+-- short-circuited by the availability breaker, and the retry half of a
+-- malformed-output round are all free. At the cap the review degrades to
+-- `skipped` rather than erroring, so a task that has already finished its work
+-- is not stopped from landing it by the loop guard.
+CREATE TABLE IF NOT EXISTS code_review_calls (
+    task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    calls      INTEGER NOT NULL DEFAULT 0,   -- successful model rounds only
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (task_id)
+);

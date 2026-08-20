@@ -751,6 +751,51 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #     "PATCH /repos/*/pulls/*",
 #     "PATCH /repos/*/issues/*",
 # ]
+#
+# # Author credit appended to every commit message the bot writes. This is the
+# # only trailer the `commit` skill permits; nothing else is ever appended.
+# author_credit = "Co-Authored-By: Bot <bot@example.invalid>"
+
+# ----------------------------------------------------------------------------
+# Code review (`istota-skill code_review run`)
+# ----------------------------------------------------------------------------
+# One or two text-only reviewers over a branch diff, run daemon-side through the
+# configured brain. Gated by `developer.enabled` and an admin check as well as
+# the flag below, so there is no separate feature switch. The defaults give a
+# working review on any repository you have already enabled [developer] for.
+#
+# The reviewers have no tools: the CLI assembles everything they see from the
+# repository, because a model-authored prompt deciding what the daemon reads is
+# the boundary this design exists to keep.
+#
+# Two ceilings sit above `timeout_seconds`, and the lower one bites first. The
+# skill proxy kills the command at `security.skill_proxy_timeout` (300s by
+# default). Below that, the sandboxed model calls the CLI through its own Bash
+# tool, whose limit is 120s — so the model must invoke the command with an
+# explicit extended timeout, which `code_review/skill.md` tells it to do.
+
+# [developer.review]
+# enabled = true                      # false disables the CLI; the workflow then
+#                                     # reports "review unavailable" and lands anyway
+# conformance_model = "general"       # role alias; a ":effort" modifier is honoured
+# bughunt_model = "smart:high"        # e.g. "general:medium", "smart:high"
+# both_agents_threshold_lines = 150   # over this, both reviewers run
+# boundary_patterns = [               # case-insensitive substrings of changed paths;
+#     "auth", "secret", "credential", "token", "password",   # a hit forces both
+#     "migration", "schema.sql", "billing", "payment", "money",
+#     "crypto", "sandbox", "proxy", "deploy", "ansible",
+# ]
+# max_diff_chars = 200000
+# max_context_chars = 60000
+# max_file_chars = 20000              # per changed file for whole-body inclusion;
+#                                     # over it, that file falls back to its hunks
+# max_callers_per_symbol = 8
+# max_need_files = 6                  # files a reviewer may request on the one
+#                                     # re-invocation; 0 disables the round trip
+# timeout_seconds = 120               # per agent; both run concurrently, so this is
+#                                     # wall time, not half of it
+# max_calls_per_task = 8              # successful model rounds; at the cap the review
+#                                     # degrades to skipped rather than erroring
 
 # ============================================================================
 # ntfy Push Notifications
