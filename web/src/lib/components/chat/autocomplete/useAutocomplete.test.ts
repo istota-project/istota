@@ -140,4 +140,58 @@ describe('createAutocomplete', () => {
     await Promise.resolve();
     expect(ac.suggestions.map((s) => s.label)).toEqual(['!ab-hit']);
   });
+
+  it('reports the text each sync was computed against', () => {
+    // The composer keys its stale-check off this: state computed for one string
+    // says nothing about a field now holding another.
+    const ac = createAutocomplete([fakeProvider(() => [sug('!a')])]);
+    expect(ac.syncedText).toBe('');
+    ac.sync('!a', 2);
+    expect(ac.syncedText).toBe('!a');
+    ac.sync('hello', 5);
+    expect(ac.syncedText).toBe('hello');
+  });
+
+  it('close() lifts an Escape suppression', () => {
+    // Escape suppresses the *same* text so a bare keyup does not undo the
+    // dismissal. An explicit close is the caller moving on instead — a send, a
+    // room switch — and the next arrival of that text is a new request, not the
+    // one that was dismissed.
+    const ac = createAutocomplete([fakeProvider(() => [sug('!a')])]);
+    ac.sync('!a', 2);
+    ac.onKeydown(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(ac.open).toBe(false);
+    ac.close();
+    ac.sync('!a', 2);
+    expect(ac.open).toBe(true);
+  });
+
+  it('keeps syncedText across a close', () => {
+    // The composer's stale-check reads syncedText and calls close() on the
+    // result, so a close that cleared it would leave that effect writing one of
+    // its own dependencies.
+    const ac = createAutocomplete([fakeProvider(() => [sug('!a')])]);
+    ac.sync('!a', 2);
+    ac.close();
+    expect(ac.syncedText).toBe('!a');
+  });
+
+  it('a result that lands after close() does not reopen the popover', () => {
+    // Every real provider is `async`, so there is always a pending request
+    // between a keystroke and the rows appearing. A close arriving inside that
+    // window has to invalidate the request too, or the popover the caller just
+    // dismissed comes back on its own — with no match behind it, which is worse
+    // than leaving it open: accept() then returns null while onKeydown still
+    // eats the Enter.
+    let resolveFn!: (s: Suggestion[]) => void;
+    const p = new Promise<Suggestion[]>((res) => (resolveFn = res));
+    const ac = createAutocomplete([fakeProvider(() => p)]);
+    ac.sync('!a', 2);
+    ac.close();
+    resolveFn([sug('!a')]);
+    return Promise.resolve().then(() => {
+      expect(ac.open).toBe(false);
+      expect(ac.suggestions).toEqual([]);
+    });
+  });
 });

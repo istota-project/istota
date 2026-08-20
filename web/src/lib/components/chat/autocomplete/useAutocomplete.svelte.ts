@@ -20,6 +20,14 @@ export interface Autocomplete {
   readonly open: boolean;
   readonly suggestions: Suggestion[];
   readonly activeIndex: number;
+  /** The text most recently passed to `sync`. Whatever state the engine holds
+   *  — the match range `accept` splices into, the suggestion list, the open
+   *  flag — was computed from this string and no other, so a caller whose field
+   *  now holds something else is looking at state that has gone stale.
+   *  `close()` deliberately leaves this value standing: a caller comparing its
+   *  field against it and closing on a mismatch would otherwise be writing one
+   *  of its own dependencies. */
+  readonly syncedText: string;
   /** Recompute the active provider + suggestions from the textarea state. */
   sync(text: string, caret: number): void;
   /** Handle a keydown while the popover may be open. Returns true if consumed
@@ -41,8 +49,11 @@ export function createAutocomplete(
   let suggestions = $state<Suggestion[]>([]);
   let activeIndex = $state(0);
 
+  // Reactive so a caller can compare its own field against it and notice the
+  // engine is holding state for text that has since been replaced.
+  let currentText = $state('');
+
   // Non-reactive request/context bookkeeping.
-  let currentText = '';
   let currentMatch: TriggerMatch | null = null;
   let requestSeq = 0; // stale-guard token for async getSuggestions
   // Text at which the popover was dismissed with Escape; suppresses reopen
@@ -54,6 +65,12 @@ export function createAutocomplete(
     suggestions = [];
     activeIndex = 0;
     currentMatch = null;
+    // Drop any in-flight request as well. Every real provider is `async`, so
+    // there is always a pending one between a keystroke and the rows appearing,
+    // and a result that lands after the state was cleared would reopen the
+    // popover on its own — holding no match, which is worse than leaving it
+    // open: `accept` returns null while `onKeydown` still eats the Enter.
+    requestSeq++;
   }
 
   function apply(list: Suggestion[]) {
@@ -99,7 +116,6 @@ export function createAutocomplete(
       }
     }
     // No provider matched.
-    requestSeq++; // invalidate any in-flight async result
     reset();
   }
 
@@ -118,6 +134,11 @@ export function createAutocomplete(
   }
 
   function close() {
+    // Unlike Escape (which resets *and* records what it dismissed), an explicit
+    // close means the caller has moved on — a different room, a different
+    // message. Holding the suppression past that would keep the popover shut
+    // for text the caller has since gone back to.
+    suppressedText = null;
     reset();
   }
 
@@ -161,6 +182,9 @@ export function createAutocomplete(
     },
     get activeIndex() {
       return activeIndex;
+    },
+    get syncedText() {
+      return currentText;
     },
     sync,
     onKeydown,

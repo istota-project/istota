@@ -179,4 +179,35 @@ describe('Composer autocomplete', () => {
     );
     expect(labels).toEqual(['opus']);
   });
+
+  it('submitting closes the popover', async () => {
+    // ISSUE-260. `submit()` clears `text` programmatically, and a programmatic
+    // write fires no `input` event — so nothing driven by DOM events tells the
+    // popover the command it is offering has already been sent.
+    const { container, textarea, onSend } = mount();
+    await type(textarea, '!mo');
+    expect(container.querySelector('[role="listbox"]')).toBeTruthy();
+    key(textarea, 'Enter', { metaKey: true });
+    await tick();
+    expect(onSend).toHaveBeenCalledWith('!mo', [], null);
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+    expect(textarea.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('a submitted popover does not keep eating keys off screen', async () => {
+    // Hiding the rows would not be enough: an engine still holding the old
+    // match consumes the next bare Enter and splices the sent command back
+    // into the emptied field. An engine holding no match is not enough either —
+    // it eats the key without doing anything with it — so the assertion is that
+    // the key was left alone, not just that the field stayed empty.
+    const { textarea } = mount();
+    await type(textarea, '!mo');
+    key(textarea, 'Enter', { metaKey: true });
+    await tick();
+    expect(textarea.value).toBe('');
+    const notPrevented = await key(textarea, 'Enter');
+    await tick();
+    expect(textarea.value).toBe('');
+    expect(notPrevented).toBe(true);
+  });
 });
