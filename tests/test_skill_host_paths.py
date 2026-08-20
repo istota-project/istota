@@ -2,13 +2,20 @@
 
 A skill CLI runs host-side (the proxy spawns it outside the sandbox), so any
 verb taking a host path is an arbitrary-file read or write unless it is scoped.
-Two skills need the same scoping — devbox's ``cp-in`` / ``cp-out`` and kv's
-``set --value-file`` — so the rule lives in one leaf module rather than being
-restated per skill, where the two copies would drift.
+The module holds two allowlists. ``resolve_host_path`` scopes a path in the
+caller's own workspace against the mount roots (devbox ``cp-in``/``cp-out``, kv
+``set --value-file``, email ``--attach``); ``resolve_under_repos`` scopes a
+worktree against ``DEVELOPER_REPOS_DIR`` for the ``code_review`` CLI. One module
+so the roots and the error convention cannot drift apart.
 
-The roots mirror what ``build_bwrap_cmd`` binds *for this user*.
+The mount roots mirror what ``build_bwrap_cmd`` binds *for this user*.
 ``NEXTCLOUD_MOUNT_PATH`` is the shared mount root for everyone, so taking it
 whole would hand one user another's workspace.
+
+Several tests here are written specifically to kill a plausible wrong
+implementation rather than to describe the right one — an argument-inspecting
+check that never resolves, a lexical ``startswith`` containment, a root echoed
+back instead of resolved. Where a test looks redundant, that is usually why.
 """
 
 from pathlib import Path
@@ -17,7 +24,9 @@ import pytest
 
 from istota.skill_host_paths import (
     allowed_host_roots,
+    developer_repos_root,
     resolve_host_path,
+    resolve_under_repos,
     validate_host_path,
 )
 
@@ -210,3 +219,229 @@ class TestDevboxStillDelegates:
         p.write_text("x")
         _, err = devbox._resolve_host_path(p, must_exist=True)
         assert err is not None
+
+
+class TestDeveloperReposRoot:
+    """`DEVELOPER_REPOS_DIR` is its own root, separate from the mount ones.
+
+    The review CLI is handed a worktree path chosen by the sandboxed model, and
+    it runs host-side with the daemon's filesystem view. Without scoping, "review
+    this worktree" is an arbitrary directory read whose contents come back in a
+    reviewer prompt.
+    """
+
+    @pytest.fixture
+    def repos(self, tmp_path, monkeypatch):
+        root = tmp_path / "repos"
+        (root / "ns" / "project--branch").mkdir(parents=True)
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+        return root
+
+    def test_returns_the_resolved_root(self, repos):
+        assert developer_repos_root() == repos.resolve()
+
+    def test_root_is_resolved_not_echoed(self, tmp_path, monkeypatch):
+        """`repos.resolve() == repos` under pytest's tmp_path, so the test above
+        cannot tell a resolving implementation from one that echoes the env var.
+        A symlinked root can."""
+        physical = tmp_path / "physical"
+        physical.mkdir()
+        link = tmp_path / "link-to-physical"
+        link.symlink_to(physical)
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(link))
+        assert developer_repos_root() == physical.resolve()
+        assert developer_repos_root() != link
+
+    def test_unset_is_none(self, monkeypatch):
+        monkeypatch.delenv("DEVELOPER_REPOS_DIR", raising=False)
+        assert developer_repos_root() is None
+
+    def test_blank_is_none(self, monkeypatch):
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", "   ")
+        assert developer_repos_root() is None
+
+
+class TestResolveUnderRepos:
+    @pytest.fixture
+    def repos(self, tmp_path, monkeypatch):
+        root = tmp_path / "repos"
+        (root / "ns" / "project--branch").mkdir(parents=True)
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+        return root
+
+    def test_accepts_a_worktree_inside(self, repos):
+        wt = repos / "ns" / "project--branch"
+        resolved, err = resolve_under_repos(str(wt))
+        assert err is None
+        assert resolved == wt.resolve()
+
+    def test_returns_the_resolved_path_not_the_argument(self, repos):
+        """Callers must operate on what comes back — see the module docstring.
+
+        The argument has to be genuinely non-canonical for this to mean
+        anything. `Path("a/./b")` collapses to `a/b` at construction, so a
+        `.` component tests nothing; a symlink is a difference pathlib cannot
+        normalise away, so only a real `resolve()` produces the target.
+        """
+        target = repos / "ns" / "project--branch"
+        link = repos / "ns" / "via-link"
+        link.symlink_to(target)
+
+        resolved, err = resolve_under_repos(str(link))
+        assert err is None
+        # The argument and the answer are different paths on disk.
+        assert Path(str(link)) != target
+        assert resolved == target.resolve()
+
+    def test_accepts_a_symlink_that_stays_inside(self, repos):
+        """Following links is what catches an escape, so a link that does not
+        escape has to be accepted. Pinned because it differs from
+        `resolve_host_path`, which refuses a symlinked argument outright."""
+        target = repos / "ns" / "project--branch"
+        link = repos / "ns" / "inner-link"
+        link.symlink_to(target)
+        resolved, err = resolve_under_repos(str(link))
+        assert err is None
+        assert resolved == target.resolve()
+
+    def test_resolves_a_symlinked_root_to_the_physical_path(self, tmp_path, monkeypatch):
+        """A root reached through a link must still contain its own worktrees."""
+        physical = tmp_path / "physical-repos"
+        (physical / "ns" / "wt").mkdir(parents=True)
+        link_root = tmp_path / "linked-repos"
+        link_root.symlink_to(physical)
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(link_root))
+
+        assert developer_repos_root() == physical.resolve()
+        resolved, err = resolve_under_repos(str(link_root / "ns" / "wt"))
+        assert err is None
+        assert resolved == (physical / "ns" / "wt").resolve()
+
+    def test_refuses_a_path_outside(self, repos, tmp_path):
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        resolved, err = resolve_under_repos(str(outside))
+        assert resolved is None
+        assert err and "outside" in err.lower()
+
+    def test_refuses_traversal_out(self, repos, tmp_path):
+        """The target must EXIST outside the root, or this passes on the
+        not-found branch and says nothing about containment."""
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        resolved, err = resolve_under_repos(str(repos / "ns" / ".." / ".." / "elsewhere"))
+        assert resolved is None
+        assert err and "outside" in err.lower()
+
+    def test_refuses_a_blank_argument(self, repos):
+        """`Path("")` is `.`, so without an explicit guard the answer depends
+        on the daemon's working directory."""
+        for blank in ("", "   "):
+            resolved, err = resolve_under_repos(blank)
+            assert resolved is None
+            assert err and "empty" in err.lower()
+
+    def test_refuses_a_regular_file(self, repos):
+        """A worktree is a directory; `git -C <file>` is a confusing failure."""
+        f = repos / "ns" / "project--branch" / "README.md"
+        f.write_text("x")
+        resolved, err = resolve_under_repos(str(f))
+        assert resolved is None
+        assert err and "directory" in err.lower()
+
+    def test_refuses_a_symlink_pointing_out(self, repos, tmp_path):
+        """A symlink planted inside repos_dir is the interesting attack: the
+        argument looks compliant and resolution is what catches it."""
+        secret = tmp_path / "outside-secrets"
+        secret.mkdir()
+        link = repos / "ns" / "escape"
+        link.symlink_to(secret)
+        resolved, err = resolve_under_repos(str(link))
+        assert resolved is None
+        assert err
+
+    def test_refuses_when_env_unset(self, monkeypatch, tmp_path):
+        """Never widen to the whole filesystem because the var is missing."""
+        monkeypatch.delenv("DEVELOPER_REPOS_DIR", raising=False)
+        resolved, err = resolve_under_repos(str(tmp_path))
+        assert resolved is None
+        assert err and "DEVELOPER_REPOS_DIR" in err
+
+    def test_refuses_a_missing_path(self, repos):
+        resolved, err = resolve_under_repos(str(repos / "ns" / "no-such-worktree"))
+        assert resolved is None
+        assert err
+
+    def test_repos_root_itself_is_allowed(self, repos):
+        """Reviewing at the root is odd but not an escape."""
+        resolved, err = resolve_under_repos(str(repos))
+        assert err is None
+        assert resolved == repos.resolve()
+
+    def test_sibling_prefix_is_not_inside(self, tmp_path, monkeypatch):
+        """`/repos-evil` must not pass because it shares a string prefix with
+        `/repos`. Containment is by path component, not by startswith."""
+        root = tmp_path / "repos"
+        root.mkdir()
+        evil = tmp_path / "repos-evil"
+        evil.mkdir()
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+        resolved, err = resolve_under_repos(str(evil))
+        assert resolved is None
+        assert err
+
+    def test_does_not_use_the_mount_roots(self, repos, mount):
+        """This is a separate allowlist. A path under the user's workspace is
+        legitimate for kv/devbox and is not a worktree."""
+        resolved, err = resolve_under_repos(str(mount / "Users" / "alice"))
+        assert resolved is None
+        assert err
+
+    def test_refuses_a_non_path_argument(self, repos):
+        """The contract is an error tuple, never a raise. `--worktree` omitted
+        gives None, and `Path(None)` is a TypeError that would escape as a
+        traceback instead of the JSON envelope the proxy expects."""
+        for bad in (None, 42, b"/bytes/path", object()):
+            resolved, err = resolve_under_repos(bad)
+            assert resolved is None
+            assert err
+
+    def test_refuses_an_intermediate_symlink_out(self, repos, tmp_path):
+        """The escape does not have to be the leaf. An argument whose *middle*
+        component is a link out would survive an implementation that only
+        inspected the last element."""
+        outside = tmp_path / "outside-tree"
+        (outside / "sub").mkdir(parents=True)
+        midlink = repos / "ns" / "midlink"
+        midlink.symlink_to(outside)
+        resolved, err = resolve_under_repos(str(midlink / "sub"))
+        assert resolved is None
+        assert err and "outside" in err.lower()
+
+
+class TestDeveloperReposRootSanity:
+    """`DEVELOPER_REPOS_DIR` comes from operator config, which validates it
+    nowhere. Refusing an unset variable and then accepting `/` would not be a
+    boundary."""
+
+    def test_refuses_filesystem_root(self, monkeypatch):
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", "/")
+        assert developer_repos_root() is None
+        resolved, err = resolve_under_repos("/etc")
+        assert resolved is None
+        assert err
+
+    def test_refuses_a_single_component_root(self, monkeypatch):
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", "/srv")
+        assert developer_repos_root() is None
+
+    def test_refuses_a_relative_root(self, monkeypatch):
+        """A relative value anchors on wherever the CLI was started."""
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", "relative/repos")
+        assert developer_repos_root() is None
+
+    def test_accepts_an_ordinary_two_component_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "srv" / "repos"
+        root.mkdir(parents=True)
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+        assert developer_repos_root() == root.resolve()
