@@ -365,6 +365,19 @@
     if (textarea) ac.sync(textarea.value, textarea.selectionStart ?? textarea.value.length);
   }
 
+  // The engine only ever learns the text through `syncAc`, and `syncAc` only
+  // ever runs off a DOM event — so a programmatic write to `text` leaves it
+  // holding a match for a string the field no longer contains. `submit()` is
+  // the case that shows: it clears the field, no `input` fires, and the popover
+  // stays on screen offering the command that just went out. Hiding the rows
+  // would not be enough either, because the engine still consumes the next
+  // Enter and splices the sent command back in. So key it off the value
+  // instead: any write the engine did not see invalidates what it holds,
+  // whoever made it.
+  $effect(() => {
+    if (text !== ac.syncedText) ac.close();
+  });
+
   async function applyAccept(r: AcceptResult) {
     text = r.text;
     await tick();
