@@ -2,6 +2,7 @@
 name: developer
 triggers: [git, gitlab, github, repo, repository, commit, branch, merge request, MR, pull request, PR, code review, develop, worktree, clone]
 description: Git repository management, GitLab merge requests, and GitHub pull requests
+companion_skills: [commit, code_review, untrusted_input]
 env: [{"var":"DEVELOPER_REPOS_DIR","from":"config","config_path":"developer.repos_dir","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER_ID","from":"config","config_path":"developer.gitlab_reviewer_id","when":["developer.enabled","developer.gitlab_reviewer_id"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
 ---
 # Developer Skill — Git, GitLab & GitHub
@@ -116,67 +117,132 @@ git -C "$BARE_DIR" worktree add -b "$BRANCH" "$WORK_DIR" "origin/$DEFAULT_BRANCH
 
 All work happens inside `$WORK_DIR`.
 
-## Development Process
+## The Job Lifecycle
 
-### 1. Understand Before Changing
+A coding task runs as a lifecycle, not as a set of habits. The steps below are ordered; each one has a reason to exist and a way to fail. Do not skip ahead because a change looks small — the tier system below is how small changes get less process, not skipping steps.
+
+### 1. Preflight, before a worktree exists
+
+Batch these reads and act on them together. Do not start work that cannot land.
+
+```bash
+cd "$BARE_DIR"
+git rev-parse --is-bare-repository
+git symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main or origin/master
+git fetch origin --prune
+```
+
+- No repository, or the fetch fails: stop and report. Do not clone something else and carry on.
+- The base branch is whatever `symbolic-ref` reports, stripped of `origin/`. Never assume `main` — plenty of repositories are still on `master`, and a worktree branched from a base that does not exist is the single most common way this dies.
+
+### 2. Create the worktree, then read back what was made
+
+Create it as described under "Creating a Worktree for Development". Then read back what actually exists and use those values for the rest of the run:
+
+```bash
+cd "$WORK_DIR"
+git rev-parse --show-toplevel   # the worktree path
+git branch --show-current       # the branch name
+```
+
+Refer to those two values from here on. Nothing later should hardcode the branch name you intended to create; a push or an MR against a branch name that does not exist fails in a way that reads like an API problem and is not.
+
+### 3. Make the worktree runnable, do not baseline it
+
+A fresh worktree has the tracked files and nothing else.
+
+- **Install only the stack the task touches.** A repository with a Python service and a frontend has an install for each, and a task that only touches one has no use for the other. If the work reaches the other stack later, install it then.
+- **Never share a `node_modules` or a `.venv` between worktrees.** Vite, Vitest and esbuild resolve plugins and their native binaries through the real path of `node_modules`, so a borrowed tree fails at transform time and surfaces as dozens of unrelated red suites. Each worktree gets its own.
+- **Copy the gitignored files the stack needs to run** — `.env`, local config, test fixtures kept out of git. Never print their contents.
+- **Prove it can run tests, cheaply.** A collection step (`pytest --collect-only -q`, one small component test), not a full suite. The base branch was green when it was last committed, so a full pass here re-confirms what the last commit already established. What is unknown is whether *this worktree* can run anything.
+
+If the collection step fails, that is the environment and not the code. Fix the setup and retry. If it fails in a way you cannot explain, stop and report rather than starting work on a worktree you cannot run.
+
+### 4. Understand before changing
 
 Before writing any code, read enough of the codebase to understand the existing patterns:
 
-- **Read CLAUDE.md, AGENTS.md, and any `.claude/rules/` files** in the repo — these contain project-specific conventions and architecture notes that must be followed.
-- **Read existing code** that does something similar to what you're implementing. Match the naming conventions, error handling patterns, env var names, and module structure already in use. Never guess — grep for how other modules solve the same problem.
-- **Check how the module integrates** with the rest of the system. If you're adding a new skill/plugin/module, look at how existing ones are wired in (env vars, config, imports, tests). Copy the established pattern exactly.
+- **Read `CLAUDE.md`, `AGENTS.md`, and any `.claude/rules/` files** in the repository — these carry project-specific conventions and architecture notes that must be followed.
+- **Read existing code** that does something similar to what you are implementing. Match the naming conventions, error handling patterns, env var names and module structure already in use. Never guess — grep for how other modules solve the same problem.
+- **Check how the module integrates** with the rest of the system. If you are adding a new skill, plugin or module, look at how existing ones are wired in (env vars, config, imports, tests) and copy the established pattern.
 
-### 2. Write Tests First (TDD)
+Reading existing patterns is the cheapest step here and skipping it is the most common source of bugs. Five minutes reading saves an hour of debugging.
 
-If the project has a test suite (check for `tests/`, `pytest.ini`, `pyproject.toml [tool.pytest]`, `jest.config`, etc.):
+### 5. Pick a change tier, and say which
 
-- **Write failing tests first** that cover the expected behavior, edge cases, and error paths.
-- Run the tests to confirm they fail.
-- Implement the feature.
-- Run tests again and iterate until all pass.
-- Also run the **full test suite** to catch regressions — not just the new tests.
+The tier decides how much process the rest of the change gets. Pick it before writing code and state it in your report.
 
-If the project has linters or type checkers configured (`ruff`, `mypy`, `eslint`, `tsc --noEmit`, etc.), run those too before committing.
+**Boundary surfaces.** Any change touching one of these is Full tier regardless of size: authn/authz, secrets and credentials, money or billing, schema migrations, deletion and other destructive paths, external API contracts and payload shapes, concurrency and locking, anything crossing a network, anything running as root or over ssh on a remote host.
 
-### 3. Edit and Verify
+- **Fast** — under about 30 changed lines, one or two files, no boundary surface. Implement, add or extend one test, run the affected tests, run the suite once, commit. No pre-written failing test, and no review.
+- **Standard** — the default. Tests written alongside the implementation, full suite green before the commit, review before the MR.
+- **Full** — any boundary surface, a diff over about 150 lines, or anything you would not want to be wrong about. Failing test first, full suite before and after, review with both agents.
 
-- **Edit files** in the worktree directory.
-- **Run the test suite** before committing (check README/CI config for the test command):
-   ```bash
-   cd "$WORK_DIR"
-   # Common patterns:
-   make test          # Makefile
-   pytest             # Python
-   npm test           # Node.js
-   go test ./...      # Go
-   ```
-- **Verify integration points**: if your change adds env vars, config fields, CLI commands, or dependencies — check that all consumers/producers are updated consistently. A new env var is useless if the code reading it uses a different name than the code setting it.
+**Escalate, never downgrade.** Move up a tier the moment any of these happens: the suite goes red in a way you did not predict, you need to read a third file to understand the change, or you find a boundary surface you had not counted. Say that you escalated and why. Never move down mid-change, and never pick Fast to avoid work you already suspect is needed.
 
-### 4. Commit
+### 6. Implement, and verify as you go
 
-- **Check for secrets** before committing — never commit tokens, passwords, or private keys.
-- **Commit** with a meaningful message:
-   ```bash
-   cd "$WORK_DIR"
-   git add -A
-   # If $DEVELOPER_AUTHOR_CREDIT is set, append it after a blank line
-   CREDIT="${DEVELOPER_AUTHOR_CREDIT:+
+- **Edit files in the worktree**, never in the bare clone.
+- **Write the test first in exactly three cases**: reproducing a reported bug, where the failing test is what proves the fix; pure logic whose semantics are tricky enough that the assertion is the real spec; and any Full-tier change. In all three, run it and confirm it fails for the reason you expect.
+- **Everywhere else, write the test and the implementation together and run once.** Do not spend a separate run confirming red. Check by reading instead: an assertion that could have passed against the pre-change code is vacuous, so rewrite it.
+- **Breadth**: the happy path, the specific edge case that motivated the change, and one integration test through the real seam. Not an exhaustive edge-case sweep. Integration tests are the highest-value layer — high enough to prove the system works, low enough to debug when they break. Avoid mocks; where unavoidable, mock at a system boundary, never per collaborator.
+- **Verify integration points.** If the change adds env vars, config fields, CLI commands or dependencies, check that every consumer and producer is updated together. A new env var is useless if the code reading it uses a different name than the code setting it. Adding a package to `pyproject.toml` or `package.json` is not enough — run the install and commit the lockfile.
+- **Keep metadata in step.** If you change a module's purpose, update its descriptions, docstrings and config manifests to match.
 
-$DEVELOPER_AUTHOR_CREDIT}"
-   git commit -m "Add user authentication middleware
+### 7. The verification budget
 
-   Implements JWT-based auth with refresh token support.
-   Closes #123${CREDIT}"
-   ```
-- **Commit style**: Never include LLM/AI attribution in commit messages (no `Generated by` or similar). If `$DEVELOPER_AUTHOR_CREDIT` is set, append it after a blank line at the end of every commit message. Otherwise, write commits without any trailer.
+Test and lint output is the largest single source of wasted context. Spend it deliberately.
 
-### Common Mistakes to Avoid
+- **Failure-only output.** Use the runner's own quiet flags: `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast`.
+- **Bail on the first failure while iterating** (`-x`, `--bail=1`). One real failure beats forty cascading ones. Drop the flag for the final full run.
+- **One command, one output.** Chain lint, typecheck and tests into a single invocation rather than three.
+- **Affected tests during the loop, the full suite once at the end of the work.** Not after every fix and not before every commit.
+- **For the full pass, use the project's own entry point** — `npm run check`, `make check`, `just check`, `tox`, whatever the repository already has. Read the `package.json` scripts or the Makefile once and use what is there. If there is no single command, chain the linters, the type checker and the tests yourself. Do not write a wrapper script to avoid doing that; a second entry point drifts from the real one and hides which step failed.
+- **In a multi-stack repository, cover the stacks the branch touched.** Untouched code cannot break, with one exception: anything crossing between the stacks — an API payload shape, a serialized schema, a shared fixture — is a boundary surface and pulls the other stack's tests into scope whether or not you edited its files. Say which stacks the pass covered, so a partial run never reads as a whole one.
+- **Never re-read a file you just wrote.** The edit would have failed loudly if it had not applied.
 
-- **Wrong env var names**: Always grep for how existing env vars are named and set. Don't invent new conventions.
-- **Hardcoded paths or user-specific values**: Use env vars and config — never hardcode usernames, server paths, or workspace names.
-- **Stale metadata**: If you change a module's purpose, update all descriptions, docstrings, and config manifests to match.
-- **Missing dependency wiring**: Adding a new package to `pyproject.toml` / `package.json` isn't enough — also run the install command (`uv sync`, `npm install`) and commit the lockfile.
-- **Not reading existing patterns**: The single most common source of bugs. Five minutes reading existing code saves hours of debugging.
+### 8. Commit
+
+Commit in coherent steps rather than one lump. The `commit` companion carries the message format, what lands alongside a commit, and the scrub rules — follow it rather than improvising.
+
+**Commit before you review.** The review resolves a commit range and reads it with `git diff`, `git log` and `git show`; uncommitted work appears in none of those, so a review run against a dirty worktree reviews an empty diff and comes back clean for the wrong reason. Everything you want reviewed has to be committed first.
+
+### 9. Review before landing
+
+Unless the change is Fast tier, run a review after the work's full pass and after the commits exist, but before the branch is pushed. See the `code_review` companion for the command and for how to read what comes back.
+
+The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
+
+If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached — that is a state of the environment, not of the diff. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself: report it and do not open the MR.
+
+### 10. Land
+
+Push the branch and open a merge request or pull request, following the platform sections below. **Landing is an MR or a PR, not a merge.** Merge to the default branch only when the task text explicitly asks for it.
+
+### 11. The abort path
+
+Whenever a step above says stop: stop, change nothing further, and leave the worktree and branch exactly as they are. They hold the work. Report what failed with the command output, the worktree path and branch name, what state the base branch is in, and what you would do next.
+
+Never delete a worktree whose work did not land.
+
+### 12. Report
+
+Report in this shape every time, so the room gets a consistent block:
+
+```
+<repo>/<branch> — <task>
+
+Tier: <Fast | Standard | Full>, <why — boundary surface, size, or default>
+Worked: <what changed, one or two sentences>
+Tests: <result of the final full pass, which stacks it covered; N added>
+Review: <counts by severity and what you did about them> | <skipped, why> | <not run, Fast tier>
+Landed: <MR/PR URL> | <why not>
+Worktree: <path, left in place>
+
+Deferred: <anything you did not take on, and why it is separate — one line each>
+```
+
+Omit `Deferred` when there is nothing in it.
 
 ## GitLab: Pushing and Creating a Merge Request
 
@@ -291,8 +357,10 @@ To push additional commits to an open MR/PR, reuse the existing worktree:
 ```bash
 WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--istota-42-add-auth"
 cd "$WORK_DIR"
-# Make changes, commit, push
-git add -A
+# Make changes, then stage the specific files you touched — never `git add -A`.
+# See the `commit` companion for the message format and the scrub rules.
+git status --short
+git add src/validation.py tests/test_validation.py
 git commit -m "Address review feedback: add input validation"
 git push origin HEAD
 ```
@@ -394,9 +462,10 @@ DEFAULT_BRANCH=$(python3 -c "import sys,json; print(json.load(sys.stdin)['defaul
   cd "$WORK_DIR"
   git fetch origin "$DEFAULT_BRANCH"
   git rebase "origin/$DEFAULT_BRANCH"
-  # Resolve conflicts if any, then force-push
+  # Resolve conflicts if any, then force-push — YOUR OWN topic branch only.
   git push origin "$BRANCH" --force-with-lease
   ```
-- **MR/PR has merge conflicts**: Rebase the worktree branch onto latest target, force-push.
+  **Never force-push a shared branch.** `--force-with-lease` is permitted on `$BRANCH`, the topic branch you created for this task, and nowhere else. A rejected push to `$DEFAULT_BRANCH` or any branch you did not create means someone else moved it: report it via the abort path and let the user decide. Do not resolve it.
+- **MR/PR has merge conflicts**: Rebase the worktree branch onto the latest target and force-push `$BRANCH`, subject to the same restriction.
 - **Endpoint not allowed**: The API wrappers enforce an allowlist. Deleting and admin actions are blocked.
 - **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive).
