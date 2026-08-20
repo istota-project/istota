@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Held mail from an unknown sender no longer floods your notifications. The approval question was asked once per message, so fifty messages meant fifty questions to answer one at a time. Past a few from the same sender you now get a single notice covering the rest; each message is still held and still individually approvable, and that notice is sent even if you were already told about throttled mail in the same period.
 
+- The server now has swap, and the bot's own services have a memory ceiling. Without swap the kernel cannot reclaim cold memory at all, which is how one ordinary job took the whole machine down in August: it had nowhere to put anything, so it threw away the cache every program was running from and the box spent 41 minutes reading itself back off disk. Compressed in-RAM swap gives it somewhere to put things, and it adds no disk traffic on a machine whose disk was already the bottleneck. Operators who arranged swap another way can set `istota_zram_enabled: false` and nothing changes.
+
 - The scheduler now records the host's memory state every five minutes, whether or not anything is wrong. A production host was lost in August to memory that had been quietly accumulating for five days with nothing recording any of it, because a slow leak crosses no alarm threshold until the day it is fatal. Each line separates memory some filesystem can be asked about from memory that lives in none — the distinction the August investigation could not make, and the reason it never named a culprit. `host_pressure_enabled = false` turns it off.
 
 ### Changed

@@ -170,6 +170,220 @@
   when: istota_security_sandbox_enabled
   failed_when: false
 
+# ============================================================
+# Host memory headroom — swap (robustness spec, Track A1 + A2)
+# ============================================================
+# The box ran with Total swap = 0, which is what turned a memory shortfall into
+# a thrash-to-death: with no swap the kernel cannot evict an anonymous page, and
+# tmpfs/shmem pages are swap-backed by design, so 4.6 GB of cold shmem became
+# permanently unreclaimable and the page cache absorbed the whole shortfall.
+# Swap makes that memory reclaimable without anyone yet knowing what created it.
+#
+# Every task here is gated on istota_zram_enabled. False means this role does
+# not manage swap at all, so a host where the operator arranged it another way
+# is left exactly as it is — see the note in defaults/main.yml about what that
+# does and does not undo.
+
+- name: Install systemd-zram-generator
+  apt:
+    name:
+      - systemd-zram-generator
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+  when: not istota_update_only and not istota_web_only and istota_zram_enabled
+  tags: [swap]
+
+- name: Configure zram swap device
+  template:
+    src: zram-generator.conf.j2
+    dest: /etc/systemd/zram-generator.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: not istota_update_only and not istota_web_only and istota_zram_enabled
+  register: istota_zram_config
+  tags: [swap]
+
+# daemon-reload re-runs the generators, which is what turns the config above
+# into systemd-zram-setup@zram0.service. Without it a first install has no unit
+# to enable and the task below fails on a host that never had one.
+- name: Re-run systemd generators after a zram config change
+  systemd:
+    daemon_reload: yes
+  when: not istota_update_only and not istota_web_only and istota_zram_enabled and istota_zram_config is changed
+  tags: [swap]
+
+# Start dev-zram0.swap, NOT systemd-zram-setup@zram0.service. Two different
+# units doing two different jobs, and picking the wrong one produces a fully
+# green play on a host with no swap:
+#
+#   systemd-zram-setup@.service  is a static template shipped by the package.
+#                                It creates /dev/zram0, sets disksize and
+#                                comp_algorithm, and mkswaps it. It never calls
+#                                swapon.
+#   dev-zram0.swap               is what the *generator* synthesises from the
+#                                config, and it is the unit that swapons. It
+#                                carries Requires=/After= the setup service, so
+#                                starting it pulls the setup service in — the
+#                                dependency runs swap -> setup, never the
+#                                reverse.
+#
+# No `enabled:` either. The unit is generated into /run and has no [Install];
+# `systemctl is-enabled` answers "static", so Ansible records enabled=true and
+# silently does nothing. Persistence across boots comes from the generator
+# re-creating the swap.target.wants symlink on every reload and every boot.
+- name: Enable zram swap device
+  systemd:
+    name: dev-zram0.swap
+    state: started
+  when: not istota_update_only and not istota_web_only and istota_zram_enabled
+  tags: [swap]
+
+# Rebuild on a geometry change. A live zram0 keeps its size and algorithm until
+# it is torn down, so rendering a new config changes nothing by itself.
+#
+# The order is load-bearing: stop the swap unit (that is the swapoff), restart
+# the setup service so the device is rebuilt with the new geometry, then start
+# the swap unit again. Restarting the setup service alone is what the first
+# draft did, and it is actively harmful — Requires= propagates the *stop* to
+# dev-zram0.swap but nothing propagates the start back, so a size change on a
+# running host silently took swap to zero and left it there until reboot.
+#
+# Skipped when the device holds more than 64 MB, because swapoff has to fault
+# every page back into RAM, and doing that on a box already short of memory is
+# the exact failure this track exists to prevent. A skip is surfaced rather
+# than swallowed: the config on disk and the live device now disagree, and
+# nothing retries, because the next run sees no config change.
+- name: Rebuild zram device after a geometry change
+  shell: |
+    set -euo pipefail
+    # /proc/swaps columns: Filename Type Size Used Priority. $4 is Used, in kB.
+    used=$(awk '$1 == "/dev/zram0" { print $4; exit }' /proc/swaps)
+    # No zram0 line yet (first install) or anything non-numeric: treat as empty,
+    # which takes the rebuild branch. The assignment has to be written back —
+    # `case "${used:-0}"` alone tests a substitution and leaves `used` unset,
+    # which then fails the arithmetic below under `set -u`.
+    used="${used:-0}"
+    case "$used" in
+      *[!0-9]*) used=0 ;;
+    esac
+    if [ "$used" -lt 65536 ]; then
+      systemctl stop dev-zram0.swap
+      systemctl restart systemd-zram-setup@zram0.service
+      systemctl start dev-zram0.swap
+      echo rebuilt
+    else
+      echo "skipped: zram0 holds ${used} kB, too much to swapoff safely"
+    fi
+  args:
+    executable: /bin/bash
+  register: istota_zram_rebuild
+  changed_when: "'rebuilt' in istota_zram_rebuild.stdout"
+  when: not istota_update_only and not istota_web_only and istota_zram_enabled and istota_zram_config is changed
+  tags: [swap]
+
+- name: Warn when the zram geometry did not converge
+  debug:
+    msg: >-
+      zram0 was left at its old geometry — {{ istota_zram_rebuild.stdout }}.
+      /etc/systemd/zram-generator.conf and the live device now disagree, and
+      this will NOT retry on the next run. Rebuild during a quiet window with
+      `systemctl stop dev-zram0.swap && systemctl restart
+      systemd-zram-setup@zram0.service && systemctl start dev-zram0.swap`.
+  when:
+    - not istota_update_only and not istota_web_only and istota_zram_enabled
+    - istota_zram_rebuild is defined
+    - istota_zram_rebuild.stdout is defined
+    - "'skipped:' in istota_zram_rebuild.stdout"
+  tags: [swap]
+
+# Not optional, and deliberately not `changed_when: false` alone: a swap change
+# whose only evidence is "the play went green" is precisely how the first draft
+# of this block shipped a no-op. Assert against the kernel.
+- name: Verify zram swap is actually active
+  command: "awk '$1 == \"/dev/zram0\" { found = 1 } END { exit !found }' /proc/swaps"
+  register: istota_zram_verify
+  changed_when: false
+  failed_when: istota_zram_verify.rc != 0
+  when: not istota_update_only and not istota_web_only and istota_zram_enabled
+  tags: [swap]
+
+# Optional second tier: a disk swapfile below zram, for pages cold enough that
+# even compression is wasted. Off by default — on this host the disk is the
+# resource to protect, not to lean on.
+- name: Create the second-tier swapfile
+  command: "fallocate -l {{ istota_swapfile_size_mb }}M {{ istota_swapfile_path }}"
+  args:
+    creates: "{{ istota_swapfile_path }}"
+  register: istota_swapfile_created
+  when: not istota_update_only and not istota_web_only and istota_swapfile_enabled
+  tags: [swap]
+
+# Swap holds whatever was paged out of memory, so 0600 is not cosmetic — mkswap
+# itself warns about an insecure swapfile.
+- name: Restrict swapfile permissions
+  file:
+    path: "{{ istota_swapfile_path }}"
+    owner: root
+    group: root
+    mode: '0600'
+  when: not istota_update_only and not istota_web_only and istota_swapfile_enabled
+  tags: [swap]
+
+# Ask the file whether it carries a swap signature, rather than inferring it
+# from "did this run create the file". `creates:` above makes the create task
+# report ok (not changed) on every subsequent run, so gating mkswap on
+# `is changed` means a run interrupted between fallocate and mkswap leaves a
+# file that is never formatted — not on this run, and not on any future one.
+- name: Check whether the swapfile carries a swap signature
+  command: "blkid -p -s TYPE -o value {{ istota_swapfile_path }}"
+  register: istota_swapfile_sig
+  changed_when: false
+  failed_when: false
+  when: not istota_update_only and not istota_web_only and istota_swapfile_enabled
+  tags: [swap]
+
+# Formats an unformatted file and nothing else. Re-running mkswap over an
+# active swapfile corrupts it, which is what the signature check prevents.
+- name: Format the swapfile
+  command: "mkswap {{ istota_swapfile_path }}"
+  when:
+    - not istota_update_only and not istota_web_only and istota_swapfile_enabled
+    - istota_swapfile_sig.stdout | default('') | trim != 'swap'
+  tags: [swap]
+
+# Ask /proc/swaps rather than putting failed_when: false on swapon — that would
+# hide a genuine failure exactly as well as it hides the already-active case.
+- name: Check whether the swapfile is already active
+  command: "grep -q '^{{ istota_swapfile_path }} ' /proc/swaps"
+  register: istota_swapfile_active
+  changed_when: false
+  failed_when: false
+  when: not istota_update_only and not istota_web_only and istota_swapfile_enabled
+  tags: [swap]
+
+- name: Activate the swapfile
+  command: "swapon --priority {{ istota_swapfile_priority }} {{ istota_swapfile_path }}"
+  when: not istota_update_only and not istota_web_only and istota_swapfile_enabled and istota_swapfile_active.rc != 0
+  tags: [swap]
+
+# fstab is written LAST, only once swapon has actually succeeded on this file.
+# Written earlier, a failed activation would still leave a boot-time reference
+# to a file that may carry no swap header — a failed swap.target and a
+# confusing `systemctl --failed` on the next reboot. `nofail` is belt and
+# braces for the same reason: swap that cannot be activated must degrade to a
+# missing mitigation, never to a boot problem.
+- name: Record the swapfile in fstab
+  ansible.posix.mount:
+    src: "{{ istota_swapfile_path }}"
+    path: none
+    fstype: swap
+    opts: "sw,nofail,pri={{ istota_swapfile_priority }}"
+    state: present
+  when: not istota_update_only and not istota_web_only and istota_swapfile_enabled
+  tags: [swap]
+
 # Docker — inlined (replace with a dedicated role if you prefer)
 - name: Check if Docker CE apt repo is configured
   stat:

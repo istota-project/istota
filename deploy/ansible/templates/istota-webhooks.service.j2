@@ -22,6 +22,18 @@ RestartSec=5
 # location.db on every Overland ingest.
 LimitNOFILE=65536
 
+# Soft memory throttle (host-and-scheduler-robustness spec, A3). MemoryHigh and
+# not MemoryMax: past the limit the kernel reclaims hard and slows this cgroup
+# rather than killing it. What it buys is that a leak here cannot walk the whole
+# host into global OOM; what it costs is that the service degrades to slow
+# instead of failing loudly. No CPUWeight and no Delegate, unlike the scheduler
+# — this unit spawns no task subprocesses, and a person is waiting on a page,
+# so yielding CPU would be felt directly.
+{% if istota_web_memory_high %}
+MemoryHigh={{ istota_web_memory_high }}
+MemoryAccounting=yes
+{% endif %}
+
 # Environment
 Environment=PATH={{ istota_home }}/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{ istota_home }}
