@@ -50,6 +50,11 @@ config/config.dev.toml
 /tmp/istota/
 .env
 .env.*
+# Scratch portfolio/brokerage CSVs dropped at the repo root while working on the
+# money module. Ignored by shape rather than by name: this repo is public, and a
+# broker export is exactly the file that carries an account number if the next
+# one is a real download rather than a synthetic fixture.
+/*.csv
 
 # MkDocs
 site/
