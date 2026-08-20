@@ -60,6 +60,29 @@ _match_thread = match_thread
 # `dmarc/1=fail` reads as "no verdict", which is silent under the default config.
 _DMARC_METHODSPEC = re.compile(r"^dmarc(?:\s*/\s*\d+)?\s*=\s*([a-z]+)", re.IGNORECASE)
 
+# The same shape for the other two methods (ISSUE-249). Neither changes the
+# verdict — DMARC is the verdict — but a `dkim=pass` sitting next to a
+# `dmarc=fail` says the path is partially misconfigured rather than wholly
+# broken, and that is the state an operator has to tell apart to fix it.
+_DKIM_METHODSPEC = re.compile(r"^dkim(?:\s*/\s*\d+)?\s*=\s*([a-z]+)", re.IGNORECASE)
+_SPF_METHODSPEC = re.compile(r"^spf(?:\s*/\s*\d+)?\s*=\s*([a-z]+)", re.IGNORECASE)
+
+# The `header.from` property of a DMARC methodspec: the address the MTA says its
+# verdict was about. Checking it against the `From:` we actually routed on is
+# what turns "the MTA authenticated something" into "the MTA authenticated this
+# sender" (ISSUE-249).
+#
+# The value is captured with ``*`` rather than ``+`` on purpose: an empty match
+# is how "the property is here and there is nothing readable after it" reaches
+# `_dmarc_header_from`, which resolves it loudly. With ``+`` that shape looks
+# identical to an MTA that never emitted the property, which is silent.
+_HEADER_FROM_PROPERTY = re.compile(r"header\.from\s*=\s*([^\s;]*)", re.IGNORECASE)
+
+# Cap on any header-derived value echoed into a log line or an operator alert.
+# In the unscoped case the header is sender-supplied, and `[^\s;]+` has no length
+# bound of its own.
+_ECHOED_VALUE_MAX = 100
+
 # The results RFC 7489 §11.2 registers. An unregistered token is bucketed to
 # "other" rather than carried through: it reaches the alert-dedup key, and in the
 # deployment where this canary matters most (nothing upstream stamping, so the
@@ -217,6 +240,289 @@ def _dmarc_result(authentication_results: str | None) -> str | None:
     return "pass" if results else None
 
 
+def _authserv_id(header: str) -> str:
+    """Return the RFC 8601 authserv-id of an ``Authentication-Results`` header.
+
+    That is the first field, before the first semicolon: the identity of the host
+    that did the authenticating. It is the only thing in the header that says
+    whose stamp this is, which is why ISSUE-249 hangs the whole scoping decision
+    on it.
+
+    Read through ``_split_methodspecs``, so a quoted or commented id comes back
+    empty and therefore matches nothing. RFC 8601 does allow a quoted-string
+    there, so this is a real (if rare) shape we decline to recognise — and it is
+    the right way to decline: an id we could not read must not be taken for ours,
+    and the canary's standing rule is that an ambiguous read resolves to the
+    warning rather than to the silence.
+
+    An optional version number may follow the id (``mx.example.com 1; …``), so
+    only the first whitespace-delimited token is the id itself.
+    """
+    segments, _ = _split_methodspecs(header)
+    tokens = segments[0].strip().split() if segments else []
+    if not tokens:
+        return ""
+    return tokens[0].rstrip(".").lower()
+
+
+def _our_headers(headers: "tuple[str, ...]", authserv_id: str) -> "list[str]":
+    """Select the ``Authentication-Results`` headers our own MTA stamped.
+
+    With ``authserv_id`` configured, that is every header carrying it, and no
+    other: a header from someone else's authserv-id is discarded rather than
+    parsed, so a sender can neither quieten the canary with an injected
+    ``dmarc=pass`` nor make it noisy with an injected ``dmarc=fail``.
+
+    Blank — the default — falls back to the pre-ISSUE-249 read: the topmost
+    header and nothing else. Each hop prepends, so while the MTA stamps, the top
+    one is its stamp. When it stops, that reasoning inverts and this fallback
+    reads the sender's own header as authoritative. Closing that is exactly what
+    setting ``authserv_id`` buys.
+    """
+    if not authserv_id:
+        return list(headers[:1])
+    wanted = authserv_id.strip().rstrip(".").lower()
+    return [h for h in headers if _authserv_id(h) == wanted]
+
+
+def _method_result(header: str, pattern: "re.Pattern[str]") -> str | None:
+    """First result token for one method, or ``None`` if the header has no verdict.
+
+    Diagnostic only — used for ``dkim=`` and ``spf=``, which report *how* a path
+    is failing and never decide anything. It deliberately skips the
+    read-completeness cross-check ``_dmarc_result`` applies, because that check
+    is what keeps a load-bearing verdict honest and there is nothing load-bearing
+    here. A swallowed ``dkim=`` costs a less precise alert; a swallowed ``dmarc=``
+    would cost the alert itself.
+    """
+    segments, _ = _split_methodspecs(header)
+    for methodspec in segments:
+        match = pattern.match(methodspec.strip())
+        if match:
+            return match.group(1).lower()
+    return None
+
+
+def _property_domain(value: str) -> str:
+    """Normalise a ``header.from`` property value to a bare domain.
+
+    Accepts both shapes MTAs emit — a bare domain and a full address — and
+    normalises case and a trailing root dot. Returns ``""`` when nothing usable
+    is left, which the caller must treat as *unreadable*, not as absent.
+    """
+    value = value.strip().strip('<>"')
+    if "@" in value:
+        value = value.rsplit("@", 1)[1]
+    return value.rstrip(".").lower()
+
+
+def _dmarc_header_from(header: str) -> "tuple[list[str], bool]":
+    """The domains a DMARC methodspec says its verdict was about.
+
+    Returns every ``header.from`` attributed to a DMARC methodspec in this
+    header, and whether one of them was *present but unreadable*.
+
+    **Every one, not the first.** Returning the first match would put the check
+    back on first-match-wins, which is the rule `_dmarc_result` was fixed to stop
+    using: a sender who appends a second ``dmarc=pass header.from=<the right
+    domain>`` would mask the misaligned one ahead of it. The caller applies
+    mismatch-wins across the list, matching this module's standing rule that an
+    injected value can make the canary noisy but never quiet.
+
+    **Absent and unreadable are different answers.** An empty list with the flag
+    clear means the MTA emitted no property — genuinely uncheckable, and plenty
+    of MTAs do not emit one, so the caller stays silent. The flag means the
+    property is there and we could not read a domain out of it: a quoted value
+    (`_split_methodspecs` blanks quoted strings), a value the ``;`` of the next
+    methodspec truncated to nothing, or a bare root dot. Each of those is an
+    ambiguous read, and the rule for an ambiguous read is the loud answer.
+
+    One shape is deliberately not caught: a property wholly inside a comment
+    (``dmarc=pass (header.from=…)``) is blanked with nothing left to notice, so
+    it reads as absent. It costs nothing worth having — an MTA does not comment
+    out its own property, and a sender who writes the whole header (the unscoped
+    case) would supply an aligned domain rather than hide a misaligned one.
+    """
+    segments, _ = _split_methodspecs(header)
+    claimed: list[str] = []
+    unreadable = False
+    for methodspec in segments:
+        stripped = methodspec.strip()
+        if not _DMARC_METHODSPEC.match(stripped):
+            continue
+        for match in _HEADER_FROM_PROPERTY.finditer(stripped):
+            domain = _property_domain(match.group(1))
+            if domain:
+                claimed.append(domain)
+            else:
+                unreadable = True
+    return claimed, unreadable
+
+
+def _domains_align(claimed: str, from_domain: str) -> bool:
+    """Whether a ``header.from`` domain is the same identity as the ``From:``.
+
+    Exact match, plus a parent/child relationship on a label boundary in either
+    direction. The relaxation is there because DMARC itself aligns on the
+    *organizational* domain in its relaxed mode, and an MTA may record the domain
+    it evaluated rather than the literal `From:` domain — without it, every
+    message from a subdomain sender warns, which is the "trains you to ignore it"
+    failure `dmarc_canary_warn_on_missing` is off by default to avoid.
+
+    Deliberately not a public-suffix lookup. A real PSL is a dependency and a
+    data file that goes stale, and the gap it would close here is narrow: this
+    compares two domains that both came from the same message, so the shapes it
+    admits beyond a true organizational match are parent/child pairs, not
+    unrelated registrations under one suffix.
+    """
+    if claimed == from_domain:
+        return True
+    return claimed.endswith(f".{from_domain}") or from_domain.endswith(f".{claimed}")
+
+
+def _address_domain(address: str | None) -> str | None:
+    """The domain of an RFC 5322 address, normalised for comparison."""
+    _, addr = parseaddr(address or "")
+    if "@" not in addr:
+        return None
+    domain = addr.rsplit("@", 1)[1].strip().rstrip(".").lower()
+    return domain or None
+
+
+@dataclass(frozen=True)
+class _AuthResult:
+    """What the receiving MTA's own stamps say about one message.
+
+    ``verdict`` is one of: ``pass``; a DMARC result token (``fail``, ``none``,
+    ``temperror``, …) or ``other`` for an unregistered one; ``malformed`` for a
+    header we could not read cleanly; ``misaligned`` for a pass about a different
+    address than the one we routed on; ``unevaluated`` when our stamp is there but
+    carries no DMARC verdict; ``unstamped`` when there is no stamp of ours at all.
+
+    Only ``pass`` is silent. Everything else warns, subject to the two config
+    switches the caller applies.
+    """
+
+    verdict: str
+    detail: str
+
+
+def _with_method_detail(detail: str, dkim: str | None, spf: str | None) -> str:
+    """Append the DKIM and SPF verdicts, where the header reported them.
+
+    Truncated like every other header-derived value that reaches a log line or an
+    operator alert: `[a-z]+` bounds the alphabet these tokens are drawn from, not
+    their length, and in the unscoped case the header is sender-written.
+    """
+    extras = [
+        f"{name}={value[:_ECHOED_VALUE_MAX]}"
+        for name, value in (("dkim", dkim), ("spf", spf))
+        if value
+    ]
+    return f"{detail} ({', '.join(extras)})" if extras else detail
+
+
+def _authentication_verdict(
+    headers: "tuple[str, ...]",
+    authserv_id: str,
+    from_domain: str | None,
+) -> _AuthResult:
+    """Read the receiving MTA's authentication stamps for one message.
+
+    Three things happen here that reading the topmost ``dmarc=`` alone does not
+    (ISSUE-249): the headers are scoped to our own authserv-id where the operator
+    configured one, a ``pass`` is checked against the ``From:`` domain we actually
+    routed on rather than taken on trust, and the DKIM and SPF verdicts come along
+    for the alert text.
+
+    Several stamps of ours is a legitimate shape — nothing stops an MTA emitting
+    one header per method — so every matching header is read and the same
+    non-pass-wins rule ``_dmarc_result`` uses within a header applies across them.
+    """
+    ours = _our_headers(headers, authserv_id)
+
+    if not ours:
+        if authserv_id:
+            # The operator said their MTA stamps with this id and nothing here
+            # carries it. That is the drift case the scoping exists to expose, so
+            # it is loud on its own rather than waiting for
+            # `dmarc_canary_warn_on_missing` — which covers the *unscoped* reading
+            # of absence, where a path that stamps nothing is merely a path that
+            # stamps nothing.
+            #
+            # The other authserv-ids are counted, never quoted: in this branch
+            # every header present is one we rejected, so its content is
+            # whatever the sender wrote.
+            present = f" ({len(headers)} present from other authserv-ids)" if headers else ""
+            return _AuthResult(
+                "unstamped",
+                f"no Authentication-Results header from {authserv_id}{present}",
+            )
+        return _AuthResult(
+            "unevaluated",
+            "no DMARC result in the topmost Authentication-Results header",
+        )
+
+    dkim = next((r for r in (_method_result(h, _DKIM_METHODSPEC) for h in ours) if r), None)
+    spf = next((r for r in (_method_result(h, _SPF_METHODSPEC) for h in ours) if r), None)
+
+    results = [r for r in (_dmarc_result(h) for h in ours) if r is not None]
+
+    if not results:
+        return _AuthResult(
+            "unevaluated",
+            _with_method_detail(
+                "no DMARC result in the Authentication-Results header", dkim, spf,
+            ),
+        )
+
+    # `malformed` dominates rather than taking its turn in wire order: it is the
+    # least trustworthy state, and reporting `fail` while another stamp of ours
+    # was unreadable understates what we know. Both are loud, so this changes the
+    # wording and the dedup bucket rather than whether anything is said.
+    if "malformed" in results:
+        return _AuthResult("malformed", _with_method_detail(
+            "an unreadable Authentication-Results header (unbalanced quote or comment)",
+            dkim, spf,
+        ))
+    non_pass = next((r for r in results if r != "pass"), None)
+    if non_pass is not None:
+        return _AuthResult(non_pass, _with_method_detail(f"dmarc={non_pass}", dkim, spf))
+
+    # Everything our MTA stamped says pass. One thing left to check: that the pass
+    # was about the address we routed on. `dmarc=pass` alone says the MTA
+    # authenticated *some* From:, and taking that as a statement about this sender
+    # is the assumption ISSUE-249 asked us to stop making.
+    #
+    # Mismatch wins, and an unreadable property counts as a mismatch. Every
+    # `header.from` on every stamp of ours is checked rather than the first one
+    # found, so a second property carrying the right domain cannot mask the wrong
+    # one ahead of it — the same reason `_dmarc_result` prefers any non-pass over
+    # a pass. Genuine *absence* is the one quiet answer here: many MTAs never emit
+    # the property, and warning on those would fire on every message.
+    if from_domain:
+        unreadable = False
+        for header in ours:
+            claimed, header_unreadable = _dmarc_header_from(header)
+            unreadable = unreadable or header_unreadable
+            for domain in claimed:
+                if not _domains_align(domain, from_domain):
+                    return _AuthResult("misaligned", _with_method_detail(
+                        f"a dmarc=pass whose header.from ({domain[:_ECHOED_VALUE_MAX]}) "
+                        f"is not the From: domain ({from_domain[:_ECHOED_VALUE_MAX]})",
+                        dkim, spf,
+                    ))
+        if unreadable:
+            return _AuthResult("misaligned", _with_method_detail(
+                "a dmarc=pass carrying a header.from we could not read, so the "
+                f"verdict cannot be tied to the From: domain "
+                f"({from_domain[:_ECHOED_VALUE_MAX]})",
+                dkim, spf,
+            ))
+
+    return _AuthResult("pass", "")
+
+
 @dataclass(frozen=True)
 class _DmarcAlert:
     """An operator alert the canary decided on, awaiting delivery after the poll."""
@@ -231,7 +537,7 @@ def _check_dmarc_canary(
     sender: str,
     subject: str,
     routing_method: str,
-    authentication_results: str | None,
+    authentication_results: "tuple[str, ...]",
 ) -> "_DmarcAlert | None":
     """Warn when mail that routed on the user's own address lacks a ``dmarc=pass``.
 
@@ -243,11 +549,15 @@ def _check_dmarc_canary(
     before the poller ever read the folder. Nothing else in the code can see
     whether that is still true.
 
-    Its limit is deliberate. An attacker who forges the topmost
-    ``Authentication-Results`` suppresses the warning. That does not matter: the
-    canary is not the boundary, the MTA is. It catches misconfiguration and drift
-    — a DMARC record edited away, a mailbox moved to a provider that does not
-    enforce, an allowlist rule added for the user's own address — not attack.
+    Its limit is deliberate. An attacker who forges an ``Authentication-Results``
+    the check accepts suppresses the warning. That does not matter: the canary is
+    not the boundary, the MTA is. It catches misconfiguration and drift — a DMARC
+    record edited away, a mailbox moved to a provider that does not enforce, an
+    allowlist rule added for the user's own address — not attack. What
+    ``[email] authserv_id`` changes is *which* forgery works: unscoped, any
+    sender-written top header does it, including in the drift case the canary is
+    watching for; scoped, the forgery has to name the operator's own MTA
+    (ISSUE-249).
 
     Logs unconditionally; *returns* the alert rather than sending it, and never
     raises. Delivery is the caller's job because ``poll_emails`` holds an open
@@ -259,23 +569,21 @@ def _check_dmarc_canary(
     if not config.email.dmarc_canary:
         return None
 
-    result = _dmarc_result(authentication_results)
-    if result == "pass":
+    result = _authentication_verdict(
+        authentication_results,
+        config.email.authserv_id,
+        _address_domain(sender),
+    )
+    if result.verdict == "pass":
         return None
 
-    if result is None:
-        # No verdict at all. Silent unless the operator has said their MTA
-        # stamps, because a path that stamps nothing would warn on every message.
-        if not config.email.dmarc_canary_warn_on_missing:
-            return None
-        verdict = "unevaluated"
-        detail = "no DMARC result in the topmost Authentication-Results header"
-    elif result == "malformed":
-        verdict = result
-        detail = "an unreadable Authentication-Results header (unbalanced quote or comment)"
-    else:
-        verdict = result
-        detail = f"dmarc={result}"
+    if result.verdict == "unevaluated" and not config.email.dmarc_canary_warn_on_missing:
+        # A stamp with no DMARC verdict in it, or — unscoped — no stamp at all.
+        # Silent unless the operator has said their MTA evaluates DMARC, because a
+        # path that does not would otherwise warn on every message.
+        return None
+
+    verdict, detail = result.verdict, result.detail
 
     # Logged for every message, never deduped: the alert is throttled, so the log
     # is the only per-message record of how long a broken path has been broken.
@@ -1081,7 +1389,7 @@ def poll_emails(config: Config) -> list[int]:
                     if claims_to_be_user and routing_method in ("plus_address", "sender_match"):
                         alert = _check_dmarc_canary(
                             config, user_id, envelope.sender, email.subject,
-                            routing_method, email.authentication_results,
+                            routing_method, email.authentication_results_headers,
                         )
                         # Keyed, so a poll carrying several failing messages from the
                         # same sender raises one alert rather than one per message.

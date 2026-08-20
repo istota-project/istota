@@ -49,7 +49,9 @@ Forwarding is the case that hurts legitimate mail rather than security. A forwar
 
 Every item on that checklist can stop being true later, and none of them announce it. A DMARC record gets edited. The mailbox moves to a provider that does not enforce. Someone adds an "always trust mail from …" rule for the address the check is about. A forwarding path appears that lands mail behind the filter. The protection is gone and every surface still reports normal; the first sign would otherwise be a task that ran because someone forged a header.
 
-`dmarc_canary` (on by default) is the automated version of the checklist. When mail routes on the strength of a user's own address, it reads the DMARC verdict the receiving MTA stamped in `Authentication-Results` and logs a warning — plus an alert — if that verdict is anything other than `pass`. Mail carrying no DMARC verdict at all is a separate case, silent by default; see `dmarc_canary_warn_on_missing` below. Silent when healthy. It reads the **topmost** header only: each hop prepends its own, so the top one is the final receiving MTA's, and everything below it is whatever the sender chose to include.
+`dmarc_canary` (on by default) is the automated version of the checklist. When mail routes on the strength of a user's own address, it reads the DMARC verdict the receiving MTA stamped in `Authentication-Results` and logs a warning — plus an alert — if that verdict is anything other than `pass`. Mail carrying no DMARC verdict at all is a separate case, silent by default; see `dmarc_canary_warn_on_missing` below. Silent when healthy.
+
+Which header it reads depends on `authserv_id`. Unset, it reads the **topmost** one: each hop prepends its own, so while your MTA stamps, the top one is its stamp and everything below is whatever the sender chose to include. Set, it reads only the headers carrying your MTA's own authserv-id and discards the rest. Read the next section before leaving it unset.
 
 Note that `dmarc=none` counts as a failure here, not as an absence. It means the sending domain publishes no policy — the "someone deleted the DMARC record" case — so it warns. A header the check cannot read cleanly also warns, rather than being treated as "no verdict": a sender can plant punctuation that hides the real verdict from a parser, and treating that as silence is exactly what would let them turn the check off.
 
@@ -57,9 +59,29 @@ What it catches, and when, is worth being precise about. Removing a DMARC record
 
 Two things it is not. It is **not a gate** — nothing is blocked, held, or rerouted, and turning it on cannot cost you a message. Whether to hold unauthenticated mail is `confirm_sender_match`'s decision, and the two are independent. And it is **not a verifier**: it does not check DKIM itself, because if your MTA already rejects forgeries then re-implementing that check buys nothing, and getting it wrong is worse than not having it.
 
-It follows that an attacker who forges an `Authentication-Results: … dmarc=pass` header suppresses the warning. That is fine, and worth being explicit about: the canary is not the boundary, the MTA is. Its job is catching misconfiguration and drift, not attack. A canary that can be silenced by the thing it is not defending against is still worth having — a canary mistaken for a control is not.
+It follows that an attacker who forges an `Authentication-Results: … dmarc=pass` header the check accepts suppresses the warning. That is fine, and worth being explicit about: the canary is not the boundary, the MTA is. Its job is catching misconfiguration and drift, not attack. A canary that can be silenced by the thing it is not defending against is still worth having — a canary mistaken for a control is not.
 
-`dmarc_canary_warn_on_missing` (off by default) extends it to mail carrying no DMARC verdict at all. It is off because a mail path that stamps nothing would otherwise warn on every message, which trains you to ignore it. Turn it on once you know your MTA does stamp — that is the only way "the mailbox moved somewhere that does not evaluate DMARC" ever becomes visible, and that is one of the drift cases worth catching.
+#### `authserv_id`, and why the default has a blind spot
+
+"Topmost" is a proxy for "ours", and it holds only while your MTA stamps. The one drift case it cannot see is the one where the stamping itself stops: with no header of your own on the message, the topmost header is whatever the sender wrote, so a forged `Authentication-Results: mx.example.com; dmarc=pass header.from=you.example` reads as a healthy path. The canary reports normal, `dmarc_canary_warn_on_missing` never fires because a verdict is present, and the setting that would have made the drift visible is defeated by the drift.
+
+`authserv_id` closes that. RFC 8601 puts the receiving host's own identity in the first field of the header, before the semicolon, and that field is what separates your stamp from one the sender wrote. Set it to your MTA's value — read it off the `Authentication-Results` header of a message you have actually received — and any header from another authserv-id is discarded rather than parsed.
+
+Setting it says two things, and the second is what makes it worth setting. Your MTA stamps with this id, so a message arriving without your stamp contradicts your own configuration and warns on its own, without `dmarc_canary_warn_on_missing`. That flag keeps its narrower meaning: your stamp is there and carries no DMARC verdict.
+
+It does not make the canary a boundary. A sender who knows your authserv-id — it is visible in every message your MTA has ever stamped, including replies to your own mail — can still forge a header naming it. What changes is that the forgery now has to be aimed at you, and the accident cannot happen at all.
+
+#### Two checks that run either way
+
+These apply to whichever header the canary reads, whether or not `authserv_id` is set.
+
+It reports the `dkim=` and `spf=` verdicts alongside the DMARC one, because a `dkim=pass` next to a `dmarc=fail` is a partial misconfiguration and reads differently from a wholly broken path. Neither changes the verdict; DMARC is the verdict.
+
+And it checks the `header.from` the MTA recorded against the `From:` domain the mail actually routed on. A `dmarc=pass` says the MTA authenticated some address, and taking that as a statement about *this* sender is the assumption worth dropping. A mismatch warns, and so does a `header.from` that is present but unreadable. A subdomain of the `From:` domain (or the other way round) counts as aligned, because DMARC's own relaxed mode aligns on the organizational domain and some MTAs record the domain they evaluated rather than the literal one. Many MTAs do not emit the property at all, and that absence is not a mismatch — it means the check could not run, so it stays silent.
+
+**This is the one thing that changes for an existing deployment on upgrade.** Everything else here is either unchanged or waits for you to set `authserv_id`, but the alignment check runs on the default config, so a `dmarc=pass` about a different address that was previously silent now raises a warning. That is a finding worth seeing rather than noise, but it is new.
+
+`dmarc_canary_warn_on_missing` (off by default) extends the check to mail whose stamp carries no DMARC verdict at all. It is off because a mail path that evaluates nothing would otherwise warn on every message, which trains you to ignore it. Turn it on once you know your MTA does evaluate DMARC — with `authserv_id` unset it is also the only way "the mailbox moved somewhere that does not evaluate DMARC" ever becomes visible.
 
 Alerts are deduplicated per sender and verdict for 24 hours, so a persistently broken path does not flood the channel. The log warning is not deduplicated, so there is still a per-message record.
 

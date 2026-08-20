@@ -285,6 +285,20 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # your MTA stamps — it is the only way "the mailbox moved to a provider that does
 # not evaluate DMARC" ever surfaces.
 # dmarc_canary_warn_on_missing = false
+# Your receiving MTA's own authserv-id — the first field of the
+# Authentication-Results header it stamps, before the semicolon. It is what tells
+# your MTA's stamp from one the sender wrote. Blank (the default) reads the
+# topmost header and trusts that "topmost" means "ours", which holds while the
+# MTA stamps and inverts the moment it stops: with no stamp of your own, the
+# sender's header is the top one and a forged dmarc=pass reads as a healthy path.
+# Set this and a header from any other authserv-id is discarded rather than read;
+# it must be the single token before the semicolon, without any version number
+# that follows it.
+# Setting it also says your MTA stamps, so mail arriving without your stamp warns
+# on its own — dmarc_canary_warn_on_missing stays about a stamp of yours that
+# carries no DMARC verdict. Find the value in a received message's own
+# Authentication-Results header.
+# authserv_id = "mx.example.com"
 #
 # The weakest outbound approval policy any user on this instance may run. The
 # bot holds an outgoing email as an editable draft, rather than sending it, when

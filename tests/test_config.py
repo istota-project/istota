@@ -826,6 +826,63 @@ dmarc_canary_warn_on_missing = true
         assert cfg.email.dmarc_canary is False
         assert cfg.email.dmarc_canary_warn_on_missing is True
 
+    def test_authserv_id_defaults_blank(self):
+        """ISSUE-249 — blank keeps the pre-existing topmost-only read, so an
+        existing deployment sees no change until the operator names their MTA."""
+        assert EmailConfig().authserv_id == ""
+
+    def test_authserv_id_omitted_from_toml_keeps_the_default(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+imap_host = "imap.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.authserv_id == ""
+
+    def test_authserv_id_loads_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+authserv_id = "mx.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.authserv_id == "mx.example.com"
+
+    def test_authserv_id_with_a_version_number_warns(self, tmp_path, caplog):
+        """RFC 8601 puts a version number directly after the authserv-id, and the
+        operator is told to copy the value off a real header — so pasting
+        `mx.example.com 1` is the plausible mistake. Nothing matches it and every
+        message reads as unstamped, which is loud but says nothing about why."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+authserv_id = "mx.example.com 1"
+""")
+        with caplog.at_level("WARNING"):
+            cfg = load_config(config_file)
+
+        assert "authserv_id" in caplog.text
+        # Warned, not corrected: an operator with a genuinely unusual id keeps it.
+        assert cfg.email.authserv_id == "mx.example.com 1"
+
+    def test_authserv_id_is_trimmed_without_warning(self, tmp_path, caplog):
+        """Surrounding whitespace is a paste artefact, not a malformed id."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+authserv_id = "  mx.example.com  "
+""")
+        with caplog.at_level("WARNING"):
+            cfg = load_config(config_file)
+
+        assert cfg.email.authserv_id == "mx.example.com"
+        assert "authserv_id" not in caplog.text
+
 
 class TestSleepCycleConfig:
     def test_defaults(self):

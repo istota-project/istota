@@ -132,6 +132,26 @@ class Email:
     # MTA. Carried for the ISSUE-228 DMARC canary; see `_msg_to_email` for why
     # only the topmost one is meaningful.
     authentication_results: str | None = None
+    # Every Authentication-Results header, in wire order, topmost first
+    # (ISSUE-249). An authserv-id-scoped read needs the ones below the top:
+    # "topmost is ours" holds only while the MTA stamps, and the case the scoping
+    # exists to detect is the one where it has stopped. Read it through
+    # `authentication_results_headers`, never directly.
+    authentication_results_all: tuple[str, ...] = ()
+
+    @property
+    def authentication_results_headers(self) -> tuple[str, ...]:
+        """Every Authentication-Results header, topmost first.
+
+        `Email` is also built by hand in several places that predate
+        `authentication_results_all` and only ever set the topmost header. Falling
+        back to it keeps the canary reading something there rather than going
+        blind, and the two fields can only disagree in that direction — anything
+        `_msg_to_email` produced populates both.
+        """
+        if self.authentication_results_all:
+            return self.authentication_results_all
+        return (self.authentication_results,) if self.authentication_results else ()
 
 
 @dataclass
@@ -202,6 +222,21 @@ def _header_str(msg, name: str) -> str | None:
     if isinstance(value, tuple):
         value = value[0] if value else None
     return value
+
+
+def _header_all(msg, name: str) -> tuple[str, ...]:
+    """Read every occurrence of a repeated header, in wire order.
+
+    Same verbatim read as ``_header_str`` — no RFC 2047 decoding — for the same
+    reason. imap-tools builds ``msg.headers`` from the parsed header list in wire
+    order, so element 0 is the topmost and the rest follow as they arrived.
+    """
+    value = msg.headers.get(name)
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return tuple(v for v in value if v is not None)
+    return (value,)
 
 
 def _decoded_header_str(msg, name: str) -> str | None:
@@ -440,13 +475,19 @@ def _msg_to_email(msg) -> Email:
         body_html=msg.html or "",
         in_reply_to=_decoded_header_str(msg, "in-reply-to"),
         attachment_manifest=manifest,
-        # Security-relevant: take the TOPMOST Authentication-Results and no other.
-        # Each hop prepends its own, so the top one is stamped by the final
-        # receiving MTA; everything below it is whatever the sender chose to put
-        # in the message they handed over, and is therefore forgeable. imap-tools
-        # builds `msg.headers` from the parsed header list in wire order, so
-        # `_header_str` returning the first element is exactly the topmost.
+        # Security-relevant: the TOPMOST Authentication-Results. Each hop prepends
+        # its own, so the top one is stamped by the final receiving MTA; everything
+        # below it is whatever the sender chose to put in the message they handed
+        # over, and is therefore forgeable. imap-tools builds `msg.headers` from
+        # the parsed header list in wire order, so `_header_str` returning the
+        # first element is exactly the topmost.
         authentication_results=_header_str(msg, "authentication-results"),
+        # The full list, for the authserv-id-scoped read (ISSUE-249). "Topmost is
+        # ours" is a proxy that inverts exactly when the MTA stops stamping, which
+        # is the drift the canary exists to catch: with no stamp of our own, the
+        # sender's header *is* element 0. Naming our authserv-id makes the
+        # distinction explicit, and that needs every header rather than the first.
+        authentication_results_all=_header_all(msg, "authentication-results"),
     )
 
 

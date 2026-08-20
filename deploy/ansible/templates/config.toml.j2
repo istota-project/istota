@@ -239,6 +239,7 @@ imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
 confirm_sender_match = {{ istota_email_confirm_sender_match | lower }}
 dmarc_canary = {{ istota_email_dmarc_canary | lower }}
 dmarc_canary_warn_on_missing = {{ istota_email_dmarc_canary_warn_on_missing | lower }}
+authserv_id = "{{ istota_email_authserv_id }}"
 outbound_approval_floor = "{{ istota_email_outbound_approval_floor }}"
 {% endif %}
 

@@ -76,6 +76,26 @@ class EmailConfig:
     # when the MTA is known to stamp — that is the only way the "mailbox moved to
     # a provider that does not evaluate DMARC" drift case is visible.
     dmarc_canary_warn_on_missing: bool = False
+    # The receiving MTA's own authserv-id — the first field of an RFC 8601
+    # Authentication-Results header, before the semicolon. It is what separates
+    # our MTA's stamp from one the sender wrote (ISSUE-249). Blank, the default,
+    # selects the topmost header and trusts that "topmost" means "ours" — sound
+    # while the MTA stamps, and inverted the moment it stops, since element 0 is
+    # then whatever the sender put there and a forged `dmarc=pass` reads as a
+    # healthy path.
+    #
+    # Setting it is the operator's statement that their MTA stamps with this id,
+    # so a message carrying no header of ours warns on its own, without
+    # `dmarc_canary_warn_on_missing`. That flag stays scoped to what it always
+    # meant: our stamp is there but carries no DMARC verdict.
+    #
+    # Blank changes which header is *selected*, and nothing else — but note that
+    # the alignment check ISSUE-249 added runs on whichever header is selected,
+    # scoped or not. So a deployment on the default config does gain one new
+    # warning class on upgrade: a `dmarc=pass` whose `header.from` is not the
+    # `From:` domain the mail routed on. That is a real finding rather than
+    # noise, and it is why this is not "blank means nothing changed".
+    authserv_id: str = ""
     imap_timeout_seconds: int = 30  # socket timeout for IMAP connections (0/unset → 30)
     # Outbound approval floor: the weakest policy any user may run. One of
     # `off` (no holds), `untrusted` (hold unless every recipient is explicitly
@@ -1853,6 +1873,36 @@ def _validate_sandbox_ro_paths(raw: object) -> list[str]:
     return cleaned
 
 
+def _validate_authserv_id(raw: object) -> str:
+    """Validate ``[email] authserv_id``, warning rather than raising.
+
+    An authserv-id is a single token. The operator is told to copy it off a real
+    ``Authentication-Results`` header, where the very next thing after it may be
+    an RFC 8601 version number (``mx.example.com 1;``), so pasting a whole prefix
+    is the plausible mistake. Nothing matches such a value and every message then
+    reads as ``unstamped`` — loud, so no message is silently mishandled, but with
+    nothing pointing at the config value that caused it. This says so once at
+    load.
+
+    A warning, not a raise, unlike ``outbound_approval_floor``: that one is a
+    security floor whose every wrong answer is unsafe, while a bad value here
+    fails toward noise. Trimmed but otherwise passed through, so an operator who
+    genuinely has an unusual id keeps it.
+    """
+    value = raw if isinstance(raw, str) else ""
+    value = value.strip()
+    if value and any(ch.isspace() or ch in ';"(' for ch in value):
+        logger.warning(
+            "[email] authserv_id = %r contains whitespace or a delimiter. It must "
+            "be the single token before the semicolon in your MTA's "
+            "Authentication-Results header, without any version number that "
+            "follows it. Nothing will match this value, so every message will "
+            "report as unstamped.",
+            value,
+        )
+    return value
+
+
 def _validate_outbound_approval_floor(raw: object) -> str:
     """Validate ``[email] outbound_approval_floor``, raising on anything else.
 
@@ -2030,6 +2080,7 @@ def load_config(config_path: Path | None = None) -> Config:
             confirm_sender_match=email.get("confirm_sender_match", False),
             dmarc_canary=email.get("dmarc_canary", True),
             dmarc_canary_warn_on_missing=email.get("dmarc_canary_warn_on_missing", False),
+            authserv_id=_validate_authserv_id(email.get("authserv_id", "")),
             imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
             outbound_approval_floor=_validate_outbound_approval_floor(
                 email.get("outbound_approval_floor", "untrusted"),

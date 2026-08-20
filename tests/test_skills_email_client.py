@@ -374,6 +374,39 @@ class TestMapping:
         msg = _mock_message(headers={"authentication-results": (raw,)})
         assert _msg_to_email(msg).authentication_results == raw
 
+    def test_every_authentication_results_header_is_carried_in_wire_order(self):
+        """ISSUE-249: an authserv-id-scoped read has to see the headers below the
+        top one. "Topmost is ours" only holds while the MTA stamps — the case the
+        scoping exists to detect is the one where it has stopped."""
+        headers = (
+            "mx.example; dmarc=fail header.from=peer.example",
+            "forged.example; dmarc=pass header.from=peer.example",
+        )
+        msg = _mock_message(headers={"authentication-results": headers})
+        email = _msg_to_email(msg)
+
+        assert email.authentication_results_all == headers
+        assert email.authentication_results == headers[0]
+        assert email.authentication_results_headers == headers
+
+    def test_a_message_with_no_authentication_results_carries_an_empty_tuple(self):
+        email = _msg_to_email(_mock_message(headers={}))
+
+        assert email.authentication_results is None
+        assert email.authentication_results_all == ()
+        assert email.authentication_results_headers == ()
+
+    def test_a_hand_built_email_falls_back_to_its_single_header(self):
+        """`Email` is constructed by hand in several places that only ever knew about
+        the topmost header. The accessor the canary reads must not go blind there."""
+        from istota.skills.email import Email
+
+        email = Email(id="1", subject="s", sender="a@test.example", date="",
+                      body="", attachments=[],
+                      authentication_results="mx.example; dmarc=pass")
+
+        assert email.authentication_results_headers == ("mx.example; dmarc=pass",)
+
     def test_undecodable_header_falls_back_to_raw(self):
         """A malformed encoded-word must not cost the poll its message."""
         raw = "=?bogus-charset?Q?<sent1@bot.example>?="
