@@ -170,6 +170,32 @@ class TestBodiesDoNotContradict:
         ]
         assert offending == [], f"{name} instructs blanket staging: {offending}"
 
+    def test_a_runnable_skill_does_not_call_itself_unavailable(self, bundled_index):
+        """Stage 1 shipped a `code_review` body headed "Status: not yet
+        available", telling the model to skip the review and land the work. Turn
+        `cli: true` on without rewriting that and the skill is simultaneously
+        advertised in the proxy allowlist and documented as nonexistent — the
+        model reads the body, so the body wins.
+        """
+        for name, meta in sorted(bundled_index.items()):
+            if not meta.cli:
+                continue
+            body = self._body(name).lower()
+            for claim in ("does not exist yet", "not yet available", "until it lands"):
+                assert claim not in body, (
+                    f"{name} declares `cli: true` but its body still says {claim!r}"
+                )
+
+    def test_code_review_tells_the_model_to_extend_the_bash_timeout(self):
+        """The sandboxed model calls the CLI through its own Bash tool, whose
+        limit is 120s. A two-agent review on a real diff exceeds that routinely,
+        so the tool call dies while the review runs on and is paid for. The
+        feature does not work at default settings without this instruction, which
+        is why it is a spec requirement and not an implementation detail."""
+        body = self._body("code_review")
+        assert "timeout" in body.lower()
+        assert "istota-skill code_review run" in body
+
     def test_commit_precedes_review_in_the_lifecycle(self):
         """The review resolves a commit range, so a lifecycle that numbers the
         review before the commit reviews an empty diff and comes back clean."""

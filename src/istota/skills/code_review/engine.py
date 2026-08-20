@@ -1361,6 +1361,10 @@ found nothing, return {"findings": []}.
 # there is not enough left for a round trip to be worth starting.
 MIN_RETRY_SECONDS = 15
 
+# Headroom on the join above each agent's own timeout. The timeout is enforced
+# inside the brain; this is the backstop for a brain that does not honour it.
+JOIN_SLACK_SECONDS = 10
+
 # Handed to the caller with every envelope. Findings are model text about a diff
 # that may be an outside contributor's, so they are data describing code and
 # never instructions addressed to whoever reads them.
@@ -1386,54 +1390,122 @@ class AgentReply:
     error: str = ""
 
 
-def _parse_or_none(raw: str, source: str) -> list[Finding] | None:
-    """Findings, or None when the response carried no usable JSON at all.
+@dataclass
+class AgentOutcome:
+    """What one reviewer produced, including what it cost and what was lost.
 
-    `parse_findings` returns `[]` both for "no findings" and for "unparseable",
-    which are opposite outcomes: one is a clean review and the other has to be
-    retried. The difference is whether a payload of the right shape was in
-    there, so that is what this checks before delegating.
+    `reason` is a slug rather than prose because the caller branches on it, and
+    reconstructing "was this malformed?" by substring-matching an error message
+    couples the contract to the wording — reword the message and every malformed
+    review silently reclassifies.
+
+    `calls` counts model invocations that returned, successfully parsed or not.
+    It is what the budget is charged on: a reviewer that answers in prose twice
+    has spent real money, and counting only clean rounds would leave that loop
+    unbounded, which is the failure the cap exists to prevent, inverted.
+    """
+
+    findings: list[Finding] | None = None
+    error: str = ""
+    reason: str = ""  # "" | "malformed" | "call_failed"
+    calls: int = 0
+    dropped: int = 0
+
+
+def _parse_payload(raw: str, source: str):
+    """`(findings, dropped)`, or `None` when the response carried no usable JSON.
+
+    Two different failures hide behind `parse_findings` returning `[]`. One is a
+    clean review; the other is a response that has to be retried. The shape
+    check separates them — but only partly, so `dropped` carries the rest.
+
+    `parse_findings` discards any item that is not a dict or that names no file,
+    so `{"findings": ["must-fix: sql injection"]}` and a finding whose `file` is
+    empty both arrive as a well-shaped list that empties to nothing. Reported as
+    a clean review those are indistinguishable from "the reviewer found no
+    defects" — and the prompt asks explicitly for findings the reviewer could
+    not verify, which is exactly where a missing `file` comes from. Returning
+    the drop count lets the caller treat "items present, all discarded" as
+    malformed instead of clean.
     """
     payload = _extract_json(raw)
     if isinstance(payload, dict):
-        if not isinstance(payload.get("findings"), list):
-            return None
-    elif not isinstance(payload, list):
+        items = payload.get("findings")
+    elif isinstance(payload, list):
+        items = payload
+    else:
         return None
-    return parse_findings(raw, source)
+    if not isinstance(items, list):
+        return None
+    findings = parse_findings(raw, source)
+    return findings, len(items) - len(findings)
 
 
-def _run_agent(agent: str, prompt: str, invoke, timeout_seconds: int):
-    """One reviewer, with its single retry. Returns `(findings|None, error)`.
+def _attempt(agent: str, raw: str):
+    """One response, classified. `None` when it should be retried."""
+    parsed = _parse_payload(raw, agent)
+    if parsed is None:
+        return None
+    findings, dropped = parsed
+    if not findings and dropped:
+        # Well-shaped envelope, nothing survivable in it. Treated as malformed
+        # rather than clean, because "the reviewer found nothing" and "every
+        # finding the reviewer wrote was unusable" are opposite outcomes and
+        # only one of them is safe to report as a passing review.
+        return None
+    return findings, dropped
 
-    `None` findings means the agent produced nothing usable; `error` says why,
-    and carries the head of the raw output when the cause was malformed JSON —
-    a caller staring at "malformed" with no sample cannot tell a truncated
-    response from a chatty one.
+
+def _run_agent(agent: str, prompt: str, invoke, timeout_seconds: int) -> AgentOutcome:
+    """One reviewer, with its single retry.
+
+    The error carries the head of the raw output when the cause was malformed
+    JSON — a caller staring at "malformed" with no sample cannot tell a
+    truncated response from a chatty one.
     """
     started = time.monotonic()
     reply = invoke(agent, prompt, timeout_seconds)
     if not reply.ok:
-        return None, (reply.error or f"{agent} call failed")
+        return AgentOutcome(
+            error=reply.error or f"{agent} call failed", reason="call_failed", calls=1
+        )
 
-    findings = _parse_or_none(reply.text, agent)
-    if findings is not None:
-        return findings, ""
+    attempt = _attempt(agent, reply.text)
+    if attempt is not None:
+        findings, dropped = attempt
+        return AgentOutcome(findings=findings, calls=1, dropped=dropped)
 
+    # The retry runs against what is left of this agent's budget, never a fresh
+    # one, so a reviewer cannot double the wall time by answering badly. The
+    # floor scales with the configured budget: a hard 15s would report "no
+    # budget left" against a 10s timeout that had not been spent at all.
+    floor = min(MIN_RETRY_SECONDS, max(1, timeout_seconds // 2))
     remaining = int(timeout_seconds - (time.monotonic() - started))
-    if remaining < MIN_RETRY_SECONDS:
-        return None, (
-            f"{agent} returned unparseable output and too little budget "
-            f"remained to retry: {reply.text[:500]}"
+    if remaining < floor:
+        return AgentOutcome(
+            error=(
+                f"{agent} returned unparseable output and only {remaining}s of its "
+                f"{timeout_seconds}s budget remained, below the {floor}s retry "
+                f"floor: {reply.text[:500]}"
+            ),
+            reason="malformed",
+            calls=1,
         )
 
     retry = invoke(agent, f"{prompt}\n\n{_RETRY_NUDGE}", remaining)
     if not retry.ok:
-        return None, (retry.error or f"{agent} retry failed")
-    findings = _parse_or_none(retry.text, agent)
-    if findings is not None:
-        return findings, ""
-    return None, f"{agent} returned unparseable output twice: {reply.text[:500]}"
+        return AgentOutcome(
+            error=retry.error or f"{agent} retry failed", reason="call_failed", calls=2
+        )
+    attempt = _attempt(agent, retry.text)
+    if attempt is not None:
+        findings, dropped = attempt
+        return AgentOutcome(findings=findings, calls=2, dropped=dropped)
+    return AgentOutcome(
+        error=f"{agent} returned unparseable output twice: {reply.text[:500]}",
+        reason="malformed",
+        calls=2,
+    )
 
 
 def run_review(
@@ -1455,11 +1527,17 @@ def run_review(
     their boundary where the sleep-cycle tests draw theirs.
 
     The returned dict carries a `rounds` key the CLI uses to decide whether to
-    charge the task's budget: 1 when at least one reviewer came back with usable
-    findings, 0 otherwise. A review that spent nothing, or that spent a call and
-    got nothing back, must not consume budget — otherwise a task could exhaust
-    its allowance without a single review arriving, which is the failure the cap
-    exists to prevent, inverted.
+    charge the task's budget: 1 when at least one model invocation returned,
+    0 when none did. Charging on invocations rather than on clean results is
+    deliberate in both directions — a run refused by a guard or short-circuited
+    by the breaker spent nothing and must be free, while a reviewer that answers
+    in prose twice has spent real money and must not be, or a malformed-output
+    loop runs unbounded past a cap that never moves.
+
+    Every return path carries the same key set, so a consumer can read
+    `envelope["findings"]` or `envelope["counts"]` without first branching on
+    `status`. `notice` rides along everywhere, including the error path — which
+    is the one path that embeds raw model text.
     """
     cfg = cfg or ReviewConfig()
     if invoke is None:
@@ -1475,44 +1553,51 @@ def run_review(
         "truncated": bundle.truncated,
         "truncated_files": bundle.truncated_files,
         "rounds": 0,
+        "agents": [],
+        "sizing_reason": "",
+        "counts": _counts([]),
+        "findings": [],
+        "dropped_findings": 0,
+        "partial": False,
+        "partial_reason": "",
+        "empty": False,
+        "notice": NOTICE,
     }
 
     if not bundle.files and not bundle.body.strip():
         # A real state rather than an error: an empty branch is something the
         # workflow's own gate decides about, and paying for a model call to
-        # discover it would be waste.
+        # discover it would be waste. `empty` is the machine-readable half —
+        # a gate reading `status == "ok" and counts["must-fix"] == 0` would
+        # otherwise take an unreviewed empty range for a clean review, and
+        # prose in `notice` is not something a consumer branches on.
         return {
             **envelope,
             "status": "ok",
-            "agents": [],
+            "empty": True,
             "sizing_reason": "the range is empty, so no reviewer ran",
-            "counts": _counts([]),
-            "findings": [],
-            "partial": False,
-            "partial_reason": "",
             "notice": EMPTY_NOTICE,
         }
 
     agents, sizing_reason = size_review(bundle, cfg, forced_agents)
     context = assemble_context(worktree, bundle, cfg)
 
-    results: dict[str, list[Finding]] = {}
-    errors: dict[str, str] = {}
+    outcomes: dict[str, AgentOutcome] = {}
 
     def _one(agent: str) -> None:
         try:
             prompt = build_prompt(agent, bundle, context, intent)
-            findings, error = _run_agent(agent, prompt, invoke, timeout_seconds)
+            outcomes[agent] = _run_agent(agent, prompt, invoke, timeout_seconds)
         except Exception as exc:
             # A brain that raises is one failed reviewer, not a failed review.
-            # Letting it out of the thread would lose the other agent's work
-            # and report nothing at all.
-            errors[agent] = f"{agent} raised {type(exc).__name__}: {exc}"
-            return
-        if findings is None:
-            errors[agent] = error
-        else:
-            results[agent] = findings
+            # Letting it out of the thread would lose the other agent's work and
+            # report nothing at all. `calls=1` because the invocation was made:
+            # whatever it cost, it was spent.
+            outcomes[agent] = AgentOutcome(
+                error=f"{agent} raised {type(exc).__name__}: {exc}",
+                reason="call_failed",
+                calls=1,
+            )
 
     if len(agents) == 1:
         _one(agents[0])
@@ -1522,41 +1607,65 @@ def run_review(
         threads = [threading.Thread(target=_one, args=(agent,)) for agent in agents]
         for thread in threads:
             thread.start()
+        # Bounded, because `timeout_seconds` is enforced inside the brain and a
+        # brain that hangs — a stuck read, a subprocess ignoring SIGTERM — would
+        # otherwise hold this process until the skill proxy kills it, emitting
+        # nothing at all. A thread still alive here is that agent's failure; the
+        # other agent's findings survive it.
+        deadline = time.monotonic() + timeout_seconds + JOIN_SLACK_SECONDS
         for thread in threads:
-            thread.join()
+            thread.join(max(0.0, deadline - time.monotonic()))
 
-    succeeded = [agent for agent in agents if agent in results]
+    for agent in agents:
+        if agent not in outcomes:
+            outcomes[agent] = AgentOutcome(
+                error=(
+                    f"{agent} did not return within "
+                    f"{timeout_seconds + JOIN_SLACK_SECONDS}s and was abandoned"
+                ),
+                reason="call_failed",
+                calls=1,
+            )
+
+    rounds = 1 if any(o.calls for o in outcomes.values()) else 0
+    succeeded = [a for a in agents if outcomes[a].findings is not None]
+    failed = [a for a in agents if outcomes[a].findings is None]
+    dropped = sum(outcomes[a].dropped for a in succeeded)
+
     if not succeeded:
         # Every reviewer failed, so there is no partial answer to salvage.
-        # Malformed output gets its own reason because the cause differs: a bad
-        # response rather than a bad request, and the raw head is what
-        # diagnoses it.
-        malformed = any("unparseable" in error for error in errors.values())
+        # Malformed output gets its own reason because the cause differs — a bad
+        # response rather than a bad request — and the workflow branches on it.
+        malformed = any(outcomes[a].reason == "malformed" for a in agents)
         return {
             **envelope,
             "status": "error",
+            "rounds": rounds,
             "reason": "malformed_output" if malformed else "review_failed",
-            "error": "; ".join(errors[a] for a in agents if a in errors),
-            "agents": [],
+            "error": "; ".join(outcomes[a].error for a in agents),
             "sizing_reason": sizing_reason,
         }
 
-    merged = merge_findings([results[a] for a in succeeded], changed_files=bundle.files)
-    failed = [agent for agent in agents if agent not in results]
+    merged = merge_findings(
+        [outcomes[a].findings or [] for a in succeeded], changed_files=bundle.files
+    )
     return {
         **envelope,
         "status": "ok",
-        "rounds": 1,
+        "rounds": rounds,
         "agents": succeeded,
         "sizing_reason": sizing_reason,
         "counts": _counts(merged),
         "findings": [_finding_dict(f) for f in merged],
+        # Items a reviewer wrote that could not be used — no file named, or not
+        # an object. Surfaced rather than swallowed: a review reporting zero
+        # findings having discarded three is not the same as a clean one.
+        "dropped_findings": dropped,
         # A review that lost a reviewer is reported as partial rather than as
         # clean. Half a review that says so is usable; half a review that claims
         # to be whole is worse than none at all.
         "partial": bool(failed),
-        "partial_reason": "; ".join(errors[a] for a in failed),
-        "notice": NOTICE,
+        "partial_reason": "; ".join(outcomes[a].error for a in failed),
     }
 
 

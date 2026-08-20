@@ -764,9 +764,13 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # the flag below, so there is no separate feature switch. The defaults give a
 # working review on any repository you have already enabled [developer] for.
 #
-# The reviewers have no tools: the CLI assembles everything they see from the
-# repository, because a model-authored prompt deciding what the daemon reads is
-# the boundary this design exists to keep.
+# The reviewers are invoked with no tools requested and no sandbox wrapper: the
+# CLI assembles everything they see from the repository, because a model-authored
+# prompt deciding what the daemon reads is the boundary this design exists to
+# keep. On the native brain an empty tool list is enforced in-process; on
+# claude_code it means the CLI is passed neither an allow-list nor
+# --dangerously-skip-permissions, which leaves the guarantee resting on the
+# upstream CLI's own default rather than on something this repo enforces.
 #
 # Two ceilings sit above `timeout_seconds`, and the lower one bites first. The
 # skill proxy kills the command at `security.skill_proxy_timeout` (300s by
@@ -794,7 +798,10 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                     # re-invocation; 0 disables the round trip
 # timeout_seconds = 120               # per agent; both run concurrently, so this is
 #                                     # wall time, not half of it
-# max_calls_per_task = 8              # successful model rounds; at the cap the review
+# max_calls_per_task = 8              # review rounds per task (one round is up to four
+#                                     # model invocations: two agents, each retrying once).
+#                                     # 0 or less permits none — use enabled = false to
+#                                     # switch the feature off. At the cap the review
 #                                     # degrades to skipped rather than erroring
 
 # ============================================================================

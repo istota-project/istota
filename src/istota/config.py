@@ -524,9 +524,13 @@ class ReviewConfig:
     # Per agent. Both agents run concurrently, so this is wall time and not half
     # of it.
     timeout_seconds: int = 120
-    # Successful model rounds per task. At the cap the review degrades to
-    # `skipped` rather than erroring: a blocking cap would stop a task that had
-    # already finished its work from landing it.
+    # Review rounds per task, where a round is one `code_review run` that
+    # reached the model — up to four invocations, since each of two agents may
+    # retry once. Guard refusals and breaker skips are free. 0 or less permits
+    # no reviews at all, matching `max_need_files` above rather than reading as
+    # "unlimited"; use `enabled = false` to switch the feature off. At the cap
+    # the review degrades to `skipped` rather than erroring, because a blocking
+    # cap would stop a task that had already finished its work from landing it.
     max_calls_per_task: int = 8
 
 

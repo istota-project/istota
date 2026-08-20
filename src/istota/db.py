@@ -8116,11 +8116,12 @@ def cache_reverse_geocode(
 
 
 def code_review_calls_get(conn: sqlite3.Connection, task_id: int) -> int:
-    """Successful review rounds this task has already spent.
+    """Review rounds this task has already spent.
 
-    Zero for a task that has never run one, which is also what a deleted task
-    reads as — the row is `ON DELETE CASCADE`, so a counter cannot outlive the
-    task it was budgeting.
+    Zero for a task that has never run one. The table's `ON DELETE CASCADE` is
+    decorative like every other FK in this module — `PRAGMA foreign_keys` is
+    never enabled on these connections — so a counter does outlive its task and
+    is pruned by whatever sweeps `tasks`, not by the constraint.
     """
     row = conn.execute(
         "SELECT calls FROM code_review_calls WHERE task_id = ?",

@@ -12,13 +12,20 @@ env: [{"var":"DEVELOPER_REPOS_DIR","from":"config","config_path":"developer.repo
 
 A review runs over a branch's diff and comes back with findings you have to act on. It is part of the development lifecycle rather than optional diligence — see the `developer` skill for where it sits.
 
-## Status: not yet available
+## Running one
 
-**The review command does not exist yet.** It is being built; this document describes the shape it will have so the surrounding workflow can be written against it, and so nobody spends a task hunting for a command that is not there.
+```bash
+istota-skill code_review run --worktree "$WORKTREE" --base main \
+  --intent "one line on what this change is meant to do"
+```
 
-Until it lands, do not claim a change was reviewed. When the `developer` lifecycle reaches its review step, report the review as unavailable and say why, then carry on and land the work. An unreviewed change that says it is unreviewed is fine. A change described as reviewed when nothing reviewed it is not.
+**Give the command an explicit timeout of at least 300 seconds.** Your Bash tool defaults to 120, and a review of a real diff routinely takes longer than that — both reviewers run concurrently, each with its own budget, on top of assembling the diff and its context. At the default the tool call dies while the review runs on and finishes, so you are charged for a result you never see. This is the single most common way this command appears broken.
 
-## When a review will run
+`--base <ref>` reviews `<ref>...HEAD`. `--range` takes an explicit range and wins over `--base`; with neither, the range is the merge base against the tracked default branch. `--agents both` forces both reviewers; by default the size of the diff decides.
+
+Never pass the diff, the file contents, or any prompt text. The command assembles all of that from the repository itself, and there is no argument for it.
+
+## When to run one
 
 - Before pushing a branch and opening a merge request or pull request, unless the change is Fast tier.
 - At the close of each stage of a staged piece of work, over that stage's commits rather than everything since the work began.
@@ -37,6 +44,12 @@ Read the envelope's `status` before its findings:
 - `error` — something is wrong with the request itself: a bad range, a path outside the allowed roots, a response that would not parse. Report it and do not open the MR.
 
 A `skipped` review is not a clean review. Never report "no findings" when the review did not run.
+
+Three more fields decide whether an `ok` is actually clean, and all three are easy to miss:
+
+- `empty: true` — the range held no changes, so nothing was reviewed and no reviewer ran. Not a pass.
+- `partial: true` — a reviewer was lost. `partial_reason` says which and why. Report the review as partial.
+- `dropped_findings` above zero — a reviewer wrote findings that could not be used, usually because they named no file. Whatever it said is gone; say so rather than reporting a clean review.
 
 ## What to do with findings
 

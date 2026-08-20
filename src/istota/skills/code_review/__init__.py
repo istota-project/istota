@@ -42,7 +42,7 @@ import os
 import sys
 from pathlib import Path
 
-from istota.skill_host_paths import resolve_under_repos
+from istota.skill_host_paths import developer_repos_root, resolve_under_repos
 
 from . import engine
 
@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 # startup warning rather than from a review that dies half-finished.
 ASSEMBLY_ALLOWANCE_SECONDS = 60
 
+# Floor for the clamp above. A proxy ceiling tighter than the assembly allowance
+# would otherwise hand an agent zero or negative seconds, which is not a shorter
+# review but no review at all.
+MIN_AGENT_TIMEOUT_SECONDS = 30
+
 
 def _emit(envelope: dict, code: int):
     """The facade contract: one line of JSON on stdout, then an exit code."""
@@ -62,20 +67,31 @@ def _emit(envelope: dict, code: int):
     sys.exit(code)
 
 
-def _fail(reason: str, message: str):
-    logger.warning("code_review refused (%s): %s", reason, message)
-    _emit({"status": "error", "reason": reason, "error": message}, 1)
+def _fail(reason: str, message: str, **extra):
+    """Something is wrong with the *request*, so the workflow blocks the push.
+
+    Logged with the task id and the rejected input: a guard refusal with neither
+    is a line an operator cannot act on.
+    """
+    logger.warning(
+        "code_review refused (task=%s, reason=%s): %s",
+        os.environ.get("ISTOTA_TASK_ID", "-"), reason, message,
+    )
+    _emit({"status": "error", "reason": reason, "error": message, **extra}, 1)
 
 
 def _skip(reason: str, message: str, **extra):
-    """A state of the environment rather than of the diff.
+    """A state of the *environment* rather than of the diff.
 
     Exit 0 and `skipped`, never `error`. The workflow does not block a push on
     these, because none of them resolves by refusing to push — and a review that
     errors *does* block, so misfiling one here would strand finished work on a
     branch nobody is watching. A skipped review still counts as unreviewed.
     """
-    logger.info("code_review skipped (%s): %s", reason, message)
+    logger.info(
+        "code_review skipped (task=%s, reason=%s): %s",
+        os.environ.get("ISTOTA_TASK_ID", "-"), reason, message,
+    )
     _emit({"status": "skipped", "reason": reason, "error": message, **extra}, 0)
 
 
@@ -111,9 +127,15 @@ def cmd_run(args):
 
     review_cfg = dev.review
     if not review_cfg.enabled:
-        _fail(
+        # An operator switch, so `skipped` and exit 0. It is a state of the
+        # deployment rather than of the diff and will not resolve by refusing to
+        # push; blocking here would mean a deployment that turned review off
+        # could never land anything. The workflow reports the work as unreviewed
+        # and says why.
+        _skip(
             "review_disabled",
-            "[developer.review] enabled = false, so code review is switched off",
+            "[developer.review] enabled = false, so code review is switched off "
+            "on this deployment",
         )
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
@@ -122,6 +144,21 @@ def cmd_run(args):
             "not_admin",
             "code review is admin-only; repos_dir is bound into the sandbox for "
             "admins only, so a non-admin has no worktree to review",
+        )
+
+    # The guard above reads `repos_dir` off the loaded config; containment below
+    # resolves against `DEVELOPER_REPOS_DIR`. Those can disagree — the variable
+    # is injected only for *authorized* skills, so a claude_code deployment with
+    # `[developer]` configured but no forge token has the config key and not the
+    # variable. Reported through `path_not_allowed` that reads as "your path is
+    # wrong" and blocks the push; it is neither. Separate reason, and skipped,
+    # because no amount of not-pushing will set the variable.
+    if developer_repos_root() is None:
+        _skip(
+            "repos_root_unavailable",
+            "DEVELOPER_REPOS_DIR is not set in this process, so no worktree path "
+            "can be validated. The variable is injected for authorized skills "
+            "only — check that code_review resolved its credentials.",
         )
 
     worktree, error = resolve_under_repos(args.worktree)
@@ -137,14 +174,56 @@ def cmd_run(args):
             "can be driven on this deployment",
         )
 
+    # Before the cap and the breaker, so an operator whose budget cannot fit
+    # learns about it even on a run those short-circuit — a warning that only
+    # fires on the runs that were going to work is not much of a warning.
+    proxy_ceiling = config.security.skill_proxy_timeout
+    agent_timeout = review_cfg.timeout_seconds
+    if proxy_ceiling and agent_timeout + ASSEMBLY_ALLOWANCE_SECONDS > proxy_ceiling:
+        # Clamped, not just warned about. Left alone, every agent would be given
+        # a budget the proxy kills the whole command before it can spend, so
+        # each review would die half-finished having paid for both agents.
+        # Shrinking is the only outcome that returns anything.
+        agent_timeout = max(
+            MIN_AGENT_TIMEOUT_SECONDS, proxy_ceiling - ASSEMBLY_ALLOWANCE_SECONDS
+        )
+        logger.warning(
+            "code_review timeout_seconds of %ss plus %ss of assembly exceeds "
+            "security.skill_proxy_timeout of %ss, so each agent is being given "
+            "%ss instead. Lower timeout_seconds or raise skill_proxy_timeout.",
+            review_cfg.timeout_seconds, ASSEMBLY_ALLOWANCE_SECONDS,
+            proxy_ceiling, agent_timeout,
+        )
+
     task_id = _task_id()
     db_path = _db_path()
     cap = review_cfg.max_calls_per_task
     calls_used = None
     if task_id is not None and db_path:
-        with db.get_db(db_path) as conn:
-            calls_used = db.code_review_calls_get(conn, task_id)
-        if cap > 0 and calls_used >= cap:
+        # A read that fails must not sink a review. Losing the budget check is a
+        # cost risk bounded by whatever else is wrong with the database; refusing
+        # the review outright turns a transient lock into a blocked push.
+        try:
+            with db.get_db(db_path) as conn:
+                calls_used = db.code_review_calls_get(conn, task_id)
+        except Exception as exc:
+            logger.error(
+                "code_review could not read the call budget for task %s, "
+                "proceeding uncapped: %s", task_id, exc,
+            )
+        # `<= 0` means no reviews, matching `max_need_files = 0` next door rather
+        # than reading as "unlimited". Two adjacent knobs where 0 means opposite
+        # things is a trap, and on a spend control the expensive reading is the
+        # wrong one to guess at.
+        if cap <= 0:
+            _skip(
+                "call_cap",
+                f"max_calls_per_task is {cap}, so no review rounds are permitted "
+                "for this task",
+                calls_used=calls_used or 0,
+                max_calls=cap,
+            )
+        if calls_used is not None and calls_used >= cap:
             _skip(
                 "call_cap",
                 f"this task has already spent {calls_used} review rounds, at the "
@@ -169,16 +248,8 @@ def cmd_run(args):
             "brain_unavailable",
             f"the primary brain is degraded ({breaker_reason or 'cooling down'}), "
             "so the review was not attempted",
-        )
-
-    budget = review_cfg.timeout_seconds + ASSEMBLY_ALLOWANCE_SECONDS
-    proxy_ceiling = config.security.skill_proxy_timeout
-    if proxy_ceiling and budget > proxy_ceiling:
-        logger.warning(
-            "code_review budget of %ss (timeout_seconds %s + assembly %ss) exceeds "
-            "security.skill_proxy_timeout of %ss — the proxy will kill the review "
-            "before it finishes. Lower timeout_seconds or raise skill_proxy_timeout.",
-            budget, review_cfg.timeout_seconds, ASSEMBLY_ALLOWANCE_SECONDS, proxy_ceiling,
+            calls_used=calls_used,
+            max_calls=cap,
         )
 
     cwd = Path(config.temp_dir) if config.temp_dir else Path("/tmp")
@@ -237,15 +308,25 @@ def cmd_run(args):
                 max_callers_per_symbol=review_cfg.max_callers_per_symbol,
             ),
             invoke=invoke,
-            timeout_seconds=review_cfg.timeout_seconds,
+            timeout_seconds=agent_timeout,
         )
     except engine.ReviewError as exc:
         _fail(exc.reason, str(exc))
 
     rounds = envelope.pop("rounds", 0)
     if rounds and task_id is not None and db_path:
-        with db.get_db(db_path) as conn:
-            calls_used = db.code_review_calls_increment(conn, task_id)
+        # The review is already paid for by this point, so a failure to record
+        # the charge must not lose it. Emitting an un-counted review is a cost
+        # risk; a traceback instead of an envelope violates the facade contract
+        # and hands the caller nothing at all.
+        try:
+            with db.get_db(db_path) as conn:
+                calls_used = db.code_review_calls_increment(conn, task_id)
+        except Exception as exc:
+            logger.error(
+                "code_review completed but could not record the call against "
+                "task %s: %s", task_id, exc,
+            )
     envelope["calls_used"] = calls_used
     envelope["max_calls"] = cap
     _emit(envelope, 1 if envelope["status"] == "error" else 0)
@@ -291,7 +372,19 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     commands = {"run": cmd_run}
-    commands[args.command](args)
+    try:
+        commands[args.command](args)
+    except SystemExit:
+        # `_emit` is how this module returns; it is not a failure to catch.
+        raise
+    except Exception as exc:
+        # The facade contract is one line of JSON and an exit code, and the
+        # scheduler sniffs stdout for that shape. The engine shells out to git
+        # through `subprocess.Popen`, which raises `OSError` and friends outside
+        # `ReviewError`, so without this the caller gets a traceback on stderr,
+        # empty stdout, and nothing it can classify.
+        logger.exception("code_review failed unexpectedly")
+        _fail("internal_error", f"{type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":

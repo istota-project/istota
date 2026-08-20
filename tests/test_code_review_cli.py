@@ -327,13 +327,20 @@ class TestCallCounterHelpers:
             assert db.code_review_calls_increment(conn, task_row) == 2
             assert db.code_review_calls_get(conn, task_row) == 2
 
-    def test_counters_do_not_outlive_their_task(self, review_db, task_row):
+    def test_the_cascade_is_decorative_like_every_other_fk_here(
+        self, review_db, task_row
+    ):
+        """`PRAGMA foreign_keys` is never enabled on these connections, so the
+        `ON DELETE CASCADE` on `code_review_calls` does not fire — matching every
+        other FK in `db.py`, each annotated the same way. Pinned because the
+        docstring used to claim the opposite, and a test that switched the pragma
+        on itself would have validated a behaviour production never has.
+        """
         with db.get_db(review_db) as conn:
             db.code_review_calls_increment(conn, task_row)
-            conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("DELETE FROM tasks WHERE id = ?", (task_row,))
             conn.commit()
-            assert db.code_review_calls_get(conn, task_row) == 0
+            assert db.code_review_calls_get(conn, task_row) == 1
 
 
 # --------------------------------------------------------------------------
@@ -363,13 +370,39 @@ class TestGuards:
         assert code == 1
         assert envelope["reason"] == "repos_dir_unset"
 
-    def test_review_disabled(
+    def test_review_disabled_is_skipped_not_errored(
         self, capsys, worktree, review_env, developer_config, no_brain
     ):
+        """An operator switch is a state of the deployment, not of the diff.
+
+        An `error` blocks the push, so filing it here would mean a deployment
+        that deliberately turned review off could never land anything. The
+        config block shipped alongside says as much: "false disables the CLI;
+        the workflow then reports 'review unavailable' and lands anyway".
+        """
         developer_config(enabled=False)
         code, envelope = drive(capsys, "run", "--worktree", str(worktree))
-        assert code == 1
+        assert code == 0
+        assert envelope["status"] == "skipped"
         assert envelope["reason"] == "review_disabled"
+
+    def test_repos_root_missing_from_the_environment_is_skipped(
+        self, capsys, monkeypatch, tmp_path, review_env, developer_config, no_brain
+    ):
+        """`repos_dir` in config and `DEVELOPER_REPOS_DIR` in the environment can
+        disagree: the variable is injected for *authorized* skills only, so a
+        deployment with `[developer]` configured but no resolved credential has
+        the config key and not the variable. Reporting that as
+        `path_not_allowed` would blame the caller's path and block the push for
+        something no amount of not-pushing fixes.
+        """
+        cfg = developer_config()
+        cfg.developer.repos_dir = str(tmp_path / "repos")
+        monkeypatch.delenv("DEVELOPER_REPOS_DIR", raising=False)
+        code, envelope = drive(capsys, "run", "--worktree", str(tmp_path / "repos/x"))
+        assert code == 0
+        assert envelope["status"] == "skipped"
+        assert envelope["reason"] == "repos_root_unavailable"
 
     def test_non_admin_refused(
         self, capsys, monkeypatch, worktree, review_env, developer_config, no_brain
@@ -429,9 +462,11 @@ class TestGuards:
         assert envelope["reason"] == "brain_unsupported"
 
     def test_a_refused_run_does_not_increment_the_counter(
-        self, capsys, worktree, review_env, developer_config, review_db, no_brain
+        self, capsys, tmp_path, monkeypatch, worktree, review_env, review_db, no_brain
     ):
-        developer_config(enabled=False)
+        cfg = Config(db_path=tmp_path / "db", temp_dir=tmp_path / "t")
+        cfg.developer = DeveloperConfig(enabled=False, repos_dir=str(worktree.parent))
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **k: cfg)
         drive(capsys, "run", "--worktree", str(worktree))
         with db.get_db(review_db) as conn:
             assert db.code_review_calls_get(conn, review_env) == 0
@@ -595,16 +630,110 @@ class TestReviewRun:
         assert envelope["reason"] == "malformed_output"
         assert "not json" in envelope["error"]
 
+    def test_a_round_that_spent_calls_and_failed_still_charges_the_budget(
+        self, capsys, worktree, review_env, developer_config, stub_brain, review_db
+    ):
+        """Otherwise a reviewer that reliably answers in prose loops forever:
+        error, exit 1, the workflow retries, and the cap that is supposed to
+        stop the spend never moves because no round ever "succeeded"."""
+        developer_config()
+        stub_brain.replies["conformance"] = ["not json", "still not json"]
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 1
+
+    def test_a_well_shaped_envelope_of_unusable_findings_is_not_a_clean_review(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`parse_findings` drops any item naming no file, so a must-fix without
+        one empties to `[]` and would otherwise be reported as `ok` with zero
+        findings — indistinguishable from a reviewer that found nothing. The
+        prompt asks explicitly for findings the reviewer could not verify, which
+        is exactly where a missing `file` comes from."""
+        developer_config()
+        stub_brain.replies["conformance"] = [
+            json.dumps({"findings": [{"severity": "must-fix", "claim": "secret leaked"}]}),
+            findings_json(finding(severity="must-fix", file="app.py", line=4)),
+        ]
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        # Retried rather than accepted, and the retry's usable finding survives.
+        assert stub_brain.calls == ["conformance", "conformance"]
+        assert code == 0
+        assert envelope["counts"]["must-fix"] == 1
+
+    def test_partly_unusable_findings_are_counted_not_swallowed(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config()
+        stub_brain.replies["conformance"] = [
+            json.dumps({
+                "findings": [
+                    finding(severity="high", file="app.py", line=4),
+                    {"severity": "must-fix", "claim": "no file named"},
+                ]
+            })
+        ]
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert code == 0
+        assert envelope["counts"]["total"] == 1
+        assert envelope["dropped_findings"] == 1
+
+    def test_an_empty_range_is_flagged_machine_readably(
+        self, capsys, empty_worktree, review_env, developer_config, stub_brain
+    ):
+        """A gate reading `status == "ok" and counts["must-fix"] == 0` would
+        otherwise take an unreviewed empty range for a clean review; prose in
+        `notice` is not something a consumer branches on."""
+        developer_config()
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(empty_worktree), "--base", "main"
+        )
+        assert envelope["empty"] is True
+
+    def test_every_envelope_carries_the_same_keys(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A consumer must be able to read `findings` or `counts` without first
+        branching on `status`, and the error path — the only one that embeds raw
+        model text — must carry the untrusted-input notice like the rest."""
+        developer_config()
+        _, ok = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        stub_brain.replies["conformance"] = ["not json", "still not json"]
+        _, err = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        for key in ("findings", "counts", "partial", "notice", "range", "agents"):
+            assert key in ok, key
+            assert key in err, key
+
     def test_bad_range_returns_git_stderr(
         self, capsys, worktree, review_env, developer_config, stub_brain
     ):
+        """Git's own diagnosis has to survive into the envelope. A generic "bad
+        range" costs the caller a round trip working out which ref was wrong."""
         developer_config()
         code, envelope = drive(
             capsys, "run", "--worktree", str(worktree), "--range", "no-such-ref...HEAD"
         )
         assert code == 1
         assert envelope["status"] == "error"
-        assert envelope["error"]
+        assert "no-such-ref" in envelope["error"]
+
+    def test_an_unexpected_exception_still_produces_an_envelope(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """The facade contract is one line of JSON and an exit code, and the
+        scheduler sniffs stdout for that shape. The engine shells out through
+        `subprocess.Popen`, which raises OSError and friends outside
+        `ReviewError`."""
+        developer_config()
+        monkeypatch.setattr(
+            "istota.skills.code_review.engine.run_review",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("git vanished")),
+        )
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert code == 1
+        assert envelope["status"] == "error"
+        assert envelope["reason"] == "internal_error"
+        assert "git vanished" in envelope["error"]
 
 
 # --------------------------------------------------------------------------
@@ -650,6 +779,51 @@ class TestCallCap:
         drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
         assert stub_brain.calls == []
 
+    def test_a_cap_of_zero_permits_nothing_rather_than_everything(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`max_need_files = 0` disables its feature, so a neighbouring knob
+        where 0 silently means "unlimited" is a trap — and on a spend control
+        the expensive reading is the wrong one to guess at. An operator who
+        wants the feature off has `enabled = false`."""
+        developer_config(max_calls_per_task=0)
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert code == 0
+        assert envelope["status"] == "skipped"
+        assert envelope["reason"] == "call_cap"
+        assert stub_brain.calls == []
+
+    def test_an_unreadable_budget_does_not_sink_the_review(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """Losing the cap check is a bounded cost risk; refusing the review turns
+        a transient database lock into a blocked push."""
+        developer_config()
+        monkeypatch.setattr(
+            db, "code_review_calls_get",
+            lambda conn, task_id: (_ for _ in ()).throw(RuntimeError("database is locked")),
+        )
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert code == 0
+        assert envelope["status"] == "ok"
+
+    def test_an_unrecordable_charge_does_not_lose_a_paid_for_review(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """The model calls are already paid for by the time the counter is
+        written. A traceback here would violate the facade contract and hand the
+        caller nothing at all for the money."""
+        developer_config()
+        stub_brain.replies["conformance"] = [findings_json(finding())]
+        monkeypatch.setattr(
+            db, "code_review_calls_increment",
+            lambda conn, task_id: (_ for _ in ()).throw(RuntimeError("disk I/O error")),
+        )
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert len(envelope["findings"]) == 1
+
 
 # --------------------------------------------------------------------------
 # The timeout budget
@@ -669,16 +843,36 @@ class TestTimeoutBudget:
         )
         assert stub_brain.timeouts == [45, 45]
 
-    def test_a_budget_over_the_proxy_ceiling_warns_the_operator(
+    def test_a_budget_over_the_proxy_ceiling_is_clamped_and_warned_about(
         self, capsys, caplog, worktree, review_env, developer_config, stub_brain
     ):
-        """The proxy kills the command at `security.skill_proxy_timeout`, so an
-        operator who raises `timeout_seconds` past it should find out before a
-        review dies half-finished rather than after."""
+        """The proxy kills the command at `security.skill_proxy_timeout`. Warning
+        and then handing each agent the full budget anyway describes the problem
+        without avoiding it: every review would be killed half-finished having
+        paid for its agents. Shrinking is the only outcome that returns
+        anything."""
         cfg = developer_config(timeout_seconds=400)
         cfg.security.skill_proxy_timeout = 300
         with caplog.at_level("WARNING"):
             drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert any("skill_proxy_timeout" in r.message for r in caplog.records)
+        assert stub_brain.timeouts == [300 - code_review.ASSEMBLY_ALLOWANCE_SECONDS]
+
+    def test_the_ceiling_warning_fires_even_when_the_run_is_capped(
+        self, capsys, caplog, worktree, review_env, developer_config,
+        stub_brain, review_db,
+    ):
+        """A warning that only fires on the runs that were going to work anyway
+        is not much of a warning."""
+        cfg = developer_config(timeout_seconds=400, max_calls_per_task=1)
+        cfg.security.skill_proxy_timeout = 300
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            _, envelope = drive(
+                capsys, "run", "--worktree", str(worktree), "--base", "main"
+            )
+        assert envelope["reason"] == "call_cap"
         assert any("skill_proxy_timeout" in r.message for r in caplog.records)
 
 
