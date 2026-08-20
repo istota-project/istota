@@ -47,6 +47,7 @@ src/istota/
 ├── email_support.py      # Shared non-transport email plumbing (get_email_config, thread helpers, cleanup) used by transport + briefing/notifications/tasks-file
 ├── tasks_file_poller.py  # TASKS.md monitoring
 ├── heartbeat.py          # Health-check system
+├── host_pressure.py      # Host memory instrumentation: PSI/meminfo/tmpfs sampling, the fixed-cadence `host_pressure` breadcrumb line (incl. `shmem_unaccounted` = Shmem − Σ tmpfs used), and a threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders. stdlib-only leaf, every reader takes its `/proc` root as a parameter, never raises. `python -m istota.host_pressure [--snapshot]`
 ├── webhook_receiver.py   # FastAPI: Overland GPS, etc.
 ├── garmin_routes.py      # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
 ├── web_app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)

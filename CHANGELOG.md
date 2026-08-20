@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Held mail from an unknown sender no longer floods your notifications. The approval question was asked once per message, so fifty messages meant fifty questions to answer one at a time. Past a few from the same sender you now get a single notice covering the rest; each message is still held and still individually approvable, and that notice is sent even if you were already told about throttled mail in the same period.
 
+- The scheduler now records the host's memory state every five minutes, whether or not anything is wrong. A production host was lost in August to memory that had been quietly accumulating for five days with nothing recording any of it, because a slow leak crosses no alarm threshold until the day it is fatal. Each line separates memory some filesystem can be asked about from memory that lives in none — the distinction the August investigation could not make, and the reason it never named a culprit. `host_pressure_enabled = false` turns it off.
+
 ### Changed
 
 - Incoming mail now runs on the background queue instead of competing with your live chat. Email is the one way a stranger can create work, and nobody watches a mailbox for a reply the way they watch a chat window, so a burst of mail no longer takes the slots your own messages need. Mail turnaround is slower under load, which is the trade; `email_task_queue = "foreground"` restores the old behaviour.

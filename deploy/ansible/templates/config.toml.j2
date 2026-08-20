@@ -322,6 +322,8 @@ db_backup_interval = {{ istota_scheduler_db_backup_interval }}
 db_backup_dir = "{{ istota_scheduler_db_backup_dir }}"
 db_backup_retention = {{ istota_scheduler_db_backup_retention }}
 scheduler_stats_interval = {{ istota_scheduler_stats_interval }}
+host_pressure_enabled = {{ istota_scheduler_host_pressure_enabled | lower }}
+host_pressure_breadcrumb_interval_seconds = {{ istota_scheduler_host_pressure_breadcrumb_interval }}
 
 # Progress / event streaming
 progress_updates = {{ istota_scheduler_progress_updates | lower }}

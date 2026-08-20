@@ -183,6 +183,16 @@ class SchedulerConfig:
     db_backup_retention: int = 7  # number of newest dated snapshot dirs to keep (0 = keep all). Older dirs are pruned, but any dir holding the newest good copy of a DB is protected from pruning
     scheduler_stats_interval: int = 60  # seconds between scheduler_stats health-line emits (0 = disabled)
     loop_stall_alert_seconds: int = 180  # alert if the main dispatch loop hasn't ticked in this long (0 = disabled)
+    # Host memory-pressure instrumentation (host_pressure.py). The breadcrumb is
+    # a fixed-cadence one-line record of MemAvailable / Shmem / SwapFree / PSI /
+    # per-tmpfs usage, written whether or not anything is wrong. The 2026-08-20
+    # outage accumulated ~35 MB/hour of unreclaimable shmem for five days and
+    # never crossed a threshold until the day it became fatal, so a
+    # threshold-gated record could not have seen it — hence unconditional, and
+    # hence not gated on a delta either (the flat stretches are what bound when
+    # an accumulation started). 288 lines a day at the default interval.
+    host_pressure_enabled: bool = True  # master switch for host-pressure sampling
+    host_pressure_breadcrumb_interval_seconds: int = 300  # cadence of the breadcrumb line (0 = disabled)
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
@@ -2071,6 +2081,10 @@ def load_config(config_path: Path | None = None) -> Config:
             db_backup_retention=sched.get("db_backup_retention", 7),
             scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
             loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
+            host_pressure_enabled=sched.get("host_pressure_enabled", True),
+            host_pressure_breadcrumb_interval_seconds=sched.get(
+                "host_pressure_breadcrumb_interval_seconds", 300
+            ),
             talk_poll_interval=sched.get("talk_poll_interval", 10),
             talk_poll_timeout=sched.get("talk_poll_timeout", 30),
             talk_poll_wait=sched.get("talk_poll_wait", 2.0),
