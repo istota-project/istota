@@ -506,8 +506,23 @@ CREATE TABLE processed_emails (
 
 
 def _legacy_db(path, rows):
-    """A framework DB carrying the pre-ISSUE-250 ledger shape and some rows."""
+    """A framework DB carrying the pre-ISSUE-250 ledger shape and some rows.
+
+    Built by creating the *live* schema first and then reverting the ledger to
+    its old shape, so the DB the migration meets carries the other tables a
+    real deployment has. That matters for one of them in particular:
+    `knowledge_facts`, whose dedupe backfill in `_run_migrations` is a DML
+    statement, and so opens an implicit transaction on the migration
+    connection that the rebuild then has to cope with (ISSUE-261).
+
+    The original fixture created `processed_emails` on its own from a DDL
+    constant. No other table existed, so no earlier migration ran any DML, no
+    transaction was open, and the rebuild's `BEGIN IMMEDIATE` succeeded — in a
+    state no upgraded DB is ever in. That is what let the failure ship green.
+    """
+    db.init_db(path)  # every table a real deployment has
     conn = sqlite3.connect(str(path))
+    conn.execute("DROP TABLE processed_emails")
     conn.execute(LEGACY_PROCESSED_EMAILS_DDL)
     conn.executemany(
         "INSERT INTO processed_emails (email_id, sender_email, subject, "
@@ -541,6 +556,139 @@ class TestUidValidityMigration:
             (0, "1", "alice@test.com", "One", "plus_address"),
             (0, "2", "bob@test.com", "Two", "discarded"),
         ]
+
+    def test_rebuild_runs_when_an_earlier_migration_left_a_transaction_open(
+        self, tmp_path,
+    ):
+        """ISSUE-261: the rebuild opens its own transaction, on a connection
+        whose earlier migrations have already opened an implicit one.
+
+        `_run_migrations` runs on one connection in Python's legacy
+        `isolation_level` mode, where any DML opens a transaction that stays
+        open until someone commits. The `knowledge_facts` dedupe backfill is
+        DML and runs against every DB that has the table — which is every DB
+        written by a released version — so by the time the rebuild ran,
+        `BEGIN IMMEDIATE` raised "cannot start a transaction within a
+        transaction". The handler rolled back, logged, and re-armed, so it
+        failed identically on every restart and the column was never created.
+
+        Assert on the resulting DDL, not on row counts: a failed rebuild
+        leaves the rows untouched too, so a row-count check passes either way
+        and survives this bug.
+
+        The spy asserts the *precondition* rather than trusting it. The
+        transaction happens to be opened today by the `knowledge_facts` dedupe,
+        which is unconditional DML on any DB that has the table. Marker that
+        migration — four of its siblings already are — and the fixture would
+        stop reproducing the bug while every assertion here kept passing.
+        """
+        path = tmp_path / "legacy.db"
+
+        real = db._migrate_processed_emails_uidvalidity
+        seen = []
+
+        def spy(conn):
+            seen.append(conn.in_transaction)
+            return real(conn)
+
+        with patch.object(db, "_migrate_processed_emails_uidvalidity", spy):
+            _legacy_db(path, [("1", "alice@test.com", "One", "plus_address")])
+
+        assert seen and seen[-1] is True, (
+            "the fixture no longer reaches the rebuild with a transaction "
+            f"open, so it cannot reproduce ISSUE-261: {seen}"
+        )
+
+        with db.get_db(path) as conn:
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(processed_emails)")
+            }
+            ddl = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'processed_emails'"
+            ).fetchone()[0]
+
+        assert "uidvalidity" in cols, (
+            "the rebuild never ran; the poller queries a column that does not "
+            "exist and inbound email is dead"
+        )
+        assert "UNIQUE (uidvalidity, email_id)" in ddl
+
+    def test_rebuild_does_not_discard_an_earlier_migration(self, tmp_path):
+        """The rollback in the rebuild's handler used to undo the *inherited*
+        transaction, discarding the `knowledge_facts` dedupe and the
+        `briefing_configs` backfill on every start. Committing before
+        `BEGIN IMMEDIATE` scopes the rollback to the rebuild's own work, so
+        the earlier migration's rows survive.
+
+        The dedupe keeps the newest id per (user_id, subject, predicate,
+        object) current and retires the older duplicates, which is what makes
+        the partial unique index in schema.sql creatable.
+
+        Pre-fix this goes red by erroring rather than by the assertion below:
+        with the dedupe rolled back, the two colliding rows are still current
+        when `schema.sql` recreates `idx_kf_unique_current`, and `init_db`
+        raises IntegrityError. Worth knowing as an operational fact — a
+        production DB holding duplicate current facts would have failed
+        `istota init` outright rather than only losing email.
+        """
+        path = tmp_path / "legacy.db"
+        db.init_db(path)
+        conn = sqlite3.connect(str(path))
+        # A legacy DB predates the partial unique index the dedupe exists to
+        # make creatable, so drop it to insert the duplicates it would reject.
+        conn.execute("DROP INDEX idx_kf_unique_current")
+        # Two current facts that collide on the dedupe key; the older one must
+        # end up retired.
+        conn.executemany(
+            "INSERT INTO knowledge_facts "
+            "(user_id, subject, predicate, object, valid_until) "
+            "VALUES (?, ?, ?, ?, NULL)",
+            [("user1", "carol", "knows", "python"),
+             ("user1", "carol", "knows", "python")],
+        )
+        conn.execute("DROP TABLE processed_emails")
+        conn.execute(LEGACY_PROCESSED_EMAILS_DDL)
+        conn.commit()
+        conn.close()
+
+        db.init_db(path)  # runs both migrations on one connection
+
+        with db.get_db(path) as conn:
+            still_current = conn.execute(
+                "SELECT COUNT(*) FROM knowledge_facts WHERE valid_until IS NULL"
+            ).fetchone()[0]
+            retired = conn.execute(
+                "SELECT COUNT(*) FROM knowledge_facts "
+                "WHERE valid_until IS NOT NULL"
+            ).fetchone()[0]
+
+        assert (still_current, retired) == (1, 1), (
+            "the dedupe backfill was rolled back by the rebuild's handler"
+        )
+
+    def test_poll_against_an_upgraded_db_ingests_mail(
+        self, make_config, tmp_path,
+    ):
+        """The operator-visible symptom, end to end: one line per tick,
+        `Error polling emails: no such column: uidvalidity`, and no mail
+        ingested. `adopt_legacy_email_namespace` is the statement that raised,
+        and it sits upstream of the cursor write, so every tick took the
+        first-poll branch and nothing was ever consumed.
+
+        Drive a real poll against a DB that went through the upgrade path.
+        """
+        config = make_config()
+        _legacy_db(config.db_path, [
+            ("1", "alice@test.com", "One", "plus_address"),
+        ])
+
+        mailbox = FakeMailbox(range(1, 4), uidvalidity=12345)
+        created = _run_poll(config, mailbox)
+
+        assert len(created) == 2, (
+            f"upgraded DB did not ingest new mail: {len(created)} tasks"
+        )
+        assert _processed_uids(config) == {1, 2, 3}
 
     def test_rebuild_is_idempotent(self, tmp_path):
         path = tmp_path / "legacy.db"
