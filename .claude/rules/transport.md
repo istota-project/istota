@@ -274,8 +274,9 @@ messages are re-polled rather than silently lost.
     the correspondent's address is past the gate, and the DMARC canary does not
     watch this route — it is scoped to the self-claim, and `claims_to_be_user`
     is structurally False here. Widening it would alert on every reply from a
-    domain that publishes no DMARC policy, i.e. on ordinary mail, so the real
-    answer is the authserv-id-scoped verdict check ISSUE-249 owns.
+    domain that publishes no DMARC policy, i.e. on ordinary mail. ISSUE-249's
+    authserv-id scoping made the verdict trustworthy but left it a detector; a
+    gate that reads it is still unbuilt.
 
   What this route now shares with a gated `sender_match` reply is that the held
   task sits under a **real room token** (it inherits `sent_emails.
@@ -397,9 +398,15 @@ messages are re-polled rather than silently lost.
 
   A signal the sender cannot forge (inbound DKIM/SPF/DMARC via a trusted
   `Authentication-Results` stamp) would let the gate distinguish the user from a
-  spoofer and stop asking about legitimate mail. It needs an operator-configured
-  authserv-id to tell our own MTA's header from one the sender wrote, so it is a
-  feature rather than part of the ISSUE-227 fix.
+  spoofer and stop asking about legitimate mail. The operator-configured
+  authserv-id that tells our own MTA's header from one the sender wrote now
+  exists (`[email] authserv_id`, ISSUE-249), but **the gate still does not read
+  the verdict** — `needs_confirmation` consults `is_trusted_email_sender` and
+  nothing else, so a self-claim with a verified aligned pass and one with a
+  forged header get the same answer. Making the verdict load-bearing is a
+  deliberate change of the canary's nature (its docstring and
+  `docs/features/email.md` both promise it is not a control) and is its own
+  change.
 
   **The DMARC canary (ISSUE-228)** is the monitoring for the assumption the
   `false` default encodes, not that feature. `_check_dmarc_canary` in
@@ -408,18 +415,69 @@ messages are re-polled rather than silently lost.
   a *detector*: it never blocks, holds, or reroutes, so it is orthogonal to
   `confirm_sender_match` and safe on by default. It does not verify DKIM
   in-process; if the MTA already rejects, re-implementing the check buys nothing.
-  An attacker who forges the top header silences it, which is acceptable because
-  the MTA is the boundary — it catches misconfiguration and drift, and should
-  never be described as a control.
+  An attacker who forges a header the check accepts silences it, which is
+  acceptable because the MTA is the boundary — it catches misconfiguration and
+  drift, and should never be described as a control. What `[email] authserv_id`
+  changes is which forgery works: unscoped, any sender-written top header does,
+  including in the drift case the canary is watching for; scoped, the forgery has
+  to name the operator's own MTA.
 
   Three things about it that are load-bearing and easy to break:
 
-  - **Topmost header only.** `Email.authentication_results` is filled from
-    `_header_str(msg, "authentication-results")`, which returns element 0 —
-    imap-tools builds `msg.headers` from the parsed list in wire order, and each
-    hop prepends, so element 0 is the final receiving MTA's stamp. Everything
-    below it is sender-supplied. A change that reads any other element, or joins
-    them, hands the verdict to the spoofer.
+  - **Which headers are read is `[email] authserv_id`'s decision** (ISSUE-249).
+    `Email.authentication_results_all` carries every `Authentication-Results` in
+    wire order (`_header_all`) and `authentication_results_headers` is the
+    accessor; `authentication_results` stays the topmost, and the accessor falls
+    back to it for the several places that build an `Email` by hand. Blank
+    `authserv_id` reads element 0 alone, which is what the check always did:
+    each hop prepends, so while the MTA stamps, element 0 is its stamp. Set,
+    `_our_headers` keeps every header whose `_authserv_id` matches and discards
+    the rest, so a sender can neither quieten the check with an injected
+    `dmarc=pass` nor make it noisy with an injected `dmarc=fail`. Several stamps
+    of ours is legitimate (one header per method), so all matching headers are
+    read and the non-pass-wins rule applies across them as well as within one.
+    A quoted authserv-id reads as empty and matches nothing — the loud
+    direction, per the parser's standing rule.
+  - **"No stamp of ours" is loud on its own** when `authserv_id` is set
+    (`unstamped`), without `dmarc_canary_warn_on_missing`. Configuring the id is
+    the operator's assertion that their MTA stamps, so a message contradicting
+    it is a finding; the flag keeps its narrower meaning, our stamp present with
+    no DMARC verdict in it (`unevaluated`). Unscoped, absence stays
+    `unevaluated` and stays behind the flag, exactly as before. The alert counts
+    the headers it rejected and never quotes them — in that branch every header
+    present is one the sender wrote.
+  - **A pass is checked for alignment, and this rung runs whether or not
+    `authserv_id` is set** — so it is the one part of ISSUE-249 that changes
+    behaviour for a deployment on the default config. `_dmarc_header_from`
+    returns **every** `header.from` attributed to a DMARC methodspec in a header,
+    and the caller warns (`misaligned`) if *any* fails `_domains_align` against
+    `_address_domain(sender)`. Returning the first would put the check back on
+    first-match-wins, which is exactly the rule `_dmarc_result` was fixed to stop
+    using — a sender appending a second `header.from` naming the right domain
+    would mask the wrong one ahead of it.
+  - **Absent and unreadable are different answers, and only absent is quiet.**
+    `_dmarc_header_from` returns a second flag for "the property is there and no
+    domain came out of it" — a quoted value (`_split_methodspecs` blanks quoted
+    strings), a value the next methodspec's `;` truncated away, a bare root dot.
+    Each is an ambiguous read and resolves loudly, matching `_authserv_id`'s rule
+    in the same file; `_HEADER_FROM_PROPERTY` captures with `*` rather than `+`
+    so an empty value reaches that branch instead of looking like absence.
+    Genuine absence stays silent because many MTAs never emit the property.
+    Known limit: a property wholly inside a comment is blanked with nothing left
+    to notice and reads as absent.
+  - **Alignment is relaxed to a label boundary** (`_domains_align`): exact, or a
+    parent/child relationship either way. DMARC's own relaxed mode aligns on the
+    organizational domain and an MTA may record the domain it evaluated, so a
+    strict compare warns on every message from a subdomain sender — the noise
+    `dmarc_canary_warn_on_missing` is off by default to avoid. Deliberately not a
+    public-suffix lookup; both domains come from the same message, so what it
+    admits beyond a true org match is parent/child pairs, not unrelated
+    registrations under a shared suffix.
+  - **`dkim=`/`spf=` are alert detail only** (`_method_result`). They skip the
+    read-completeness cross-check because nothing load-bearing rests on them, and
+    they are truncated at `_ECHOED_VALUE_MAX` like every other header-derived
+    value reaching a log line or an alert — `[a-z]+` bounds the alphabet, not the
+    length, and the WARNING is emitted per message and never deduped.
   - **Scoped to the self-claim on both routes**, gated on `claims_to_be_user and
     routing_method in ("plus_address", "sender_match")` — the same set the
     confirmation gate covers, for the same ISSUE-227 reason. Watching only
@@ -642,10 +700,11 @@ messages are re-polled rather than silently lost.
   boundary:
   a *first-contact* self-addressed mail keeps its `room:<tok>,email` plan and its
   mirror — one message pair with no quoted chain, into the room the user's routing
-  chose for mail that names no conversation. Residual, and why ISSUE-249 stays
-  open: this rests on an unauthenticated `From:`, so a spoof now also buys
-  *suppression*. Same forgery the confirmation gate already faces, which is what
-  the ISSUE-228 DMARC canary watches for; a new consequence of it, not a new class.
+  chose for mail that names no conversation. Residual: this rests on an
+  unauthenticated `From:`, so a spoof now also buys *suppression*. Same forgery
+  the confirmation gate already faces, which is what the ISSUE-228 canary watches
+  for and what ISSUE-249's authserv-id scoping made harder to hide; a new
+  consequence of it, not a new class.
 
   **The decision is recorded on the task (ISSUE-255).** The task still carries
   the origin room as its `conversation_token` — kept deliberately, so the reply

@@ -396,6 +396,13 @@ istota_email_confirm_sender_match: false
 # provider that does not evaluate DMARC.
 istota_email_dmarc_canary: true
 istota_email_dmarc_canary_warn_on_missing: false
+# Your receiving MTA's authserv-id — the first field of the
+# Authentication-Results header it stamps. Blank reads the topmost header and
+# trusts that "topmost" means "ours", which stops holding the moment the MTA
+# stops stamping: the sender's own header is then the top one. Set it and any
+# header from another authserv-id is discarded. Setting it also says your MTA
+# stamps, so mail arriving without your stamp warns on its own.
+istota_email_authserv_id: ""
 # The weakest outbound approval policy any user on this instance may run. An
 # outgoing email whose recipients are not explicitly authorized is held as an
 # editable draft instead of being sent; the user approves, edits or discards it

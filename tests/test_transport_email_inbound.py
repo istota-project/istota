@@ -85,13 +85,15 @@ def _envelope(id="1", subject="Hello", sender="alice@test.com", date="Mon, 01 Ja
 
 
 def _email(id="1", subject="Hello", sender="alice@test.com", body="Hi there",
-           to=("bot@test.com",), cc=(), authentication_results=None):
+           to=("bot@test.com",), cc=(), authentication_results=None,
+           authentication_results_all=()):
     return Email(
         id=id, subject=subject, sender=sender,
         date="Mon, 01 Jan 2026 10:00:00 +0000",
         body=body, attachments=[],
         message_id="<msg1@test.com>", references=None,
         to=to, cc=cc, authentication_results=authentication_results,
+        authentication_results_all=authentication_results_all,
     )
 
 
@@ -3534,3 +3536,447 @@ class TestDmarcCanary:
 
         assert len(task_ids) == 2
         assert len(observed) == 2
+
+
+# =============================================================================
+# TestAuthservIdScoping (ISSUE-249)
+# =============================================================================
+
+
+class TestAuthservIdScoping:
+    """ISSUE-249 Gap 1 — "topmost" is only a proxy for "ours", and it inverts in
+    exactly the case the canary exists to catch. While the MTA stamps, element 0
+    is its stamp. The moment it stops, element 0 is whatever the sender wrote, so
+    a forged ``dmarc=pass`` reads as a healthy path and the one config change that
+    would have made the drift visible is defeated by the drift itself.
+
+    ``[email] authserv_id`` names the receiving host's own identity — the first
+    field of the RFC 8601 header — so our stamp can be told from one the sender
+    wrote.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _config(self, make_config, **email_overrides):
+        config = make_config()
+        config.email = _email_config()
+        for key, val in email_overrides.items():
+            setattr(config.email, key, val)
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        return config
+
+    def _poll(self, config, headers, id="a1", sender="alice@test.com"):
+        email = _email(id=id, sender=sender, authentication_results_all=tuple(headers))
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id=id, sender=sender)]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True) as alert,
+        ):
+            poll_emails(config)
+        return alert
+
+    def test_a_forged_stamp_no_longer_reads_as_a_healthy_path(self, make_config, caplog):
+        """The whole point of the issue. The MTA has stopped stamping, so the only
+        Authentication-Results on the message is the sender's own, claiming a pass.
+        Unscoped, that is silent — element 0 is taken as ours."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, ["forged.example; dmarc=pass header.from=test.com"])
+
+        assert alert.call_count == 1
+        assert "mx.test" in caplog.text
+
+    def test_no_header_at_all_is_loud_once_an_authserv_id_is_configured(self, make_config, caplog):
+        """Configuring the id *is* the operator's statement that their MTA stamps,
+        so a message with no stamp of ours contradicts it. This does not wait for
+        `dmarc_canary_warn_on_missing` — that flag exists for the unscoped case,
+        where absence only means "this path does not stamp"."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [])
+
+        assert alert.call_count == 1
+        assert config.email.dmarc_canary_warn_on_missing is False
+
+    def test_our_stamp_below_a_forged_one_is_still_the_one_read(self, make_config, caplog):
+        """A sender who supplies their own header cannot stop the MTA prepending
+        its stamp above it. The verdict read is ours either way."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [
+                "forged.example; dmarc=pass header.from=test.com",
+                "mx.test; dmarc=fail header.from=test.com",
+            ])
+
+        assert alert.call_count == 1
+        assert "dmarc=fail" in caplog.text.lower()
+
+    def test_a_forged_fail_beside_our_pass_cannot_add_a_verdict(self, make_config, caplog):
+        """Headers that are not ours are discarded, not merged: a sender cannot make
+        the canary noisy by planting a `dmarc=fail` under someone else's authserv-id
+        any more than they can make it quiet with a `dmarc=pass`."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [
+                "mx.test; dmarc=pass header.from=test.com",
+                "forged.example; dmarc=fail header.from=test.com",
+            ])
+
+        assert alert.call_count == 0
+
+    def test_the_match_ignores_case_and_a_trailing_dot(self, make_config):
+        config = self._config(make_config, authserv_id="MX.Test.")
+
+        alert = self._poll(config, ["mx.test; dmarc=pass header.from=test.com"])
+
+        assert alert.call_count == 0
+
+    def test_an_rfc_8601_version_after_the_id_still_matches(self, make_config):
+        """RFC 8601 allows a version number between the authserv-id and the first
+        methodspec: `Authentication-Results: mx.test 1; dmarc=pass`."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        alert = self._poll(config, ["mx.test 1; dmarc=pass header.from=test.com"])
+
+        assert alert.call_count == 0
+
+    def test_a_matching_stamp_with_no_dmarc_verdict_follows_warn_on_missing(self, make_config):
+        """Distinct from "no stamp of ours": our MTA did stamp, it just did not
+        evaluate DMARC. That is the pre-existing absence-of-evidence class and it
+        keeps its existing knob."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        assert self._poll(config, ["mx.test; spf=pass smtp.mailfrom=test.com"]).call_count == 0
+
+        loud = self._config(make_config, authserv_id="mx.test",
+                            dmarc_canary_warn_on_missing=True)
+        assert self._poll(loud, ["mx.test; spf=pass smtp.mailfrom=test.com"],
+                          id="a2").call_count == 1
+
+    def test_blank_authserv_id_still_selects_the_topmost_header_only(self, make_config, caplog):
+        """The default, and it governs header *selection* only — the alignment
+        check below runs either way, so this is deliberately not named "nothing
+        changes". The silent case here is the one the feature exists to close,
+        which is why the docs push operators to set an id."""
+        config = self._config(make_config)
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [
+                "forged.example; dmarc=pass header.from=test.com",
+                "mx.test; dmarc=fail header.from=test.com",
+            ])
+
+        assert alert.call_count == 0
+
+    def test_a_second_stamp_of_ours_is_read_too(self, make_config, caplog):
+        """Nothing stops an MTA emitting one header per method, so several stamps
+        carrying our id is a legitimate shape. Non-pass-wins has to hold across
+        them, not only within one — this is the multi-header case the scoping
+        introduces, and the rejected-header tests do not reach it."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [
+                "mx.test; dmarc=pass header.from=test.com",
+                "mx.test; dmarc=fail header.from=test.com",
+            ])
+
+        assert alert.call_count == 1
+        assert "dmarc=fail" in caplog.text.lower()
+
+    def test_an_unreadable_stamp_of_ours_outranks_a_readable_failure(self, make_config, caplog):
+        """`malformed` is the least trustworthy state, so it decides the wording
+        and the dedup bucket rather than taking its turn in wire order. Both are
+        loud either way; what would be wrong is reporting a specific verdict while
+        another of our own stamps was unreadable."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [
+                "mx.test; dmarc=fail header.from=test.com",
+                'mx.test; dmarc="x',
+            ])
+
+        assert alert.call_count == 1
+        assert "unreadable" in caplog.text.lower()
+
+    def test_the_rejected_headers_are_counted_never_quoted(self, make_config, caplog):
+        """In the unstamped branch every header present is one we rejected, so its
+        content is whatever the sender wrote. It must not reach the log or the
+        operator alert."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("WARNING"):
+            alert = self._poll(config, [
+                "forged.example; dmarc=pass header.from=attacker-controlled.invalid",
+            ])
+
+        assert alert.call_count == 1
+        assert "forged.example" not in caplog.text
+        assert "attacker-controlled.invalid" not in caplog.text
+        assert "forged.example" not in alert.call_args.args[2]
+        assert "attacker-controlled.invalid" not in alert.call_args.args[2]
+        assert "1 present" in caplog.text
+
+    def test_a_quoted_authserv_id_is_not_taken_as_ours(self, make_config):
+        """`_split_methodspecs` blanks quoted strings, so a quoted authserv-id reads
+        as empty and matches nothing. Deliberately the loud direction: the parser's
+        standing rule is that an ambiguous read resolves to the warning, never to
+        the silence."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        alert = self._poll(config, ['"mx.test"; dmarc=pass header.from=test.com'])
+
+        assert alert.call_count == 1
+
+    def test_the_canary_switch_still_turns_the_whole_thing_off(self, make_config):
+        config = self._config(make_config, authserv_id="mx.test", dmarc_canary=False)
+
+        assert self._poll(config, ["forged.example; dmarc=pass"]).call_count == 0
+
+
+# =============================================================================
+# TestDmarcAlignment (ISSUE-249)
+# =============================================================================
+
+
+class TestDmarcAlignment:
+    """A `dmarc=pass` says the MTA authenticated *some* address. Checking its
+    `header.from` against the `From:` we actually routed on is what makes it a
+    statement about this sender rather than one we assumed was about this sender.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _config(self, make_config, **email_overrides):
+        config = make_config()
+        config.email = _email_config()
+        for key, val in email_overrides.items():
+            setattr(config.email, key, val)
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        return config
+
+    def _poll(self, config, header, id="g1", sender="alice@test.com"):
+        email = _email(id=id, sender=sender, authentication_results=header)
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id=id, sender=sender)]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True) as alert,
+        ):
+            poll_emails(config)
+        return alert
+
+    def test_a_pass_about_a_different_domain_warns(self, make_config, caplog):
+        with caplog.at_level("WARNING"):
+            alert = self._poll(self._config(make_config),
+                               "mx.test; dmarc=pass header.from=vendor.example")
+
+        assert alert.call_count == 1
+        assert "vendor.example" in caplog.text
+
+    def test_an_aligned_pass_stays_silent(self, make_config):
+        alert = self._poll(self._config(make_config),
+                           "mx.test; dmarc=pass header.from=test.com")
+
+        assert alert.call_count == 0
+
+    def test_alignment_ignores_case_a_local_part_and_a_trailing_dot(self, make_config):
+        alert = self._poll(self._config(make_config),
+                           "mx.test; dmarc=pass header.from=Alice@TEST.com.")
+
+        assert alert.call_count == 0
+
+    def test_a_pass_with_no_header_from_property_is_silent(self, make_config):
+        """Not every MTA emits the property. Absence means we cannot check, which is
+        not the same as a mismatch — warning here would fire on every message from
+        such a path and train the operator to ignore the canary."""
+        alert = self._poll(self._config(make_config), "mx.test; dmarc=pass")
+
+        assert alert.call_count == 0
+
+    def test_a_fail_is_still_reported_as_a_fail(self, make_config, caplog):
+        """The alignment check only refines a pass. A non-pass is already the more
+        specific answer and must not be relabelled."""
+        with caplog.at_level("WARNING"):
+            alert = self._poll(self._config(make_config),
+                               "mx.test; dmarc=fail header.from=vendor.example")
+
+        assert alert.call_count == 1
+        assert "dmarc=fail" in caplog.text.lower()
+
+    def test_an_appended_aligned_property_cannot_mask_a_misaligned_one(self, make_config, caplog):
+        """First-match-wins is the rule `_dmarc_result` was fixed to stop using,
+        and it must not come back one property down: a sender who appends a second
+        `header.from` naming the right domain would otherwise silence the wrong
+        one ahead of it. Every property on every stamp we read is checked."""
+        with caplog.at_level("WARNING"):
+            alert = self._poll(self._config(make_config),
+                               "mx.test; dmarc=pass header.from=test.com; "
+                               "dmarc=pass header.from=evil.example")
+
+        assert alert.call_count == 1
+        assert "evil.example" in caplog.text
+
+    def test_a_property_present_but_unreadable_warns(self, make_config, caplog):
+        """Absent and unreadable are different answers. `_split_methodspecs` blanks
+        a quoted value, and resolving that to silence would hand a sender a
+        one-token way to turn the alignment check off — the parser's standing rule
+        is that an ambiguous read resolves loudly."""
+        with caplog.at_level("WARNING"):
+            alert = self._poll(self._config(make_config),
+                               'mx.test; dmarc=pass header.from="evil.example"')
+
+        assert alert.call_count == 1
+        assert "could not read" in caplog.text.lower()
+
+    def test_an_empty_property_value_warns(self, make_config, caplog):
+        """`header.from=` truncated to nothing by the next methodspec's semicolon
+        is the same unreadable class, and reads as absent under a `+` capture."""
+        with caplog.at_level("WARNING"):
+            alert = self._poll(self._config(make_config),
+                               "mx.test; dmarc=pass header.from=; x=evil.example")
+
+        assert alert.call_count == 1
+
+    def test_a_bare_root_dot_warns(self, make_config):
+        """Normalising a trailing dot must not turn a present property into an
+        absent one."""
+        assert self._poll(self._config(make_config),
+                          "mx.test; dmarc=pass header.from=.").call_count == 1
+
+    def test_a_subdomain_of_the_from_domain_counts_as_aligned(self, make_config):
+        """DMARC's own relaxed mode aligns on the organizational domain, and an MTA
+        may record the domain it evaluated rather than the literal From: domain.
+        Warning on every message from such a path is the noise that trains an
+        operator to ignore the canary."""
+        config = self._config(make_config)
+        # The canary only runs on a self-claim, so the subdomain sender has to be
+        # one of this user's own addresses — otherwise the route is `discarded`
+        # and the silence proves nothing about alignment.
+        config.users["alice"].email_addresses = ["alice@test.com", "alice@mail.test.com"]
+
+        assert self._poll(config, "mx.test; dmarc=pass header.from=mail.test.com",
+                          id="g10").call_count == 0
+        assert self._poll(config, "mx.test; dmarc=pass header.from=test.com",
+                          id="g11", sender="alice@mail.test.com").call_count == 0
+
+    def test_a_lookalike_domain_is_not_aligned(self, make_config, caplog):
+        """The relaxation is a label-boundary relationship, not a suffix match —
+        `nottest.com` must not pass as `test.com`."""
+        with caplog.at_level("WARNING"):
+            alert = self._poll(self._config(make_config),
+                               "mx.test; dmarc=pass header.from=nottest.com")
+
+        assert alert.call_count == 1
+
+
+# =============================================================================
+# TestDkimSpfDetail (ISSUE-249)
+# =============================================================================
+
+
+class TestDkimSpfDetail:
+    """`dkim=` and `spf=` never change the verdict — they say *how* a failing path
+    is failing, which is what a partial misconfiguration looks like."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _config(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        return config
+
+    def test_the_log_and_the_alert_name_the_dkim_and_spf_verdicts(self, make_config, caplog):
+        config = self._config(make_config)
+        email = _email(id="k1", sender="alice@test.com",
+                       authentication_results=(
+                           "mx.test; dmarc=fail header.from=test.com; "
+                           "dkim=pass header.d=test.com; spf=softfail smtp.mailfrom=test.com"
+                       ))
+
+        with caplog.at_level("WARNING"), \
+                patch("istota.transport.email.inbound.list_emails",
+                      return_value=[_envelope(id="k1", sender="alice@test.com")]), \
+                patch("istota.transport.email.inbound.read_email", return_value=email), \
+                patch("istota.transport.email.inbound.download_attachments", return_value=[]), \
+                patch("istota.notifications.send_notification", return_value=True) as alert:
+            poll_emails(config)
+
+        assert alert.call_count == 1
+        assert "dkim=pass" in caplog.text
+        assert "spf=softfail" in caplog.text
+        assert "dkim=pass" in alert.call_args.args[2]
+
+    def test_a_failing_dkim_beside_an_aligned_pass_stays_silent(self, make_config):
+        """The rule this class exists to state: DMARC is the verdict, and dkim/spf
+        are detail. Without this the class asserts detail text on a message that
+        was already failing, which would still pass if dkim promoted a pass."""
+        config = self._config(make_config)
+        email = _email(id="k2", sender="alice@test.com",
+                       authentication_results=(
+                           "mx.test; dmarc=pass header.from=test.com; "
+                           "dkim=fail header.d=test.com; spf=fail smtp.mailfrom=test.com"
+                       ))
+
+        with patch("istota.transport.email.inbound.list_emails",
+                   return_value=[_envelope(id="k2", sender="alice@test.com")]), \
+                patch("istota.transport.email.inbound.read_email", return_value=email), \
+                patch("istota.transport.email.inbound.download_attachments", return_value=[]), \
+                patch("istota.notifications.send_notification", return_value=True) as alert:
+            poll_emails(config)
+
+        assert alert.call_count == 0
+
+    def test_an_oversized_method_token_is_truncated(self, make_config, caplog):
+        """`[a-z]+` bounds the alphabet these tokens are drawn from, not their
+        length, and in the unscoped case the whole header is sender-written. The
+        WARNING is emitted per message and never deduped, so an unbounded value
+        here is an unbounded write to the log and to the alert body."""
+        config = self._config(make_config)
+        email = _email(id="k3", sender="alice@test.com",
+                       authentication_results=(
+                           "mx.test; dmarc=fail header.from=test.com; "
+                           "dkim=" + "a" * 5000
+                       ))
+
+        with caplog.at_level("WARNING"), \
+                patch("istota.transport.email.inbound.list_emails",
+                      return_value=[_envelope(id="k3", sender="alice@test.com")]), \
+                patch("istota.transport.email.inbound.read_email", return_value=email), \
+                patch("istota.transport.email.inbound.download_attachments", return_value=[]), \
+                patch("istota.notifications.send_notification", return_value=True) as alert:
+            poll_emails(config)
+
+        assert alert.call_count == 1
+        assert "a" * 200 not in caplog.text
+        assert "a" * 200 not in alert.call_args.args[2]
