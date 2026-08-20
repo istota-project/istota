@@ -148,7 +148,11 @@ PY
     done
 }
 
-# Helper: create a Talk group room (roomType=3) and invite USER_NAME.
+# Helper: create a Talk group room (roomType=2) and invite USER_NAME.
+# Group (roomType=2), not public (roomType=3): #logs carries the execution log and
+# #alerts carries confirmations and security alerts, and a public room is
+# joinable by anyone holding its token. Matches istota/provision_rooms.py, which
+# is the Ansible path's implementation of the same provisioning.
 # Reuses an existing room with the same name when one is already present
 # (idempotent across API_PROVISION_FLAG loss). Logs go to stderr; stdout = token.
 create_group_room() {
@@ -168,7 +172,7 @@ create_group_room() {
         -H "OCS-APIRequest: true" \
         -H "Content-Type: application/json" \
         -X POST "${NC_URL}/ocs/v2.php/apps/spreed/api/v4/room?format=json" \
-        -d "{\"roomType\":3,\"roomName\":\"${room_name}\"}" 2>/dev/null || echo "000")
+        -d "{\"roomType\":2,\"roomName\":\"${room_name}\"}" 2>/dev/null || echo "000")
 
     token=""
     if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then

@@ -69,6 +69,7 @@ src/istota/
 ├── devbox_proxy_protocol.py  # Wire protocol for devbox_proxy (single-line JSON, 16 MiB cap)
 ├── docker_proxy.py       # Per-user Docker-API allowlist proxy: bound into the sandbox at /var/run/docker.sock in place of the root-equivalent raw socket; permits only exec/cp/inspect/restart on the user's own container
 ├── nextcloud_api.py      # NC user metadata
+├── provision_rooms.py    # Default Talk rooms (#general/#logs/#alerts) for a user: participant-scoped idempotent lookup, group (not public) rooms, and seeding log_channel/alerts_channel only where empty. Behind `istota nextcloud provision-rooms`, called by the Ansible role — the bare-metal counterpart to the docker entrypoint
 ├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
 ├── nextcloud_client.py   # Back-compat shim: the None-returning variants four best-effort daemon paths depend on
 ├── storage.py            # Bot-managed Nextcloud storage

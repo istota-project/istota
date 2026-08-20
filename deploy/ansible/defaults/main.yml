@@ -348,6 +348,24 @@ istota_nextcloud_app_password: ""
 # Default expiry applied by `nextcloud share link`. 0 = no default expiry.
 istota_nextcloud_share_default_expire_days: 14
 
+# Create each user's default Talk rooms (#general / #logs / #alerts) and seed
+# the log/alerts channel tokens into their profile, matching what the Docker
+# entrypoint does (ISSUE-115). Without this a bare-metal install starts with an
+# empty `log_channel`, so the execution log is off and the web "Send execution
+# log to" control reads `(off)`.
+#
+# Idempotent, and it cannot overrule a human. A channel whose column is already
+# set (pinned below, or chosen in the web UI) gets no room created for it at
+# all, and a token is written only for a room this run itself made usable — so
+# clearing "Send execution log to" in the web UI stays cleared across deploys
+# rather than being refilled, the way an inventory timezone used to clobber a
+# web-set one (ISSUE-102). Re-pointing a channel on purpose is
+# `istota nextcloud provision-rooms --user U --reseed`, by hand.
+#
+# Also gated on istota_talk_enabled and on a non-empty app password. Set to
+# false to manage the rooms yourself.
+istota_provision_talk_rooms: true
+
 # Talk settings (polling-based, no webhook needed)
 istota_talk_enabled: true
 istota_talk_bot_username: "{{ istota_namespace }}"  # Nextcloud username (to filter own messages)
@@ -454,7 +472,11 @@ istota_experimental_features: []
 #                                   # execution log. For non-Talk destinations
 #                                   # (email / ntfy / comma lists) set routing.log
 #                                   # below instead — it wins over this field.
+#                                   # Leave empty to let istota_provision_talk_rooms
+#                                   # create #logs and fill this in; a value set
+#                                   # here is never overwritten by provisioning.
 #     alerts_channel: ""            # Talk room token for confirmations and security alerts
+#                                   # Same: empty means auto-provision #alerts.
 #     trusted_email_senders:        # patterns for trusted email senders (plus-address gate)
 #       - "*@example.com"           # domain wildcard
 #       - "bob@other.com"           # exact match

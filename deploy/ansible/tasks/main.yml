@@ -1216,6 +1216,60 @@
     - "restart istota-scheduler"
     - "restart istota-web"
 
+# Create each user's default Talk rooms and seed their channel tokens — the
+# bare-metal counterpart to what docker/istota/entrypoint.sh does (ISSUE-115).
+# Without it a fresh Ansible install has an empty `log_channel`, so
+# `effective_log_destinations` returns [] and the execution log is simply off,
+# while the same install under Docker has it working.
+#
+# Runs *after* "Ensure user_profiles rows" on purpose: the CLI only fills a
+# channel column that is currently empty, so anything the operator pinned in
+# inventory is already in the row by now and survives. Reversing the order would
+# invert that precedence.
+- name: Provision default Talk rooms and seed log/alerts channels
+  command: >
+    {{ istota_home }}/.venv/bin/{{ istota_package }}
+    -c {{ istota_repo_dir }}/config/config.toml
+    nextcloud provision-rooms
+    --user {{ user_item.key }}
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  # `app_password` is deliberately absent from the rendered config.toml when
+  # istota_use_environment_file is on (the default) — it reaches the daemon
+  # through systemd's EnvironmentFile, which an Ansible `command:` does not
+  # read. Without this the CLI sees no credential and exits 1.
+  environment:
+    ISTOTA_NEXTCLOUD_APP_PASSWORD: "{{ istota_nextcloud_app_password }}"
+  loop: "{{ istota_users | dict2items }}"
+  loop_control:
+    loop_var: user_item
+  register: _istota_provision_rooms
+  # spreed migrations can lag a Nextcloud upgrade, and the docker entrypoint
+  # waits up to two minutes for the API for exactly that reason. Retry rather
+  # than aborting a deploy on a transient 5xx.
+  retries: 3
+  delay: 5
+  until: _istota_provision_rooms is succeeded
+  # A room the user was never added to is a room they cannot read, so it is a
+  # failure, not a clean `changed`.
+  failed_when: >-
+    _istota_provision_rooms.rc != 0
+    or 'invite FAILED' in (_istota_provision_rooms.stdout | default(''))
+  # Idempotent and self-reporting, same STATE contract as `user ensure`.
+  changed_when: "'STATE: noop' not in (_istota_provision_rooms.stdout | default(''))"
+  when:
+    - not istota_web_only
+    - istota_provision_talk_rooms | bool
+    - istota_talk_enabled | bool
+    - istota_nextcloud_url | length > 0
+    - istota_nextcloud_app_password | length > 0
+  # Both tiers snapshot user profiles at config load, so a newly seeded
+  # log_channel is invisible until the processes reload — same reason the
+  # profile task above notifies.
+  notify:
+    - "restart istota-scheduler"
+    - "restart istota-web"
+
 # Write user_resources rows into the DB via `istota resource ensure`.
 # After the Resources sunset only `folder` (an out-of-workspace sandbox
 # mount) is a declarable type; the other path-shaped types

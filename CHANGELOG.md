@@ -27,11 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The `#general`, `#logs` and `#alerts` rooms are created as private group rooms rather than public ones. A public room is joinable by anyone holding its link, which is the wrong default for rooms carrying your execution log and your security alerts. Rooms that already exist are reused untouched, so this only affects new installs.
+
 - Incoming mail now runs on the background queue instead of competing with your live chat. Email is the one way a stranger can create work, and nobody watches a mailbox for a reply the way they watch a chat window, so a burst of mail no longer takes the slots your own messages need. Mail turnaround is slower under load, which is the trade; `email_task_queue = "foreground"` restores the old behaviour.
 
 - Very long messages and very large attachments are now capped before they are read. The whole body went into the prompt, so one long message was expensive on its own; it is now truncated with a note saying so, and the full message stays in the mailbox. Attachments have a size budget per message and per check, and anything skipped for size is named in the message the bot reads, so it never answers as though an attachment had never been sent.
 
 ### Fixed
+
+- A server installed with Ansible now gets its Talk channels created for it. The `#general`, `#logs` and `#alerts` rooms were only ever set up by the Docker installer, so a bare-metal install started with no logs channel and the execution log quietly off, while the same install under Docker had it working — and the setting that turns it on asked for a room token the operator had no way to know yet. The rooms are created on deploy now and their tokens filled in. A channel you already set is left alone, and so is one you deliberately cleared: turning the execution log off in the web UI stays off across deploys rather than being switched back on. `istota_provision_talk_rooms: false` turns the whole thing off.
 
 - The `!command` suggestion list in web chat no longer stays on screen after you send. Sending empties the field without the browser reporting a change, and the list only ever recomputed from what it saw you type, so it sat over the composer offering the command that had just run until the next keystroke cleared it. It now follows the text itself — a change to the field the list did not see closes it, whatever made the change — which also stops the off-screen list taking the next Enter and putting the sent command back in the empty field.
 
