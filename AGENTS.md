@@ -27,7 +27,7 @@ For module-specific internals, see `.claude/rules/`:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── skills/               # 34 self-contained skills (skill.md + optional CLI)
+├── skills/               # 36 self-contained skills (skill.md + optional CLI)
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, serve, setup, …)
 ├── serve.py              # Combined local launcher (`istota serve`): scheduler thread + uvicorn in one process
 ├── setup_wizard.py       # Interactive first-run installer (`istota setup`) for the local single-user shape
