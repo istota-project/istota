@@ -76,7 +76,11 @@ if [ ! -d "$BARE_DIR" ]; then
     # only the unused clone-day main/master get dropped.
     CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
     for ref in $(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/); do
-        echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" branch -D "$ref"
+        # `update-ref -d`, not `branch -D`: HEAD was just repointed at a
+        # remote-tracking ref, and every `branch` subcommand then dies with
+        # `fatal: HEAD not found below refs/heads!` before deleting anything.
+        # `branch -D` here silently left the clone-day fossils in place.
+        echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" update-ref -d "refs/heads/$ref"
     done
 fi
 
@@ -111,7 +115,13 @@ WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--{BOT_DIR}-${TASK_ID}-${SLUG}"
 
 # Create branch from latest main (or master — check which exists)
 git -C "$BARE_DIR" fetch origin
-DEFAULT_BRANCH=$(git -C "$BARE_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+# Assign, then default. `cmd | sed || echo main` takes the exit status of the
+# *pipeline*, which is sed's, and sed succeeds on empty input — so a missing
+# origin/HEAD gave an empty DEFAULT_BRANCH and `worktree add origin/` rather
+# than the intended fallback.
+DEFAULT_BRANCH=$(git -C "$BARE_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)
+DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 git -C "$BARE_DIR" worktree add -b "$BRANCH" "$WORK_DIR" "origin/$DEFAULT_BRANCH"
 ```
 

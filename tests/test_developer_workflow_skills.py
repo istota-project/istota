@@ -6,6 +6,8 @@ These run against the *real* bundled skill tree rather than synthetic
 whatever the shipped files happen to say.
 """
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -276,3 +278,130 @@ class TestLoadBudget:
             f"three-body bundle is {total} lines, over the {self.BUDGET_LINES} "
             f"budget: {per_skill}"
         )
+
+
+# ---------------------------------------------------------------------------
+# The bare-clone recipe, executed rather than described.
+
+GIT_ISOLATION = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.invalid",
+}
+
+
+def _git(cwd: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd), capture_output=True, text=True,
+        env={**os.environ, **GIT_ISOLATION},
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed:\n{proc.stderr}")
+    return proc.stdout
+
+
+def _extract(marker: str, stop: str) -> str:
+    """Lift a shell fragment out of the shipped `developer` body.
+
+    The fragment is *run*, not restated, so a body edited back to the broken
+    form fails these tests instead of quietly passing against a copy kept here.
+    """
+    body = (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text().splitlines()
+    starts = [i for i, line in enumerate(body) if marker in line]
+    assert len(starts) == 1, (
+        f"expected exactly one {marker!r} in developer/skill.md, got {len(starts)}"
+    )
+    start = starts[0]
+    end = next(i for i in range(start, len(body)) if stop in body[i])
+    return "\n".join(body[start:end + 1])
+
+
+def _run_fragment(fragment: str, bare: Path) -> str:
+    proc = subprocess.run(
+        ["bash", "-c", fragment],
+        capture_output=True, text=True,
+        env={**os.environ, **GIT_ISOLATION, "BARE_DIR": str(bare)},
+    )
+    assert proc.returncode == 0, f"fragment failed:\n{fragment}\n{proc.stderr}"
+    return proc.stdout
+
+
+@pytest.fixture
+def bare_clone(tmp_path) -> Path:
+    """A bare clone in the shape `developer/skill.md` documents: remote-tracking
+    refspec configured, fetched, HEAD repointed at `refs/remotes/origin/*`."""
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "-q", "-b", "main", ".")
+    _git(upstream, "commit", "-q", "--allow-empty", "-m", "init")
+
+    bare = tmp_path / "project.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(upstream), str(bare))
+    _git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+    _git(bare, "fetch", "-q", "origin")
+    _git(bare, "symbolic-ref", "HEAD", "refs/remotes/origin/main")
+    return bare
+
+
+class TestBareCloneRecipe:
+    """Two shell defects that shipped in the body and that no test could see,
+    because the body was only ever read as text. Both surfaced by running the
+    documented recipe against a real repository."""
+
+    def test_fossil_deletion_survives_the_repointed_head(self, bare_clone):
+        """ISSUE-125 deletes the clone-day `refs/heads/*` fossils, but the step
+        before it points HEAD at `refs/remotes/origin/main`. Every `git branch`
+        subcommand then fails with `fatal: HEAD not found below refs/heads!`
+        before deleting anything, so the fossils the loop exists to remove
+        survived every clone."""
+        assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
+
+        _run_fragment(_extract("CHECKED_OUT=$(git -C", "done"), bare_clone)
+
+        refs = _git(bare_clone, "for-each-ref", "--format=%(refname)")
+        assert "refs/heads/main" not in refs, f"clone-day fossil survived: {refs}"
+        assert "refs/remotes/origin/main" in refs, "the remote-tracking ref must remain"
+
+    def test_branch_d_would_not_have_worked(self, bare_clone):
+        """The test above passes trivially if someone swaps the delete back to
+        `branch -D`, so pin the reason: `branch -D` really does fail here."""
+        proc = subprocess.run(
+            ["git", "-C", str(bare_clone), "branch", "-D", "main"],
+            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+        )
+        assert proc.returncode != 0
+        assert "HEAD not found below refs/heads" in proc.stderr
+
+    def test_default_branch_falls_back_when_origin_head_is_absent(self, bare_clone):
+        """`symbolic-ref ... | sed ... || echo "main"` takes the *pipeline's*
+        exit status, which is sed's, and sed succeeds on empty input. So the
+        fallback never fired: DEFAULT_BRANCH came out empty and the worktree was
+        created from `origin/`, an unknown revision. `refs/remotes/origin/HEAD`
+        is absent on any clone made before git 2.48, so this was the ordinary
+        path rather than an edge case."""
+        _git(bare_clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+
+        fragment = _extract(
+            "symbolic-ref --short refs/remotes/origin/HEAD", "DEFAULT_BRANCH:-main"
+        )
+        out = _run_fragment(fragment + '\necho "$DEFAULT_BRANCH"', bare_clone)
+
+        assert out.strip() == "main", f"fallback did not fire, got {out.strip()!r}"
+        # The point of a fallback: the ref it names has to actually resolve.
+        _git(bare_clone, "rev-parse", f"origin/{out.strip()}")
+
+    def test_default_branch_reads_origin_head_when_present(self, bare_clone):
+        """The fallback must not shadow a repository that is on `master`."""
+        _git(bare_clone, "update-ref", "refs/remotes/origin/master", "refs/remotes/origin/main")
+        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+
+        fragment = _extract(
+            "symbolic-ref --short refs/remotes/origin/HEAD", "DEFAULT_BRANCH:-main"
+        )
+        out = _run_fragment(fragment + '\necho "$DEFAULT_BRANCH"', bare_clone)
+
+        assert out.strip() == "master", f"origin/HEAD ignored, got {out.strip()!r}"
