@@ -1443,6 +1443,100 @@ def cmd_nextcloud_capabilities(args):
     print(json.dumps(caps_mod.summarize(payload, account), indent=2, default=str))
 
 
+def cmd_nextcloud_provision_rooms(args):
+    """Create the user's default Talk rooms and seed their channel tokens.
+
+    The bare-metal counterpart to what `docker/istota/entrypoint.sh` does for a
+    Docker install (ISSUE-115). Idempotent, and prints a `STATE:` line so the
+    Ansible role can report `changed` off it the way `user ensure` does.
+    """
+    from istota import provision_rooms as provision_rooms_mod
+
+    config = load_config(Path(args.config) if args.config else None)
+    nc = config.nextcloud
+    if not nc.url or not nc.username or not nc.app_password:
+        print(
+            "Error: Nextcloud is not configured (need url, username and app_password)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    db_path = Path(config.db_path)
+    if not args.no_seed and not db_path.exists():
+        print(f"Error: DB not found at {db_path}; run `istota init` first", file=sys.stderr)
+        sys.exit(1)
+
+    names = tuple(args.room) if args.room else provision_rooms_mod.DEFAULT_ROOMS
+    # Don't mint a `logs` room beside the hand-made one an operator pinned in
+    # inventory; `user ensure` has already written that token by now.
+    if not args.no_seed and not args.reseed:
+        names = provision_rooms_mod.pending_channel_rooms(db_path, args.user, names)
+    if not names:
+        print(f"Talk rooms for {args.user!r}: all channels already configured.")
+        print("STATE: noop")
+        return
+
+    try:
+        rooms = provision_rooms_mod.provision_user_rooms(config, args.user, names)
+    except Exception as e:
+        print(f"Error: could not provision Talk rooms for {args.user!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    seeded: dict = {}
+    seed_state = "noop"
+    if not args.no_seed:
+        seeded, seed_state = provision_rooms_mod.seed_channel_profile(
+            db_path, args.user, rooms, force=args.reseed,
+        )
+
+    if any(r.created for r in rooms):
+        state = "created"
+    elif seed_state != "noop" or any(r.adopted for r in rooms):
+        state = "updated"
+    else:
+        state = "noop"
+
+    if args.json:
+        print(json.dumps({
+            "user": args.user,
+            "rooms": [
+                {
+                    "name": r.name, "token": r.token, "created": r.created,
+                    "invited": r.invited, "adopted": r.adopted,
+                }
+                for r in rooms
+            ],
+            "seeded": seeded,
+            "state": state,
+        }, indent=2))
+    else:
+        print(f"Talk rooms for {args.user!r}:")
+        for room in rooms:
+            if room.created:
+                note = "created"
+            elif room.adopted:
+                note = "adopted"
+            else:
+                note = "existing"
+            if not room.invited and (room.created or room.adopted):
+                note += ", invite FAILED"
+            print(f"  {room.name}: {room.token} ({note})")
+        for field, token in sorted(seeded.items()):
+            print(f"  seeded {field} = {token}")
+
+    # A room the user was never added to is one they cannot read, so say so
+    # loudly. The next run adopts that room and retries rather than making
+    # another one, but a persistent failure needs an operator.
+    stranded = [r.name for r in rooms if not r.invited and (r.created or r.adopted)]
+    if stranded:
+        print(
+            f"Warning: could not add {args.user!r} to: {', '.join(stranded)}. "
+            "Check that the bot account may add participants and that the user exists.",
+            file=sys.stderr,
+        )
+    print(f"STATE: {state}")
+
+
 def cmd_experimental_list(args):
     """List known experimental feature flags with current on/off status."""
     from istota.experimental import KNOWN_FEATURES
@@ -1923,6 +2017,28 @@ def main():
         default=None,
         help="Comma list of dotted feature names; exits non-zero if any is missing",
     )
+    nc_rooms_parser = nc_subparsers.add_parser(
+        "provision-rooms",
+        help="Create a user's default Talk rooms and seed log/alerts channels",
+    )
+    nc_rooms_parser.add_argument("--user", required=True, help="Nextcloud user id")
+    nc_rooms_parser.add_argument(
+        "--room",
+        action="append",
+        default=None,
+        help="Room name to provision; repeatable (default: general, logs, alerts)",
+    )
+    nc_rooms_parser.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="Create the rooms but don't write log_channel/alerts_channel",
+    )
+    nc_rooms_parser.add_argument(
+        "--reseed",
+        action="store_true",
+        help="Re-point log_channel/alerts_channel at these rooms, overwriting what's set",
+    )
+    nc_rooms_parser.add_argument("--json", action="store_true", help="Machine-readable output")
 
     # experimental
     exp_parser = subparsers.add_parser("experimental", help="Experimental feature flags")
@@ -1998,6 +2114,7 @@ def main():
     elif args.command == "nextcloud":
         nextcloud_commands = {
             "capabilities": cmd_nextcloud_capabilities,
+            "provision-rooms": cmd_nextcloud_provision_rooms,
         }
         nextcloud_commands[args.nextcloud_action](args)
     elif args.command == "experimental":
