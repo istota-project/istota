@@ -189,9 +189,17 @@ Without `-t`, it walks every Talk-origin room. Use it after binding existing Tal
 istota nextcloud capabilities                # Curated summary of what the server supports
 istota nextcloud capabilities --raw          # Full /cloud/capabilities payload
 istota nextcloud capabilities --check talk,sharing.public   # Exits non-zero if any is missing
+
+istota nextcloud provision-rooms --user alice        # Ensure #general/#logs/#alerts, seed the channel tokens
+istota nextcloud provision-rooms --user alice --room general   # Only the named room(s); repeatable
+istota nextcloud provision-rooms --user alice --no-seed        # Create the rooms, write nothing to the profile
+istota nextcloud provision-rooms --user alice --reseed         # Re-point log_channel/alerts_channel at these rooms
+istota nextcloud provision-rooms --user alice --json           # Machine-readable
 ```
 
 The `--check` form is the deployment fit-check — usable in a shell or a heartbeat `shell-command`. See [Nextcloud](../features/nextcloud.md) for the feature names and for the full `istota-skill nextcloud` surface.
+
+`provision-rooms` is what the Ansible role calls to give a bare-metal install the same default Talk rooms a Docker install gets. It is idempotent and prints `STATE: created|updated|noop`. A channel room whose profile column is already set is left alone entirely, and a token is written only for a room the run actually made usable — so it can neither overwrite a pinned value nor re-enable an execution log you turned off. `--reseed` is the deliberate re-point, and overrides both rules.
 
 ### Experimental features
 

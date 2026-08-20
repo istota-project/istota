@@ -239,7 +239,20 @@ def _backfill_briefing_output(conn: sqlite3.Connection) -> None:
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Run ALTER TABLE migrations before schema to avoid index failures on new columns."""
+    """Run ALTER TABLE migrations before schema to avoid index failures on new columns.
+
+    Every migration below shares one connection, in Python's legacy
+    `isolation_level` mode. DDL autocommits, but any DML opens an implicit
+    transaction and holds it open until someone commits — a zero-row UPDATE is
+    enough — so whether a transaction is already open at a given migration
+    depends on which tables happen to exist in the DB being upgraded.
+
+    The contract for a migration that wants its own transaction: commit the
+    inherited one first, then `BEGIN`. Skipping that raises "cannot start a
+    transaction within a transaction" on exactly the DBs that have the most to
+    lose — the upgraded ones — and passes on a fresh install, which is how
+    ISSUE-261 shipped green and killed inbound email for two days.
+    """
     # Tasks table migrations
     for col, col_type in [
         ("talk_message_id", "INTEGER"),
@@ -975,7 +988,13 @@ def _resolve_schema_path() -> Path:
 def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
     schema_path = _resolve_schema_path()
-    with sqlite3.connect(db_path) as conn:
+    # timeout=30.0 to match `get_db`, not sqlite3's 5s default. Migrations run
+    # against a live daemon — the auto-update script calls this from its own
+    # process while the services are still up — and the uidvalidity rebuild
+    # takes a write lock of its own after committing the earlier migrations
+    # (ISSUE-261). A 5s budget turns ordinary writer contention into a rebuild
+    # that logs a warning and leaves the schema unmigrated.
+    with sqlite3.connect(db_path, timeout=30.0) as conn:
         # WAL is set ONCE here, not on every get_db open. journal_mode is
         # persistent in the SQLite file header, so re-issuing it per
         # connection only buys a needless write-lock acquisition that races
@@ -4774,8 +4793,44 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
     # would see the new DDL and no-op forever, and the first poll against an
     # empty ledger re-ingests every message in the mailbox as a fresh task.
     # A dropped dedupe ledger is a mail storm, so it gets a real rollback.
+    #
+    # Commit whatever the earlier migrations left open first (ISSUE-261).
+    # `_run_migrations` runs every migration on one connection in Python's
+    # legacy `isolation_level` mode, where a DML statement opens an implicit
+    # transaction and holds it until someone commits — and a zero-row UPDATE
+    # is enough. Two earlier migrations are DML (the `briefing_configs` output
+    # backfill and the `knowledge_facts` dedupe, the latter unconditional on
+    # any DB that has the table, which is every released one), so `BEGIN
+    # IMMEDIATE` here raised "cannot start a transaction within a transaction"
+    # on every upgraded DB. The rebuild rolled back and re-armed, so it failed
+    # identically every time migrations ran, while the poller shipped in the
+    # same commit queried a `uidvalidity` column that was therefore never
+    # created: inbound email was dead. Nothing on the daemon or web startup
+    # path runs framework migrations — only `istota init` and the auto-update
+    # script do — so a service restart never cleared it either. Committing
+    # also scopes the handler's ROLLBACK below to this rebuild's own work,
+    # instead of discarding the earlier migrations'.
+    if conn.in_transaction:
+        conn.commit()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Re-read the guard now that the write lock is held. The check above
+        # ran under the inherited transaction's snapshot, and the commit that
+        # followed dropped the lock — so a concurrent `istota init` (the
+        # auto-update script runs one against a live daemon) could have
+        # completed the rebuild in between. Acting on the stale answer would
+        # rename the already-migrated table and re-copy it with `uidvalidity`
+        # forced back to 0, and since adoption only runs on a folder's first
+        # poll those rows would never be re-namespaced: the next poll would
+        # re-ingest the whole mailbox.
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'processed_emails'"
+        ).fetchone()
+        sql = row[0] if row and row[0] else ""
+        if not sql or "UNIQUE (uidvalidity, email_id)" in sql:
+            conn.execute("COMMIT")
+            return
         conn.execute(
             "ALTER TABLE processed_emails RENAME TO _processed_emails_old"
         )
