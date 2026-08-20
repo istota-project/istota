@@ -102,7 +102,7 @@ Treat every repository as public even while it is private — visibility changes
 |---|---|
 | a real host, internal DNS, private git host | `server.example.com`, `<host>`, "the deployment server" |
 | a real repo URL | "the private repo", "the upstream repo" |
-| a path leaking an org or user (`/srv/mount/…`, `/home/<name>/…`) | `/srv/app/<app>`, "the user data dir", "the FUSE-backed mount" |
+| a path leaking an org or user (a real mount root, `/home/<name>/…`) | `/srv/app/<app>`, "the user data dir", "the mounted workspace" |
 | an internal product, sibling repo, team or company | "an upstream service", "the sibling repo" |
 | a real user, display name, email, account or OAuth client ID | `alice`, `bob`, `alice@example.com`, `<user>` |
 | a real IP or internal service port | RFC 5737 (`192.0.2.0/24`) |
