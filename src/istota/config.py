@@ -519,14 +519,22 @@ class ReviewConfig:
     max_file_chars: int = 20_000
     max_callers_per_symbol: int = 8
     # Files a reviewer may request on the one re-invocation; 0 disables the
-    # round trip. Consumed in Stage 5.
+    # round trip, and the offer is then kept out of the reviewer's prompt rather
+    # than made and refused. A round trip spends a second model round, so it is
+    # also withheld when `max_calls_per_task` has no room for one.
     max_need_files: int = 6
     # Per agent. Both agents run concurrently, so this is wall time and not half
     # of it.
     timeout_seconds: int = 120
-    # Review rounds per task, where a round is one `code_review run` that
-    # reached the model — up to four invocations, since each of two agents may
-    # retry once. Guard refusals and breaker skips are free. 0 or less permits
+    # Review rounds per task, where a round is one *wave* of model calls rather
+    # than one `code_review run`: a run charges 1, or 2 when a reviewer took its
+    # `max_need_files` round trip. A wave is up to four invocations, since each
+    # of two agents may retry a malformed answer once — so one run is at most
+    # two rounds and six invocations. Guard refusals and breaker skips are free
+    # and a malformed-output retry rides on the round that provoked it, because
+    # a run that spends every call and parses none must still charge, or a
+    # reviewer stuck answering in prose loops past a cap that never moves.
+    # 0 or less permits
     # no reviews at all, matching `max_need_files` above rather than reading as
     # "unlimited"; use `enabled = false` to switch the feature off. At the cap
     # the review degrades to `skipped` rather than erroring, because a blocking

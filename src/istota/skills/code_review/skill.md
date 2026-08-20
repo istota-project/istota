@@ -50,6 +50,7 @@ Three more fields decide whether an `ok` is actually clean, and all three are ea
 - `empty: true` — the range held no changes, so nothing was reviewed and no reviewer ran. Not a pass.
 - `partial: true` — a reviewer was lost. `partial_reason` says which and why. Report the review as partial.
 - `dropped_findings` above zero — a reviewer wrote findings that could not be used, usually because they named no file. Whatever it said is gone; say so rather than reporting a clean review.
+- `need_files_note` non-empty — a reviewer asked for files and the round trip did not improve its answer: either nothing could be served, or it was served and the second call failed. `files_served` and `files_refused` say which. The review still stands; the note is what tells you how much weight it carries.
 
 ## What to do with findings
 

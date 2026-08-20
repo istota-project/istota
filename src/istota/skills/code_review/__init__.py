@@ -31,6 +31,12 @@ Four things gate a run before a single token is spent, and all four are in
   from the sandbox, so a loop that reached a file-backed cap could delete the
   counter and carry on spending.
 
+The budget also decides one thing that is not a gate. A reviewer may ask to see
+files it was not given, which costs a second model round, so the offer is made
+only when the remaining budget can pay for one — otherwise the reviewer spends
+its answer on a request the CLI would refuse. See `engine.collect_needed_files`
+for what may be served and `engine._round_trip` for why there is exactly one.
+
 Heavy imports (`config`, `brain`, `db`) are function-local so the module stays
 cheap to import and so tests can patch them at their real home.
 """
@@ -199,7 +205,11 @@ def cmd_run(args):
     db_path = _db_path()
     cap = review_cfg.max_calls_per_task
     calls_used = None
-    if task_id is not None and db_path:
+    # Distinct from `calls_used is not None`: this says a budget *applies*, not
+    # that reading it worked. The two come apart on a database error and the
+    # round-trip decision below turns on the difference.
+    has_task_budget = task_id is not None and bool(db_path)
+    if has_task_budget:
         # A read that fails must not sink a review. Losing the budget check is a
         # cost risk bounded by whatever else is wrong with the database; refusing
         # the review outright turns a transient lock into a blocked push.
@@ -241,6 +251,24 @@ def cmd_run(args):
             os.environ.get("ISTOTA_TASK_ID", ""),
             bool(db_path),
         )
+
+    # The `need_files` round trip spends a second model round, so it is only
+    # offered when the budget can pay for one. Advertising it otherwise leaves
+    # two bad outcomes and no good one: overshoot the operator's cap, or refuse
+    # a request the prompt had just invited after the reviewer spent its answer
+    # making it. When there is no task budget at all there is nothing to
+    # overshoot, so the offer stands.
+    # Three states, not two, and the middle one is why this is not a single
+    # `calls_used is not None` test. No task budget at all (an operator-driven
+    # run) has nothing to overshoot, so the offer stands. A budget that was read
+    # gates on the arithmetic. A budget whose *read failed* leaves `calls_used`
+    # None with a real cap still in force — the review proceeds uncapped rather
+    # than being sunk by a transient lock, but it does not also get to spend the
+    # optional extra round on a budget nobody could check.
+    if not has_task_budget:
+        allow_need_files = True
+    else:
+        allow_need_files = calls_used is not None and calls_used + 2 <= cap
 
     available, breaker_reason = primary_brain_unavailable(config.brain)
     if not available:
@@ -306,9 +334,11 @@ def cmd_run(args):
                 max_context_chars=review_cfg.max_context_chars,
                 max_file_chars=review_cfg.max_file_chars,
                 max_callers_per_symbol=review_cfg.max_callers_per_symbol,
+                max_need_files=review_cfg.max_need_files,
             ),
             invoke=invoke,
             timeout_seconds=agent_timeout,
+            allow_need_files=allow_need_files,
         )
     except engine.ReviewError as exc:
         _fail(exc.reason, str(exc))
@@ -321,7 +351,7 @@ def cmd_run(args):
         # and hands the caller nothing at all.
         try:
             with db.get_db(db_path) as conn:
-                calls_used = db.code_review_calls_increment(conn, task_id)
+                calls_used = db.code_review_calls_increment(conn, task_id, rounds)
         except Exception as exc:
             logger.error(
                 "code_review completed but could not record the call against "

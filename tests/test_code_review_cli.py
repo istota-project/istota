@@ -17,11 +17,14 @@ is bound read-write into the sandbox, so a loop that hit a file-backed cap could
 delete the counter and carry on spending. The cap tests read `code_review_calls`
 back through `db` directly rather than trusting the envelope's own count.
 
-**Only successful model rounds increment it.** A run refused by a guard, one
-short-circuited by the availability breaker, and the retry half of a
-malformed-output round are all free. Otherwise a task could exhaust its budget
-without a single review coming back, which is the failure the cap exists to
-prevent inverted.
+**A round is a wave of calls, and it is charged on invocations made rather than
+on answers parsed.** A run refused by a guard and one short-circuited by the
+availability breaker are free, because they spent nothing; the retry half of a
+malformed-output round rides on the round that provoked it, because it did. A
+reviewer that answers in prose twice has spent real money, and counting only
+clean rounds would leave that loop unbounded — the failure the cap exists to
+prevent, inverted. One run charges 1, or 2 when a reviewer took its `need_files`
+round trip.
 
 The brain is the mock boundary, the same place the sleep-cycle and explainer
 tests draw it. There is no live model call anywhere in this file.
@@ -32,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,6 +96,11 @@ def worktree(repos_root) -> Path:
     run_git(wt, "init", "-q", "-b", "main", ".")
     (wt / "AGENTS.md").write_text("# Rules\n\nSpaces, never tabs.\n")
     (wt / "app.py").write_text("def existing():\n    return 1\n")
+    # Committed, unchanged by the branch, and named by no convention rule — so
+    # it reaches no reviewer unless one asks for it. That is what makes it the
+    # subject of the `need_files` tests: `AGENTS.md` is already in every prompt
+    # as a conventions file, so serving it proves nothing.
+    (wt / "helper.py").write_text("SUPPORT_SENTINEL = 'unrequested support module'\n")
     commit(wt, "base")
     run_git(wt, "checkout", "-q", "-b", "feature")
     (wt / "app.py").write_text(
@@ -164,11 +173,15 @@ class StubBrain:
     calls: list = field(default_factory=list)
     prompts: list = field(default_factory=list)
     timeouts: list = field(default_factory=list)
+    # Wall time one call burns, for the tests that drive a budget to exhaustion.
+    delay: float = 0.0
 
     def resolve_model_name(self, name: str) -> str:
         return f"resolved/{name}"
 
     def execute(self, req):
+        if self.delay:
+            time.sleep(self.delay)
         # Which reviewer this is, read off the prompt the engine built. The
         # brain has no other way to tell them apart, and asserting on it here
         # is what proves the CLI routed each agent to its own model.
@@ -326,6 +339,14 @@ class TestCallCounterHelpers:
             assert db.code_review_calls_increment(conn, task_row) == 1
             assert db.code_review_calls_increment(conn, task_row) == 2
             assert db.code_review_calls_get(conn, task_row) == 2
+
+    def test_a_multi_round_charge_lands_in_one_statement(self, review_db, task_row):
+        """A review whose reviewers took the `need_files` round trip spent two
+        model rounds. Charging both in one upsert is what keeps the guarantee
+        that two concurrent reviews cannot interleave into a single increment."""
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_increment(conn, task_row, 2) == 2
+            assert db.code_review_calls_increment(conn, task_row, 2) == 4
 
     def test_the_cascade_is_decorative_like_every_other_fk_here(
         self, review_db, task_row
@@ -817,7 +838,9 @@ class TestCallCap:
         stub_brain.replies["conformance"] = [findings_json(finding())]
         monkeypatch.setattr(
             db, "code_review_calls_increment",
-            lambda conn, task_id: (_ for _ in ()).throw(RuntimeError("disk I/O error")),
+            lambda conn, task_id, count=1: (_ for _ in ()).throw(
+                RuntimeError("disk I/O error")
+            ),
         )
         code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
         assert code == 0
@@ -895,3 +918,514 @@ def drive(capsys, *argv) -> tuple[int, dict]:
     envelope = json.loads(out.splitlines()[-1])
     code = excinfo.value.code
     return (0 if code is None else int(code)), envelope
+
+
+# --------------------------------------------------------------------------
+# The need_files round trip
+# --------------------------------------------------------------------------
+
+
+def need_files_json(*paths, findings=()) -> str:
+    return json.dumps({"findings": list(findings), "need_files": list(paths)})
+
+
+class TestNeedFilesRoundTrip:
+    """A reviewer may name files once, and exactly once.
+
+    The round trip is the cheapest way to close the gap a text-only reviewer
+    has, and it is also the one place a *model* picks which blob the daemon
+    reads. Three properties hold it down, and each has a test here: paths are
+    served from inside the worktree only, the cap bounds how many, and the
+    re-invocation is a single extra round charged to the task's budget rather
+    than a loop that can spend it.
+    """
+
+    def test_a_request_produces_a_second_call_carrying_the_bodies(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py"),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert stub_brain.calls == ["conformance", "conformance"]
+        assert "SUPPORT_SENTINEL" in stub_brain.prompts[1], (
+            "the second prompt must carry the requested body"
+        )
+        assert "SUPPORT_SENTINEL" not in stub_brain.prompts[0], (
+            "and the first must not, or the round trip served nothing new"
+        )
+        assert envelope["files_served"] == ["helper.py"]
+        assert len(envelope["findings"]) == 1
+
+    def test_the_second_call_keeps_everything_the_first_one_had(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The served files are added to the prompt, not swapped in for it. A
+        reviewer re-invoked without the diff would be reviewing nothing."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py"),
+            findings_json(finding()),
+        ]
+
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        first, second = stub_brain.prompts
+        assert "def added" in second, "the diff must survive the re-invocation"
+        assert "## Diff stat" in second
+        assert "Spaces, never tabs." in second, "and so must the conventions"
+        assert "no tools" in second.lower()
+        assert "SUPPORT_SENTINEL" in second
+        # The one thing that is deliberately *not* carried over: a reviewer
+        # reading the offer twice has been told it may ask twice.
+        assert "need_files" in first
+        assert "need_files" not in second.split("## Files you asked for")[0]
+
+    def test_a_path_outside_the_worktree_is_dropped_and_the_rest_served(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain
+    ):
+        outside = tmp_path / "outside_secret.txt"
+        outside.write_text("OUTSIDE_SENTINEL\n")
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("../../outside_secret.txt", "helper.py"),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert "OUTSIDE_SENTINEL" not in stub_brain.prompts[1]
+        assert "SUPPORT_SENTINEL" in stub_brain.prompts[1], (
+            "one bad path must not sink the rest of the request"
+        )
+        assert envelope["files_served"] == ["helper.py"]
+        assert envelope["files_refused"] == ["../../outside_secret.txt"]
+
+    def test_more_than_the_cap_are_truncated_to_it(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config(max_need_files=1)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md", "app.py"),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["files_served"] == ["AGENTS.md"]
+        assert envelope["files_refused"] == ["app.py"]
+
+    def test_zero_disables_the_round_trip_entirely(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config(max_need_files=0)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md", findings=[finding()]),
+            findings_json(finding(claim="never reached")),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance"]
+        assert "need_files" not in stub_brain.prompts[0]
+        assert envelope["files_served"] == []
+        assert len(envelope["findings"]) == 1
+
+    def test_the_re_invocation_counts_as_its_own_round(
+        self, capsys, worktree, review_env, developer_config, stub_brain, review_db
+    ):
+        """Read back from `code_review_calls`, not from the envelope. A round
+        trip that charged nothing would be a way to spend past the cap."""
+        developer_config(max_need_files=6, max_calls_per_task=8)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md"),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 2
+        assert envelope["calls_used"] == 2
+
+    def test_a_run_without_a_round_trip_still_charges_one(
+        self, capsys, worktree, review_env, developer_config, stub_brain, review_db
+    ):
+        developer_config(max_need_files=6, max_calls_per_task=8)
+        stub_brain.replies["conformance"] = [findings_json(finding())]
+
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 1
+
+    def test_one_re_invocation_and_never_a_loop(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The second answer asking again is answered by returning what it has,
+        not by serving a third round."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md"),
+            need_files_json("app.py", findings=[finding()]),
+            findings_json(finding(claim="never reached")),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance", "conformance"]
+        assert len(envelope["findings"]) == 1
+
+    def test_the_round_trip_is_not_started_when_the_budget_cannot_pay_for_it(
+        self, capsys, worktree, review_env, developer_config, stub_brain, review_db
+    ):
+        """At `cap - 1` there is room for this round and not for a second one.
+        Offering the round trip anyway would either overshoot the operator's
+        budget or refuse a request the prompt had just invited."""
+        developer_config(max_need_files=6, max_calls_per_task=2)
+        with db.get_db(review_db) as conn:
+            db.code_review_calls_increment(conn, review_env)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md", findings=[finding()]),
+            findings_json(finding(claim="never reached")),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance"]
+        assert "need_files" not in stub_brain.prompts[0]
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 2
+
+    def test_a_failed_re_invocation_falls_back_to_the_first_answer(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The first answer is already paid for. Discarding it because the
+        optional extra round failed loses a usable review to an improvement."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md", findings=[finding(claim="found early")]),
+            StubResult(success=False, stop_reason="timeout"),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert [f["claim"] for f in envelope["findings"]] == ["found early"]
+        assert "timeout" in envelope["need_files_note"]
+
+    def test_an_unparseable_re_invocation_falls_back_rather_than_retrying(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md", findings=[finding(claim="found early")]),
+            "I have read the files and everything looks fine to me.",
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance", "conformance"]
+        assert [f["claim"] for f in envelope["findings"]] == ["found early"]
+        assert envelope["need_files_note"]
+
+    def test_each_agent_gets_its_own_round_trip_but_they_share_one_round(
+        self, capsys, worktree, review_env, developer_config, stub_brain, review_db
+    ):
+        """Two agents re-invoking is one extra wave, not two. A round is a wave
+        of calls — that is what makes the default of 8 a budget an operator can
+        reason about."""
+        developer_config(max_need_files=6, max_calls_per_task=8)
+        stub_brain.replies["conformance"] = [
+            need_files_json("AGENTS.md"),
+            findings_json(finding()),
+        ]
+        stub_brain.replies["bughunt"] = [
+            need_files_json("app.py"),
+            findings_json(finding(claim="another defect", line=5)),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+
+        assert code == 0
+        assert sorted(stub_brain.calls) == [
+            "bughunt", "bughunt", "conformance", "conformance",
+        ]
+        assert envelope["files_served"] == ["AGENTS.md", "app.py"]
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 2
+
+    def test_a_malformed_first_answer_still_gets_its_round_trip(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The malformed retry and the round trip are different mechanisms with
+        different causes, so one must not consume the other's chance."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            "sorry, here is some prose instead",
+            need_files_json("AGENTS.md"),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance"] * 3
+        assert len(envelope["findings"]) == 1
+
+    def test_an_empty_range_never_reaches_the_round_trip(
+        self, capsys, empty_worktree, review_env, developer_config, stub_brain
+    ):
+        developer_config(max_need_files=6)
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(empty_worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["empty"] is True
+        assert stub_brain.calls == []
+        assert envelope["files_served"] == []
+
+    def test_a_raising_re_invocation_falls_back_rather_than_sinking_the_review(
+        self, capsys, worktree, review_env, developer_config, stub_brain, review_db
+    ):
+        """`make_brain` and `brain.execute` raise; neither returns an
+        `AgentReply`. `run_review` turns an escaping exception into a *failed
+        reviewer*, so without a guard in `_round_trip` an optional extra round
+        would take a paid-for `ok` review down to `error` — which the workflow
+        reads as "block the push"."""
+        developer_config(max_need_files=6, max_calls_per_task=8)
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py", findings=[finding(claim="found early")]),
+            RuntimeError("brain blew up on the re-invocation"),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["status"] == "ok", "a paid-for review must survive this"
+        assert [f["claim"] for f in envelope["findings"]] == ["found early"]
+        assert envelope["files_served"] == ["helper.py"]
+        assert "RuntimeError" in envelope["need_files_note"]
+        # The invocation was made, so it is charged: counting only calls that
+        # returned would let a reviewer whose re-invocation always raises spend
+        # two invocations for every round it pays for.
+        with db.get_db(review_db) as conn:
+            assert db.code_review_calls_get(conn, review_env) == 2
+
+    def test_an_ungatherable_request_falls_back_without_a_second_call(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """`serve` runs `git_dir`, which raises `ReviewError` on a repository it
+        refuses. That is not a reason to lose the first answer either."""
+        from istota.skills.code_review import engine
+
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py", findings=[finding(claim="found early")]),
+            findings_json(finding(claim="never reached")),
+        ]
+        monkeypatch.setattr(
+            engine, "collect_needed_files",
+            lambda *a, **k: (_ for _ in ()).throw(
+                engine.ReviewError("gitdir refused", reason="git_dir_not_allowed")
+            ),
+        )
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert stub_brain.calls == ["conformance"]
+        assert [f["claim"] for f in envelope["findings"]] == ["found early"]
+        assert "gitdir refused" in envelope["need_files_note"]
+
+    def test_a_bare_string_request_is_accepted_rather_than_retried(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A reviewer naming one file often writes it bare. Cheaper to accept
+        than to spend a round teaching it the list form."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            json.dumps({"findings": [], "need_files": "helper.py"}),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance", "conformance"]
+        assert envelope["files_served"] == ["helper.py"]
+        assert "SUPPORT_SENTINEL" in stub_brain.prompts[1]
+
+    def test_no_budget_left_in_the_agents_timeout_skips_the_second_call(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The round trip runs against what is left of the agent's own budget,
+        never a fresh one, so a reviewer cannot double the wall time by asking
+        for files."""
+        developer_config(max_need_files=6, timeout_seconds=1)
+        stub_brain.delay = 1.1
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py", findings=[finding()]),
+            findings_json(finding(claim="never reached")),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance"], "no budget left for a second call"
+        assert len(envelope["findings"]) == 1
+        assert "budget remained" in envelope["need_files_note"]
+
+    def test_an_empty_second_answer_is_never_a_silent_clean_review(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The dangerous shape: a reviewer answers `{"findings": []}` on its
+        re-invocation because it believes it already reported them. Taken at
+        face value the envelope is byte-identical to a genuinely clean review —
+        `ok`, all counts zero, nothing partial — which is the workflow's signal
+        to let the push through. The second answer still wins, because a
+        reviewer that read the file may legitimately be retracting; what must
+        not happen is the loss going unrecorded."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json(
+                "helper.py", findings=[finding(severity="must-fix", claim="found early")]
+            ),
+            findings_json(),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["counts"]["total"] == 0
+        assert envelope["need_files_note"], (
+            "a review that lost every finding on its round trip must not read "
+            "as a clean one"
+        )
+        assert "down from 1" in envelope["need_files_note"]
+
+    def test_a_second_answer_that_keeps_its_findings_says_nothing(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The note is for a loss. An ordinary round trip is silent, or every
+        review that used one would read as suspect."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py", findings=[finding(claim="found early")]),
+            findings_json(
+                finding(claim="found early"),
+                # A distinct line, or `merge_findings` folds the two into one by
+                # `(file, line)` and the test measures the merge, not the round
+                # trip. The engine compares pre-merge counts for the same reason.
+                finding(claim="and another", line=5),
+            ),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert len(envelope["findings"]) == 2
+        assert envelope["need_files_note"] == ""
+
+    def test_a_request_only_answer_is_served_rather_than_retried(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`{"need_files": [...]}` with no findings key is the shape the offer
+        invites from a reviewer with nothing to report yet. Retrying it as
+        malformed would spend a model call teaching it a key it was never told
+        was mandatory."""
+        developer_config(max_need_files=6)
+        stub_brain.replies["conformance"] = [
+            json.dumps({"need_files": ["helper.py"]}),
+            findings_json(finding()),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert stub_brain.calls == ["conformance", "conformance"], (
+            "two calls: the request and its answer, not a malformed retry"
+        )
+        assert "SUPPORT_SENTINEL" in stub_brain.prompts[1]
+        assert len(envelope["findings"]) == 1
+
+    def test_an_unreadable_budget_does_not_also_buy_the_optional_round(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """A failed budget read leaves the review uncapped rather than sunk —
+        but "we could not check the cap" is not a reason to also spend the
+        optional extra round on it."""
+        developer_config(max_need_files=6, max_calls_per_task=8)
+        monkeypatch.setattr(
+            db, "code_review_calls_get",
+            lambda conn, task_id: (_ for _ in ()).throw(
+                RuntimeError("database is locked")
+            ),
+        )
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py", findings=[finding()]),
+            findings_json(finding(claim="never reached")),
+        ]
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert stub_brain.calls == ["conformance"]
+        assert "need_files" not in stub_brain.prompts[0]
