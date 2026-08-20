@@ -206,8 +206,9 @@ messages are re-polled rather than silently lost.
   rule per routing method:
 
   - `plus_address` / `sender_match` — gated unless `is_trusted_email_sender`,
-    called with `include_own_addresses=not config.email.confirm_sender_match`.
-    **One rule, both routes** — see below.
+    called with `include_own_addresses=_own_address_claim_counts(config,
+    auth_result)`, which is the whole of the three-state `confirm_sender_match`
+    (ISSUE-249 Gap 3). **One rule, both routes** — see below.
   - `thread_match` — gated unless `email_ownership.thread_reply_from_correspondent`
     says the envelope sender is one of the addresses the bot actually wrote to on
     the matched `sent_emails` row, and then by the same `is_trusted_email_sender`
@@ -396,24 +397,69 @@ messages are re-polled rather than silently lost.
   it, alongside `!trust` and `trusted_email_senders`. All three stay reachable as
   deliberate acts; the point is not to nudge.
 
-  A signal the sender cannot forge (inbound DKIM/SPF/DMARC via a trusted
-  `Authentication-Results` stamp) would let the gate distinguish the user from a
-  spoofer and stop asking about legitimate mail. The operator-configured
-  authserv-id that tells our own MTA's header from one the sender wrote now
-  exists (`[email] authserv_id`, ISSUE-249), but **the gate still does not read
-  the verdict** — `needs_confirmation` consults `is_trusted_email_sender` and
-  nothing else, so a self-claim with a verified aligned pass and one with a
-  forged header get the same answer. Making the verdict load-bearing is a
-  deliberate change of the canary's nature (its docstring and
-  `docs/features/email.md` both promise it is not a control) and is its own
-  change.
+  **The gate reads the verdict under `verify` (ISSUE-249 Gap 3).** A signal the
+  sender cannot forge is what lets it distinguish the user from a spoofer and
+  stop asking about legitimate mail, and `[email] authserv_id` is what makes the
+  verdict trustworthy enough to act on. `_own_address_claim_counts(config,
+  auth_result)` is the whole policy and feeds `include_own_addresses`: `off`
+  returns True (the header is proof), `gate` returns False (it never is),
+  `verify` returns True only for `_AuthResult.verdict == "pass"`. **Fails
+  closed** — a `None` result, which is what the thread route passes since
+  `claims_to_be_user` is structurally False there, is held. `verify` is refused
+  at config load without `authserv_id`, because an unscoped verdict is read off
+  whichever header arrived on top and gating on a sender-written value reads as
+  protection while being none. `_own_address_claim_counts` re-asserts the
+  authserv-id itself rather than resting on that validator, so the guarantee is
+  local to the decision; `_sender_match_policy` is the reader and normalises case
+  and the legacy booleans for anything that builds an `EmailConfig` directly.
+
+  **Authserv-id discovery, and why it splits in two.** While `authserv_id` is
+  blank the poller helps the operator find it, but the value can only be read off
+  a header — so what it does depends on whether that header is credible.
+  `_note_observed_authserv_id` names the observed id **only on a `pass`**, where
+  the header authenticated the sender's domain and is therefore good evidence of
+  a real MTA, and only in the log, keyed on `user_id` alone. A canary alert
+  instead carries `_AUTHSERV_ID_ADVICE`, which names **no id at all**: a failing
+  verdict means the top header is the one in doubt, and a spoofer can raise that
+  alert on demand, so recommending the authserv-id off their own forged header
+  would let them nominate the id we then trust — silencing the canary and, under
+  `verify`, turning every forged message into a `pass`. Keying the dedup on the
+  observed id would also be an unbounded axis (attacker-chosen in exactly this
+  state, so one log line and one permanent entry per message), which is the flood
+  `_DMARC_RESULTS` buckets unregistered tokens to avoid. Neither half raises a
+  notification of its own, so a healthy path stays as quiet on the alert channel
+  as it was before, and both stop once the id is set.
+
+  **A `verify` hold always says why.** `_check_dmarc_canary`'s WARNING is the
+  usual explanation, but it sits behind `dmarc_canary` and, for an `unevaluated`
+  verdict, `dmarc_canary_warn_on_missing` — both of which the gate is
+  deliberately independent of. In either state every self-addressed message would
+  be held with nothing saying why, and an unanswered hold is cancelled at
+  `confirmation_timeout_minutes`, so the failure mode is mail quietly going
+  missing. `poll_emails` logs the hold separately, per message and undeduped.
+
+  **The canary alert describes the policy, never the message's fate.** What
+  actually happened is not knowable where the alert is composed: the hold is
+  decided much later and also turns on `is_trusted_email_sender`, and the
+  quiet-sender and rate-limit branches can drop the message before a task exists.
+  A draft that inferred the outcome from the policy string was wrong both ways —
+  it told a `gate` deployment nothing was blocked when everything is, and told a
+  `verify` deployment a trusted sender's message was held when it ran.
 
   **The DMARC canary (ISSUE-228)** is the monitoring for the assumption the
-  `false` default encodes, not that feature. `_check_dmarc_canary` in
+  `off` default encodes. `_check_dmarc_canary` in
   `transport/email/inbound.py` warns — and alerts, `purpose="alert"` — when a
-  self-claim arrives without a `dmarc=pass` from the receiving MTA. Deliberately
-  a *detector*: it never blocks, holds, or reroutes, so it is orthogonal to
-  `confirm_sender_match` and safe on by default. It does not verify DKIM
+  self-claim arrives without a `dmarc=pass` from the receiving MTA.
+  `_check_dmarc_canary` is still purely a *detector* and never blocks, holds or
+  reroutes, which is why `dmarc_canary` is safe on by default. **The verdict it
+  reports is no longer only a detector**, though: under `confirm_sender_match =
+  "verify"` the same `_AuthResult` decides whether the message runs (ISSUE-249
+  Gap 3). So the verdict is computed by the *caller* (`poll_emails`) and passed
+  in, rather than derived inside the canary behind the `dmarc_canary` switch —
+  the gate needs an answer whether or not the operator wants the warnings, and
+  one shared computation is what stops the two from disagreeing about one
+  message. Anything claiming the canary is "not a gate" should be read as being
+  about `dmarc_canary`, not about the verdict. It does not verify DKIM
   in-process; if the MTA already rejects, re-implementing the check buys nothing.
   An attacker who forges a header the check accepts silences it, which is
   acceptable because the MTA is the boundary — it catches misconfiguration and

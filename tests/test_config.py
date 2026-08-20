@@ -765,12 +765,15 @@ class TestEmailConfig:
         assert ec.effective_smtp_user == "smtp@example.com"
 
     def test_confirm_sender_match_defaults_off(self):
-        """Opt-in (ISSUE-227): the gate was dead code until now, so `false` is the
+        """Opt-in (ISSUE-227): the gate was dead code until now, so `off` is the
         behaviour every existing deployment already has. Defaulting it on would
         start holding every self-sent email as a side effect of a bug fix."""
-        assert EmailConfig().confirm_sender_match is False
+        assert EmailConfig().confirm_sender_match == "off"
 
-    def test_confirm_sender_match_loads_from_toml(self, tmp_path):
+    def test_confirm_sender_match_loads_the_legacy_true_as_gate(self, tmp_path):
+        """ISSUE-249 turned this key from a bool into a three-state policy. Both
+        deploy paths still render a boolean, so `true` has to keep meaning exactly
+        what it meant — hold every self-addressed message."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [email]
@@ -778,7 +781,30 @@ enabled = true
 confirm_sender_match = true
 """)
         cfg = load_config(config_file)
-        assert cfg.email.confirm_sender_match is True
+        assert cfg.email.confirm_sender_match == "gate"
+
+    def test_confirm_sender_match_loads_the_legacy_false_as_off(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+confirm_sender_match = false
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.confirm_sender_match == "off"
+
+    def test_confirm_sender_match_accepts_a_boolean_rendered_as_a_string(self, tmp_path):
+        """Ansible renders a YAML boolean into a quoted template slot as "False",
+        so the string forms have to load as the booleans they came from or a
+        deployment breaks on a value it did not choose."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+confirm_sender_match = "False"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.confirm_sender_match == "off"
 
     def test_confirm_sender_match_omitted_from_toml_defaults_off(self, tmp_path):
         """Every deployment gets its value through load_config, not EmailConfig(),
@@ -790,7 +816,47 @@ enabled = true
 imap_host = "imap.example.com"
 """)
         cfg = load_config(config_file)
-        assert cfg.email.confirm_sender_match is False
+        assert cfg.email.confirm_sender_match == "off"
+
+    def test_confirm_sender_match_verify_requires_an_authserv_id(self, tmp_path):
+        """ISSUE-249 Gap 3. Unscoped, the verdict comes off whichever header
+        arrived on top, which in the case the gate exists for is the sender's own
+        — so `verify` without `authserv_id` gates on a value the sender writes.
+        Refusing to load is how "requires" differs from "prefers"."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+confirm_sender_match = "verify"
+""")
+        with pytest.raises(ValueError, match="authserv_id"):
+            load_config(config_file)
+
+    def test_confirm_sender_match_verify_loads_with_an_authserv_id(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+confirm_sender_match = "verify"
+authserv_id = "mx.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.confirm_sender_match == "verify"
+
+    def test_confirm_sender_match_rejects_an_unknown_policy(self, tmp_path):
+        """A security control with a typo in it stops the process rather than
+        picking a policy on the operator's behalf — same rule as
+        outbound_approval_floor, and for the same reason: there is no neutral
+        fallback, since `off` disables a gate that was asked for and `gate` holds
+        every message on an instance that deliberately wrote `off`."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+confirm_sender_match = "verifty"
+""")
+        with pytest.raises(ValueError, match="confirm_sender_match"):
+            load_config(config_file)
 
     def test_dmarc_canary_defaults_on(self):
         """ISSUE-228 — on by default: a deployment that never thinks to enable a

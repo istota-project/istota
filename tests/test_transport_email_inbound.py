@@ -1675,7 +1675,7 @@ class TestEmailConfirmationGate:
             alerts_channel="alerts_room",
         )}
 
-        assert config.email.confirm_sender_match is False
+        assert config.email.confirm_sender_match == "off"
 
         envelope = _envelope(id="23", sender="alice@test.com", subject="Hi")
         email = _email(id="23", sender="alice@test.com")
@@ -1693,10 +1693,10 @@ class TestEmailConfirmationGate:
             assert task.status == "pending"
 
     def test_sender_match_not_gated_when_disabled(self, make_config):
-        """Sender-match emails proceed directly when confirm_sender_match is False."""
+        """Sender-match emails proceed directly when confirm_sender_match is "off"."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = False
+        config.email.confirm_sender_match = "off"
         config.users = {"alice": UserConfig(
             email_addresses=["alice@test.com"],
         )}
@@ -1720,7 +1720,7 @@ class TestEmailConfirmationGate:
         """A trusted_email_senders pattern exempts an address even with the gate on."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(
             email_addresses=["alice@test.com"],
             trusted_email_senders=["alice@test.com"],
@@ -1782,7 +1782,7 @@ class TestSenderMatchConfirmationGate:
     def test_own_address_is_gated_when_enabled(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(
             email_addresses=["alice@test.com"],
             alerts_channel="alerts_room",
@@ -1814,7 +1814,7 @@ class TestSenderMatchConfirmationGate:
         publish before the user has answered (same contract as the plus-address gate)."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="sm2", sender="alice@test.com", subject="Hi")
@@ -1844,7 +1844,7 @@ class TestSenderMatchConfirmationGate:
         gate stops asking, so an operator who turns it on is not stuck confirming forever."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         with db.get_db(config.db_path) as conn:
@@ -1870,7 +1870,7 @@ class TestSenderMatchConfirmationGate:
         can also route around it. Same own-address claim, same answer, either route."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="sm4", sender="alice@test.com", subject="Hi")
@@ -1916,7 +1916,7 @@ class TestSenderMatchConfirmationGate:
         is the intended way to stop being asked, and costs nothing this gate protects."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="sm4c", sender="stranger@evil.com", subject="Hi")
@@ -2000,7 +2000,7 @@ class TestSenderMatchConfirmationGate:
         shortcut the prompt deliberately withholds from a self-claim."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.email.outbound_approval_floor = "untrusted"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
@@ -2024,7 +2024,7 @@ class TestSenderMatchConfirmationGate:
         external sender — so their trust answer is arithmetically unchanged."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(
             email_addresses=["alice@test.com"],
             trusted_email_senders=["*@partner.com"],
@@ -2049,7 +2049,7 @@ class TestSenderMatchConfirmationGate:
         gate — for the spoofer too. It must not be offered as one of three equal options."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="sm4d", sender="alice@test.com", subject="Hi")
@@ -2074,7 +2074,7 @@ class TestSenderMatchConfirmationGate:
         happens to return first — offering it would trust their own address."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {
             "bob": UserConfig(email_addresses=["shared@test.com"]),
             "alice": UserConfig(email_addresses=["shared@test.com"]),
@@ -2103,7 +2103,7 @@ class TestSenderMatchConfirmationGate:
         nobody receives is silent mail loss. It must at least be logged."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="sm4e", sender="alice@test.com", subject="Hi")
@@ -2123,7 +2123,7 @@ class TestSenderMatchConfirmationGate:
     def test_delivered_prompt_does_not_warn(self, caplog, make_config):
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="sm4f", sender="alice@test.com", subject="Hi")
@@ -2150,7 +2150,7 @@ class TestSenderMatchConfirmationGate:
         now gives. `TestThreadMatchConfirmationGate` covers the narrowing itself."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         with db.get_db(config.db_path) as conn:
@@ -2257,7 +2257,7 @@ class TestThreadMatchConfirmationGate:
         was left ungated in the first place. It must stay quiet."""
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
         self._seed_thread(config)
 
@@ -2391,7 +2391,7 @@ class TestEmailPromptBoundaries:
     def test_regular_email_has_boundary_markers(self, make_config):
         config = make_config()
         config.email = _email_config()
-        config.email.confirm_sender_match = False
+        config.email.confirm_sender_match = "off"
         config.users = {"alice": UserConfig(email_addresses=["alice@test.com"])}
 
         envelope = _envelope(id="b1", sender="alice@test.com", subject="Test")
@@ -3980,3 +3980,459 @@ class TestDkimSpfDetail:
         assert alert.call_count == 1
         assert "a" * 200 not in caplog.text
         assert "a" * 200 not in alert.call_args.args[2]
+
+
+# =============================================================================
+# TestVerifyPolicy (ISSUE-249 Gap 3)
+# =============================================================================
+
+
+class TestVerifyPolicy:
+    """ISSUE-249 Gap 3 — the verdict finally decides something.
+
+    Before this, the gate consulted `is_trusted_email_sender` and nothing else,
+    so a self-claim carrying a verified aligned pass and one carrying a header
+    the sender wrote got the identical answer whichever way the flag was set. The
+    canary computed the answer and threw it away.
+
+    `verify` is what makes the gate usable: `gate` asks about every self-sent
+    message because nothing in a plain SMTP message separates the user from
+    someone claiming to be them, and this is the signal that does.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _config(self, make_config, policy="verify", **email_overrides):
+        config = make_config()
+        config.email = _email_config()
+        config.email.authserv_id = "mx.test"
+        config.email.confirm_sender_match = policy
+        for key, val in email_overrides.items():
+            setattr(config.email, key, val)
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        return config
+
+    def _poll(self, config, header, id="v1", sender="alice@test.com"):
+        """Returns (task_ids, confirmation-prompt spy). A held message still
+        creates a task — it is parked awaiting an answer, not dropped — so the
+        prompt is what distinguishes gated from ungated, never the task count."""
+        email = _email(id=id, sender=sender,
+                       authentication_results_all=(header,) if header else ())
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id=id, sender=sender)]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True),
+            patch("istota.notifications.send_confirmation_prompt",
+                  return_value=(True, 99)) as prompt,
+        ):
+            task_ids = poll_emails(config)
+        return task_ids, prompt
+
+    def test_a_verified_aligned_pass_is_let_through(self, make_config):
+        """The point of the setting. This is the message `gate` would have held
+        and interrupted the user about, for no gain."""
+        config = self._config(make_config)
+
+        task_ids, prompt = self._poll(
+            config, "mx.test; dmarc=pass header.from=test.com")
+
+        assert len(task_ids) == 1
+        assert prompt.call_count == 0
+
+    def test_a_failing_verdict_is_held(self, make_config):
+        config = self._config(make_config)
+
+        _, prompt = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
+
+        assert prompt.call_count == 1
+
+    def test_a_pass_from_someone_elses_authserv_id_is_held(self, make_config):
+        """The forgery case, and the reason `verify` refuses to run without an
+        authserv-id: unscoped this header would have been read as a pass."""
+        config = self._config(make_config)
+
+        _, prompt = self._poll(
+            config, "forged.example; dmarc=pass header.from=test.com")
+
+        assert prompt.call_count == 1
+
+    def test_a_misaligned_pass_is_held(self, make_config):
+        """A pass about a different address is not a statement about this sender,
+        which is exactly what the gate is asking about."""
+        config = self._config(make_config)
+
+        _, prompt = self._poll(
+            config, "mx.test; dmarc=pass header.from=vendor.example")
+
+        assert prompt.call_count == 1
+
+    def test_no_verdict_at_all_is_held(self, make_config):
+        """Fail closed. Holding costs one confirmation and the mail is still
+        there; the other direction runs an unauthenticated message on the
+        strength of a check that never happened."""
+        config = self._config(make_config)
+
+        _, prompt = self._poll(config, None)
+
+        assert prompt.call_count == 1
+
+    def test_verify_works_with_the_canary_switched_off(self, make_config):
+        """`dmarc_canary` governs the warnings. An operator who does not want the
+        log noise has not thereby said unauthenticated mail should run, so the
+        verdict has to be computed independently of that switch."""
+        config = self._config(make_config, dmarc_canary=False)
+
+        _, held = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
+        assert held.call_count == 1
+
+        _, passed = self._poll(config, "mx.test; dmarc=pass header.from=test.com",
+                               id="v7")
+        assert passed.call_count == 0
+
+    def test_off_ignores_the_verdict_entirely(self, make_config):
+        """Unchanged behaviour for every deployment that has not opted in: the
+        header is proof, and a failing verdict warns without holding anything."""
+        config = self._config(make_config, policy="off")
+
+        _, prompt = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
+
+        assert prompt.call_count == 0
+
+    def test_gate_ignores_the_verdict_entirely(self, make_config):
+        """Also unchanged: `gate` holds a self-claim however well it authenticates.
+        That is the noisiness `verify` exists to fix, not a bug."""
+        config = self._config(make_config, policy="gate")
+
+        _, prompt = self._poll(config, "mx.test; dmarc=pass header.from=test.com")
+
+        assert prompt.call_count == 1
+
+    def test_an_explicitly_trusted_sender_still_bypasses_verify(self, make_config):
+        """`verify` narrows what the own-address claim buys. It does not withdraw
+        a grant the operator made out of band."""
+        config = self._config(make_config)
+        config.users["alice"].trusted_email_senders = ["alice@test.com"]
+
+        _, prompt = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
+
+        assert prompt.call_count == 0
+
+    def test_verify_without_an_authserv_id_holds_a_forged_pass(self, make_config):
+        """`_validate_confirm_sender_match` refuses this combination at load, so
+        this is the defence behind it: the guarantee must not rest on nothing ever
+        setting the policy outside `load_config`. Unscoped, the verdict is read off
+        the topmost header, so a sender writing `dmarc=pass` would otherwise walk
+        straight through the gate."""
+        config = self._config(make_config)
+        config.email.authserv_id = ""
+
+        _, prompt = self._poll(
+            config, "attacker.example; dmarc=pass header.from=test.com")
+
+        assert prompt.call_count == 1
+
+    def test_the_policy_reader_normalises_what_the_loader_would_have(self, make_config):
+        """Anything building an `EmailConfig` directly bypasses the validator. A
+        stray `False` meaning `off` that silently became `gate` would hold every
+        self-sent message and expire it into cancellation — safe in the security
+        direction, mail loss in the availability one."""
+        config = self._config(make_config)
+        header = "mx.test; dmarc=fail header.from=test.com"
+
+        for value, expect_held in (
+            (False, 0), ("Off", 0), (" off ", 0),
+            (True, 1), ("GATE", 1),
+        ):
+            config.email.confirm_sender_match = value
+            _, prompt = self._poll(config, header, id=f"vn-{value}")
+            assert prompt.call_count == expect_held, value
+
+    def test_an_unrecognised_policy_fails_closed_and_says_so(self, make_config, caplog):
+        """Loud, not silent: an unreachable value reaching here is a bug, and
+        `gate` is the safe direction to be wrong in."""
+        config = self._config(make_config, policy="verifty")
+
+        with caplog.at_level("WARNING"):
+            _, prompt = self._poll(config, "mx.test; dmarc=pass header.from=test.com")
+
+        assert prompt.call_count == 1
+        assert "not one of" in caplog.text
+
+
+# =============================================================================
+# TestAuthservIdDiscovery (ISSUE-249)
+# =============================================================================
+
+
+class TestAuthservIdDiscovery:
+    """The setting does nothing until it is set, and the value lives in a raw
+    header most people never open. The poller reads it off and produces the exact
+    line to paste — once per observed id, and only while the setting is blank.
+
+    It raises no notification of its own. A healthy mail path is silent on the
+    alert channel today, and an advisory arriving there would both devalue a
+    channel that otherwise means "your mail authentication is failing" and land
+    unsolicited on every deployment that upgrades. It logs, and it rides along
+    with a canary alert when one is already firing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _config(self, make_config, **email_overrides):
+        config = make_config()
+        config.email = _email_config()
+        for key, val in email_overrides.items():
+            setattr(config.email, key, val)
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        return config
+
+    def _poll(self, config, header, id="s1"):
+        email = _email(id=id, sender="alice@test.com",
+                       authentication_results_all=(header,) if header else ())
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id=id, sender="alice@test.com")]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True) as alert,
+        ):
+            poll_emails(config)
+        return alert
+
+    def test_a_clean_verdict_logs_the_id_and_raises_nothing(self, make_config, caplog):
+        """Two properties at once. The id is named only where the verdict passed,
+        because that is the evidence the stamp came from a real MTA rather than
+        from the sender. And mail that authenticates cleanly stays silent on the
+        alert channel, advisory or not — that is what decided the shape."""
+        config = self._config(make_config)
+
+        with caplog.at_level("INFO"):
+            alert = self._poll(config, "mx.test; dmarc=pass header.from=test.com")
+
+        assert alert.call_count == 0
+        assert "'mx.test'" in caplog.text
+        assert "[email] authserv_id" in caplog.text
+
+    def test_a_failing_verdict_never_names_an_id(self, make_config, caplog):
+        """The attack this closes: a spoofer can raise a canary alert on demand by
+        sending a forged self-claim that fails. If the alert then recommended the
+        authserv-id off that same forged header, an operator who pasted it would
+        scope the check to an id the attacker stamps — silencing the canary, and
+        under `verify` turning every forged message into a pass. So a failing
+        verdict gets generic advice naming nothing."""
+        config = self._config(make_config)
+
+        with caplog.at_level("INFO"):
+            alert = self._poll(
+                config, "forged.example; dmarc=fail header.from=test.com")
+
+        assert alert.call_count == 1
+        body = alert.call_args.args[2]
+        assert "forged.example" not in body
+        assert "forged.example" not in caplog.text
+        assert "authserv_id" in body
+
+    def test_the_advice_still_rides_along_with_an_alert(self, make_config):
+        """Where an operator is already being interrupted, tell them the check can
+        be scoped — just without a value read off the header under suspicion."""
+        config = self._config(make_config)
+
+        alert = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
+
+        assert "[email] authserv_id" in alert.call_args.args[2]
+
+    def test_setting_the_id_silences_both_halves_for_good(self, make_config, caplog):
+        """The nag terminates on the one action it asks for, which is why it needs
+        no off switch of its own."""
+        config = self._config(make_config, authserv_id="mx.test")
+
+        with caplog.at_level("INFO"):
+            alert = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
+
+        assert "authserv_id" not in caplog.text
+        assert "authserv_id" not in alert.call_args.args[2]
+
+    def test_distinct_forged_ids_cannot_make_it_a_per_message_log(self, make_config, caplog):
+        """The dedup key is the user, not the observed id. Keyed on the id it would
+        be an unbounded axis — the observed value is attacker-chosen in exactly the
+        state this runs in, so every message could carry a fresh one, giving one
+        log line and one permanent set entry per message."""
+        config = self._config(make_config)
+
+        with caplog.at_level("INFO"):
+            for n in range(5):
+                self._poll(config, f"mx{n}.test; dmarc=pass header.from=test.com",
+                           id=f"s5-{n}")
+
+        assert caplog.text.count("[email] authserv_id") == 1
+        assert len(inbound_module._authserv_id_suggested) == 1
+
+    def test_mail_with_no_stamp_suggests_nothing(self, make_config, caplog):
+        """Nothing to name, and inventing a value would be worse than silence."""
+        config = self._config(make_config, dmarc_canary_warn_on_missing=True)
+
+        with caplog.at_level("INFO"):
+            alert = self._poll(config, None)
+
+        assert "'mx" not in caplog.text
+        assert "authserv_id" in alert.call_args.args[2]
+
+
+# =============================================================================
+# TestCanaryAlertOutcomeWording (ISSUE-249 Gap 3)
+# =============================================================================
+
+
+class TestCanaryAlertOutcomeWording:
+    """The alert describes the *policy*, never this message's fate.
+
+    An earlier draft inferred the outcome from the policy string and was wrong in
+    both directions: it told a `gate` deployment nothing was blocked when
+    everything is, and told a `verify` deployment a trusted sender's message was
+    held when it ran. What actually happened is not knowable where the alert is
+    composed — the hold is decided much later and also turns on the trust list,
+    and the quiet-sender and rate-limit branches can drop the message before a
+    task exists at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _poll(self, make_config, policy, *, trusted=(), id="w1"):
+        config = make_config()
+        config.email = _email_config()
+        config.email.authserv_id = "mx.test"
+        config.email.confirm_sender_match = policy
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+            trusted_email_senders=list(trusted),
+        )}
+        email = _email(id=id, sender="alice@test.com",
+                       authentication_results="mx.test; dmarc=fail header.from=test.com")
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id=id, sender="alice@test.com")]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True) as alert,
+            patch("istota.notifications.send_confirmation_prompt",
+                  return_value=(True, 99)) as prompt,
+        ):
+            poll_emails(config)
+        return alert.call_args.args[2], prompt.call_count
+
+    def test_gate_does_not_claim_nothing_was_blocked(self, make_config):
+        """Under `gate` every self-claim is held, so the old flat sentence was the
+        exact opposite of what happened."""
+        body, held = self._poll(make_config, "gate")
+
+        assert held == 1
+        assert "Nothing was blocked" not in body
+        assert "gate" in body
+
+    def test_verify_does_not_claim_a_hold_that_did_not_happen(self, make_config):
+        """A trusted sender goes through on a failing verdict, and the alert still
+        fires. Claiming the message was held would be false."""
+        body, held = self._poll(make_config, "verify", trusted=["alice@test.com"])
+
+        assert held == 0
+        assert "The message is held" not in body
+        assert "unless its sender is explicitly trusted" in body
+
+    def test_off_says_nothing_was_blocked(self, make_config):
+        body, held = self._poll(make_config, "off")
+
+        assert held == 0
+        assert "Nothing was blocked" in body
+
+
+# =============================================================================
+# TestVerifyHoldIsDiagnosable (ISSUE-249 Gap 3)
+# =============================================================================
+
+
+class TestVerifyHoldIsDiagnosable:
+    """A `verify` hold always says why, even where the canary is silent.
+
+    The canary's WARNING is the usual explanation, but it sits behind two switches
+    the gate is deliberately independent of. In either state every self-addressed
+    message would be held with nothing in the log saying why, and an unanswered
+    hold is cancelled at `confirmation_timeout_minutes` — so the failure mode is
+    mail quietly going missing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_dedup(self):
+        inbound_module._reset_dmarc_alert_dedup()
+        yield
+        inbound_module._reset_dmarc_alert_dedup()
+
+    def _poll(self, make_config, header, id="h1", **email_overrides):
+        config = make_config()
+        config.email = _email_config()
+        config.email.authserv_id = "mx.test"
+        config.email.confirm_sender_match = "verify"
+        for key, val in email_overrides.items():
+            setattr(config.email, key, val)
+        config.users = {"alice": UserConfig(
+            email_addresses=["alice@test.com"],
+            alerts_channel="alerts_room",
+        )}
+        email = _email(id=id, sender="alice@test.com",
+                       authentication_results_all=(header,) if header else ())
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[_envelope(id=id, sender="alice@test.com")]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.notifications.send_notification", return_value=True),
+            patch("istota.notifications.send_confirmation_prompt",
+                  return_value=(True, 99)) as prompt,
+        ):
+            poll_emails(config)
+        return prompt.call_count
+
+    def test_a_hold_with_the_canary_off_is_still_logged(self, make_config, caplog):
+        with caplog.at_level("WARNING"):
+            held = self._poll(make_config, "mx.test; dmarc=fail header.from=test.com",
+                              dmarc_canary=False)
+
+        assert held == 1
+        assert "confirm_sender_match is 'verify'" in caplog.text
+        assert "alice@test.com" in caplog.text
+
+    def test_a_hold_on_an_unevaluated_verdict_is_logged(self, make_config, caplog):
+        """The default flags leave `unevaluated` silent on the canary, so without
+        this the most likely `verify` hold of all would have no diagnostic."""
+        with caplog.at_level("WARNING"):
+            held = self._poll(make_config, "mx.test; spf=pass smtp.mailfrom=test.com")
+
+        assert held == 1
+        assert "confirm_sender_match is 'verify'" in caplog.text
+
+    def test_a_message_that_passes_logs_no_hold(self, make_config, caplog):
+        with caplog.at_level("WARNING"):
+            held = self._poll(make_config, "mx.test; dmarc=pass header.from=test.com")
+
+        assert held == 0
+        assert "confirm_sender_match is 'verify'" not in caplog.text

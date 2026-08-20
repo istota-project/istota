@@ -1170,6 +1170,45 @@
     quiet: true
   when: not istota_web_only
 
+# Same YAML-boolean trap as the floor above, and sharper here because "off" is
+# this key's default: an inventory writing `istota_email_confirm_sender_match:
+# off` unquoted hands Jinja Python `False`. That one still loads (the legacy
+# booleans are accepted, and `False` means "off"), so the trap costs nothing —
+# but `verify` and `gate` are strings with no boolean spelling, and a typo in
+# either raises at config load. Assert before the template so the failure names
+# the variable.
+- name: Validate inbound sender-match policy
+  assert:
+    that:
+      - istota_email_confirm_sender_match in ['off', 'verify', 'gate', true, false]
+    fail_msg: >-
+      istota_email_confirm_sender_match is
+      {{ istota_email_confirm_sender_match | to_json }}, which is not one of
+      off / verify / gate. Note that off, on, yes and no are YAML booleans —
+      quote the value ("off"). The legacy true/false are still accepted and
+      mean gate/off.
+    quiet: true
+  when: not istota_web_only
+
+# `verify` reads the DMARC verdict off the header carrying our own authserv-id.
+# Without one it would read whichever header arrived on top, which the sender
+# writes — so the daemon refuses to start rather than gate on an attacker-chosen
+# value. Caught here so the deploy fails on the variable rather than on a
+# service that will not come up.
+- name: Validate that verify mode has an authserv-id to scope to
+  assert:
+    that:
+      - istota_email_authserv_id | default('') | trim | length > 0
+    fail_msg: >-
+      istota_email_confirm_sender_match is "verify", which requires
+      istota_email_authserv_id to be set to your receiving MTA's own
+      authserv-id (the first field of the Authentication-Results header it
+      stamps). Use "gate" to hold every self-addressed message instead.
+    quiet: true
+  when:
+    - not istota_web_only
+    - istota_email_confirm_sender_match == 'verify'
+
 - name: Validate per-user outbound approval policies
   assert:
     that:

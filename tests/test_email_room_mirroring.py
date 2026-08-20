@@ -399,7 +399,7 @@ class TestConfirmationGate:
                 enabled=True, imap_host="imap.test", imap_port=993,
                 imap_user="u", imap_password="p",
                 smtp_host="smtp.test", smtp_port=587, bot_email="bot@test.com",
-                confirm_sender_match=True,
+                confirm_sender_match="gate",
             ),
             scheduler=SchedulerConfig(),
             nextcloud_mount_path=tmp_path / "mount",

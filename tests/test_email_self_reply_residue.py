@@ -173,7 +173,7 @@ class TestTheDecisionIsRecorded:
         and `confirmations.approve` publishes it once answered — so a gated
         external turn is not withheld in this column's sense, and the room's
         context must keep counting it once it lands."""
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn)

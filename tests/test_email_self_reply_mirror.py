@@ -451,7 +451,7 @@ class TestApprovalDoesNotRestoreIt:
     stops the own-address claim from counting as trust."""
 
     def _gated_self_reply(self, db_path, config):
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn, to_addr=USER_ADDR)
@@ -485,7 +485,7 @@ class TestApprovalDoesNotRestoreIt:
         here as the end-to-end half: the row must actually reappear on approval."""
         from istota import confirmations
 
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.users[USER].alerts_channel = ROOM
         with db.get_db(db_path) as conn:
             _origin_room(conn)
@@ -508,7 +508,7 @@ class TestApprovalDoesNotRestoreIt:
         is withheld until answered and published on approval, unchanged."""
         from istota import confirmations
 
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn)

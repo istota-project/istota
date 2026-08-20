@@ -22,7 +22,7 @@ from pathlib import Path
 from imap_tools import AND, U
 
 from ... import db
-from ...config import Config
+from ...config import CONFIRM_SENDER_MATCH_POLICIES, Config
 from ...email_ownership import (
     extract_user_from_recipient,
     match_thread,
@@ -108,9 +108,19 @@ _DMARC_ALERT_WINDOW_SECONDS = 24 * 60 * 60
 _dmarc_alerted: dict[tuple[str, str, str], float] = {}
 
 
+# Authserv-id discovery (ISSUE-249). Fires only while `authserv_id` is blank, so
+# it stops for good the moment the operator acts on it — the nag terminates on
+# the one action it asks for, rather than needing its own off switch. Keyed on
+# `user_id` alone and unpersisted: the observed id is attacker-chosen in exactly
+# the state this runs in, so keying on it would be an unbounded axis, one entry
+# and one log line per message.
+_authserv_id_suggested: set[str] = set()
+
+
 def _reset_dmarc_alert_dedup() -> None:
-    """Clear the alert-dedup table. For tests; the daemon never needs it."""
+    """Clear the alert-dedup tables. For tests; the daemon never needs it."""
     _dmarc_alerted.clear()
+    _authserv_id_suggested.clear()
 
 
 def _split_methodspecs(header: str) -> tuple[list[str], bool]:
@@ -523,6 +533,140 @@ def _authentication_verdict(
     return _AuthResult("pass", "")
 
 
+def _sender_match_policy(config: Config) -> str:
+    """Read ``confirm_sender_match`` as one of the three policy names.
+
+    `load_config` normalises through `_validate_confirm_sender_match`, so in a
+    running daemon this is a plain read. It exists for everything that builds an
+    `EmailConfig` directly — tests, and any future in-process editor — where the
+    field is a bare dataclass attribute with nothing enforcing its shape.
+
+    The `str()` / `strip()` / `lower()` handles the near misses (`"Off"`, a
+    stray space). The legacy booleans are mapped the same way the validator maps
+    them, because a caller still assigning `False` means ``off`` and silently
+    getting ``gate`` would hold every self-addressed message and expire it into
+    cancellation — safe in the security direction and a mail-loss bug in the
+    availability one. Anything genuinely unrecognised warns and falls back to
+    ``gate``, which is the safe direction, rather than passing silently.
+    """
+    raw = config.email.confirm_sender_match
+    if isinstance(raw, bool):
+        return "gate" if raw else "off"
+    value = str(raw).strip().lower()
+    if value in ("true", "false"):
+        return "gate" if value == "true" else "off"
+    if value in CONFIRM_SENDER_MATCH_POLICIES:
+        return value
+    logger.warning(
+        "confirm_sender_match is %r, which is not one of %s. Treating it as "
+        "'gate' — every message naming a user's own address will be held.",
+        raw, "/".join(CONFIRM_SENDER_MATCH_POLICIES),
+    )
+    return "gate"
+
+
+def _own_address_claim_counts(config: Config, result: "_AuthResult | None") -> bool:
+    """Whether a ``From:`` naming the user's own address counts as evidence.
+
+    This is the whole of ``confirm_sender_match`` (ISSUE-249 Gap 3). It answers
+    the one question the confirmation gate asks about a self-claim, and feeds
+    `is_trusted_email_sender`'s ``include_own_addresses``, so the three policies
+    stay one expression rather than three branches spread through the poll loop.
+
+    ``verify`` is the reason this exists. ``gate`` is noisy by construction —
+    nothing in a plain SMTP message separates the user from someone claiming to
+    be them, so it asks about every self-sent message and is therefore rarely
+    left on. The receiving MTA's verdict is the signal that finally discriminates,
+    and `_authentication_verdict` returns ``pass`` only for a stamp carrying our
+    own authserv-id whose ``header.from`` aligns with the address we routed on.
+
+    **Fail closed.** Anything short of that ``pass`` is held, and so is a
+    ``None`` result — which is what a caller passes when no verdict was computed
+    at all, the thread route being the live case. Holding costs one confirmation
+    and the mail is still there; the other direction runs an unauthenticated
+    message on the strength of a check that did not happen.
+    """
+    policy = _sender_match_policy(config)
+    if policy == "off":
+        return True
+    if policy == "verify":
+        # The authserv-id is re-asserted here rather than left to the config
+        # validator alone. `_authentication_verdict` returns `pass` for an
+        # *unscoped* read too — it just reads whichever header arrived on top,
+        # which is the sender's own in the state that matters — so without this
+        # the docstring's guarantee holds only as long as nothing ever sets the
+        # policy outside `load_config`. One line, and it fails closed.
+        if not config.email.authserv_id:
+            return False
+        return result is not None and result.verdict == "pass"
+    return False
+
+
+# Generic advice appended to a canary alert while `authserv_id` is unset. It
+# deliberately names no id: in this branch the verdict already failed, so the
+# header we would read one from is the header under suspicion. Naming it would
+# let a spoofer raise an alert on demand and have it recommend their own
+# authserv-id — which, pasted, silences the canary and turns every forged
+# message into a `pass` under `verify`. The observed id is only ever named on a
+# clean verdict, and only in the log (`_note_observed_authserv_id`).
+_AUTHSERV_ID_ADVICE = (
+    "\n\nThis check can be tightened. It currently reads whichever "
+    "Authentication-Results header arrived on top, which a sender can write. "
+    "Setting [email] authserv_id to your own mail server's authserv-id scopes it "
+    "to that server's stamp and discards every other. See docs/features/email.md; "
+    "the value is logged the next time a message authenticates cleanly."
+)
+
+
+def _note_observed_authserv_id(
+    config: Config, user_id: str, headers: "tuple[str, ...]", result: "_AuthResult",
+) -> None:
+    """Log the authserv-id this mailbox carries, once per user.
+
+    ``authserv_id`` is a single token an operator would otherwise dig out of a raw
+    message header, and the scoping does nothing until it is set. This reads it
+    off the stamp and logs the line to paste.
+
+    **Only on a clean verdict.** A ``pass`` means the header authenticated the
+    sender's domain, which is the best available evidence that the stamp came
+    from a real MTA rather than from the sender. On a failing verdict the top
+    header is precisely the one in doubt, so no id is named at all — the alert
+    gets `_AUTHSERV_ID_ADVICE`, which names none.
+
+    **Keyed on the user alone.** The observed id is attacker-chosen in the state
+    this runs in, so keying on it would be an unbounded axis: one entry and one
+    log line per message, which is the flood `_DMARC_RESULTS` buckets unregistered
+    tokens to avoid. The operator needs telling once; a second distinct id is not
+    new advice.
+
+    **Deliberately not a notification.** A healthy mail path raises nothing today
+    and that silence is worth keeping — an advisory on the channel that otherwise
+    means "your mail authentication is failing" devalues the channel and lands
+    unsolicited on every deployment that upgrades.
+
+    Runs only while ``authserv_id`` is blank, so acting on it is what stops it.
+    """
+    if config.email.authserv_id or not headers or result.verdict != "pass":
+        return
+    if user_id in _authserv_id_suggested:
+        return
+
+    observed = _authserv_id(headers[0])
+    if not observed:
+        return
+
+    # Marked before the log, so the first sight is the only one.
+    _authserv_id_suggested.add(user_id)
+    logger.info(
+        "Inbound mail for user %s authenticated cleanly against an "
+        "Authentication-Results stamp from authserv-id %r. Setting [email] "
+        "authserv_id = %r scopes the DMARC check to that server's stamp; left "
+        "blank, the check reads whichever header arrived on top, which a sender "
+        "can write. Confirm it is your own mail server before setting it.",
+        user_id, observed[:_ECHOED_VALUE_MAX], observed[:_ECHOED_VALUE_MAX],
+    )
+
+
 @dataclass(frozen=True)
 class _DmarcAlert:
     """An operator alert the canary decided on, awaiting delivery after the poll."""
@@ -537,15 +681,25 @@ def _check_dmarc_canary(
     sender: str,
     subject: str,
     routing_method: str,
-    authentication_results: "tuple[str, ...]",
+    result: "_AuthResult",
+    authserv_hint: str | None = None,
 ) -> "_DmarcAlert | None":
     """Warn when mail that routed on the user's own address lacks a ``dmarc=pass``.
 
-    This is a canary, not a verifier, and not a gate. It never changes what
-    happens to the message — that call belongs to ``confirm_sender_match``. Its
-    job is detecting that an assumption the running config depends on has broken:
-    with the gate off, a ``From:`` naming the user's own address is taken as proof
-    the user sent it, which is only sound if the receiving MTA rejected forgeries
+    **This function is a detector. The verdict it reports is not.** Under
+    ``confirm_sender_match = "verify"`` the same ``_AuthResult`` decides whether
+    the message runs or is held (ISSUE-249 Gap 3), so the old flat claim that
+    "nothing here changes what happens to the message" is now true of this
+    function and false of its input. The verdict is therefore computed by the
+    *caller* and passed in, rather than being derived here behind the
+    ``dmarc_canary`` switch: the gate needs an answer whether or not the operator
+    wants the warnings, and one shared computation is what stops the two from
+    ever disagreeing about the same message.
+
+    What this function still owns is the warning and the operator alert. Its job
+    is detecting that an assumption the running config depends on has broken:
+    under ``off``, a ``From:`` naming the user's own address is taken as proof the
+    user sent it, which is only sound if the receiving MTA rejected forgeries
     before the poller ever read the folder. Nothing else in the code can see
     whether that is still true.
 
@@ -569,11 +723,6 @@ def _check_dmarc_canary(
     if not config.email.dmarc_canary:
         return None
 
-    result = _authentication_verdict(
-        authentication_results,
-        config.email.authserv_id,
-        _address_domain(sender),
-    )
     if result.verdict == "pass":
         return None
 
@@ -600,14 +749,44 @@ def _check_dmarc_canary(
     if last is not None and time.time() - last < _DMARC_ALERT_WINDOW_SECONDS:
         return None
 
+    # Describes the *policy*, never this message's fate. What actually happened
+    # is not knowable here: the hold is decided ~400 lines later and also turns on
+    # `is_trusted_email_sender`, while the quiet-sender and rate-limit branches
+    # below can drop the message before a task exists at all — and this runs
+    # before both of those deliberately, because a quiet sender's mail is still
+    # evidence about the mail path. An earlier draft inferred the outcome from the
+    # policy string and was wrong in both directions: it told a `gate` deployment
+    # nothing was blocked when everything is, and told a `verify` deployment a
+    # trusted sender's message was held when it ran.
+    policy = _sender_match_policy(config)
+    if policy == "verify":
+        outcome = (
+            'Under confirm_sender_match = "verify", mail failing this check is held '
+            "for your confirmation unless its sender is explicitly trusted."
+        )
+    elif policy == "gate":
+        outcome = (
+            'Under confirm_sender_match = "gate", mail naming your own address is '
+            "held for your confirmation unless its sender is explicitly trusted."
+        )
+    else:
+        outcome = (
+            'Nothing was blocked: confirm_sender_match is "off", so the From: header '
+            "is taken as proof on this route."
+        )
     message = (
         f"Inbound mail authentication check failed.\n\n"
         f"Mail from {sender} routed as {routing_method} on the strength of the "
         f"From: header, but arrived with {detail}.\n"
         f"Subject: {subject}\n\n"
-        f"Nothing was blocked. This is a warning that the mail path may no longer "
+        f"{outcome} This is a warning that the mail path may no longer "
         f"be authenticating From:, which the current settings assume it does."
     )
+    # Ridden along rather than sent on its own: an operator already being told
+    # their mail authentication is failing is exactly who should know the check
+    # can be scoped, and a healthy path stays silent on this channel.
+    if authserv_hint:
+        message += authserv_hint
     return _DmarcAlert(key=key, user_id=user_id, message=message)
 
 
@@ -1386,10 +1565,35 @@ def poll_emails(config: Config) -> list[int]:
                     # sender-match-only check never sees. Runs before the quiet-sender
                     # branch below, because a quiet sender's mail is still evidence about
                     # the mail *path*, and that branch skips to the next message.
+                    #
+                    # The verdict is computed here rather than inside the canary
+                    # because two things read it now: the canary, which warns, and
+                    # the confirmation gate below under `confirm_sender_match =
+                    # "verify"`, which holds the message (ISSUE-249 Gap 3). One
+                    # computation means they can never disagree about the same
+                    # message, and the gate keeps working when `dmarc_canary` is
+                    # off — the operator declining the warnings is not a statement
+                    # about whether unauthenticated mail should run.
+                    auth_result = None
                     if claims_to_be_user and routing_method in ("plus_address", "sender_match"):
+                        auth_result = _authentication_verdict(
+                            email.authentication_results_headers,
+                            config.email.authserv_id,
+                            _address_domain(envelope.sender),
+                        )
+                        # Names the authserv-id this mailbox carries, so setting it
+                        # does not mean digging through a raw header. Logs once per
+                        # user and only on a clean verdict, where the top header is
+                        # good evidence of a real MTA; it raises nothing of its own,
+                        # so a healthy path stays as quiet as it is today.
+                        _note_observed_authserv_id(
+                            config, user_id, email.authentication_results_headers,
+                            auth_result,
+                        )
                         alert = _check_dmarc_canary(
                             config, user_id, envelope.sender, email.subject,
-                            routing_method, email.authentication_results_headers,
+                            routing_method, auth_result,
+                            _AUTHSERV_ID_ADVICE if not config.email.authserv_id else None,
                         )
                         # Keyed, so a poll carrying several failing messages from the
                         # same sender raises one alert rather than one per message.
@@ -1811,8 +2015,27 @@ def poll_emails(config: Config) -> list[int]:
                         # fire. Passed anyway so the strict reading of an own-address
                         # claim is one expression rather than a reachability argument
                         # a later change could quietly invalidate.
-                        include_own_addresses=not config.email.confirm_sender_match,
+                        include_own_addresses=_own_address_claim_counts(config, auth_result),
                     )
+
+                    # Why a `verify` hold happened, on the record. The canary's
+                    # WARNING is the usual answer, but it is behind two switches the
+                    # gate is deliberately independent of — `dmarc_canary = false`,
+                    # and an `unevaluated` verdict without `dmarc_canary_warn_on_
+                    # missing`. In either state every self-addressed message would be
+                    # held with nothing saying why, and an unanswered hold is
+                    # cancelled at `confirmation_timeout_minutes`, so the failure mode
+                    # is mail quietly going missing. Logged per message, not deduped:
+                    # a hold the operator has to answer is not a throttleable event.
+                    if (needs_confirmation and claims_to_be_user
+                            and _sender_match_policy(config) == "verify"):
+                        logger.warning(
+                            "Held mail from %s for user %s: confirm_sender_match is "
+                            "'verify' and the message did not authenticate (%s). It is "
+                            "awaiting confirmation and will be cancelled unanswered.",
+                            envelope.sender, user_id,
+                            auth_result.verdict if auth_result else "no verdict",
+                        )
 
                     attachment_strs = attachment_paths if attachment_paths else []
                     task_id = ingest_message(conn, config, IncomingMessage(

@@ -57,12 +57,30 @@ class EmailConfig:
     # Polling settings
     poll_folder: str = "INBOX"
     bot_email: str = ""  # bot's email address (to skip own messages)
-    # Require confirmation for sender-match routing — SMTP `From:` is unauthenticated,
-    # so "this came from the user's own address" is a claim, not evidence. Opt-in
-    # (ISSUE-227): the branch reading this flag was unreachable until now, so `false`
-    # is the behaviour every existing deployment already has, and turning it on holds
-    # every self-sent email for an out-of-band yes/no.
-    confirm_sender_match: bool = False
+    # What an own-address claim buys. SMTP `From:` is unauthenticated, so "this
+    # came from the user's own address" is a claim, not evidence (ISSUE-227).
+    # Three states, weakest first:
+    #
+    #   off     the claim is proof. Sound only because something upstream —
+    #           normally DMARC enforcement at the receiving MTA — rejected the
+    #           forgery before the poller ever saw the folder.
+    #   verify  the claim is proof when the receiving MTA's own stamp says so:
+    #           a verified, aligned `dmarc=pass` from `authserv_id` proceeds,
+    #           anything else is held for an out-of-band yes/no (ISSUE-249).
+    #   gate    the claim is never proof. Every self-sent email is held.
+    #
+    # `off` is the default and is what every deployment ran before `verify`
+    # existed; the legacy booleans still load, `false` as `off` and `true` as
+    # `gate`. `verify` is the setting that makes the gate usable at all — `gate`
+    # is noisy by construction because nothing in a plain SMTP message
+    # distinguishes the user from someone claiming to be them, and the MTA's
+    # verdict is the signal that finally does.
+    #
+    # `verify` requires `authserv_id`, and `_validate_confirm_sender_match`
+    # refuses to load without it: unscoped, the verdict comes from whichever
+    # header sat on top, which in the case that matters is the sender's own. A
+    # gate keyed on a value the attacker writes is not a gate.
+    confirm_sender_match: str = "off"
     # DMARC canary (ISSUE-228). With `confirm_sender_match` off, the default,
     # the bot treats a `From:` naming one of the user's own addresses as proof
     # that user sent the mail — sound only because something upstream rejected
@@ -1873,6 +1891,60 @@ def _validate_sandbox_ro_paths(raw: object) -> list[str]:
     return cleaned
 
 
+CONFIRM_SENDER_MATCH_POLICIES = ("off", "verify", "gate")
+
+
+def _validate_confirm_sender_match(raw: object, authserv_id: str) -> str:
+    """Validate ``[email] confirm_sender_match``, raising on anything unusable.
+
+    Accepts the legacy booleans as well as the three names, because this key
+    shipped as a bool and both deploy paths still render one: TOML ``false`` and
+    ``true`` map to ``off`` and ``gate``, and so do the strings ``"false"`` and
+    ``"true"``, which is what Ansible produces when a YAML boolean reaches a
+    quoted template slot. Existing deployments therefore keep their exact
+    behaviour with no edit.
+
+    Raises rather than warning and falling back, matching
+    ``outbound_approval_floor`` and for the same reason: every wrong answer here
+    is unsafe in one direction or the other and there is no neutral one to pick.
+    Falling back to ``off`` would disable a gate the operator asked for; falling
+    back to ``gate`` would hold every self-sent message on an instance that
+    deliberately wrote ``off``.
+
+    ``verify`` additionally requires ``authserv_id``. Without it the verdict is
+    read off whichever `Authentication-Results` header sat on top, and in the
+    case the gate exists for — the MTA no longer stamping — that header is the
+    sender's own. Letting `verify` run unscoped would gate on a value the
+    attacker writes, which is worse than not gating at all, because it reads as
+    protection. Refusing at load is how it "requires" rather than "prefers".
+    """
+    if isinstance(raw, bool):
+        return "gate" if raw else "off"
+
+    value = raw.strip().lower() if isinstance(raw, str) else ""
+    if value in ("true", "false"):
+        return "gate" if value == "true" else "off"
+
+    if value not in CONFIRM_SENDER_MATCH_POLICIES:
+        raise ValueError(
+            f"[email] confirm_sender_match = {raw!r} is not valid. Use one of "
+            f"{', '.join(CONFIRM_SENDER_MATCH_POLICIES)} (the legacy true/false "
+            "still load, as gate and off)."
+        )
+
+    if value == "verify" and not authserv_id:
+        raise ValueError(
+            "[email] confirm_sender_match = \"verify\" requires [email] "
+            "authserv_id to be set. Without it the DMARC verdict is read from "
+            "whichever Authentication-Results header arrived on top, which the "
+            "sender can write — so the gate would be keyed on a value the "
+            "sender chooses. Set authserv_id to your receiving MTA's own "
+            "authserv-id, or use \"gate\" to hold every self-addressed message."
+        )
+
+    return value
+
+
 def _validate_authserv_id(raw: object) -> str:
     """Validate ``[email] authserv_id``, warning rather than raising.
 
@@ -2065,6 +2137,10 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "email" in data:
         email = data["email"]
+        # Resolved before the constructor because `confirm_sender_match = "verify"`
+        # is only valid with an authserv-id to scope the verdict to, and the
+        # validator has to see both to say so.
+        authserv_id = _validate_authserv_id(email.get("authserv_id", ""))
         config.email = EmailConfig(
             enabled=email.get("enabled", False),
             imap_host=email.get("imap_host", ""),
@@ -2077,10 +2153,12 @@ def load_config(config_path: Path | None = None) -> Config:
             smtp_password=email.get("smtp_password", ""),
             poll_folder=email.get("poll_folder", "INBOX"),
             bot_email=email.get("bot_email", ""),
-            confirm_sender_match=email.get("confirm_sender_match", False),
+            confirm_sender_match=_validate_confirm_sender_match(
+                email.get("confirm_sender_match", "off"), authserv_id,
+            ),
             dmarc_canary=email.get("dmarc_canary", True),
             dmarc_canary_warn_on_missing=email.get("dmarc_canary_warn_on_missing", False),
-            authserv_id=_validate_authserv_id(email.get("authserv_id", "")),
+            authserv_id=authserv_id,
             imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
             outbound_approval_floor=_validate_outbound_approval_floor(
                 email.get("outbound_approval_floor", "untrusted"),

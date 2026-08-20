@@ -366,7 +366,7 @@ class TestConfirmationPromptCollapse:
         per held message, undeduplicated, all of them answerable only one at a
         time. Past a few, the user gets one notice instead."""
         config = make_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.scheduler.email_rate_limit_messages = 0
         config.scheduler.email_sender_rate_limit_messages = 0
         # UID 1 primes the cursor, and priming sends a prompt of its own — from
@@ -387,7 +387,7 @@ class TestConfirmationPromptCollapse:
     def test_a_single_notice_covers_the_suppressed_prompts(self, make_config):
         """Suppressing silently would leave held mail with nobody told."""
         config = make_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.scheduler.email_rate_limit_messages = 0
         config.scheduler.email_sender_rate_limit_messages = 0
         mailbox = FakeMailbox(range(1, 21), senders={1: "primer@example.com"})
@@ -404,7 +404,7 @@ class TestConfirmationPromptCollapse:
         """The collapse must not fire on ordinary traffic — three held messages
         from a stranger still ask three ordinary questions."""
         config = make_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.scheduler.email_rate_limit_messages = 0
         config.scheduler.email_sender_rate_limit_messages = 0
         mailbox = FakeMailbox(range(1, 4), senders={1: "primer@example.com"})
@@ -620,7 +620,7 @@ class TestPromptCollapseKnob:
         it has to disable this half too — otherwise an operator who opted out
         still loses gated mail to the confirmation timeout."""
         config = make_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.scheduler.email_rate_limit_messages = 0
         config.scheduler.email_sender_rate_limit_messages = 0
         config.scheduler.email_confirmation_prompts_per_window = 0
@@ -638,7 +638,7 @@ class TestPromptCollapseKnob:
         so a user already told about throttling must still be told about holds.
         """
         config = make_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         # Loose enough that several gated messages get past the collapse
         # threshold (so there is held mail to report), tight enough that the
         # rest is throttled (so there is filed mail too).
@@ -661,7 +661,7 @@ class TestSenderKeyNormalization:
         one sender varying their display name gets an unbounded number of
         prompts while the task budget still counts them as one sender."""
         config = make_config()
-        config.email.confirm_sender_match = True
+        config.email.confirm_sender_match = "gate"
         config.scheduler.email_rate_limit_messages = 0
         config.scheduler.email_sender_rate_limit_messages = 0
         senders = {

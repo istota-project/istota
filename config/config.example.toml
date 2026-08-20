@@ -264,14 +264,29 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # imap_timeout_seconds = 30  # socket timeout for IMAP connections (fail fast on a dead host)
 # A declaration about your inbound mail path, not a safety switch to flip on.
 # SMTP From: is unauthenticated, so a From: naming a user's own address is a
-# claim until something checks it. false (default) = "something upstream already
-# did" — normally DMARC enforcement at the receiving MTA, which rejects a forgery
-# before it ever reaches poll_folder. true = "nothing upstream does, so ask me",
-# which holds every message a user sends the bot for a yes/no in Talk. Prefer
-# fixing it upstream: it is silent and costs nothing per message. Leaving this
-# off makes the mail path load-bearing — see the checklist in
-# docs/features/email.md.
-# confirm_sender_match = false
+# claim until something checks it. Three answers to "who checked it":
+#
+#   "off"     (default) something upstream already did — normally DMARC
+#             enforcement at the receiving MTA, which rejects a forgery before
+#             it ever reaches poll_folder. Nothing is ever held.
+#   "verify"  your mail server did, and we read its verdict: a stamp from
+#             authserv_id carrying an aligned dmarc=pass goes straight through,
+#             anything else is held. Requires authserv_id — without one the
+#             verdict comes off whichever header arrived on top, which the
+#             sender writes, so the daemon refuses to start.
+#   "gate"    nothing upstream does, so ask me. Holds every message a user
+#             sends the bot for a yes/no.
+#
+# The legacy booleans still load: false is "off", true is "gate".
+#
+# "verify" is the one worth reaching for. "gate" has to ask about every
+# self-sent message because nothing in a plain SMTP message separates the user
+# from someone claiming to be them; the mail server's verdict is what finally
+# tells them apart, so you are asked only when authentication actually failed.
+# Prefer fixing things upstream regardless: it is silent and costs nothing per
+# message. Leaving this "off" makes the mail path load-bearing — see the
+# checklist in docs/features/email.md.
+# confirm_sender_match = "off"
 # The canary for the assumption above. Reads the DMARC verdict the receiving MTA
 # stamped in Authentication-Results and warns when mail routed on a user's own
 # address arrives without a pass — so the protection going away is noticed

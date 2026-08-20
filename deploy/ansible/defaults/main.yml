@@ -381,13 +381,22 @@ istota_email_smtp_port: 587
 istota_email_poll_folder: "INBOX"
 istota_email_bot_address: ""
 istota_email_imap_timeout_seconds: 30  # socket timeout for IMAP connections
-# Declares whether anything upstream authenticates the From: header. false
-# (default) = it does, normally DMARC enforcement at the receiving MTA, which
-# rejects a forged From: before it reaches poll_folder. true = it does not, so
-# hold every message a user sends the bot for a yes/no in Talk. Prefer the
-# upstream fix; this one is noisy by construction. See docs/features/email.md
-# for what leaving it off assumes.
-istota_email_confirm_sender_match: false
+# What an own-address claim buys. Three states, weakest first:
+#
+#   "off"     the claim is proof. Sound only because something upstream —
+#             normally DMARC enforcement at the receiving MTA — rejects a forged
+#             From: before it reaches poll_folder. The default, and what every
+#             deployment ran before "verify" existed.
+#   "verify"  the claim is proof when the receiving MTA's stamp says so. Needs
+#             istota_email_authserv_id; the daemon refuses to load without it.
+#   "gate"    the claim is never proof. Every self-sent email is held for a
+#             yes/no. Noisy by construction — nothing in a plain SMTP message
+#             separates the user from someone claiming to be them, which is
+#             what "verify" fixes.
+#
+# The legacy booleans still work: false is "off", true is "gate". Quote the
+# value — off, on, yes and no are YAML booleans.
+istota_email_confirm_sender_match: "off"
 # Canary for the assumption the setting above encodes. Reads the DMARC verdict
 # the receiving MTA stamped and warns when mail routed on a user's own address
 # arrives without a pass, so the protection lapsing gets noticed. On by default;

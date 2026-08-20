@@ -17,7 +17,7 @@ Attachments are downloaded to `/Users/{user_id}/inbox/`.
 Emails from untrusted senders require explicit user confirmation before processing. This applies to:
 
 - Plus-addressed emails (`bot+user_id@domain`) from senders not in the user's trusted list
-- Emails whose `From:` names one of the user's own addresses, when `confirm_sender_match` is enabled (default: false)
+- Emails whose `From:` names one of the user's own addresses, when `confirm_sender_match` is `"verify"` (and the message did not authenticate) or `"gate"` (default: `"off"`, never)
 - Thread-matched emails (replies to mail the bot sent) whose `From:` is not one of the addresses the bot actually wrote to on that thread
 
 When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, discard, or — for an external sender — trust them so later mail passes. Trusted senders bypass the gate.
@@ -28,10 +28,19 @@ An emissary reply from the contact the bot wrote to is not gated: that address i
 
 **This flag is a declaration about your inbound mail path, not a security feature you switch on for extra safety.** The bot treats a `From:` matching one of a user's `email_addresses` as proof that user sent the mail. SMTP `From:` is unauthenticated, so on its own that is a claim anyone who knows the address can make. The question the flag answers is *who checked it*:
 
-- **`false` (default)** — "something upstream already authenticated the `From:`." Normally that means the receiving mail infrastructure enforces DMARC, so a forged message claiming your address is rejected at SMTP time and never reaches the folder the poller reads. Nothing asks you anything; mail you send the bot is processed immediately.
-- **`true`** — "nothing upstream authenticates it, so ask me." Mail arriving with a user's own address on it is held until they approve it from Talk, a channel the sender cannot reach.
+- **`"off"` (default)** — "something upstream already authenticated the `From:`." Normally that means the receiving mail infrastructure enforces DMARC, so a forged message claiming your address is rejected at SMTP time and never reaches the folder the poller reads. Nothing asks you anything; mail you send the bot is processed immediately.
+- **`"verify"`** — "ask the mail server." A message whose own stamp carries a verified, aligned `dmarc=pass` is processed immediately; anything else is held. Requires `authserv_id`, and the bot refuses to start without it.
+- **`"gate"`** — "nothing upstream authenticates it, so ask me." Every message arriving with a user's own address on it is held until they approve it from Talk, a channel the sender cannot reach.
 
-Solving this at the MTA is strictly better than solving it here. It is silent, it costs nothing per message, and it cannot be talked past by a tired human approving a prompt. The confirmation gate exists for deployments that cannot do it upstream — it is a fallback, and it is noisy by construction, because nothing in a plain SMTP message distinguishes you from someone claiming to be you.
+The legacy booleans still load: `false` is `"off"` and `true` is `"gate"`, so an existing config keeps its exact behaviour with no edit.
+
+Solving this at the MTA is strictly better than solving it here. It is silent, it costs nothing per message, and it cannot be talked past by a tired human approving a prompt. The gate exists for deployments that cannot do it upstream.
+
+**`"verify"` is the setting worth reaching for, and it is why the other two are the way they are.** `"gate"` is noisy by construction: nothing in a plain SMTP message distinguishes you from someone claiming to be you, so it has to ask about every message you send the bot, which is why almost nobody leaves it on. Your mail server's own verdict is the signal that finally tells the two apart. With `"verify"`, mail that authenticates cleanly goes straight through and you are asked only when it does not — which on a working mail path is close to never.
+
+It requires `authserv_id` because an unscoped verdict is read from whichever `Authentication-Results` header arrived on top, and in the case the gate matters — your server no longer stamping — that header is the sender's own. Gating on a value the sender writes is worse than not gating, because it reads as protection. The bot refuses to start rather than run that way.
+
+Two things `"verify"` does not change. An unevaluable verdict is held, not passed: if the check cannot reach an answer you get the question, because holding costs one confirmation while the other direction runs an unauthenticated message on a check that never happened. And it narrows only what the *own-address claim* buys — an address you trusted deliberately, via `trusted_email_senders` or `!trust`, still goes through.
 
 #### What the default assumes
 
@@ -57,7 +66,9 @@ Note that `dmarc=none` counts as a failure here, not as an absence. It means the
 
 What it catches, and when, is worth being precise about. Removing a DMARC record, or a mail path that stops evaluating DMARC, shows up on the next ordinary message. *Weakening* a policy from `p=reject` to `p=none` does not: legitimate mail still passes, so nothing looks wrong until someone actually forges your address — at which point the forgery itself trips the canary, rather than the config change that allowed it. Checking that your published policy is still `p=reject` stays a manual item on the checklist above.
 
-Two things it is not. It is **not a gate** — nothing is blocked, held, or rerouted, and turning it on cannot cost you a message. Whether to hold unauthenticated mail is `confirm_sender_match`'s decision, and the two are independent. And it is **not a verifier**: it does not check DKIM itself, because if your MTA already rejects forgeries then re-implementing that check buys nothing, and getting it wrong is worse than not having it.
+One thing it is not: a **verifier**. It does not check DKIM itself, because if your MTA already rejects forgeries then re-implementing that check buys nothing, and getting it wrong is worse than not having it.
+
+It used to be documented as "not a gate" as well, and under the default settings that is still true — nothing is blocked, held or rerouted, and `dmarc_canary` cannot cost you a message. But `confirm_sender_match = "verify"` makes the same verdict decide whether a self-addressed message runs. The detector and the control read one shared answer; which of the two you get is `confirm_sender_match`'s decision, not the canary's. See the next section.
 
 It follows that an attacker who forges an `Authentication-Results: … dmarc=pass` header the check accepts suppresses the warning. That is fine, and worth being explicit about: the canary is not the boundary, the MTA is. Its job is catching misconfiguration and drift, not attack. A canary that can be silenced by the thing it is not defending against is still worth having — a canary mistaken for a control is not.
 
@@ -70,6 +81,8 @@ It follows that an attacker who forges an `Authentication-Results: … dmarc=pas
 Setting it says two things, and the second is what makes it worth setting. Your MTA stamps with this id, so a message arriving without your stamp contradicts your own configuration and warns on its own, without `dmarc_canary_warn_on_missing`. That flag keeps its narrower meaning: your stamp is there and carries no DMARC verdict.
 
 It does not make the canary a boundary. A sender who knows your authserv-id — it is visible in every message your MTA has ever stamped, including replies to your own mail — can still forge a header naming it. What changes is that the forgery now has to be aimed at you, and the accident cannot happen at all.
+
+**Finding the value.** You do not have to open a raw header. While `authserv_id` is blank, the next message that authenticates cleanly writes the observed id and the line to paste into the log, once. It has to be a message that passed: on a failing verdict the topmost header is the one under suspicion, and naming *its* authserv-id would be an invitation to scope the check to a spoofer's own stamp — so an alert about a failing check tells you the setting exists and deliberately names no value. Confirm the id is really your mail server before setting it either way.
 
 #### Two checks that run either way
 
@@ -85,7 +98,7 @@ And it checks the `header.from` the MTA recorded against the `From:` domain the 
 
 Alerts are deduplicated per sender and verdict for 24 hours, so a persistently broken path does not flood the channel. The log warning is not deduplicated, so there is still a per-message record.
 
-#### With `confirm_sender_match` on
+#### With `confirm_sender_match` set to verify or gate
 
 It applies to whichever route the mail takes, not only to sender-match routing. Routing is decided by the recipient first, and the plus-address is public — it is the `From:` on every message the bot sends on the user's behalf — so a sender who knows the address the gate is about also knows how to arrive as a plus-addressed message instead. The same claim gets the same answer either way. Mail from a genuinely external sender is unaffected by the flag; it is gated or not on the existing plus-address rule.
 
