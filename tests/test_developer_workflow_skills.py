@@ -108,12 +108,43 @@ class TestCliFlagMatchesReality:
             f"`python -m istota.skills.<name>` cannot run: {broken}"
         )
 
-    def test_code_review_defers_its_cli_flag(self, bundled_index):
-        """Stage 1 ships the document only. Delete this at Stage 4, when the
-        module lands; the general test above carries the invariant from then on."""
-        assert bundled_index["code_review"].cli is False, (
-            "`cli: true` belongs at Stage 4, when __main__.py exists"
+    def test_code_review_declares_its_cli(self, bundled_index):
+        """The flag is what puts the module in `cli_skills` and so in the
+        proxy's allowlist. Stage 1 deliberately withheld it; the module exists
+        now, and `test_cli_skills_are_runnable_as_modules` above carries the
+        invariant that it stays runnable."""
+        assert bundled_index["code_review"].cli is True
+
+    def test_code_review_declares_the_api_key_it_needs(self, bundled_index):
+        """A native-brain deployment authenticates from
+        `ISTOTA_BRAIN_NATIVE_API_KEY`, which `config.py` reads at load time. The
+        CLI does not run in the daemon process, so it does not inherit it — the
+        env spec is the only thing that gets the key there.
+
+        It must be `sensitive` and **not** `proxy_only`. The executor splits the
+        proxy-only set out of the env *before* the credential set, so a var
+        flagged both lands in `proxy_only_env` and never reaches
+        `credential_env` — and `proxy_only_env` is handed to every skill CLI
+        unscoped, on the stated grounds that those vars are not secrets. An API
+        key is. Declared `sensitive` alone, injection is scoped to the skills
+        whose own manifest asked for it, so only `code_review` sees it.
+        """
+        specs = {spec.var: spec for spec in bundled_index["code_review"].env_specs}
+        assert set(specs) == {"DEVELOPER_REPOS_DIR", "ISTOTA_BRAIN_NATIVE_API_KEY"}
+
+        api_key = specs["ISTOTA_BRAIN_NATIVE_API_KEY"]
+        assert api_key.source == "config"
+        assert api_key.config_path == "brain.native.api_key"
+        assert api_key.sensitive is True
+        assert api_key.proxy_only is False, (
+            "proxy_only would leak the key to every other skill CLI and skip "
+            "the scoped credential path entirely"
         )
+        assert api_key.when == ["developer.enabled", "brain.native.api_key"]
+
+        repos = specs["DEVELOPER_REPOS_DIR"]
+        assert repos.config_path == "developer.repos_dir"
+        assert repos.sensitive is False, "a directory path is not a credential"
 
 
 class TestBodiesDoNotContradict:
@@ -138,6 +169,32 @@ class TestBodiesDoNotContradict:
             if line.strip().startswith(("git add -A", "git add --all", "git add ."))
         ]
         assert offending == [], f"{name} instructs blanket staging: {offending}"
+
+    def test_a_runnable_skill_does_not_call_itself_unavailable(self, bundled_index):
+        """Stage 1 shipped a `code_review` body headed "Status: not yet
+        available", telling the model to skip the review and land the work. Turn
+        `cli: true` on without rewriting that and the skill is simultaneously
+        advertised in the proxy allowlist and documented as nonexistent — the
+        model reads the body, so the body wins.
+        """
+        for name, meta in sorted(bundled_index.items()):
+            if not meta.cli:
+                continue
+            body = self._body(name).lower()
+            for claim in ("does not exist yet", "not yet available", "until it lands"):
+                assert claim not in body, (
+                    f"{name} declares `cli: true` but its body still says {claim!r}"
+                )
+
+    def test_code_review_tells_the_model_to_extend_the_bash_timeout(self):
+        """The sandboxed model calls the CLI through its own Bash tool, whose
+        limit is 120s. A two-agent review on a real diff exceeds that routinely,
+        so the tool call dies while the review runs on and is paid for. The
+        feature does not work at default settings without this instruction, which
+        is why it is a spec requirement and not an implementation detail."""
+        body = self._body("code_review")
+        assert "timeout" in body.lower()
+        assert "istota-skill code_review run" in body
 
     def test_commit_precedes_review_in_the_lifecycle(self):
         """The review resolves a commit range, so a lifecycle that numbers the
