@@ -216,6 +216,13 @@ istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup sna
 istota_scheduler_db_backup_dir: ""               # Snapshot destination; empty = {nextcloud_mount}/istota-db-backups
 istota_scheduler_db_backup_retention: 7          # Newest dated snapshot dirs to keep (0 = keep all); dirs holding the newest good copy of a DB are never pruned
 istota_scheduler_stats_interval: 60              # scheduler_stats health line interval (0 = disabled)
+# Host memory breadcrumb: one host_pressure line per interval carrying
+# MemAvailable / Shmem / SwapFree / PSI / per-tmpfs usage / shmem_unaccounted,
+# written whether or not the box is under pressure. The 2026-08-20 outage
+# accumulated unreclaimable shmem for five days without crossing any threshold,
+# so a threshold-gated record could not have caught it. 288 lines/day at 300s.
+istota_scheduler_host_pressure_enabled: true     # Master switch for host-pressure sampling
+istota_scheduler_host_pressure_breadcrumb_interval: 300  # Breadcrumb cadence in seconds (0 = disabled)
 
 # Local-disk root for per-user module DBs (feeds/health/location/money). MUST be
 # local disk, NOT the Nextcloud mount (WAL -shm SIGBUSes on FUSE). Only the .db

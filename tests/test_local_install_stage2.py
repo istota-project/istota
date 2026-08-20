@@ -14,6 +14,7 @@ import pytest
 from istota import db
 from istota.config import (
     Config,
+    SchedulerConfig,
     SecurityConfig,
     TalkConfig,
     UserConfig,
@@ -30,6 +31,9 @@ def _standalone_config(tmp_path, *, init=True, with_user=True):
         talk=TalkConfig(enabled=False),
         security=SecurityConfig(sandbox_enabled=False),
         web=WebConfig(enabled=True, port=8799, auth="none"),
+        # These tests run a real daemon loop; keep the host-pressure breadcrumb
+        # off so they never touch the real /proc (see test_background_checks).
+        scheduler=SchedulerConfig(host_pressure_enabled=False),
         bot_name="Istota",
     )
     if init:

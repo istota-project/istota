@@ -266,6 +266,8 @@ class TestConfigLoading:
             'email_retention_days = 30\n'
             'worker_idle_timeout = 20\n'
             'worker_idle_poll_interval = 1.5\n'
+            'host_pressure_enabled = false\n'
+            'host_pressure_breadcrumb_interval_seconds = 60\n'
         )
         cfg = load_config(p)
         assert cfg.scheduler.poll_interval == 10
@@ -280,6 +282,8 @@ class TestConfigLoading:
         assert cfg.scheduler.email_retention_days == 30
         assert cfg.scheduler.worker_idle_timeout == 20
         assert cfg.scheduler.worker_idle_poll_interval == 1.5
+        assert cfg.scheduler.host_pressure_enabled is False
+        assert cfg.scheduler.host_pressure_breadcrumb_interval_seconds == 60
 
     def test_load_logging_section(self, tmp_path):
         p = tmp_path / "config.toml"

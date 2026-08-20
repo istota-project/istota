@@ -295,6 +295,13 @@ def _daemon_config(tmp_path):
             db_health_check_interval=1,
             db_backup_enabled=False,
             loop_stall_alert_seconds=0,
+            # This file drives a real run_daemon loop, and the host-pressure
+            # breadcrumb fires on the first tick — so leaving it on would have
+            # these tests read the real /proc and statvfs every tmpfs on the CI
+            # host, which the spec's test strategy forbids. Off is also the
+            # regression proof that the feature is inert when disabled: every
+            # assertion below passes unchanged with it off.
+            host_pressure_enabled=False,
         ),
     )
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)

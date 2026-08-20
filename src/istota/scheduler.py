@@ -27,8 +27,16 @@ logger = logging.getLogger("istota.scheduler")
 # Dedicated logger so operators can isolate the periodic health line from the
 # noisy general scheduler logger (`journalctl … | grep scheduler_stats`).
 _SCHEDULER_STATS_LOGGER = logging.getLogger("istota.scheduler.stats")
+# Same reasoning for the host-pressure breadcrumb: its own logger, so a
+# multi-day series can be pulled out whole (`journalctl … | grep host_pressure`)
+# without the surrounding scheduler chatter.
+_HOST_PRESSURE_LOGGER = logging.getLogger("istota.scheduler.pressure")
 # Warn at most once when psutil is unavailable rather than on every emit.
 _psutil_unavailable_warned = False
+# …and once when /proc has no pressure interface at all (macOS, a kernel built
+# without CONFIG_PSI). Absence is a platform fact, not a fault, so it is said
+# once and then the emit is a no-op rather than a line per interval.
+_host_pressure_unavailable_warned = False
 
 # Source types the system generates on its own (not user-submitted). Used to
 # suppress the "A task you submitted was cancelled" notice when these age out —
@@ -4019,6 +4027,56 @@ def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
         )
 
 
+def _emit_host_pressure_breadcrumb() -> None:
+    """Write one ``host_pressure`` line: the fixed-cadence memory breadcrumb.
+
+    The record that makes the *next* memory incident attributable. On
+    2026-08-20 the host died carrying 4.64 GB of unreclaimable shmem with no
+    swap, and what created it could never be established — the tmpfs cleared on
+    reboot, and no process in the OOM dump had the memory mapped. The only
+    samples that existed came from the kernel's own OOM records, which left a
+    five-day hole either side of the accumulation.
+
+    So this runs unconditionally, on its interval, whether or not the box is
+    under pressure: a slow leak never crosses a threshold until the day it is
+    fatal. The field that does the work is ``shmem_unaccounted_kb`` — ``Shmem``
+    minus the summed tmpfs usage — which separates memory some mount can be
+    ``du``'d for from memory that lives in no filesystem at all.
+
+    Costs six small file reads plus one ``statvfs`` and one ``stat`` per tmpfs
+    mount, so it stays on the loop thread rather than paying for a thread every
+    interval. Wrapped whole: an instrumentation failure must never take the
+    daemon down, which would be the instrument causing the outage it exists to
+    explain.
+
+    The failure line is deliberately prefixed ``host_pressure_error`` and not
+    ``host_pressure``. The documented way to retrieve the series is
+    ``journalctl … | grep host_pressure``, so a failure notice sharing the
+    record's prefix would land inside a parsed series as a row with no fields.
+    """
+    global _host_pressure_unavailable_warned
+    try:
+        from . import host_pressure  # noqa: PLC0415  -- leaf module, imported where used
+
+        sample = host_pressure.read_sample()
+        if sample is None:
+            if not _host_pressure_unavailable_warned:
+                logger.info(
+                    "host_pressure: /proc/meminfo unreadable — no memory breadcrumb "
+                    "on this host (not Linux, or not a procfs). PSI being absent is "
+                    "not enough to reach here; the breadcrumb records what it can.",
+                )
+                _host_pressure_unavailable_warned = True
+            return
+
+        tmpfs = host_pressure.read_tmpfs_usage()
+        _HOST_PRESSURE_LOGGER.info(host_pressure.breadcrumb(sample, tmpfs))
+    except Exception as exc:  # noqa: BLE001  -- instrumentation must never crash the loop
+        _HOST_PRESSURE_LOGGER.warning(
+            "host_pressure_error breadcrumb failed: %s", exc, exc_info=True,
+        )
+
+
 def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
     """How long a ``processed_emails`` row is kept, in days. 0 = never prune.
 
@@ -5220,6 +5278,13 @@ def run_daemon(
     logger.info("STARTUP Shared file check interval: %ds", config.scheduler.shared_file_check_interval)
     logger.info("STARTUP Heartbeat check interval: %ds", config.scheduler.heartbeat_check_interval)
     logger.info("STARTUP DB health check interval: %ds", config.scheduler.db_health_check_interval)
+    logger.info(
+        "STARTUP Host pressure breadcrumb: %s",
+        f"{config.scheduler.host_pressure_breadcrumb_interval_seconds}s"
+        if config.scheduler.host_pressure_enabled
+        and config.scheduler.host_pressure_breadcrumb_interval_seconds
+        else "disabled",
+    )
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
@@ -5415,6 +5480,12 @@ def run_daemon(
     # Init to "now" (not 0.0) so the first stats line fires after one full
     # interval — avoids a noisy emit during startup while state is hydrating.
     last_stats_check = time.time()
+    # The breadcrumb inits to 0.0, not "now", so the first line fires on the
+    # first tick. A daemon restart is precisely when a datum is worth having:
+    # it establishes the post-restart baseline the series is read against, and
+    # the 2026-08-20 analysis turned on knowing the host idles at 85 MB of
+    # Shmem. Waiting a full interval throws that sample away.
+    last_pressure_breadcrumb = 0.0
     # In-flight registry for the slow periodic checks that run off this thread
     # (ISSUE-144). Loop-local rather than process-global so tests and a
     # re-entered daemon each get a clean slate.
@@ -5623,6 +5694,19 @@ def run_daemon(
         ):
             _emit_scheduler_stats(config, pool)
             last_stats_check = now
+
+        # Emit the host memory breadcrumb (MemAvailable / Shmem / SwapFree /
+        # PSI / per-tmpfs usage / shmem_unaccounted). Unconditional by design —
+        # see _emit_host_pressure_breadcrumb. Either switch at 0/false disables
+        # it and the host is left exactly as it is today.
+        if (
+            config.scheduler.host_pressure_enabled
+            and config.scheduler.host_pressure_breadcrumb_interval_seconds
+            and now - last_pressure_breadcrumb
+            >= config.scheduler.host_pressure_breadcrumb_interval_seconds
+        ):
+            _emit_host_pressure_breadcrumb()
+            last_pressure_breadcrumb = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:
