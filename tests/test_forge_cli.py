@@ -430,12 +430,52 @@ class TestBuildInvocation:
         assert env["GITLAB_TOKEN"] == SENTINEL
 
     def test_config_dir_and_quiet_flags(self):
+        """Names taken from `gh help environment` against the installed binary,
+        not inferred. GH_NO_UPDATE_CHECKER — the plausible-sounding spelling
+        that lived here for a while — is not a gh variable at all, and a wrong
+        name here fails silently rather than loudly."""
         _, _, env = self._call()
         assert env["GH_CONFIG_DIR"] == "/tmp/cfg"
-        assert env["GH_NO_UPDATE_CHECKER"] == "1"
+        assert env["GH_NO_UPDATE_NOTIFIER"] == "1"
+        assert "GH_NO_UPDATE_CHECKER" not in env
+        assert env["GH_NO_EXTENSION_UPDATE_NOTIFIER"] == "1"
+        assert env["GH_TELEMETRY"] == "0"
         assert env["GH_PROMPT_DISABLED"] == "1"
         assert env["GH_PAGER"] == "cat"
         assert env["NO_COLOR"] == "1"
+        assert env["CLICOLOR"] == "0"
+
+    def test_ghe_dot_com_uses_gh_token_not_enterprise_token(self):
+        """`gh help environment`: GH_TOKEN covers github.com *and subdomains of
+        ghe.com*. ghe.com is Enterprise Cloud with data residency — enterprise
+        by name, non-enterprise by variable."""
+        _, _, env = self._call(url="https://acme.ghe.com")
+        assert env["GH_HOST"] == "acme.ghe.com"
+        assert env["GH_TOKEN"] == SENTINEL
+        assert "GH_ENTERPRISE_TOKEN" not in env
+
+    def test_state_dir_kept_out_of_the_read_only_config_dir(self):
+        """gh writes a device id under $XDG_STATE_HOME on every run. Left to
+        default it lands in $HOME/.local/state, which may not be writable."""
+        _, _, env = build_invocation(
+            FORGE_GITHUB, ["pr", "list"], {"PATH": "/usr/bin"}, SENTINEL,
+            "/usr/local/bin/gh", "/tmp/cfg", "", "/tmp/state",
+        )
+        assert env["XDG_STATE_HOME"] == "/tmp/state"
+
+    def test_command_running_env_vars_are_scrubbed(self):
+        """Each of these runs a command of the caller's choosing inside a
+        process holding the token, or redirects where the call goes."""
+        parent = {
+            "PATH": "/usr/bin", "GH_EDITOR": "/tmp/evil", "GIT_EDITOR": "/tmp/evil",
+            "EDITOR": "/tmp/evil", "VISUAL": "/tmp/evil", "BROWSER": "/tmp/evil",
+            "GH_BROWSER": "/tmp/evil", "GH_REPO": "attacker/repo",
+            "GH_PATH": "/tmp/evil", "XDG_CONFIG_HOME": "/tmp/evil",
+        }
+        _, _, env = self._call(parent=parent)
+        for key in parent:
+            if key != "PATH":
+                assert key not in env, key
 
     def test_glab_gets_its_own_config_dir(self):
         _, _, env = self._call(forge=FORGE_GITLAB)

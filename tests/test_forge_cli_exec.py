@@ -475,10 +475,27 @@ class TestDevboxBackend:
         assert "no token configured" in r.stderr
 
 
+def _seed_config_dir(base, name, file_mode, dir_mode=0o500):
+    """A CLI config dir the way the deployment seeds it: empty config.yml,
+    then the directory locked down. Mode is a parameter because gh and glab
+    disagree about what they will accept."""
+    cfg = base / name
+    cfg.mkdir()
+    (cfg / "config.yml").write_text("")
+    (cfg / "config.yml").chmod(file_mode)
+    cfg.chmod(dir_mode)
+    return cfg
+
+
 @pytest.mark.integration
 class TestAgainstRealBinary:
-    """The one seam the fakes cannot cover: the real CLI's own argv and env
-    handling. Skipped wherever gh is not installed."""
+    """The seam the fakes cannot cover: the real CLIs' own argv, env and
+    config handling. Skipped wherever the binary is not installed.
+
+    These pin what Stage 2a measured. The wrapper's whole config-dir design
+    rests on the real binaries tolerating a read-only directory, and one of
+    them very nearly does not.
+    """
 
     def test_version_through_the_wrapper(self, deployed, tmp_path):
         gh = shutil.which("gh")
@@ -491,3 +508,75 @@ class TestAgainstRealBinary:
         })
         assert r.returncode == 0, r.stderr
         assert "gh version" in r.stdout
+
+    def test_real_gh_accepts_a_read_only_config_dir(self, deployed, tmp_path):
+        """gh expands `aliases` from config.yml before dispatch, so the config
+        dir must not be writable by the model. Measured against gh 2.98: a
+        0500 directory holding a 0400 config.yml is fine."""
+        gh = shutil.which("gh")
+        if gh is None:
+            pytest.skip("gh not installed")
+        wrapper, _, _ = deployed
+        cfg = _seed_config_dir(tmp_path, "ro-gh", 0o400)
+        try:
+            r = _run(wrapper, ["--version"], {
+                "ISTOTA_GH_REAL": gh,
+                "ISTOTA_GH_CONFIG_DIR": str(cfg),
+                "ISTOTA_FORGE_STATE_DIR": str(tmp_path / "state"),
+            })
+            assert r.returncode == 0, r.stderr
+            assert "gh version" in r.stdout
+        finally:
+            cfg.chmod(0o700)
+
+    def test_real_glab_requires_config_yml_at_0600(self, deployed, tmp_path):
+        """glab refuses to start on any other mode — "has the permissions 400,
+        but glab requires 600". So the seeded file is 0600 and immutability
+        comes from the sandbox's read-only bind, not from the file mode. If
+        this ever passes at 0400, the seeding step can be simplified."""
+        glab = shutil.which("glab")
+        if glab is None:
+            pytest.skip("glab not installed")
+        wrapper, _, _ = deployed
+        glab_wrapper = wrapper.parent / "glab"
+        shutil.copy(_MODULE, glab_wrapper)
+        glab_wrapper.chmod(0o700)
+
+        strict = _seed_config_dir(tmp_path, "ro-glab-400", 0o400)
+        loose = _seed_config_dir(tmp_path, "ro-glab-600", 0o600)
+        try:
+            env = {
+                "ISTOTA_GLAB_REAL": glab,
+                "ISTOTA_FORGE_STATE_DIR": str(tmp_path / "state"),
+            }
+            bad = _run(glab_wrapper, ["--version"], {
+                **env, "ISTOTA_GLAB_CONFIG_DIR": str(strict),
+            })
+            assert bad.returncode != 0
+            assert "600" in (bad.stdout + bad.stderr)
+
+            good = _run(glab_wrapper, ["--version"], {
+                **env, "ISTOTA_GLAB_CONFIG_DIR": str(loose),
+            })
+            assert good.returncode == 0, good.stderr
+            assert "glab" in good.stdout
+        finally:
+            strict.chmod(0o700)
+            loose.chmod(0o700)
+
+    def test_denied_verb_never_reaches_the_real_binary(self, deployed, tmp_path, sock_path):
+        gh = shutil.which("gh")
+        if gh is None:
+            pytest.skip("gh not installed")
+        wrapper, _, cfg = deployed
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            r = _run(wrapper, ["repo", "delete", "someorg/somerepo"], {
+                "ISTOTA_GH_REAL": gh,
+                "ISTOTA_GH_CONFIG_DIR": str(cfg),
+                "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert r.returncode == EXIT_DENIED
+        assert proxy.requests == []

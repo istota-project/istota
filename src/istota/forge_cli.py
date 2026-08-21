@@ -111,8 +111,23 @@ _BASELINE_PATH_RULES = {
         ["release", "delete-asset"],
         ["run", "delete"],
         ["cache", "delete"],
+        ["project", "delete"],
+        # Publishing. `gh gist create` takes files or stdin and puts them on
+        # github.com; `--public` lists them. That is a one-command
+        # exfiltration path with no forge-side gate, so the tree goes.
+        ["gist"],
+        # Code execution somewhere else. `codespace ssh` is a remote shell,
+        # `codespace cp` moves files in and out, and `skill`/`copilot`/
+        # `agent-task`/`preview` install or run code on the bot's behalf.
+        ["codespace"],
+        ["skill"],
+        ["copilot"],
+        ["agent-task"],
+        ["preview"],
         # Guard-evading: an alias or an extension renames a denied verb, and
         # gh expands both before dispatch, where this check no longer runs.
+        # `extensions` and `ext` are gh's own aliases for `extension`
+        # (confirmed against gh 2.98).
         ["alias"],
         ["extension"],
         ["extensions"],
@@ -124,17 +139,36 @@ _BASELINE_PATH_RULES = {
     ],
     FORGE_GITLAB: [
         ["auth"],
+        # glab mints credentials of its own: `token create` issues user, group
+        # and project access tokens. Nothing else in this list hands out a new
+        # credential; this does.
+        ["token"],
         ["ssh-key", "add"],
         ["ssh-key", "delete"],
+        ["gpg-key", "add"],
+        ["gpg-key", "delete"],
+        ["deploy-key"],
+        ["securefile"],
         ["variable", "set"],
         ["variable", "delete"],
+        # Destructive.
         ["repo", "delete"],
         ["repo", "archive"],
         ["project", "delete"],     # `project` is glab's alias for `repo`
         ["project", "archive"],
         ["release", "delete"],
+        # `ci` carries two deprecated-but-live aliases, `pipe` and `pipeline`.
         ["ci", "delete"],
-        ["pipeline", "delete"],    # `pipeline` is glab's alias for `ci`
+        ["pipeline", "delete"],
+        ["pipe", "delete"],
+        # Publishing and remote execution, as above.
+        ["snippet"],
+        ["runner"],
+        ["runner-controller"],
+        ["cluster"],
+        ["opentofu"],
+        ["skills"],
+        ["mcp"],
         ["alias"],
         ["extension"],
         ["extensions"],
@@ -609,6 +643,15 @@ _SCRUB = (
     "GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_CURL_VERBOSE",
     "GIT_TRACE_REDACT", "GIT_TRACE_CURL_NO_DATA",
     "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_PAGER",
+    # Named by `gh help environment` (2.98) and each one runs a command of the
+    # caller's choosing inside a process that holds the token, or redirects
+    # where the call goes: editors, browsers, the repo override, and gh's own
+    # notion of its executable path.
+    "GH_EDITOR", "GIT_EDITOR", "VISUAL", "EDITOR",
+    "GH_BROWSER", "BROWSER",
+    "GH_REPO", "GH_PATH", "GH_FORCE_TTY",
+    "GLAMOUR_STYLE", "CLICOLOR_FORCE",
+    "XDG_STATE_HOME", "XDG_CONFIG_HOME",
 )
 
 
@@ -632,7 +675,20 @@ def _hostname(url: str) -> str:
 
 
 def _is_github_com(host: str) -> bool:
-    return host == "github.com" or host.endswith(".github.com")
+    """Hosts whose token is GH_TOKEN rather than GH_ENTERPRISE_TOKEN.
+
+    `gh help environment` (2.98): GH_TOKEN "will be used when a command targets
+    either github.com or a subdomain of ghe.com". ghe.com is Enterprise Cloud
+    with data residency — an enterprise product that nonetheless takes the
+    *non*-enterprise variable, which is exactly the sort of thing worth reading
+    rather than inferring from the name.
+    """
+    return (
+        host == "github.com"
+        or host.endswith(".github.com")
+        or host == "ghe.com"
+        or host.endswith(".ghe.com")
+    )
 
 
 def build_invocation(
@@ -643,6 +699,7 @@ def build_invocation(
     real_bin: str,
     config_dir: str,
     forge_url: str = "",
+    state_dir: str = "",
 ) -> tuple[str, list[str], dict[str, str]]:
     """The exact ``(path, argv, env)`` to exec. Pure; ``main`` does the exec.
 
@@ -667,11 +724,25 @@ def build_invocation(
 
     env["PAGER"] = "cat"
     env["NO_COLOR"] = "1"
+    env["CLICOLOR"] = "0"
+    env["DO_NOT_TRACK"] = "1"
+    # gh writes a device id under $XDG_STATE_HOME (or $HOME/.local/state) on
+    # every run — outside GH_CONFIG_DIR, and therefore outside the read-only
+    # config dir. Point it at the config dir's neighbour so a read-only HOME
+    # cannot turn a forge call into a filesystem error.
+    if state_dir:
+        env["XDG_STATE_HOME"] = state_dir
 
     if forge == FORGE_GITHUB:
         env["GH_CONFIG_DIR"] = config_dir
         env["GH_PAGER"] = "cat"
-        env["GH_NO_UPDATE_CHECKER"] = "1"
+        # GH_NO_UPDATE_NOTIFIER, not GH_NO_UPDATE_CHECKER. The latter is not a
+        # gh variable at all — it was set here for a while and did nothing,
+        # which is the failure mode this spec's reconnaissance stage exists to
+        # catch: a wrong name is silent, not an error.
+        env["GH_NO_UPDATE_NOTIFIER"] = "1"
+        env["GH_NO_EXTENSION_UPDATE_NOTIFIER"] = "1"
+        env["GH_TELEMETRY"] = "0"
         env["GH_PROMPT_DISABLED"] = "1"
         host = _hostname(forge_url) or "github.com"
         env["GH_HOST"] = host
@@ -685,7 +756,12 @@ def build_invocation(
                 env["GH_ENTERPRISE_TOKEN"] = token
     else:
         env["GLAB_CONFIG_DIR"] = config_dir
-        # glab reads none of the GH_* knobs. Spellings confirmed in Stage 2a.
+        # glab reads none of the GH_* knobs and ships no `help environment`
+        # topic, so these spellings are from its documentation rather than
+        # from the binary. They are best-effort quieting: if one is wrong the
+        # cost is a version check or a telemetry ping, not a failure. The two
+        # things that do matter here were measured (see the config-dir note
+        # below and GITLAB_HOST above).
         env["GLAB_CHECK_UPDATE"] = "false"
         env["GLAB_SEND_TELEMETRY"] = "0"
         env["NO_PROMPT"] = "1"
@@ -711,8 +787,23 @@ def _real_bin(forge: str, env: dict[str, str]) -> str:
 
 
 def _config_dir(forge: str, env: dict[str, str]) -> str:
+    """The read-only, pre-seeded CLI config directory.
+
+    Read-only is the point: gh expands ``aliases`` from ``config.yml`` before
+    command dispatch, so a writable config dir is a complete policy bypass.
+    Measured against gh 2.98 and glab 1.114 — gh runs fine with the directory
+    at 0500 and the file at 0400, but **glab refuses to start unless
+    config.yml is exactly 0600** ("has the permissions 400, but glab requires
+    600"). So the seeded file is 0600 and the immutability comes from the
+    sandbox's read-only bind over ``.developer``, not from the file mode.
+    """
     var = "ISTOTA_GH_CONFIG_DIR" if forge == FORGE_GITHUB else "ISTOTA_GLAB_CONFIG_DIR"
     return env.get(var, "")
+
+
+def _state_dir(env: dict[str, str]) -> str:
+    """Writable scratch for the CLI's own state, kept out of the config dir."""
+    return env.get("ISTOTA_FORGE_STATE_DIR", "")
 
 
 def _forge_url(forge: str, env: dict[str, str]) -> str:
@@ -789,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
 
     path, child_argv, child_env = build_invocation(
         forge, args, env, token, real_bin, config_dir, forge_url,
+        _state_dir(env),
     )
     try:
         os.execve(path, child_argv, child_env)
