@@ -461,3 +461,94 @@ class TestFileToolQuality:
         (tmp_path / "dangling.py").symlink_to(tmp_path / "gone")
         result = await _run(make_glob_tool(_env(tmp_path)), {"pattern": "*.py"})
         assert "real.py" in _text(result)
+
+
+class TestWriteDeniedRoots:
+    """A read-only carve-out nested inside a writable root.
+
+    Mirrors build_cmd's ``--ro-bind`` of ``.developer`` applied after the
+    read-write bind of its parent (executor.py, "must be read-only to prevent a
+    compromised subprocess from replacing them"): reads pass, writes do not.
+    """
+
+    def _env(self, workspace, denied):
+        return ToolEnv(
+            cwd=workspace,
+            read_roots=(workspace,),
+            write_roots=(workspace,),
+            write_denied_roots=tuple(denied),
+        )
+
+    async def test_write_into_denied_subdir_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        env = self._env(ws, [carve])
+        target = carve / "credential-fetch"
+        result = await _run(
+            make_write_tool(env), {"file_path": str(target), "content": "#!/bin/sh\n"},
+        )
+        assert not target.exists()
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+    async def test_read_from_denied_subdir_allowed(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        (carve / "helper").write_text("visible\n")
+        env = self._env(ws, [carve])
+        result = await _run(make_read_tool(env), {"file_path": str(carve / "helper")})
+        assert "visible" in _text(result)
+
+    async def test_edit_inside_denied_subdir_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        target = carve / "credential-fetch"
+        target.write_text("original\n")
+        env = self._env(ws, [carve])
+        result = await _run(
+            make_edit_tool(env),
+            {
+                "file_path": str(target),
+                "old_string": "original",
+                "new_string": "tampered",
+            },
+        )
+        assert target.read_text() == "original\n"
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+    async def test_sibling_of_denied_subdir_still_writable(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        env = self._env(ws, [carve])
+        target = ws / "notes.txt"
+        result = await _run(
+            make_write_tool(env), {"file_path": str(target), "content": "ok\n"},
+        )
+        assert target.read_text() == "ok\n"
+        assert "Created" in _text(result)
+
+    async def test_symlink_into_denied_subdir_rejected(self, tmp_path):
+        """The deny check resolves symlinks, like the root check above it."""
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        (carve / "credential-fetch").write_text("original\n")
+        link = ws / "link"
+        link.symlink_to(carve / "credential-fetch")
+        env = self._env(ws, [carve])
+        result = await _run(
+            make_write_tool(env), {"file_path": str(link), "content": "tampered\n"},
+        )
+        assert (carve / "credential-fetch").read_text() == "original\n"
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+    async def test_no_denied_roots_leaves_writes_alone(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        env = self._env(ws, [])
+        target = ws / "a.txt"
+        await _run(make_write_tool(env), {"file_path": str(target), "content": "x\n"})
+        assert target.read_text() == "x\n"

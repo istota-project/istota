@@ -1769,8 +1769,10 @@ def native_fs_roots(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
-) -> tuple[list[Path], list[Path]]:
-    """The file-access roots for a native-brain task: ``(read_roots, write_roots)``.
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """File-access roots for a native-brain task.
+
+    Returns ``(read_roots, write_roots, write_denied_roots)``.
 
     Mirrors ``build_bwrap_cmd``'s user-data binds (not the system/venv binds,
     which are irrelevant to the file tools) so the native file tools reach
@@ -1778,9 +1780,18 @@ def native_fs_roots(
     Writable roots are the RW binds; read roots additionally include the RO
     binds (Talk attachments, read-only resources). No database root of any
     kind — build_bwrap_cmd masks those, and these tools have no masks.
+
+    The third element carries the RO carve-outs bwrap gets by re-binding a
+    subdirectory read-only *after* its parent's RW bind. Containment alone
+    cannot express those, so they are returned separately and threaded onto
+    ``ToolEnv.write_denied_roots``. Today that is ``.developer`` — the
+    credential-fetch helper and the git credential helpers — which the
+    claude_code path has protected since the RO re-bind was added and which
+    this function silently left writable until it grew this return value.
     """
     write: list[Path] = []
     read_only: list[Path] = []
+    write_denied: list[Path] = []
 
     def _add(target: list[Path], p: Path | None) -> None:
         if p is None:
@@ -1791,6 +1802,11 @@ def native_fs_roots(
 
     # User workspace (RW) — always present (mkdir'd by the caller).
     _add(write, user_temp_dir)
+
+    # .developer/ (RO carve-out inside the workspace above). Mirrors the
+    # _ro_bind in build_bwrap_cmd: the scripts in here hold the credential
+    # helpers, so a writable copy is a credential-interception path.
+    _add(write_denied, user_temp_dir.resolve() / ".developer")
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
@@ -1834,7 +1850,7 @@ def native_fs_roots(
             _add(write if r.permissions == "readwrite" else read_only, rpath)
 
     read_roots = list(dict.fromkeys(write + read_only))
-    return read_roots, write
+    return read_roots, write, write_denied
 
 
 def _allowlist_pattern_to_case(pattern: str) -> str:
@@ -4106,8 +4122,9 @@ def execute_task(
         # cwd choice below uses. Other brains ignore these fields.
         _fs_read_roots: "list[Path] | None" = None
         _fs_write_roots: "list[Path] | None" = None
+        _fs_write_denied_roots: "list[Path]" = []
         if native_fs_confinement_active(config):
-            _fs_read_roots, _fs_write_roots = native_fs_roots(
+            _fs_read_roots, _fs_write_roots, _fs_write_denied_roots = native_fs_roots(
                 config,
                 task,
                 is_admin,
@@ -4167,6 +4184,7 @@ def execute_task(
             # brains ignore these (bwrap already confines their tools).
             fs_read_roots=_fs_read_roots,
             fs_write_roots=_fs_write_roots,
+            fs_write_denied_roots=_fs_write_denied_roots,
             result_file=result_file,
             # Task-derived tmux session label (no-op for other brains): threads
             # the task id into the session name, structured log line, and

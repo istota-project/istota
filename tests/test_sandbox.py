@@ -842,13 +842,13 @@ class TestNativeFsRoots:
         task = make_sandbox_task()
         user_temp = sandbox_config.temp_dir / "alice"
         user_temp.mkdir(parents=True)
-        read, write = self._roots(sandbox_config, task, False, user_temp=user_temp)
+        read, write, _ = self._roots(sandbox_config, task, False, user_temp=user_temp)
         assert user_temp.resolve() in write
         assert user_temp.resolve() in read
 
     def test_user_mount_and_channel_writable(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
-        _, write = self._roots(sandbox_config, task, False)
+        _, write, _ = self._roots(sandbox_config, task, False)
         mount = sandbox_config.nextcloud_mount_path.resolve()
         assert (mount / "Users" / "alice").resolve() in write
         assert (mount / "Channels" / "room123").resolve() in write
@@ -856,7 +856,7 @@ class TestNativeFsRoots:
     def test_talk_is_read_only(self, sandbox_config, make_sandbox_task):
         (sandbox_config.nextcloud_mount_path / "Talk").mkdir()
         task = make_sandbox_task()
-        read, write = self._roots(sandbox_config, task, False)
+        read, write, _ = self._roots(sandbox_config, task, False)
         talk = (sandbox_config.nextcloud_mount_path / "Talk").resolve()
         assert talk in read
         assert talk not in write
@@ -865,7 +865,7 @@ class TestNativeFsRoots:
     def test_db_absent_for_everyone(self, sandbox_config, make_sandbox_task, is_admin):
         """Admins lost the RO read root along with the bwrap bind."""
         task = make_sandbox_task()
-        read, write = self._roots(sandbox_config, task, is_admin)
+        read, write, _ = self._roots(sandbox_config, task, is_admin)
         db_path = sandbox_config.db_path.resolve()
         assert db_path not in read
         assert db_path not in write
@@ -873,5 +873,31 @@ class TestNativeFsRoots:
     def test_temp_dir_parent_not_a_root(self, sandbox_config, make_sandbox_task):
         # The shared temp_dir parent must NOT be a root — only the per-user dir.
         task = make_sandbox_task()
-        read, _ = self._roots(sandbox_config, task, False)
+        read, _, _ = self._roots(sandbox_config, task, False)
         assert sandbox_config.temp_dir.resolve() not in read
+
+    def test_developer_dir_denied_for_writes(self, sandbox_config, make_sandbox_task):
+        """build_bwrap_cmd re-binds .developer read-only after binding its
+        parent read-write, so the model can't replace credential-fetch or the
+        git credential helpers. The native file tools must carve out the same
+        hole, or the claim in this function's docstring is false."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        dev_dir = user_temp / ".developer"
+        dev_dir.mkdir(parents=True)
+        read, write, denied = self._roots(
+            sandbox_config, task, False, user_temp=user_temp,
+        )
+        assert dev_dir.resolve() in denied
+        assert user_temp.resolve() in write   # the parent stays writable
+        assert dev_dir.resolve() not in write
+        assert user_temp.resolve() in read    # and .developer stays readable
+
+    def test_no_denied_roots_when_developer_dir_absent(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        _, _, denied = self._roots(sandbox_config, task, False, user_temp=user_temp)
+        assert denied == []

@@ -9,7 +9,7 @@ CM-aware composition) and deferred file processing stay in the executor.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -83,6 +83,10 @@ class BrainRequest:
     # claude_code path's own posture where bwrap is unavailable.
     fs_read_roots: list[Path] | None = None
     fs_write_roots: list[Path] | None = None
+    # RO carve-outs nested inside a write root — bwrap expresses these by
+    # re-binding a subdirectory read-only after its parent; containment alone
+    # cannot. Empty is the unconfined/no-carve-out case.
+    fs_write_denied_roots: list[Path] = field(default_factory=list)
 
     # The framework DB path, for brains that need a local writable dir of their
     # own (NativeBrain's OpenRouter catalog cache uses its parent). Passed

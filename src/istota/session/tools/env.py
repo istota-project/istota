@@ -77,6 +77,12 @@ class ToolEnv:
     - ``write_roots`` — the writable subset (Write/Edit). Reads are allowed in
       ``read_roots`` (which the constructor unions with ``write_roots``); writes
       only in ``write_roots``. Ignored when ``read_roots`` is ``None``.
+    - ``write_denied_roots`` — read-only carve-outs nested *inside* a write
+      root. A path under one of these is readable but never writable, which is
+      what ``build_bwrap_cmd`` gets for free by re-binding a subdirectory
+      ``--ro-bind`` after its parent's read-write bind. Containment alone can't
+      express that: ``.developer`` sits inside ``user_temp_dir``, so without
+      this the model could rewrite ``credential-fetch``.
     """
 
     cwd: Path
@@ -90,6 +96,7 @@ class ToolEnv:
     max_read_bytes: int = 25_000_000
     read_roots: tuple[Path, ...] | None = None
     write_roots: tuple[Path, ...] | None = None
+    write_denied_roots: tuple[Path, ...] = ()
 
     # Where Bash spills full over-cap output (task-scoped ISTOTA_DEFERRED_DIR).
     # ``None`` falls back to the system temp dir. Kept in the write-root set on a
@@ -109,8 +116,12 @@ class ToolEnv:
     # Resolved (symlink-free) roots, populated in __post_init__. Not init args.
     _read_real: list[Path] | None = field(default=None, init=False, repr=False, compare=False)
     _write_real: list[Path] | None = field(default=None, init=False, repr=False, compare=False)
+    _write_denied_real: list[Path] = field(default_factory=list, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Resolved regardless of confinement so the deny set is never silently
+        # inert; ``_contains`` only consults it on the write path anyway.
+        self._write_denied_real = [_realpath(p) for p in self.write_denied_roots]
         if self.read_roots is None:
             self._read_real = None
             self._write_real = None
@@ -162,6 +173,12 @@ class ToolEnv:
     def _contains(self, path: Path, *, write: bool) -> bool:
         roots = self._write_real if write else self._read_real
         real = _realpath(path)
+        if write:
+            # Denied before allowed: a carve-out is always nested inside a root
+            # that would otherwise admit it, so order is the whole mechanism.
+            for denied in self._write_denied_real:
+                if real == denied or real.is_relative_to(denied):
+                    return False
         for root in roots or ():
             if real == root or real.is_relative_to(root):
                 return True
