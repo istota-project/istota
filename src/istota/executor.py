@@ -988,6 +988,13 @@ def build_stripped_env() -> dict[str, str]:
 _PROXY_LOOKUP_BLOCKED = frozenset({"ISTOTA_SECRET_KEY"})
 
 
+# Reserved key a setup_env hook may return to prepend entries to the *model's*
+# PATH. os.pathsep-separated. Consumed and dropped by execute_task; never
+# merged into ``env`` and never handed to the skill proxy — see the
+# application site for why that distinction is load-bearing.
+HOOK_PATH_PREPEND_KEY = "ISTOTA_PATH_PREPEND"
+
+
 # --- Network proxy allowlist ---
 
 _DEFAULT_NETWORK_HOSTS = frozenset({
@@ -1886,21 +1893,6 @@ def native_fs_roots(
 
     read_roots = list(dict.fromkeys(write + read_only))
     return read_roots, write, write_denied
-
-
-def _allowlist_pattern_to_case(pattern: str) -> str:
-    """Convert an allowlist pattern like 'GET /api/v4/projects/*' to a shell case glob.
-
-    Each literal segment is quoted, wildcards become unquoted * for shell globbing.
-    Examples:
-        'GET /api/v4/projects/*' → '"GET /api/v4/projects/"*'
-        'POST /api/v4/projects/*/merge_requests' → '"POST /api/v4/projects/"*"/merge_requests"'
-    """
-    parts = pattern.split("*")
-    result = "*".join(f'"{p}"' for p in parts if p)
-    if pattern.endswith("*"):
-        result += "*"
-    return result
 
 
 def _detect_notification_reply(
@@ -3715,6 +3707,9 @@ def execute_task(
             if k not in env:
                 env[k] = v
         for k, v in hook_env.items():
+            if k == HOOK_PATH_PREPEND_KEY:
+                # Never merged into ``env``: see the application site below.
+                continue
             if k not in env:
                 env[k] = v
 
@@ -3805,6 +3800,34 @@ def execute_task(
             and _bwrap_available()
         ):
             env["ISTOTA_SANDBOXED"] = "1"
+
+        # PATH entries contributed by setup_env hooks — today the developer
+        # skill's .developer dir, so the model can type `gh` and reach the
+        # wrapper rather than the real binary.
+        #
+        # Applied *here*, after the proxy's base env was snapshotted above, and
+        # never merged into ``env`` by the hook loop. That ordering is the
+        # whole point and must not be tidied away:
+        #
+        #   ``proxy_base_env`` is what SkillProxy hands every host-side skill
+        #   CLI, which runs outside bwrap as the daemon user. Some of those
+        #   resolve a binary by bare name — google_workspace does
+        #   ``os.execvp("gws", …)``, devbox does ``shutil.which("docker")``.
+        #   A task-temp directory on that PATH would therefore be a host-side
+        #   code-execution path, wide open to whatever the model can write
+        #   into it. The sandbox re-binds .developer read-only precisely to
+        #   stop that, but relying on a bind to contain a PATH entry that
+        #   never needed to be there is the wrong way round.
+        #
+        # ``build_claude_env`` already set PATH, so a hook returning "PATH"
+        # would be silently dropped by the ``if k not in env`` merge; this
+        # reserved key is the explicit alternative. It is consumed here and
+        # never reaches the model.
+        _path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY, "")
+        if _path_prepend:
+            _entries = [p for p in _path_prepend.split(os.pathsep) if p]
+            if _entries:
+                env["PATH"] = os.pathsep.join([*_entries, env["PATH"]])
 
         # Network isolation via CONNECT proxy: outbound traffic restricted
         # to an allowlist of host:port pairs via --unshare-net + proxy.

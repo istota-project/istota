@@ -643,6 +643,20 @@ class DeveloperConfig:
     # tokens server-side for the in-container `git`, `gitlab-api`,
     # `github-api`, `gh`, and `glab` wrappers — the container never sees
     # the token.
+    # Forge CLI wrapper (src/istota/forge_cli.py). The real `gh` and `glab`
+    # run behind a wrapper that injects the token and checks the argv against
+    # a policy. The policy is code-owned rather than config-owned because it
+    # is a safety default, not a preference; these two knobs extend and
+    # puncture it. Entries are written as they would be typed —
+    # "gh repo view" — and an entry with no binary name applies to both.
+    forge_cli_extra_denied: list[str] = field(default_factory=list)
+    # Removes a baseline entry. Documented as turning off an accident guard,
+    # because that is what it does. An entry matching no baseline rule and no
+    # forge_cli_extra_denied entry is warned about at startup: a hatch that
+    # silently stopped matching reads exactly like one that is still open.
+    forge_cli_permit: list[str] = field(default_factory=list)
+    gh_bin_path: str = "/usr/local/bin/gh"
+    glab_bin_path: str = "/usr/local/bin/glab"
     api_timeout_seconds: int = 30
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
@@ -2712,6 +2726,12 @@ def load_config(config_path: Path | None = None) -> Config:
             extra["gitlab_api_allowlist"] = dev["gitlab_api_allowlist"]
         if "github_api_allowlist" in dev:
             extra["github_api_allowlist"] = dev["github_api_allowlist"]
+        for _key in ("forge_cli_extra_denied", "forge_cli_permit"):
+            if _key in dev:
+                extra[_key] = list(dev[_key])
+        for _key in ("gh_bin_path", "glab_bin_path"):
+            if _key in dev:
+                extra[_key] = dev[_key]
         # Unknown keys are ignored rather than fatal, matching the rest of the
         # loader: only the fields named here are read off the block.
         rev = dev.get("review", {})
@@ -2960,8 +2980,58 @@ def load_config(config_path: Path | None = None) -> Config:
 
     _validate_brain_fallback(config)
     _validate_advisor_model(config)
+    _validate_forge_clis(config)
 
     return config
+
+
+def _validate_forge_clis(config: "Config") -> None:
+    """Warn about a forge CLI setup that will only fail later, and worse.
+
+    Both checks are warnings rather than errors: the developer skill is one of
+    many, and a deployment that has not finished wiring it should still start.
+
+    A missing binary otherwise surfaces as a forge command exiting 6 partway
+    through somebody's task. A ``forge_cli_permit`` entry matching nothing
+    otherwise surfaces as nothing at all — which is the problem, since a hatch
+    that silently stopped matching after a baseline rewording looks exactly
+    like one that is still open.
+    """
+    import os
+
+    dev = getattr(config, "developer", None)
+    if dev is None or not dev.enabled or not dev.repos_dir:
+        return
+    _logger = logging.getLogger("istota.config")
+
+    if dev.gitlab_token or dev.github_token:
+        for label, path in (("gh", dev.gh_bin_path), ("glab", dev.glab_bin_path)):
+            if path and not os.path.exists(path):
+                _logger.warning(
+                    "[developer] %s not found at %s; forge commands using it "
+                    "will fail at run time. Install it (the Ansible role does) "
+                    "or point %s_bin_path at the real one.",
+                    label, path, label,
+                )
+
+    try:
+        from .forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
+
+        dead = unmatched_permits(
+            [FORGE_GITHUB, FORGE_GITLAB],
+            list(dev.forge_cli_permit),
+            list(dev.forge_cli_extra_denied),
+        )
+        for entry in dead:
+            _logger.warning(
+                "[developer] forge_cli_permit entry %r matches no rule this "
+                "deployment has. It is turning nothing off — check the "
+                "spelling against the baseline before assuming the verb is "
+                "permitted.",
+                entry,
+            )
+    except Exception:  # pragma: no cover - never fail config load over a warning
+        _logger.warning("forge_cli_permit validation failed", exc_info=True)
 
 
 # Anthropic-namespace brain kinds — the only ones the advisor tool can ever

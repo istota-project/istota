@@ -1,9 +1,18 @@
 """Developer skill — setup_env hook.
 
-Generates the credential-fetch helper script and the per-platform
-git-credential-helper / gitlab-api / github-api wrapper scripts inside the
-task's user temp directory, and exports the GIT_CONFIG_* env vars that
-point git at those helpers.
+Generates, inside the task's user temp directory:
+
+- the credential-fetch helper and the per-platform git-credential-helper
+  scripts, plus the ``GIT_CONFIG_*`` vars that point git at them;
+- ``gh`` and ``glab``, copies of :mod:`istota.forge_cli` that wrap the real
+  binaries, and the policy file they read;
+- a seeded, read-only config directory per CLI.
+
+Everything lands in ``{user_temp_dir}/.developer``, which ``build_bwrap_cmd``
+re-binds read-only inside the sandbox (and which ``native_fs_roots`` excludes
+from the native brain's write roots). That is what makes the wrapper, the
+policy and the alias table unwritable by the model — none of it would mean
+anything in a directory the model could edit.
 
 Static env vars (DEVELOPER_REPOS_DIR, GITLAB_URL, GITHUB_URL, the optional
 namespace/owner/reviewer/credit knobs, GITLAB_TOKEN, GITHUB_TOKEN) come
@@ -13,23 +22,56 @@ that aren't expressible as static EnvSpecs.
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 from pathlib import Path
+
+from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 
 logger = logging.getLogger("istota.skills.developer")
 
+# Where the canonical wrapper lives, for copying into the task's .developer.
+_FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
 
-def _allowlist_pattern_to_case(pattern: str) -> str:
-    """Convert an allowlist pattern like 'GET /api/v4/projects/*' to a shell case glob."""
-    parts = pattern.split("*")
-    result = "*".join(f'"{p}"' for p in parts if p)
-    if pattern.endswith("*"):
-        result += "*"
-    return result
+
+def _write_forge_cli(dev_bin: Path, name: str) -> Path:
+    """Install the wrapper under one of the names it dispatches on.
+
+    A copy rather than a symlink: ``forge_from_argv0`` reads ``argv[0]``, and
+    the sandbox's view of a symlink's target is one more thing to get wrong
+    for no benefit.
+    """
+    dest = dev_bin / name
+    shutil.copyfile(_FORGE_CLI_SOURCE, dest)
+    dest.chmod(0o700)
+    return dest
+
+
+def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
+    """A pre-seeded CLI config directory, at the modes each CLI will accept.
+
+    ``config.yml`` is mode 0600, not 0400, because glab refuses to start on
+    anything else ("has the permissions 400, but glab requires 600"); gh is
+    happy with either. The file being owner-writable does not matter: the
+    model reaches this path only through the sandbox, where ``.developer`` is
+    a read-only bind, and that is what actually holds it down.
+
+    Seeding an empty file rather than leaving the directory bare is
+    deliberate. gh expands ``aliases`` from ``config.yml`` *before* command
+    dispatch, so an absent file is one the model could otherwise supply.
+    """
+    cfg = dev_bin / name
+    cfg.mkdir(parents=True, exist_ok=True)
+    config_yml = cfg / "config.yml"
+    if not config_yml.exists():
+        config_yml.write_text("")
+    config_yml.chmod(0o600)
+    return cfg
 
 
 def setup_env(ctx) -> dict[str, str]:
-    """Write helper scripts and return GIT_CONFIG_* / *_API_CMD env vars.
+    """Write helper scripts and return the GIT_CONFIG_* / forge-CLI env vars.
 
     Self-gates on ``config.developer.enabled`` and a non-empty
     ``repos_dir`` — the hook is invoked for every skill in the index, so
@@ -76,9 +118,13 @@ def setup_env(ctx) -> dict[str, str]:
         cred_fetch_cmd = str(cred_fetch)
 
     def _token_expr(var_name: str) -> str:
+        # Quoted: git's credential protocol wants the value verbatim, and an
+        # unquoted expansion is word-split by sh and rejoined by echo on
+        # single spaces. No PAT format has whitespace today; this costs two
+        # characters and removes a way for a future one to fail unreadably.
         if use_proxy:
-            return f"$({cred_fetch_cmd} {var_name})"
-        return f"${var_name}"
+            return f'"$({cred_fetch_cmd} {var_name})"'
+        return f'"${var_name}"'
 
     git_config_index = 0
 
@@ -97,43 +143,6 @@ def setup_env(ctx) -> dict[str, str]:
         env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(git_cred)
         git_config_index += 1
 
-        api_script = dev_bin / "gitlab-api"
-        allowlist_cases = "\n".join(
-            f"  {_allowlist_pattern_to_case(p)}) ;;"
-            for p in dev.gitlab_api_allowlist
-        )
-        if use_proxy:
-            token_line = f'TOKEN=$({cred_fetch_cmd} GITLAB_TOKEN)\n'
-            curl_header = '"PRIVATE-TOKEN: $TOKEN"'
-        else:
-            token_line = ""
-            curl_header = '"PRIVATE-TOKEN: $GITLAB_TOKEN"'
-        # The GitLab API root is ``<host>/api/v4`` — we build that into
-        # the curl target so callers pass bare paths (``/projects/...``,
-        # ``/user``) matching the bundled allowlist patterns. A leading
-        # ``/api/v4`` in the endpoint is stripped for back-compat with
-        # prompts written against the old convention; allowlist matching
-        # is always done on the bare form.
-        api_script.write_text(
-            "#!/bin/sh\n"
-            'METHOD="$1"; shift\n'
-            'ENDPOINT="$1"; shift\n'
-            'case "$ENDPOINT" in\n'
-            '  /api/v4/*) ENDPOINT="${ENDPOINT#/api/v4}" ;;\n'
-            'esac\n'
-            'CLEAN="${ENDPOINT%%\\?*}"\n'
-            'case "$METHOD $CLEAN" in\n'
-            f"{allowlist_cases}\n"
-            '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
-            '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
-            "esac\n"
-            f'{token_line}'
-            f'curl -s --header {curl_header} '
-            f'--request "$METHOD" "{gitlab_host}/api/v4$ENDPOINT" "$@"\n'
-        )
-        api_script.chmod(0o700)
-        env["GITLAB_API_CMD"] = str(api_script)
-
     if dev.github_token:
         github_host = dev.github_url.rstrip("/")
         gh_username = dev.github_username or "x-access-token"
@@ -150,41 +159,61 @@ def setup_env(ctx) -> dict[str, str]:
         env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(gh_cred)
         git_config_index += 1
 
-        gh_api_script = dev_bin / "github-api"
-        gh_allowlist_cases = "\n".join(
-            f"  {_allowlist_pattern_to_case(p)}) ;;"
-            for p in dev.github_api_allowlist
-        )
-        gh_host_stripped = github_host.rstrip("/")
-        if "github.com" == gh_host_stripped.split("//")[-1]:
-            gh_api_base = "https://api.github.com"
-        else:
-            gh_api_base = f"{gh_host_stripped}/api/v3"
-        if use_proxy:
-            gh_token_line = f'TOKEN=$({cred_fetch_cmd} GITHUB_TOKEN)\n'
-            gh_curl_header = '"Authorization: Bearer $TOKEN"'
-        else:
-            gh_token_line = ""
-            gh_curl_header = '"Authorization: Bearer $GITHUB_TOKEN"'
-        gh_api_script.write_text(
-            "#!/bin/sh\n"
-            'METHOD="$1"; shift\n'
-            'ENDPOINT="$1"; shift\n'
-            'CLEAN="${ENDPOINT%%\\?*}"\n'
-            'case "$METHOD $CLEAN" in\n'
-            f"{gh_allowlist_cases}\n"
-            '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
-            '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
-            "esac\n"
-            f'{gh_token_line}'
-            f'curl -s --header {gh_curl_header} '
-            f'--header "Accept: application/vnd.github+json" '
-            f'--request "$METHOD" "{gh_api_base}$ENDPOINT" "$@"\n'
-        )
-        gh_api_script.chmod(0o700)
-        env["GITHUB_API_CMD"] = str(gh_api_script)
-
     if git_config_index > 0:
         env["GIT_CONFIG_COUNT"] = str(git_config_index)
+
+    # --- Forge CLIs -------------------------------------------------------
+    #
+    # Installed whenever either token is configured. Both names go on PATH
+    # regardless: `glab` with no GitLab token exits 5 with the proxy's own
+    # message, which is a clearer failure than "command not found" leading
+    # the model to the real binary and an unauthenticated call.
+    if dev.gitlab_token or dev.github_token:
+        policy = {
+            FORGE_GITHUB: build_policy(
+                FORGE_GITHUB,
+                extra_denied=list(getattr(dev, "forge_cli_extra_denied", [])),
+                permit=list(getattr(dev, "forge_cli_permit", [])),
+            ),
+            FORGE_GITLAB: build_policy(
+                FORGE_GITLAB,
+                extra_denied=list(getattr(dev, "forge_cli_extra_denied", [])),
+                permit=list(getattr(dev, "forge_cli_permit", [])),
+            ),
+        }
+        policy_path = dev_bin / "forge-policy.json"
+        policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True))
+        policy_path.chmod(0o600)
+
+        _write_forge_cli(dev_bin, "gh")
+        _write_forge_cli(dev_bin, "glab")
+        # The retired names, so a cached habit or an old CRON.md job gets the
+        # one-line explanation rather than "command not found".
+        _write_forge_cli(dev_bin, "github-api")
+        _write_forge_cli(dev_bin, "gitlab-api")
+
+        # Writable scratch for the CLIs' own state — gh drops a device id
+        # under $XDG_STATE_HOME on every run, and that must not land in the
+        # read-only config dir or in a possibly read-only HOME.
+        state_dir = user_temp_dir / ".forge-state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        env["ISTOTA_FORGE_POLICY"] = str(policy_path)
+        env["ISTOTA_GH_REAL"] = getattr(dev, "gh_bin_path", "") or "/usr/local/bin/gh"
+        env["ISTOTA_GLAB_REAL"] = (
+            getattr(dev, "glab_bin_path", "") or "/usr/local/bin/glab"
+        )
+        env["ISTOTA_GH_CONFIG_DIR"] = str(_seed_cli_config_dir(dev_bin, "gh-config"))
+        env["ISTOTA_GLAB_CONFIG_DIR"] = str(
+            _seed_cli_config_dir(dev_bin, "glab-config")
+        )
+        env["ISTOTA_FORGE_STATE_DIR"] = str(state_dir)
+        env["ISTOTA_GH_URL"] = dev.github_url
+        env["ISTOTA_GITLAB_URL"] = dev.gitlab_url
+        # Reserved key: the executor prepends this to the *model's* PATH only,
+        # after snapshotting the environment it gives host-side skill CLIs.
+        # See executor.HOOK_PATH_PREPEND_KEY — the ordering is a security
+        # property, not housekeeping.
+        env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
 
     return env
