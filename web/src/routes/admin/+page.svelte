@@ -987,11 +987,18 @@
 
   /* Per-user 24h breakdown — stacked bar + tag list. */
   .users-grid {
-    /* Raised by the two usage columns' 14rem. The sized columns must not add up
-		   to the whole table, or `col-24h` — the one deliberately left auto, since
-		   it carries the stacked bar and the per-source chips — is squeezed to
-		   nothing at the declared minimum. */
-    min-width: 904px;
+    /* The sized columns below come to 46.5rem; this is that plus 10rem for
+		   `col-24h`, the one column deliberately left auto, since it carries the
+		   stacked bar and the per-source chips. The sized columns must not add up to
+		   the whole table, or that column is squeezed to nothing at the declared
+		   minimum — which is what the two usage columns did on mobile (ISSUE-276).
+		   In rem rather than px for the same reason: the columns are rem, so a px
+		   floor stops covering them the moment the reader picks a larger text
+		   scale. At 120% the columns alone came to within a few pixels of the old
+		   904px, which left 24h activity nothing again — the same defect reached by
+		   changing a setting rather than a breakpoint. 56.5rem is that 904px at the
+		   default scale, so nothing moves until the reader asks it to. */
+    min-width: 56.5rem;
   }
 
   /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
@@ -1003,7 +1010,13 @@
     width: 9rem;
   }
 
-  .users-grid .col-total,
+  /* Total holds a lifetime count, which reaches seven figures on a long-running
+	   install; measured, "1,284,507" at --text-sm needs 66px and 4.5rem leaves a
+	   63px content box. Failed is a small integer or a pill. */
+  .users-grid .col-total {
+    width: 5rem;
+  }
+
   .users-grid .col-failed {
     width: 4.5rem;
   }
@@ -1306,25 +1319,40 @@
     gap: var(--space-2);
   }
 
-  /* Mobile: drop low-priority columns and tighten the source cell.
-	   Ordered widest-to-narrowest. The Total column is hidden first because
-	   the per-source breakdown carries 24h activity (the more interesting
-	   number) and the headline tasks card already shows the grand total. */
+  /* Mobile: keep every column and scroll the table sideways, the same treatment
+	   the briefings tables get. Hiding columns was the previous answer and it did
+	   not survive two more of them. `.grid` is table-layout: fixed, so the widths
+	   below are honoured whatever the screen is, and dropping the table's
+	   min-width never made it narrower — it made `col-24h`, the one column left
+	   auto on purpose, absorb everything that no longer fit. Once Tokens and Cost
+	   were added there was nothing left to absorb: measured at a 390px viewport
+	   that column came out exactly 0px wide, with the headings painted over each
+	   other. `.table-scroll` scrolls instead. */
   @media (max-width: 768px) {
-    .col-total,
-    .col-active {
-      display: none;
-    }
+    /* The 34.5rem of column widths below, plus 11rem for the auto 24h column —
+		   a rem more than the desktop table leaves it, since the chips have a whole
+		   phone screen less to be legible in. Every column keeps a legible width and
+		   the surplus becomes horizontal scroll. */
     .users-grid {
-      min-width: 0;
+      min-width: 45.5rem;
     }
-    /* Tighten the sized columns further so the auto 24h column keeps a usable
-		   share of a phone-width table. */
+    /* Tighten the columns whose content has a known short bound, so that scroll
+		   stays as short as it can be, and leave the numeric ones at a width their
+		   strings fit. Nothing sets `overflow` on a `.grid` cell, so a number too
+		   wide for its box paints over the column beside it rather than wrapping —
+		   `toLocaleString` puts commas in but no break opportunity. Total is the one
+		   that bit: it keeps its (widened) desktop width here rather than the 3.5rem
+		   this block used to give it. */
     .users-grid .col-user {
       width: 6.5rem;
     }
     .users-grid .col-failed {
       width: 3.5rem;
+    }
+    /* "1234d ago" is the longest `formatTimestamp` produces — it has no upper
+		   branch, so a dormant account counts days indefinitely. */
+    .users-grid .col-active {
+      width: 5rem;
     }
     .users-grid .col-avg {
       width: 4rem;
@@ -1347,7 +1375,6 @@
   }
 
   @media (max-width: 640px) {
-    .col-avg,
     .col-cron {
       display: none;
     }
