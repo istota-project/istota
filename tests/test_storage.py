@@ -401,6 +401,27 @@ class TestRcloneOperations:
         result = _rclone_cat("nc", "/Users/alice/context/memory.md")
         assert result is None
 
+    @patch("istota.storage.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    def test_a_missing_rclone_binary_is_a_failure_not_a_raise(self, mock_run):
+        """These helpers all promise None/False on failure, and "rclone is not
+        installed" is a failure. `subprocess.run` reports it by raising, so it
+        used to escape every one of them — a mountless deployment without
+        rclone got a FileNotFoundError out of `read_channel_memory` rather than
+        the documented None.
+        """
+        assert _rclone_cat("nc", "/Users/alice/context/memory.md") is None
+        assert _rclone_path_exists("nc", "/Users/alice/inbox") is False
+        assert _rclone_mkdir("nc", "/Users/alice/inbox") is False
+        assert _rclone_rcat("nc", "/Users/alice/context/memory.md", "content") is False
+
+    @patch("istota.storage.subprocess.run", side_effect=FileNotFoundError("rclone"))
+    def test_upload_to_inbox_reports_the_miss_too(self, mock_run, tmp_path):
+        """The sixth caller, and the only one with a public signature."""
+        local = tmp_path / "note.txt"
+        local.write_text("hello")
+
+        assert upload_file_to_inbox("nc", "alice", local) is None
+
     @patch("istota.storage.subprocess.run")
     def test_rclone_rcat_success(self, mock_run):
         mock_run.return_value = self._mock_run(returncode=0)
