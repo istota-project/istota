@@ -28,7 +28,9 @@ model wrote. Four escapes were demonstrated against exactly such a path:
 `_git` answers the config routes (overrides on the command line, which beat the
 repository's own values, plus the flags that cover the per-attribute drivers),
 the upward search (a discovery ceiling at the root), and the option injection
-(`--end-of-options` before every revision). `git_dir` answers the relocations,
+(`--end-of-options` before every revision — except `git grep`, which does not
+accept the flag on the git the runtime image ships and instead requires a
+resolved object id; see `_require_object_id`). `git_dir` answers the relocations,
 by putting both `--absolute-git-dir` and `--git-common-dir` back through
 `resolve_under_repos`. Call `git_dir` before any content-producing command —
 `resolve_range`, `collect_diff` and all four collectors do.
@@ -235,6 +237,39 @@ NO_FILTERS = ("--no-ext-diff", "--no-textconv", "--no-color")
 # leading dash in `resolve_range` is the first line; this is the one that holds
 # even when a caller reaches a collector directly.
 END_OF_OPTIONS = "--end-of-options"
+
+# …with one exception, and it is a real one rather than a style choice.
+# `git grep` did not learn `--end-of-options` when the rest of git did: on
+# Debian bookworm's git 2.39 — which is what `docker/istota/Dockerfile` ships —
+# `git grep -e P --end-of-options <rev> --` exits 128 with "unable to resolve
+# revision: --end-of-options", so every review on that image was refused with
+# `git_failed` before it reached a reviewer. The developer host's newer git
+# accepts it, which is why the suite never said so; `scripts/test-linux.sh`
+# runs against bookworm and does.
+#
+# So `collect_callers` passes the revision bare and holds the same guarantee a
+# different way: the argument must be a full object id, which cannot be read as
+# an option under any git version. That is stricter than `--end-of-options`,
+# not weaker — it rejects `HEAD` too — and it is what the only caller already
+# passes (`bundle.head`, resolved by `_range_head`).
+_OBJECT_ID = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+
+
+def _require_object_id(rev: str, label: str) -> str:
+    """Refuse anything but a full hex object id.
+
+    The narrow substitute for `END_OF_OPTIONS` on the one subcommand that
+    rejects it. A resolved id is not option-shaped, is not a path, and does not
+    depend on which git is installed.
+    """
+    stripped = rev.strip()
+    if not _OBJECT_ID.match(stripped):
+        raise ReviewError(
+            f"{label} {stripped!r} is not a resolved object id; "
+            "callers must pass the output of rev-parse, not a ref.",
+            reason="bad_range",
+        )
+    return stripped
 
 # One git call may not eat the daemon. The worktree is model-writable, so the
 # size of a diff is chosen by the same party that chose the path, and
@@ -1071,6 +1106,14 @@ def changed_symbols(diff_body: str) -> list[str]:
 def collect_callers(worktree: Path, symbols: list[str], caps: Caps, rev: str) -> str:
     """Direct callers of the changed symbols, from the tree at `rev`.
 
+    `rev` must be a **resolved object id** — the output of `rev-parse --verify`,
+    which is what `bundle.head` carries. A ref, a tag or an abbreviation raises
+    `ReviewError(reason="bad_range")`. That is stricter than the other
+    collectors, which accept anything not option-shaped, and deliberately so:
+    `git grep` is the one subcommand that rejects `END_OF_OPTIONS` on the git
+    the runtime image ships, so the id *is* the guard here. See
+    `_require_object_id`.
+
     Mechanical and unfiltered: callers are included because they are callers,
     not because they looked relevant. Deciding what else a reviewer "needs to
     see" reintroduces exactly the blind spot an independent reviewer exists to
@@ -1080,6 +1123,10 @@ def collect_callers(worktree: Path, symbols: list[str], caps: Caps, rev: str) ->
     rule intact — nothing here touches the filesystem.
     """
     git_dir(worktree)
+    # See `_require_object_id`: git grep rejects `--end-of-options` on the git
+    # the runtime image ships, so the revision is pinned to an object id here
+    # instead. Checked once, before any symbol is grepped.
+    rev = _require_object_id(rev, "revision")
     parts: list[str] = []
     used = 0
     for symbol in symbols:
@@ -1094,7 +1141,6 @@ def collect_callers(worktree: Path, symbols: list[str], caps: Caps, rev: str) ->
                 "-F",
                 "-e",
                 symbol,
-                END_OF_OPTIONS,
                 rev,
                 "--",
             ],
