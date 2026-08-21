@@ -1155,8 +1155,10 @@ class TestDeveloperConfig:
         assert dev.github_username == ""
         assert dev.github_default_owner == ""
         assert dev.github_reviewer == ""
-        assert isinstance(dev.github_api_allowlist, list)
-        assert len(dev.github_api_allowlist) > 0
+        # The two REST endpoint allowlists are gone with the devbox proxy's
+        # API actions — the real gh/glab run behind forge_cli.py instead.
+        assert not hasattr(dev, "github_api_allowlist")
+        assert not hasattr(dev, "gitlab_api_allowlist")
         # Forge CLI wrapper defaults.
         assert dev.forge_cli_extra_denied == []
         assert dev.forge_cli_permit == []
@@ -1225,16 +1227,26 @@ github_reviewer = "reviewer-user"
         assert cfg.developer.github_default_owner == "myorg"
         assert cfg.developer.github_reviewer == "reviewer-user"
 
-    def test_load_github_custom_allowlist(self, tmp_path):
+    def test_retired_allowlist_keys_load_clean_and_inert(self, tmp_path):
+        """Every deployed host has these two keys in its config.toml, and
+        will keep having them: config.toml.j2 still renders both on every
+        Ansible run. The loader ignores unknown keys by design, so they must
+        load without raising and without reaching the DeveloperConfig
+        constructor — a TypeError here would take the whole daemon down on
+        upgrade, on every host at once."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [developer]
 enabled = true
 repos_dir = "/srv/repos"
 github_api_allowlist = ["GET /repos/*"]
+gitlab_api_allowlist = ["GET /projects/*"]
 """)
         cfg = load_config(config_file)
-        assert cfg.developer.github_api_allowlist == ["GET /repos/*"]
+        assert cfg.developer.enabled is True
+        assert cfg.developer.repos_dir == "/srv/repos"
+        assert not hasattr(cfg.developer, "github_api_allowlist")
+        assert not hasattr(cfg.developer, "gitlab_api_allowlist")
 
     def test_load_forge_cli_knobs(self, tmp_path):
         config_file = tmp_path / "config.toml"

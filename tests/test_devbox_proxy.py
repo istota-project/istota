@@ -1,13 +1,13 @@
-"""Tests for the devbox credential proxy daemon (Stages 2–3).
+"""Tests for the devbox credential proxy daemon.
 
-Stage 2 (happy paths): ping, git_credential get/store/erase, gitlab_api,
-github_api against a synthetic context with mocked httpx transport.
+Three actions: ping, git_credential get/store/erase, and forge_token.
 End-to-end coverage via a tmpdir Unix socket exercises
 asyncio.start_unix_server + handle_connection without going through
-systemd.
+systemd. Edge cases: oversized requests, malformed JSON, and audit
+logging.
 
-Stage 3 (edge cases + error handling): allowlist enforcement, oversized
-requests, malformed JSON, upstream errors, timeouts, and audit logging.
+The daemon makes no outbound HTTP requests, so there is no mocked
+transport here — every answer comes out of the in-memory context.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import httpx
 import pytest
 
 
@@ -39,9 +38,8 @@ def sock_path():
 from istota.devbox_proxy import (
     DevboxProxyContext,
     handle_connection,
+    handle_forge_token,
     handle_git_credential,
-    handle_github_api,
-    handle_gitlab_api,
     handle_ping,
     serve,
 )
@@ -61,34 +59,14 @@ def _ctx(
     github_token: str = "GH-TOKEN",
     gitlab_url: str = "https://gitlab.com",
     github_url: str = "https://github.com",
-    gitlab_allowlist: tuple[str, ...] = ("GET /projects/*", "POST /projects/*/merge_requests"),
-    github_allowlist: tuple[str, ...] = ("GET /repos/*", "POST /repos/*/pulls"),
-    api_timeout: float = 5.0,
-    http_handler=None,
 ) -> DevboxProxyContext:
-    """Build a DevboxProxyContext with a MockTransport-backed httpx client.
-
-    ``http_handler`` is a callable ``(request: httpx.Request) -> httpx.Response``
-    that the MockTransport routes every request through. If None, all calls
-    return 200 OK with an empty body.
-    """
-
-    if http_handler is None:
-        def http_handler(request):  # pragma: no cover (only used if a test forgot to override)
-            return httpx.Response(200, text="")
-
-    transport = httpx.MockTransport(http_handler)
-    client = httpx.AsyncClient(transport=transport, timeout=api_timeout)
+    """Build a DevboxProxyContext. Every field is answered from memory."""
     return DevboxProxyContext(
         user_id=user_id,
         gitlab_token=gitlab_token,
         github_token=github_token,
         gitlab_url=gitlab_url,
         github_url=github_url,
-        gitlab_allowlist=gitlab_allowlist,
-        github_allowlist=github_allowlist,
-        api_timeout=api_timeout,
-        http_client=client,
     )
 
 
@@ -263,214 +241,176 @@ class TestGitCredential:
         assert resp["error"] == "bad_request"
 
 
-# ---- handle_gitlab_api / handle_github_api ---------------------------------
+import contextlib
 
 
-class TestGitlabApi:
+@contextlib.contextmanager
+def caplog_at(level):
+    """Collect records from the audit logger only.
+
+    pytest's caplog fixture is not usable from a plain contextmanager, and the
+    audit logger is the only one these assertions care about.
+    """
+    import logging
+
+    logger = logging.getLogger("istota.devbox_proxy.audit")
+    records = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Collector()
+    handler.setLevel(level)
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(level)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+async def _dispatch_one(ctx, request):
+    """Push one request through handle_connection over an in-memory pair.
+
+    Goes through the dispatcher rather than a handler, because the branch
+    under test lives in handle_connection itself.
+    """
+    reader = asyncio.StreamReader()
+    reader.feed_data((json.dumps(request) + "\n").encode())
+    reader.feed_eof()
+
+    written = bytearray()
+
+    class _Writer:
+        def write(self, data):
+            written.extend(data)
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    await handle_connection(reader, _Writer(), ctx)
+    return decode_response(bytes(written).decode())
+
+
+# ---- handle_forge_token ----------------------------------------------------
+
+
+class TestForgeToken:
+    """The action that replaced the two REST actions. It hands the real
+    token to the in-container gh/glab wrapper, which then execs the real
+    binary — so unlike git_credential there is no server-side injection to
+    hide behind, and the tests are about which provider gets which token."""
+
     @pytest.mark.asyncio
-    async def test_happy_path_get(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text='{"id":42,"name":"foo"}')
-
-        ctx = _ctx(http_handler=handler)
-        req = {
-            "action": "gitlab_api",
-            "method": "GET",
-            "endpoint": "/projects/42",
-            "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
+    async def test_github_provider_returns_the_github_token(self):
+        ctx = _ctx()
+        resp = decode_response(
+            await handle_forge_token(
+                {"action": "forge_token", "provider": "github"}, ctx,
+            )
+        )
         assert resp["ok"] is True
-        assert resp["status"] == 200
-        assert resp["body"] == '{"id":42,"name":"foo"}'
-
-        assert len(seen) == 1
-        sent = seen[0]
-        # URL composition: gitlab_url + /api/v4 + endpoint.
-        assert str(sent.url) == "https://gitlab.com/api/v4/projects/42"
-        assert sent.method == "GET"
-        # Server-side header injection.
-        assert sent.headers["PRIVATE-TOKEN"] == "GL-TOKEN"
+        assert resp["token"] == "GH-TOKEN"
 
     @pytest.mark.asyncio
-    async def test_happy_path_post_with_body(self):
-        seen: list[httpx.Request] = []
+    async def test_response_carries_the_configured_url(self):
+        """The devbox image is shared by every user, so its baked policy has
+        no per-user URL. Without one here the wrapper leaves GITLAB_HOST unset
+        and glab sends a self-hosted token to gitlab.com."""
+        ctx = _ctx(gitlab_url="https://git.example.com:8443/gitlab")
+        resp = decode_response(
+            await handle_forge_token({"provider": "gitlab"}, ctx)
+        )
+        assert resp["url"] == "https://git.example.com:8443/gitlab"
 
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"iid":7}')
-
-        ctx = _ctx(http_handler=handler)
-        req = {
-            "action": "gitlab_api",
-            "method": "POST",
-            "endpoint": "/projects/42/merge_requests",
-            "body": '{"title":"x","source_branch":"f","target_branch":"main"}',
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
+    @pytest.mark.asyncio
+    async def test_gitlab_provider_returns_the_gitlab_token(self):
+        ctx = _ctx()
+        resp = decode_response(
+            await handle_forge_token(
+                {"action": "forge_token", "provider": "gitlab"}, ctx,
+            )
+        )
         assert resp["ok"] is True
-        assert resp["status"] == 201
-        sent = seen[0]
-        assert sent.method == "POST"
-        body_text = sent.content.decode("utf-8")
-        assert "source_branch" in body_text
+        assert resp["token"] == "GL-TOKEN"
 
     @pytest.mark.asyncio
-    async def test_custom_gitlab_url_used_as_base(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(gitlab_url="https://gitlab.example.com", http_handler=handler)
-        req = {
-            "action": "gitlab_api",
-            "method": "GET",
-            "endpoint": "/projects/1",
-            "body": None,
-        }
-        await handle_gitlab_api(req, ctx)
-        assert str(seen[0].url) == "https://gitlab.example.com/api/v4/projects/1"
+    async def test_providers_do_not_cross(self):
+        """A github request must never come back with the gitlab token —
+        the two are separately scoped credentials and handing over the
+        wrong one sends it to the wrong host."""
+        ctx = _ctx(github_token="ONLY-GH", gitlab_token="ONLY-GL")
+        gh = decode_response(
+            await handle_forge_token({"provider": "github"}, ctx)
+        )
+        gl = decode_response(
+            await handle_forge_token({"provider": "gitlab"}, ctx)
+        )
+        assert gh["token"] == "ONLY-GH"
+        assert gl["token"] == "ONLY-GL"
 
     @pytest.mark.asyncio
-    async def test_token_never_appears_in_request_body_or_url(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(gitlab_token="VERY-SECRET-GL", http_handler=handler)
-        req = {
-            "action": "gitlab_api",
-            "method": "GET",
-            "endpoint": "/projects/1",
-            "body": None,
-        }
-        await handle_gitlab_api(req, ctx)
-        sent = seen[0]
-        # Only the PRIVATE-TOKEN header should carry the secret. Any URL or
-        # body path is a leak — the proxy is supposed to keep the token
-        # server-side.
-        assert "VERY-SECRET-GL" not in str(sent.url)
-        body_bytes = sent.content
-        assert b"VERY-SECRET-GL" not in body_bytes
-        assert sent.headers["PRIVATE-TOKEN"] == "VERY-SECRET-GL"
+    @pytest.mark.parametrize("provider", ["GitHub", "GITLAB", " github ", "GitLab"])
+    async def test_provider_matching_is_case_and_whitespace_insensitive(self, provider):
+        ctx = _ctx()
+        resp = decode_response(
+            await handle_forge_token({"provider": provider}, ctx)
+        )
+        assert resp["ok"] is True
 
     @pytest.mark.asyncio
-    async def test_extra_headers_forwarded(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(http_handler=handler)
-        req = {
-            "action": "gitlab_api",
-            "method": "GET",
-            "endpoint": "/projects/1",
-            "body": None,
-            "headers": {"X-Trace": "abc123"},
-        }
-        await handle_gitlab_api(req, ctx)
-        assert seen[0].headers["X-Trace"] == "abc123"
-
-    @pytest.mark.asyncio
-    async def test_no_token_when_gitlab_token_empty(self):
-        ctx = _ctx(gitlab_token="")
-        req = {
-            "action": "gitlab_api",
-            "method": "GET",
-            "endpoint": "/projects/1",
-            "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
+    @pytest.mark.parametrize("provider", ["bitbucket", "", "gitea", "git hub"])
+    async def test_unknown_provider_is_rejected(self, provider):
+        ctx = _ctx()
+        resp = decode_response(
+            await handle_forge_token({"provider": provider}, ctx)
+        )
         assert resp["ok"] is False
-        assert resp["error"] == "no_token"
-
-
-class TestGithubApi:
-    @pytest.mark.asyncio
-    async def test_happy_path_post(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"number":99,"html_url":"https://x"}')
-
-        ctx = _ctx(http_handler=handler)
-        req = {
-            "action": "github_api",
-            "method": "POST",
-            "endpoint": "/repos/foo/bar/pulls",
-            "body": '{"title":"x","head":"f","base":"main"}',
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is True
-        assert resp["status"] == 201
-
-        sent = seen[0]
-        # Public github.com base is rewritten to api.github.com.
-        assert str(sent.url) == "https://api.github.com/repos/foo/bar/pulls"
-        assert sent.headers["Authorization"] == "token GH-TOKEN"
-        assert sent.headers["Accept"] == "application/vnd.github+json"
+        assert resp["error"] == "unknown_provider"
 
     @pytest.mark.asyncio
-    async def test_token_never_appears_in_request_body_or_url(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(github_token="VERY-SECRET-GH", http_handler=handler)
-        req = {
-            "action": "github_api",
-            "method": "GET",
-            "endpoint": "/repos/foo/bar",
-            "body": None,
-        }
-        await handle_github_api(req, ctx)
-        sent = seen[0]
-        assert "VERY-SECRET-GH" not in str(sent.url)
-        assert b"VERY-SECRET-GH" not in sent.content
-        assert sent.headers["Authorization"] == "token VERY-SECRET-GH"
+    async def test_missing_provider_field_is_rejected(self):
+        ctx = _ctx()
+        resp = decode_response(await handle_forge_token({}, ctx))
+        assert resp["ok"] is False
+        assert resp["error"] == "unknown_provider"
 
     @pytest.mark.asyncio
-    async def test_ghe_url_uses_api_v3_base(self):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(github_url="https://ghe.example.com", http_handler=handler)
-        req = {
-            "action": "github_api",
-            "method": "GET",
-            "endpoint": "/repos/foo/bar",
-            "body": None,
-        }
-        await handle_github_api(req, ctx)
-        assert str(seen[0].url) == "https://ghe.example.com/api/v3/repos/foo/bar"
+    async def test_non_string_provider_does_not_raise(self):
+        ctx = _ctx()
+        for bad in (42, None, ["github"], {"a": 1}):
+            resp = decode_response(
+                await handle_forge_token({"provider": bad}, ctx)
+            )
+            assert resp["ok"] is False
+            assert resp["error"] == "unknown_provider"
 
     @pytest.mark.asyncio
-    async def test_no_token_when_github_token_empty(self):
+    async def test_unconfigured_provider_returns_no_token(self):
         ctx = _ctx(github_token="")
-        req = {
-            "action": "github_api",
-            "method": "GET",
-            "endpoint": "/repos/foo/bar",
-            "body": None,
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
+        resp = decode_response(
+            await handle_forge_token({"provider": "github"}, ctx)
+        )
         assert resp["ok"] is False
         assert resp["error"] == "no_token"
+        assert "token" not in resp
+
+    @pytest.mark.asyncio
+    async def test_rejection_message_does_not_carry_the_other_token(self):
+        ctx = _ctx(github_token="", gitlab_token="GL-SECRET")
+        resp = decode_response(
+            await handle_forge_token({"provider": "github"}, ctx)
+        )
+        assert "GL-SECRET" not in json.dumps(resp)
 
 
 # ---- End-to-end via Unix socket --------------------------------------------
@@ -585,9 +525,6 @@ class TestEndToEnd:
             gitlab_token = "GL"
             github_url = "https://github.com"
             github_token = "GH"
-            gitlab_api_allowlist: list = []
-            github_api_allowlist: list = []
-            api_timeout_seconds = 5
 
         class _Cfg:
             developer = _Dev()
@@ -658,9 +595,6 @@ class TestEndToEnd:
             gitlab_token = "GL"
             github_url = "https://github.com"
             github_token = "GH"
-            gitlab_api_allowlist: list = []
-            github_api_allowlist: list = []
-            api_timeout_seconds = 5
 
         class _Cfg:
             developer = _Dev()
@@ -718,9 +652,6 @@ class TestEndToEnd:
             gitlab_token = "GL"
             github_url = "https://github.com"
             github_token = "GH"
-            gitlab_api_allowlist: list = []
-            github_api_allowlist: list = []
-            api_timeout_seconds = 5
 
         class _Cfg:
             developer = _Dev()
@@ -752,146 +683,6 @@ class TestEndToEnd:
                 pass
 
 
-# ---- Stage 3: allowlist enforcement ----------------------------------------
-
-
-class TestAllowlist:
-    @pytest.mark.asyncio
-    async def test_gitlab_endpoint_in_allowlist_is_called(self):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(
-            gitlab_allowlist=("GET /projects/*",),
-            http_handler=handler,
-        )
-        req = {
-            "action": "gitlab_api", "method": "GET",
-            "endpoint": "/projects/42", "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
-        assert resp["ok"] is True
-        assert len(seen) == 1
-
-    @pytest.mark.asyncio
-    async def test_gitlab_endpoint_outside_allowlist_returns_not_allowed(self):
-        called = []
-
-        def handler(request):
-            called.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(
-            gitlab_allowlist=("GET /projects/*",),
-            http_handler=handler,
-        )
-        req = {
-            "action": "gitlab_api", "method": "DELETE",
-            "endpoint": "/projects/42", "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
-        assert resp["ok"] is False
-        assert resp["error"] == "not_allowed"
-        assert "/projects/42" in resp["message"]
-        # Upstream must not be called when the endpoint is rejected.
-        assert called == []
-
-    @pytest.mark.asyncio
-    async def test_gitlab_allowlist_strips_query_string(self):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        # Allowlist pattern matches the path only; the request carries a
-        # query string. The proxy should still allow it.
-        ctx = _ctx(
-            gitlab_allowlist=("GET /projects/*",),
-            http_handler=handler,
-        )
-        req = {
-            "action": "gitlab_api", "method": "GET",
-            "endpoint": "/projects/42?private_token=ignored&per_page=10",
-            "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
-        assert resp["ok"] is True
-
-    @pytest.mark.asyncio
-    async def test_github_endpoint_outside_allowlist_returns_not_allowed(self):
-        called = []
-
-        def handler(request):
-            called.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(
-            github_allowlist=("GET /repos/*",),
-            http_handler=handler,
-        )
-        req = {
-            "action": "github_api", "method": "DELETE",
-            "endpoint": "/repos/foo/bar", "body": None,
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is False
-        assert resp["error"] == "not_allowed"
-        assert called == []
-
-    @pytest.mark.asyncio
-    async def test_github_allowlist_pattern_with_trailing_glob(self):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text="{}")
-
-        ctx = _ctx(
-            github_allowlist=("POST /repos/*/pulls",),
-            http_handler=handler,
-        )
-        # /repos/<owner>/<repo>/pulls should match the wildcard segment.
-        req = {
-            "action": "github_api", "method": "POST",
-            "endpoint": "/repos/foo/bar/pulls", "body": '{"title":"x"}',
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is True
-
-
-class TestHeaderSmugglingRejection:
-    """Reject CR/LF/NUL in caller-supplied header values so a malicious
-    container can't smuggle extra HTTP headers into the upstream request."""
-
-    @pytest.mark.parametrize("bad", ["foo\nbar", "foo\rbar", "foo\x00bar"])
-    @pytest.mark.asyncio
-    async def test_rejects_newline_in_header_value(self, bad):
-        called = []
-
-        def handler(request):
-            called.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = _ctx(
-            github_allowlist=("GET /repos/*",),
-            http_handler=handler,
-        )
-        req = {
-            "action": "github_api", "method": "GET",
-            "endpoint": "/repos/foo/bar", "body": None,
-            "headers": {"X-Custom": bad},
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is False
-        assert resp["error"] == "bad_request"
-        # Upstream must not be called when smuggling is rejected.
-        assert called == []
-
-
 class TestHostNormalization:
     """``_provider_for_host`` must accept mixed case and ``host:port``."""
 
@@ -918,138 +709,7 @@ class TestHostNormalization:
         assert _provider_for_host(host, ctx) == "gitlab"
 
 
-class TestBundledDefaultAllowlists:
-    """Regression: the bundled DeveloperConfig defaults must match what the
-    shims actually emit. The legacy host-side wrapper kept the /api/v4
-    prefix on GitLab patterns; the proxy strips it into base_url, so the
-    defaults need bare paths."""
-
-    def _ctx_with_developer_defaults(self, http_handler):
-        from istota.config import DeveloperConfig
-
-        dev = DeveloperConfig()
-        transport = httpx.MockTransport(http_handler)
-        client = httpx.AsyncClient(transport=transport, timeout=5.0)
-        return DevboxProxyContext(
-            user_id="alice",
-            gitlab_token="GL-TOKEN",
-            github_token="GH-TOKEN",
-            gitlab_url=dev.gitlab_url,
-            github_url=dev.github_url,
-            gitlab_allowlist=tuple(dev.gitlab_api_allowlist),
-            github_allowlist=tuple(dev.github_api_allowlist),
-            api_timeout=5.0,
-            http_client=client,
-        )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,endpoint", [
-        ("GET", "/user"),                                # glab auth status
-        ("GET", "/projects/foo%2Fbar"),                  # glab repo view
-        ("POST", "/projects/foo%2Fbar/merge_requests"),  # glab mr create
-        ("GET", "/projects/foo%2Fbar/merge_requests/7"), # glab mr view
-        ("POST", "/projects/foo%2Fbar/issues"),          # glab issue create
-    ])
-    async def test_glab_endpoints_pass_bundled_gitlab_allowlist(self, method, endpoint):
-        called = []
-
-        def handler(request):
-            called.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = self._ctx_with_developer_defaults(handler)
-        req = {
-            "action": "gitlab_api", "method": method,
-            "endpoint": endpoint, "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
-        assert resp["ok"] is True, (
-            f"{method} {endpoint} rejected by bundled GitLab allowlist: "
-            f"{resp.get('error')} {resp.get('message')}"
-        )
-        assert len(called) == 1
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,endpoint", [
-        ("GET", "/user"),                          # gh auth status
-        ("GET", "/repos/foo/bar"),                 # gh repo view
-        ("POST", "/repos/foo/bar/pulls"),          # gh pr create
-        ("GET", "/repos/foo/bar/pulls/3"),         # gh pr view
-        ("POST", "/repos/foo/bar/issues"),         # gh issue create
-    ])
-    async def test_gh_endpoints_pass_bundled_github_allowlist(self, method, endpoint):
-        called = []
-
-        def handler(request):
-            called.append(request)
-            return httpx.Response(200, text="{}")
-
-        ctx = self._ctx_with_developer_defaults(handler)
-        req = {
-            "action": "github_api", "method": method,
-            "endpoint": endpoint, "body": None,
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is True, (
-            f"{method} {endpoint} rejected by bundled GitHub allowlist: "
-            f"{resp.get('error')} {resp.get('message')}"
-        )
-        assert len(called) == 1
-
-
-# ---- Stage 3: upstream errors + timeouts -----------------------------------
-
-
-class TestUpstreamErrors:
-    @pytest.mark.asyncio
-    async def test_upstream_4xx_returns_upstream_error_with_status_and_body(self):
-        def handler(request):
-            return httpx.Response(422, text='{"error":"invalid"}')
-
-        ctx = _ctx(http_handler=handler)
-        req = {
-            "action": "github_api", "method": "POST",
-            "endpoint": "/repos/foo/bar/pulls", "body": '{"title":"x"}',
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is False
-        assert resp["error"] == "upstream_error"
-        assert resp["status"] == 422
-        assert resp["body"] == '{"error":"invalid"}'
-
-    @pytest.mark.asyncio
-    async def test_upstream_5xx_returns_upstream_error(self):
-        def handler(request):
-            return httpx.Response(503, text="service unavailable")
-
-        ctx = _ctx(http_handler=handler)
-        req = {
-            "action": "gitlab_api", "method": "GET",
-            "endpoint": "/projects/1", "body": None,
-        }
-        resp = decode_response(await handle_gitlab_api(req, ctx))
-        assert resp["ok"] is False
-        assert resp["error"] == "upstream_error"
-        assert resp["status"] == 503
-
-    @pytest.mark.asyncio
-    async def test_upstream_timeout_returns_upstream_error_status_zero(self):
-        def handler(request):
-            raise httpx.TimeoutException("simulated timeout")
-
-        ctx = _ctx(http_handler=handler, api_timeout=0.5)
-        req = {
-            "action": "github_api", "method": "GET",
-            "endpoint": "/repos/foo/bar", "body": None,
-        }
-        resp = decode_response(await handle_github_api(req, ctx))
-        assert resp["ok"] is False
-        assert resp["error"] == "upstream_error"
-        assert resp["status"] == 0
-        assert "timeout" in resp["message"].lower()
-
-
-# ---- Stage 3: malformed + oversized requests ------------------------------
+# ---- Malformed + oversized requests ------------------------------
 
 
 class TestRequestParsing:
@@ -1139,7 +799,7 @@ class TestRequestParsing:
             await server.wait_closed()
 
 
-# ---- Stage 3: audit logging -----------------------------------------------
+# ---- Audit logging -----------------------------------------------
 
 
 class TestAuditLog:
@@ -1201,50 +861,110 @@ class TestAuditLog:
         assert "host=bitbucket.org" in msg
 
     @pytest.mark.asyncio
-    async def test_api_call_audit_line_carries_method_endpoint_status(self, caplog):
+    async def test_forge_token_audit_line_records_provider_and_no_token(self, caplog):
         import logging
 
-        def handler(request):
-            return httpx.Response(201, text='{"number":1}')
-
-        ctx = _ctx(http_handler=handler)
+        ctx = _ctx()
         with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
-            await handle_github_api(
-                {
-                    "action": "github_api", "method": "POST",
-                    "endpoint": "/repos/foo/bar/pulls", "body": '{"title":"x"}',
-                },
-                ctx,
+            resp = decode_response(
+                await handle_forge_token(
+                    {"action": "forge_token", "provider": "github"}, ctx,
+                )
             )
+        assert resp["token"] == "GH-TOKEN"
         records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
-        assert "action=github_api" in msg
-        assert "method=POST" in msg
-        assert "endpoint=/repos/foo/bar/pulls" in msg
-        assert "status=201" in msg
+        assert "action=forge_token" in msg
+        assert "provider=github" in msg
         assert "result=ok" in msg
+        # The whole point of the action is to hand out the token; the audit
+        # line is the one place it must not appear.
+        assert "GH-TOKEN" not in msg
 
     @pytest.mark.asyncio
-    async def test_not_allowed_audit_carries_attempted_endpoint(self, caplog):
+    async def test_unknown_provider_audit_line_cannot_forge_a_second_line(self, caplog):
+        """The provider field is caller-controlled. A newline in it used to
+        pass the audit quoting rule unescaped, which writes a whole second
+        line — one a log reader cannot tell from a real one."""
         import logging
 
-        ctx = _ctx(github_allowlist=("GET /repos/*",))
+        ctx = _ctx()
+        forged = "x\ndevbox_proxy user=alice action=forge_token result=ok dur_ms=1"
         with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
-            await handle_github_api(
-                {
-                    "action": "github_api", "method": "DELETE",
-                    "endpoint": "/repos/foo/bar", "body": None,
-                },
-                ctx,
+            resp = decode_response(
+                await handle_forge_token(
+                    {"action": "forge_token", "provider": forged}, ctx,
+                )
             )
+        assert resp["ok"] is False
+        assert resp["error"] == "unknown_provider"
         records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
         assert len(records) == 1
         msg = records[0].getMessage()
-        assert "result=not_allowed" in msg
-        # Operator needs to see what was attempted.
-        assert "endpoint=/repos/foo/bar" in msg
-        assert "method=DELETE" in msg
+        assert "result=unknown_provider" in msg
+        assert "\n" not in msg
+        assert "\\n" in msg
+
+    @pytest.mark.asyncio
+    async def test_oversized_provider_is_truncated_in_the_audit_line(self, caplog):
+        import logging
+
+        ctx = _ctx()
+        with caplog.at_level(logging.INFO, logger="istota.devbox_proxy.audit"):
+            await handle_forge_token(
+                {"action": "forge_token", "provider": "z" * 100_000}, ctx,
+            )
+        records = [r for r in caplog.records if r.name == "istota.devbox_proxy.audit"]
+        msg = records[0].getMessage()
+        assert len(msg) < 500, "a 16 MiB provider must not become a 16 MiB log line"
+        assert "truncated" in msg
+
+    @pytest.mark.asyncio
+    async def test_retired_action_audits_and_names_the_rebuild(self, sock_path):
+        """An un-rebuilt devbox image still sends `github_api`. Without an
+        audit line the operator sees an agent whose forge calls fail and a
+        proxy journal saying nothing happened at all."""
+        import logging
+
+        ctx = _ctx()
+        with caplog_at(logging.INFO) as records:
+            resp = await _dispatch_one(ctx, {"action": "github_api"})
+        assert resp["ok"] is False
+        assert resp["error"] == "unknown_action"
+        assert "retired" in resp["message"]
+        assert "Ansible" in resp["message"], (
+            "the message has to say what to actually do about it"
+        )
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "result=retired_action" in msg
+        assert "requested=github_api" in msg
+
+    @pytest.mark.asyncio
+    async def test_unknown_action_is_audited(self, sock_path):
+        import logging
+
+        ctx = _ctx()
+        with caplog_at(logging.INFO) as records:
+            resp = await _dispatch_one(ctx, {"action": "definitely_not_real"})
+        assert resp["error"] == "unknown_action"
+        assert len(records) == 1
+        assert "result=unknown_action" in records[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_hostile_action_name_cannot_forge_an_audit_line(self, sock_path):
+        """The action string is caller-controlled and now reaches the log."""
+        import logging
+
+        ctx = _ctx()
+        forged = "x\ndevbox_proxy user=alice action=ping result=ok dur_ms=1"
+        with caplog_at(logging.INFO) as records:
+            await _dispatch_one(ctx, {"action": forged})
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "\n" not in msg
+        assert "\\n" in msg
 
     @pytest.mark.asyncio
     async def test_audit_log_file_fanout(self, tmp_path):

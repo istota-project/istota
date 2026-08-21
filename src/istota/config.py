@@ -604,49 +604,12 @@ class DeveloperConfig:
     # renaming it means touching the env spec, the Ansible var and the
     # rendered config; the comment carries the truth until then.
     gitlab_reviewer_id: str = ""       # GitLab reviewer username for new MRs
-    # Patterns are matched against the bare path the shim emits — the
-    # devbox proxy strips ``/api/v4`` into the upstream ``base_url``
-    # (devbox_proxy.py:handle_gitlab_api) before matching. Don't add the
-    # ``/api/v4`` prefix here or every GitLab call will reject as
-    # not_allowed. The legacy host-side gitlab-api wrapper used the
-    # prefixed form; this codepath is different.
-    gitlab_api_allowlist: list[str] = field(default_factory=lambda: [
-        "GET /user",
-        "GET /projects/*",
-        "GET /groups/*",
-        "GET /users*",
-        "POST /projects/*/merge_requests",
-        "POST /projects/*/merge_requests/*/notes",
-        "POST /projects/*/issues",
-        "POST /projects/*/issues/*/notes",
-        "PUT /projects/*/merge_requests/*/merge",
-    ])
     github_url: str = "https://github.com"
     github_token: str = ""        # Personal access token (repo scope recommended)
     github_username: str = ""     # GitHub username for HTTPS auth (defaults to x-access-token if empty)
     github_default_owner: str = ""  # Default org/user for resolving short repo names
     github_reviewer: str = ""     # GitHub username to request as PR reviewer
     author_credit: str = ""       # Appended to every commit message (e.g., "Co-Authored-By: Name <email>")
-    github_api_allowlist: list[str] = field(default_factory=lambda: [
-        "GET /user",
-        "GET /repos/*",
-        "GET /orgs/*",
-        "GET /users/*",
-        "GET /search/*",
-        "POST /repos/*/pulls",
-        "POST /repos/*/pulls/*/reviews",
-        "POST /repos/*/issues",
-        "POST /repos/*/issues/*/comments",
-        "POST /repos/*/pulls/*/comments",
-        "PUT /repos/*/pulls/*/merge",
-        "PATCH /repos/*/pulls/*",
-        "PATCH /repos/*/issues/*",
-    ])
-    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
-    # `devbox-credential-proxy` spec for the design. The proxy injects
-    # tokens server-side for the in-container `git`, `gitlab-api`,
-    # `github-api`, `gh`, and `glab` wrappers — the container never sees
-    # the token.
     # Forge CLI wrapper (src/istota/forge_cli.py). The real `gh` and `glab`
     # run behind a wrapper that injects the token and checks the argv against
     # a policy. The policy is code-owned rather than config-owned because it
@@ -662,6 +625,12 @@ class DeveloperConfig:
     gh_bin_path: str = "/usr/local/bin/gh"
     glab_bin_path: str = "/usr/local/bin/glab"
     api_timeout_seconds: int = 30
+    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
+    # `devbox-credential-proxy` spec for the design. It answers two things
+    # for the container: a git credential (injected server-side, so git
+    # never holds the token) and, for `gh` / `glab`, the forge token itself
+    # — those run the real binaries behind forge_cli.py and need it in
+    # their own environment.
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
@@ -2726,10 +2695,13 @@ def load_config(config_path: Path | None = None) -> Config:
     if "developer" in data:
         dev = data["developer"]
         extra = {}
-        if "gitlab_api_allowlist" in dev:
-            extra["gitlab_api_allowlist"] = dev["gitlab_api_allowlist"]
-        if "github_api_allowlist" in dev:
-            extra["github_api_allowlist"] = dev["github_api_allowlist"]
+        # `gitlab_api_allowlist` / `github_api_allowlist` were read here
+        # until the devbox proxy stopped making REST calls of its own. They
+        # are deliberately not warned about: the loader ignores unknown keys
+        # by design (below), so a config.toml still carrying them loads clean
+        # and inert. Note that is not a transient state — `config.toml.j2`
+        # still renders both keys on every Ansible run, so they persist until
+        # that template drops them.
         for _key in ("forge_cli_extra_denied", "forge_cli_permit"):
             if _key in dev:
                 extra[_key] = list(dev[_key])

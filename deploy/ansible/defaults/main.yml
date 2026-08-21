@@ -821,10 +821,11 @@ istota_devbox_block_rfc1918: true
 istota_devbox_users: []
 
 # Devbox credential proxy. One systemd unit per devbox user listens on a per-user
-# Unix socket, bind-mounted into the container at /run/istota-cred. Container-side
-# shims (gitlab-api, github-api, gh, glab, git-credential-istota) connect to it and
-# the daemon injects developer.{gitlab,github}_token server-side — tokens never
-# enter the container. Defaults on when devbox is on.
+# Unix socket, bind-mounted into the container at /run/istota-cred. It answers two
+# things: a git credential for git-credential-istota, injected server-side, and the
+# forge token for the container's gh/glab wrapper, which needs it in the real CLI's
+# own environment. The per-user forge URL rides along with that token, since one
+# image serves every user and cannot bake one in. Defaults on when devbox is on.
 istota_devbox_proxy_enabled: true
 istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
 # Empty string → audit lines go to the journal only. Set to an absolute

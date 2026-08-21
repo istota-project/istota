@@ -165,11 +165,14 @@ def _write_policy(bin_dir, real_bin, cfg, *, forge="github", **overrides):
     return path
 
 
-@pytest.fixture
-def deployed(tmp_path):
-    """The wrapper installed as `gh`, next to a fake real binary and a policy."""
+def _deploy(tmp_path, **overrides):
+    """The wrapper installed as `gh`, next to a fake real binary and a policy.
+
+    ``overrides`` go to the github section, so a test can deploy the devbox
+    shape (``url=""``) rather than the sandbox one.
+    """
     wrapper = tmp_path / "bin" / "gh"
-    wrapper.parent.mkdir(parents=True)
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(_MODULE, wrapper)
     wrapper.chmod(0o700)
 
@@ -178,9 +181,32 @@ def deployed(tmp_path):
     real.chmod(0o700)
 
     cfg = tmp_path / "gh-config"
-    cfg.mkdir()
-    _write_policy(wrapper.parent, real, cfg)
+    cfg.mkdir(exist_ok=True)
+    _write_policy(wrapper.parent, real, cfg, **overrides)
     return wrapper, real, cfg
+
+
+def _deploy_glab(tmp_path, **overrides):
+    """The same, installed as `glab`, so the gitlab branch can be exercised."""
+    wrapper = tmp_path / "bin" / "glab"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_MODULE, wrapper)
+    wrapper.chmod(0o700)
+
+    real = tmp_path / "real-glab"
+    real.write_text(_FAKE_BIN)
+    real.chmod(0o700)
+
+    cfg = tmp_path / "glab-config"
+    cfg.mkdir(exist_ok=True)
+    _write_policy(wrapper.parent, real, cfg, forge="gitlab", **overrides)
+    return wrapper, real, cfg
+
+
+@pytest.fixture
+def deployed(tmp_path):
+    """The sandbox shape: a policy that names its own forge URL."""
+    return _deploy(tmp_path)
 
 
 def _run(wrapper, args, env):
@@ -501,17 +527,13 @@ class TestDevboxBackend:
             {"action": ACTION_FORGE_TOKEN, "provider": "github"},
         ]
 
-    def test_devbox_action_is_not_yet_a_real_proxy_action(self, deployed, tmp_path, sock_path):
-        """Stage 4 adds forge_token to the devbox proxy. Until it does, this
-        branch reaches a proxy that answers unknown_action - asserted against
-        the proxy's own ALL_ACTIONS rather than a canned reply, so the test
-        flips to red the moment Stage 4 lands and the branch goes live."""
+    def test_forge_token_is_a_real_devbox_action(self, deployed, tmp_path, sock_path):
+        """The seam between the two copies of the action name. forge_cli.py
+        cannot import istota, so it carries its own ``ACTION_FORGE_TOKEN``;
+        this is where a rename on one side would go unnoticed."""
         from istota.devbox_proxy_protocol import ALL_ACTIONS
 
-        assert ACTION_FORGE_TOKEN not in ALL_ACTIONS, (
-            "forge_token is now a real devbox action - drop this test and "
-            "assert the happy path against ALL_ACTIONS instead"
-        )
+        assert ACTION_FORGE_TOKEN in ALL_ACTIONS
         wrapper, real, cfg = deployed
         proxy = FakeCredentialProxy(
             sock_path, {"ok": True, "token": SENTINEL}, known_actions=ALL_ACTIONS,
@@ -522,8 +544,93 @@ class TestDevboxBackend:
             })
         finally:
             proxy.close()
-        assert r.returncode == EXIT_CREDENTIAL
-        assert "unknown action" in r.stderr
+        assert r.returncode == 0, r.stderr
+        assert _fields(r.stdout)["GH_TOKEN"] == SENTINEL
+
+    def test_proxy_supplied_url_sets_the_host_when_the_policy_has_none(
+        self, tmp_path, sock_path,
+    ):
+        """The devbox shape: one image shared by every user, so its baked
+        policy names no per-user URL and the proxy supplies one. Left
+        unresolved the wrapper falls back to github.com / gitlab.com and a
+        self-hosted token goes to the wrong host, which is a disclosure."""
+        wrapper, real, cfg = _deploy(tmp_path, url="")
+        proxy = FakeCredentialProxy(
+            sock_path,
+            {"ok": True, "token": SENTINEL, "url": "https://ghe.example.com"},
+        )
+        try:
+            r = _run(wrapper, ["pr", "list"], {"ISTOTA_CRED_SOCK": proxy.path})
+        finally:
+            proxy.close()
+        assert r.returncode == 0, r.stderr
+        fields = _fields(r.stdout)
+        assert fields["GH_HOST"] == "ghe.example.com"
+        # Not github.com, so the enterprise variable is the one that carries
+        # it; GH_TOKEN would leave every call unauthenticated.
+        assert fields["GH_TOKEN"] == "<unset>"
+        assert fields["GH_ENTERPRISE_TOKEN"] == SENTINEL
+
+    def test_policy_url_beats_the_proxy_supplied_one(
+        self, deployed, tmp_path, sock_path,
+    ):
+        """The sandbox's policy is the trust anchor and must stay supreme: a
+        proxy answer cannot redirect a deployment that stated its own URL."""
+        wrapper, real, cfg = deployed
+        proxy = FakeCredentialProxy(
+            sock_path,
+            {"ok": True, "token": SENTINEL, "url": "https://evil.example.com"},
+        )
+        try:
+            r = _run(wrapper, ["pr", "list"], {"ISTOTA_CRED_SOCK": proxy.path})
+        finally:
+            proxy.close()
+        assert r.returncode == 0, r.stderr
+        assert _fields(r.stdout)["GH_HOST"] == "github.com"
+
+    def test_missing_url_everywhere_refuses_rather_than_guessing(
+        self, tmp_path, sock_path,
+    ):
+        """No URL in the policy and none from the proxy must refuse, not fall
+        back to the public host.
+
+        Falling back is a credential disclosure, not a misroute: on a GitHub
+        Enterprise Server or self-hosted GitLab deployment the token is scoped
+        to that instance, and the CLI's own default sends it to github.com /
+        gitlab.com. The first cut of this treated the missing URL as benign
+        because the *github.com* case happens to be harmless — which is the
+        one deployment where it is.
+        """
+        wrapper, real, cfg = _deploy(tmp_path, url="")
+        proxy = FakeCredentialProxy(sock_path, {"ok": True, "token": SENTINEL})
+        try:
+            r = _run(wrapper, ["pr", "list"], {"ISTOTA_CRED_SOCK": proxy.path})
+        finally:
+            proxy.close()
+        assert r.returncode == EXIT_MISCONFIGURED, r.stdout
+        assert "no forge URL" in r.stderr
+        # The real binary must never have run — the fake prints these fields.
+        assert "GH_HOST" not in r.stdout
+
+    def test_missing_url_refuses_for_gitlab_too(self, tmp_path, sock_path):
+        """The gitlab counterpart, which is the case that actually bites:
+        GITLAB_HOST is set only `if forge_url`, so an unset one silently means
+        gitlab.com while GITLAB_TOKEN is still populated."""
+        wrapper, real, cfg = _deploy_glab(tmp_path, url="")
+        proxy = FakeCredentialProxy(sock_path, {"ok": True, "token": SENTINEL})
+        try:
+            r = _run(wrapper, ["mr", "list"], {"ISTOTA_CRED_SOCK": proxy.path})
+        finally:
+            proxy.close()
+        assert r.returncode == EXIT_MISCONFIGURED, r.stdout
+        assert "no forge URL" in r.stderr
+
+    def test_meta_invocation_still_works_without_a_url(self, tmp_path):
+        """`gh --version` reaches no forge and needs no token, so the URL
+        refusal must not catch it."""
+        wrapper, real, cfg = _deploy(tmp_path, url="")
+        r = _run(wrapper, ["--version"], {})
+        assert r.returncode == 0, r.stderr
 
     def test_devbox_error_envelope_exits_five(self, deployed, tmp_path, sock_path):
         wrapper, real, cfg = deployed

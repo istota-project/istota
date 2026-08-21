@@ -10,10 +10,10 @@ Two homes, one file. The canonical copy is here; ``docker/devbox/lib/`` holds a
 byte-identical copy because Docker cannot COPY from outside its build context.
 Keep it stdlib-only and free of ``istota`` imports so the container copy runs
 under a bare ``python3`` — ``scripts/sync-devbox-lib.sh`` regenerates it and a
-test fails when the two drift. The container copy is staged, not live: the
-Dockerfile still ships the curated shims and does not COPY this file yet, and
-the ``ISTOTA_CRED_SOCK`` branch below talks to a devbox-proxy action that does
-not exist until Stage 4 of the spec.
+test fails when the two drift. Both copies are live: the sandbox writes this
+file into ``.developer`` per task, and the devbox image installs it at
+``/usr/local/bin/{gh,glab,github-api,gitlab-api}`` in front of the real
+binaries under ``/usr/local/lib/istota_forge/``.
 
 What the policy is and is not: it stops a *mistaken* ``gh repo delete``. It does
 not stop a determined model, which can read the raw token from the credential
@@ -45,9 +45,9 @@ _ARGV0_MAP = {
 
 _TOKEN_VAR = {FORGE_GITHUB: "GITHUB_TOKEN", FORGE_GITLAB: "GITLAB_TOKEN"}
 
-# The devbox-proxy action the ISTOTA_CRED_SOCK branch sends. Named here so a
-# test can assert it against devbox_proxy_protocol.ALL_ACTIONS once Stage 4
-# adds it there; today it is deliberately absent and that branch is inert.
+# The devbox-proxy action the ISTOTA_CRED_SOCK branch sends. Duplicated from
+# devbox_proxy_protocol.ALL_ACTIONS because this module cannot import istota;
+# test_devbox_proxy_protocol asserts the two spellings still agree.
 ACTION_FORGE_TOKEN = "forge_token"
 
 # Exit codes. Anything above these is the real CLI's own status.
@@ -603,13 +603,25 @@ def _sock_roundtrip(sock_path: str, request: dict) -> dict:
         raise CredentialError(f"unparseable proxy response: {e}") from e
 
 
-def fetch_token(forge: str, parent_env: dict[str, str], policy: dict | None = None) -> str:
-    """Ask whichever proxy this environment has for the forge token.
+def fetch_forge_credentials(
+    forge: str, parent_env: dict[str, str], policy: dict | None = None,
+) -> tuple[str, str]:
+    """Ask whichever proxy this environment has for the token and the URL.
+
+    Returns ``(token, url_hint)``. ``url_hint`` is ``""`` everywhere except
+    the devbox: the image is built once and shared by every user, so its baked
+    policy cannot name a per-user ``gitlab_url``. Left unresolved, ``glab``
+    falls back to its own default and a self-hosted token is sent to
+    gitlab.com — a disclosure, not a misroute. The devbox proxy is per-user,
+    host-side, and already the thing handing over the token, so it is the
+    right place to learn the URL from. The policy still wins where it has one
+    (see ``main``), which keeps the sandbox's anchor supreme.
 
     Sandbox: the skill proxy, same request the generated credential-fetch
-    helper makes. Devbox: the devbox proxy's forge_token action, which Stage 4
-    adds — until then that branch reaches a proxy that answers
-    ``unknown_action`` and the call exits 5.
+    helper makes. Devbox: the devbox proxy's ``forge_token`` action.
+
+    Every return is a 2-tuple and the no-proxy case raises, so a caller cannot
+    accidentally bind the token to the whole result.
 
     An ambient token is used only when the *policy* says to. On a deployment
     with the skill proxy switched off — which the local single-user installer
@@ -624,7 +636,7 @@ def fetch_token(forge: str, parent_env: dict[str, str], policy: dict | None = No
     if policy and policy.get("direct_token"):
         ambient = parent_env.get(_TOKEN_VAR[forge], "")
         if ambient:
-            return ambient
+            return ambient, ""
         raise CredentialError(
             f"{_TOKEN_VAR[forge]} not set (policy allows direct tokens)"
         )
@@ -639,7 +651,7 @@ def fetch_token(forge: str, parent_env: dict[str, str], policy: dict | None = No
         value = reply.get("value")
         if not value:
             raise CredentialError(f"{_TOKEN_VAR[forge]} not available")
-        return str(value)
+        return str(value), ""
 
     cred_sock = parent_env.get("ISTOTA_CRED_SOCK")
     if cred_sock:
@@ -653,9 +665,11 @@ def fetch_token(forge: str, parent_env: dict[str, str], policy: dict | None = No
         value = reply.get("token")
         if not value:
             raise CredentialError(f"no token configured for {forge}")
-        return str(value)
+        url = reply.get("url")
+        return str(value), str(url) if isinstance(url, str) else ""
 
     raise NoProxyError("no credential proxy available")
+
 
 
 # --------------------------------------------------------------------------- #
@@ -710,6 +724,10 @@ _SCRUB = (
     "GH_BROWSER", "BROWSER",
     "GH_REPO", "GH_PATH", "GH_FORCE_TTY",
     "GLAMOUR_STYLE", "CLICOLOR_FORCE",
+    # Deprecated in glab 1.114 in favour of GLAB_NO_PROMPT. Scrubbed rather
+    # than passed through: inherited from the parent it buys nothing and costs
+    # a DEPRECATION WARNING on every call.
+    "NO_PROMPT",
     "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
     # Retired inputs. Read from the environment, each of these let the model
     # redirect the wrapper's own trust anchors; they now come from the policy
@@ -830,14 +848,16 @@ def build_invocation(
     else:
         env["GLAB_CONFIG_DIR"] = config_dir
         # glab reads none of the GH_* knobs and ships no `help environment`
-        # topic, so these spellings are from its documentation rather than
-        # from the binary. They are best-effort quieting: if one is wrong the
-        # cost is a version check or a telemetry ping, not a failure. The two
-        # things that do matter here were measured (see the config-dir note
-        # below and GITLAB_HOST above).
+        # topic, so these spellings were taken from its documentation. All
+        # three have since been run against glab 1.114: GLAB_CHECK_UPDATE and
+        # GLAB_SEND_TELEMETRY are accepted silently, and the bare NO_PROMPT
+        # this used to set is **deprecated** — glab prints a DEPRECATION
+        # WARNING on every single call and says to use GLAB_NO_PROMPT. That
+        # warning lands in the task transcript, and the variable stops working
+        # altogether whenever glab drops it. Only the prefixed name is set.
         env["GLAB_CHECK_UPDATE"] = "false"
         env["GLAB_SEND_TELEMETRY"] = "0"
-        env["NO_PROMPT"] = "1"
+        env["GLAB_NO_PROMPT"] = "1"
         if forge_url:
             # The whole URL, not the hostname: a non-443 port and a subpath
             # install are both supported shapes and a hostname loses them.
@@ -928,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
     forge_url = _forge_url(forge, policy)
 
     token: str | None = None
+    url_hint = ""
     if not is_meta_invocation(args):
         # An empty config dir is not a usable default: gh and glab both read an
         # empty value as unset and fall back to $HOME/.config, which is
@@ -952,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_DENIED
         try:
-            token = fetch_token(forge, env, policy)
+            token, url_hint = fetch_forge_credentials(forge, env, policy)
         except NoProxyError as e:
             print(f"{name}: {e}", file=sys.stderr)
             return EXIT_NO_PROXY
@@ -960,8 +981,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {e}", file=sys.stderr)
             return EXIT_CREDENTIAL
 
+        # Refuse rather than guess where to send the token. Neither CLI's own
+        # default is safe here: unset, glab talks to gitlab.com and gh to
+        # github.com, and on a self-hosted or Enterprise Server deployment
+        # that hands a scoped credential to a vendor that was never meant to
+        # see it. Both supported shapes always have a URL — the sandbox's
+        # policy is written with one, and the devbox proxy sends one with the
+        # token — so this fires only when something upstream is misconfigured,
+        # which is exactly when guessing is worst.
+        if not (forge_url or url_hint):
+            print(
+                f"{name}: no forge URL configured, and the credential proxy "
+                f"did not supply one. Refusing to fall back to the public "
+                f"host with a token that may not belong to it.",
+                file=sys.stderr,
+            )
+            return EXIT_MISCONFIGURED
+
+    # The policy's URL wins; the proxy's fills in where the policy has none.
+    # Only the devbox is in that position — see fetch_forge_credentials.
     path, child_argv, child_env = build_invocation(
-        forge, args, env, token, real_bin, config_dir, forge_url,
+        forge, args, env, token, real_bin, config_dir, forge_url or url_hint,
         _state_dir(policy), _data_dir(policy),
     )
     try:
