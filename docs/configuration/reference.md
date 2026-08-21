@@ -140,6 +140,9 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `max_background_workers` | `3` | Instance-level bg worker cap |
 | `user_max_foreground_workers` | `2` | Global per-user fg default |
 | `user_max_background_workers` | `1` | Global per-user bg default |
+| `long_task_threshold_minutes` | `10` | A *running* foreground task older than this stops counting against its user's interactive cap (0 = disabled) |
+| `user_max_long_workers` | `1` | Per-user allowance of discounted long tasks; additive, so the per-user fg thread ceiling becomes 3 |
+| `max_long_workers` | `2` | Instance-wide budget of discounts, partitioned inside `max_foreground_workers`, which stays the hard thread ceiling |
 | `worker_idle_timeout` | `10` | Seconds before idle worker exits |
 | `worker_idle_poll_interval` | `0.5` | Idle worker's queue re-check cadence |
 | `main_loop_read_timeout_ms` | `2000` | SQLite read timeout on the main loop |

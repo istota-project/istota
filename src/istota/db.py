@@ -7191,6 +7191,44 @@ def count_claimable_tasks_for_user_queue(
     return cursor.fetchone()[0]
 
 
+def count_long_running_tasks_by_user(
+    conn: sqlite3.Connection, queue: str, threshold_minutes: int,
+) -> dict[str, int]:
+    """Per-user count of running tasks on ``queue`` older than the threshold.
+
+    Feeds the scheduler's elapsed-time slot reclassification: a task that has
+    demonstrated it is not interactive stops counting against the user's
+    interactive worker cap. See `plan_foreground_slots` in scheduler.py.
+
+    A dict rather than a per-user call because dispatch already builds its
+    pending counts in one pre-lock scan, and a per-user variant would put N
+    queries inside a tick that runs every ~0.5s.
+
+    Only `running` counts. A pending task holds no worker to discount however
+    long it has waited, and `started_at` is NULL until the row goes running —
+    so the age predicate excludes both, which is also the specified reading of
+    a NULL `started_at`: unknown age counts as short, keeping the interactive
+    cap tight rather than loose.
+
+    A non-positive `threshold_minutes` is the off switch and returns empty
+    without querying; zero would otherwise make every task long the instant it
+    started.
+    """
+    if threshold_minutes <= 0:
+        return {}
+    cursor = conn.execute(
+        """
+        SELECT user_id, COUNT(*) FROM tasks
+        WHERE status = 'running'
+        AND queue = ?
+        AND started_at < datetime('now', ?)
+        GROUP BY user_id
+        """,
+        (queue, f"-{int(threshold_minutes)} minutes"),
+    )
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
 def has_active_foreground_task_for_channel(
     conn: sqlite3.Connection, conversation_token: str,
 ) -> bool:

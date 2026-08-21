@@ -15,7 +15,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -1041,6 +1042,126 @@ class UserWorker(threading.Thread):
         self._stop_event.set()
 
 
+@dataclass(frozen=True)
+class ForegroundSlotPlan:
+    """What one user may hold this tick, after long tasks are discounted."""
+
+    interactive: int   # threads still counting against the interactive cap
+    may_spawn: int     # new workers this user may get on this tick
+    slot_range: int    # width of the slot index space to draw from
+
+
+def plan_foreground_slots(
+    *,
+    threads: int,
+    discounted: int,
+    pending: int,
+    user_fg_cap: int,
+    user_max_long_workers: int,
+) -> ForegroundSlotPlan:
+    """Per-user slot arithmetic for elapsed-time reclassification (spec C1).
+
+    The unit of accounting in the pool is a *thread*, not a task: `UserWorker`
+    claims serially and lingers when idle, and `_workers` is keyed by slot
+    index. With the cap at 2 and both slots held there was no free index, which
+    is what blocked a short question behind a forty-minute test run.
+
+    `discounted` is how many of this user's threads are excused from the
+    interactive cap, already bounded by both the per-user and the instance-wide
+    allowance (see `allocate_long_discounts`). The long allowance is additive
+    per user, so the thread ceiling is `user_fg_cap + user_max_long_workers`.
+
+    The `max(0, ...)` is required rather than defensive: the counts are read
+    before `WorkerPool._lock` is taken, so a long task can complete in between
+    and leave `discounted` momentarily larger than `threads`. Without it that
+    reads as negative occupancy and the caller's `range` arithmetic goes with
+    it.
+
+    What it does *not* do, and what no clamp here can do: `discounted` derives
+    from `running` task rows while `threads` counts pool worker threads, and
+    the two come apart whenever a row outlives its worker — the window before
+    the stuck-worker liveness reclaim fires (roughly the same ten minutes as
+    the long threshold), or a second process draining the queue with no pool at
+    all. Such a row excuses occupancy that no thread is holding, and the user
+    gets one extra thread on ordinary interactive work. Clamping `discounted`
+    to `threads` looks like the fix and is arithmetically inert — it changes
+    `interactive` in exactly no case that `max(0, ...)` does not already cover,
+    and it cannot tell a ghost row from a real one anyway. The over-grant is
+    instead bounded by the two ceilings that do hold unconditionally: the
+    additive per-user ceiling below, and `max_foreground_workers` in the
+    caller. It clears itself when the reclaim clears the row.
+
+    Pure. No config, no DB, no lock — the whole point is that the rule can be
+    read and tested without a pool around it.
+    """
+    interactive = max(0, threads - discounted)
+    slot_range = user_fg_cap + user_max_long_workers
+    may_spawn = min(
+        user_fg_cap - interactive,
+        slot_range - threads,
+        pending,
+    )
+    return ForegroundSlotPlan(
+        interactive=interactive,
+        may_spawn=max(0, may_spawn),
+        slot_range=slot_range,
+    )
+
+
+def allocate_long_discounts(
+    long_by_user: Mapping[str, int],
+    *,
+    priority: Sequence[str],
+    user_cap: int,
+    instance_cap: int,
+) -> dict[str, int]:
+    """Hand out at most `instance_cap` discounts, `user_cap` to any one user.
+
+    Per user the long allowance is additive — 2 interactive plus 1 long — so
+    one person's long job cannot consume their own interactivity. Instance-wide
+    it is partitioned instead: `max_foreground_workers` stays the hard ceiling
+    on foreground threads and this bounds how many of them may be discounted.
+    Making both additive would raise the instance ceiling from 5 threads to 7
+    and grow the box's worst-case memory exposure, which is the failure this
+    whole feature exists to bound — the head-of-line block is a fairness
+    problem, not a throughput one.
+
+    `long_by_user` must already be filtered to users a discount would actually
+    unblock — those at or over their interactive cap. Dispatch does that
+    filtering because it is the thing holding the thread counts. Skipping it
+    starves the user the feature exists for: `priority` is oldest-pending-first
+    and does not correlate with "at cap", so a user with a free interactive
+    slot — who was going to spawn anyway, discount or no discount — can take
+    the last of the budget and leave the genuinely blocked user refused.
+
+    `priority` is dispatch's own user order (longest-waiting first), so when the
+    budget is still scarce among eligible users it goes to whoever has waited
+    longest. Users holding a long task but nothing pending never reach
+    dispatch's loop, yet still hold the extra thread, so they are allocated
+    after the priority list rather than skipped — otherwise the budget
+    under-counts exactly the threads it exists to bound. Sorted, so the
+    allocation is deterministic under xdist and across ticks.
+
+    Users granted nothing are omitted rather than mapped to 0, so the result
+    reads the same as an empty allocation when the feature is off.
+    """
+    if user_cap <= 0 or instance_cap <= 0:
+        return {}
+    seen = list(priority) + sorted(set(long_by_user) - set(priority))
+    granted: dict[str, int] = {}
+    remaining = instance_cap
+    for user_id in seen:
+        if remaining <= 0:
+            break
+        long_tasks = long_by_user.get(user_id, 0)
+        if long_tasks <= 0:
+            continue
+        take = min(long_tasks, user_cap, remaining)
+        granted[user_id] = take
+        remaining -= take
+    return granted
+
+
 class WorkerPool:
     """Manages per-user, per-queue worker threads with a concurrency cap.
 
@@ -1201,17 +1322,37 @@ class WorkerPool:
     def dispatch(self) -> None:
         """Spawn workers for users with pending tasks, prioritizing foreground.
 
-        Three-tier concurrency control:
-        1. Instance-level fg cap: max_foreground_workers
+        Concurrency control, in the order it binds:
+        1. Instance-level fg cap: max_foreground_workers — a *hard* ceiling on
+           foreground threads, which the long allowance below never raises
         2. Instance-level bg cap: max_background_workers
         3. Per-user caps: effective_user_max_fg_workers / effective_user_max_bg_workers
+        4. Per-user long allowance (C1, foreground only): a running task past
+           `long_task_threshold_minutes` stops counting against (3), which
+           raises that user's thread ceiling to `user_fg_cap +
+           user_max_long_workers`. `max_long_workers` is the instance-wide
+           budget of such discounts — partitioned inside (1), not added to it.
+           See `plan_foreground_slots` / `allocate_long_discounts`.
 
-        Ahead of all three sits the memory admission gate (C2): below the floor,
-        this tick spawns nothing at all and the pending rows wait. The check is
-        first so a squeezed host does not even pay for the DB scan.
+        Ahead of all of them sits the memory admission gate (C2): below the
+        floor, this tick spawns nothing at all and the pending rows wait. The
+        check is first so a squeezed host does not even pay for the DB scan.
         """
         if not self._admission_open():
             return
+
+        long_threshold = self.config.scheduler.long_task_threshold_minutes
+        user_max_long = self.config.scheduler.user_max_long_workers
+        # Any of the three at 0 is the documented off switch, and all three have
+        # to be checked here rather than only in the allocator: with the
+        # instance budget at 0 the query would still run every ~0.5s and have
+        # its result discarded, which is a cost the "0 disables" wording does
+        # not promise.
+        long_enabled = (
+            long_threshold > 0
+            and user_max_long > 0
+            and self.config.scheduler.max_long_workers > 0
+        )
 
         # Short busy_timeout: this scan is pure reads, so a DB locked past the
         # budget means "skip this dispatch tick" (dispatch runs again in ~0.5s)
@@ -1229,6 +1370,18 @@ class WorkerPool:
                 # legitimate parallelism is unaffected.
                 fg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
                 bg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
+                # One extra grouped query, joining the same pre-lock scan: the
+                # per-user count of foreground tasks that have demonstrated
+                # they are not interactive (C1). Skipped entirely when the
+                # feature is off, so a deployment that does not want it does
+                # not pay for it on every ~0.5s tick.
+                fg_long = (
+                    db.count_long_running_tasks_by_user(
+                        conn, "foreground", long_threshold
+                    )
+                    if long_enabled
+                    else {}
+                )
         except sqlite3.OperationalError as exc:
             logger.warning("dispatch_scan_db_locked err=%s (skipping tick)", exc)
             return
@@ -1239,15 +1392,50 @@ class WorkerPool:
         with self._lock:
             # Phase 1: foreground workers
             active_fg = sum(1 for (_, qt, _) in self._workers if qt == "foreground")
+            fg_threads: dict[str, int] = {}
+            for (uid, qt, _) in self._workers:
+                if qt == "foreground":
+                    fg_threads[uid] = fg_threads.get(uid, 0) + 1
+            # Only users already at or over their interactive cap can be
+            # unblocked by a discount; anyone below it spawns on the ordinary
+            # cap regardless. Charging them the budget anyway is how the user
+            # this feature exists for — the one at cap with a question waiting
+            # — gets refused while someone who needed nothing takes the last
+            # of it. Allocated over every eligible user holding a long task,
+            # not only those with pending work: a user with an extra thread
+            # and an empty queue still occupies the exposure being bounded.
+            eligible_long = {
+                uid: n
+                for uid, n in fg_long.items()
+                if fg_threads.get(uid, 0)
+                >= self.config.effective_user_max_fg_workers(uid)
+            }
+            discounts = allocate_long_discounts(
+                eligible_long,
+                priority=fg_users,
+                user_cap=user_max_long,
+                instance_cap=self.config.scheduler.max_long_workers,
+            )
+            self._retire_surplus_foreground_workers(fg_threads, discounts)
             for user_id in fg_users:
+                # `fg_cap` stays the hard instance ceiling on foreground
+                # threads. The long allowance is additive per user and
+                # partitioned here, so a discount never buys a thread past it.
                 if active_fg >= fg_cap:
                     break
                 user_fg_cap = self.config.effective_user_max_fg_workers(user_id)
                 existing_slots = {s for (uid, qt, s) in self._workers if uid == user_id and qt == "foreground"}
-                user_fg_active = len(existing_slots)
-                pending = fg_pending.get(user_id, 0)
-                to_spawn = min(user_fg_cap - user_fg_active, pending)
-                available = (s for s in range(user_fg_cap) if s not in existing_slots)
+                plan = plan_foreground_slots(
+                    threads=len(existing_slots),
+                    discounted=discounts.get(user_id, 0),
+                    pending=fg_pending.get(user_id, 0),
+                    user_fg_cap=user_fg_cap,
+                    user_max_long_workers=user_max_long,
+                )
+                to_spawn = plan.may_spawn
+                user_discount = discounts.get(user_id, 0)
+                threads_now = len(existing_slots)
+                available = (s for s in range(plan.slot_range) if s not in existing_slots)
                 for slot in available:
                     if to_spawn <= 0 or active_fg >= fg_cap:
                         break
@@ -1255,7 +1443,19 @@ class WorkerPool:
                     worker = UserWorker(user_id, self.config, self, queue_type="foreground", slot=slot)
                     self._workers[key] = worker
                     worker.start()
-                    logger.info("Spawned foreground worker for user %s (slot %d)", user_id, slot)
+                    threads_now += 1
+                    # `threads` is the running total *after* this spawn, not the
+                    # plan-time figure: two spawns in one tick would otherwise
+                    # log the same number twice and a reader reconstructing
+                    # occupancy from the log would undercount. This line is the
+                    # only observability the allowance ships.
+                    logger.info(
+                        "Spawned foreground worker for user %s (slot %d, threads=%d "
+                        "interactive=%d long_discount=%d)",
+                        user_id, slot, threads_now,
+                        max(0, threads_now - user_discount),
+                        user_discount,
+                    )
                     active_fg += 1
                     to_spawn -= 1
 
@@ -1280,6 +1480,60 @@ class WorkerPool:
                     logger.info("Spawned background worker for user %s (slot %d)", user_id, slot)
                     active_bg += 1
                     to_spawn -= 1
+
+    def _retire_surplus_foreground_workers(
+        self, fg_threads: "dict[str, int]", discounts: "dict[str, int]"
+    ) -> None:
+        """Ask workers held up only by a lapsed discount to finish and exit.
+
+        Without this the long allowance is granted once and never taken back.
+        `dispatch` only ever *adds* threads, and a worker re-claims on its own
+        without rechecking its slot, so the moment a long task ended while its
+        user still had backlog the extra thread carried on serving ordinary
+        interactive work — turning the documented "2 interactive + 1 long" into
+        "3 interactive" for as long as the queue stayed non-empty. The instance
+        ceiling still held, so this was never box exposure; it was the per-user
+        cap quietly not meaning what it says.
+
+        Also covers the pre-existing case of a cap lowered under a live pool,
+        which stranded a worker at an index outside the new range.
+
+        `request_stop` is graceful: `UserWorker.run` checks the stop event at
+        the top of its loop, so a worker mid-task finishes that task and then
+        exits. Nothing is preempted, killed or migrated — the same rule the
+        long task itself is held to. Highest slot index first, so the retired
+        thread is the one the allowance added rather than an original.
+
+        Called with `self._lock` held; it only reads `_workers` and calls
+        `request_stop`, which sets an event and returns.
+        """
+        for user_id, threads in fg_threads.items():
+            user_fg_cap = self.config.effective_user_max_fg_workers(user_id)
+            interactive = max(0, threads - discounts.get(user_id, 0))
+            surplus = interactive - user_fg_cap
+            if surplus <= 0:
+                continue
+            slots = sorted(
+                (s for (uid, qt, s) in self._workers
+                 if uid == user_id and qt == "foreground"),
+                reverse=True,
+            )
+            for slot in slots[:surplus]:
+                worker = self._workers.get((user_id, "foreground", slot))
+                if worker is None:
+                    continue
+                # Already asked on an earlier tick — it is finishing its task.
+                # Re-asking is harmless but would re-log every ~0.5s until it
+                # exits, which is the wrong shape for a line an operator reads.
+                stop_event = getattr(worker, "_stop_event", None)
+                if stop_event is not None and stop_event.is_set():
+                    continue
+                worker.request_stop()
+                logger.info(
+                    "Retiring surplus foreground worker for user %s (slot %d, "
+                    "interactive=%d cap=%d) — long allowance lapsed",
+                    user_id, slot, interactive, user_fg_cap,
+                )
 
     def _on_worker_exit(self, user_id: str, queue_type: str, slot: int) -> None:
         """Called by a worker thread when it exits."""
