@@ -8268,11 +8268,18 @@ def insert_task_usage(
     source_type: str = "",
     brain_kind: str = "",
     is_fallback: bool = False,
+    model: str = "",
     effort: str = "",
     stop_reason: str = "",
     success: bool = False,
 ) -> int:
     """Write one usage row plus its per-model children. Returns the parent id.
+
+    ``model`` is the model the caller knows the attempt actually ran, and it
+    wins over ``usage.model`` when set. The two can differ: ``usage.model`` is
+    the CLI's cost-weighted dominant model, which is not the same answer on a
+    run whose out-of-band calls outweigh a cheap main turn, and it is empty
+    outright for a native row, which reports one total with no per-model split.
 
     Two things here are load-bearing and neither is obvious.
 
@@ -8310,15 +8317,15 @@ def insert_task_usage(
         return _insert_task_usage_once(
             conn, usage=usage, task_id=task_id, origin=origin, user_id=user_id,
             source_type=source_type, brain_kind=brain_kind,
-            is_fallback=is_fallback, effort=effort, stop_reason=stop_reason,
-            success=success,
+            is_fallback=is_fallback, model=model, effort=effort,
+            stop_reason=stop_reason, success=success,
         )
     except sqlite3.Error:
         return _insert_task_usage_once(
             conn, usage=usage, task_id=task_id, origin=origin, user_id=user_id,
             source_type=source_type, brain_kind=brain_kind,
-            is_fallback=is_fallback, effort=effort, stop_reason=stop_reason,
-            success=success,
+            is_fallback=is_fallback, model=model, effort=effort,
+            stop_reason=stop_reason, success=success,
         )
 
 
@@ -8332,6 +8339,7 @@ def _insert_task_usage_once(
     source_type: str,
     brain_kind: str,
     is_fallback: bool,
+    model: str,
     effort: str,
     stop_reason: str,
     success: bool,
@@ -8365,7 +8373,7 @@ def _insert_task_usage_once(
             """,
             (
                 task_id, origin, user_id, source_type, brain_kind,
-                1 if is_fallback else 0, usage.model, effort, stop_reason,
+                1 if is_fallback else 0, model or usage.model, effort, stop_reason,
                 1 if success else 0,
                 1 if usage.has_totals else 0, usage.totals_source,
                 usage.billed_input_tokens, usage.output_tokens,

@@ -187,6 +187,8 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `actions_taken: str \| None` | JSON-encoded list of tool-use descriptions |
 | `execution_trace: str \| None` | JSON-encoded `[{type:"tool"\|"text"\|"cm_boundary", ...}]`. A `tool` entry carries an optional `raw` = the verbatim Bash command (`_tool_invocation`), threaded by all three brains for playbook command extraction (ISSUE-174) |
 | `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `terminated` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` = a subscription/quota/billing limit (a persistent "brain unavailable" condition the executor reroutes to the configured fallback brain — see "Brain fallback" below). `terminated` = the subprocess was killed by a signal other than SIGKILL — see "Signal deaths" below. |
+| `usage: BrainUsage | None` | Per-attempt token/cost telemetry, normalized across brains (`istota.usage`). **Retyped from `TaskUsage`** — the two vocabularies differ and the difference is load-bearing: `TaskUsage.input_tokens` is OpenAI-compat `prompt_tokens`, *inclusive* of cache reads (and `native._log_cache_telemetry` depends on that), while `BrainUsage.billed_input_tokens` excludes them, matching Anthropic's convention. `from_task_usage` reconciles the two at the boundary and labels the result `totals_source='derived'`; `session/usage.py` keeps its shape and that function still runs on the raw `TaskUsage`, before conversion. Set on **every** return, success or failure — tokens are spent either way. `TmuxClaudeBrain` leaves it `None`: it drives the interactive TUI and reconstructs events from a JSONL transcript, so there is no result frame to read, and a synthetic zero would drag every average. |
+| `brain_kind: str` | Which brain produced this result, for the usage row. Set by the brain on the way out rather than threaded from the executor's construction site, so it stays correct on the fallback path for free — there the executor's own variable no longer describes the result it holds. One of `KNOWN_BRAIN_KINDS`; empty for `tmux_claude`. |
 
 ## ClaudeCodeBrain
 Wraps the `claude` CLI subprocess. Owns:
@@ -274,6 +276,40 @@ Wraps the `claude` CLI subprocess. Owns:
    at `RETRY_AFTER_MAX_SECONDS`, else `API_RETRY_DELAY_SECONDS`.
    Retries do NOT count against the task's `attempt_count`.
 9. **Result fallback** — prefers ResultEvent > result_file > stderr.
+10. **Usage capture** — off the same stream, into `BrainResult.usage`. Totals and
+    the per-model split come from the terminal frame's `modelUsage`, **not**
+    `result.usage`: measured on a two-turn run, `modelUsage` reproduces
+    `total_cost_usd` exactly while `result.usage` is 533 input and 14 output
+    tokens short, because it covers only the main agent's conversation and not
+    the CLI's own out-of-band calls. Totalling from `result.usage` therefore
+    under-reports spend *and* breaks the invariant that a parent's totals equal
+    the sum of its children.
+
+    Per-request context measures come from `stream_event`/`message_delta`
+    frames, one per API request, carrying the final usage for that request.
+    Deliberately not the `assistant` frames: `parse_stream_line` returns one
+    event per line and that branch already ends in a ladder returning a
+    `ToolUseEvent` / `TextEvent` / `ThinkingEvent`, so emitting usage there
+    would consume the return slot and drop the tool event — costing a tool chip
+    on the live surface, an `actions_taken` entry and the `execution_trace`
+    entry the sleep cycle reads for playbooks. `tests/test_stream_parser_usage.py`
+    carries the regression guard. `message_delta` is also better data: once per
+    request, no `message.id` dedup, and the true output count rather than the
+    per-content-block snapshot an `assistant` frame carries.
+
+    Sub-agent frames (`parent_tool_use_id` set on the wrapper) and compaction
+    replays are excluded from the context measures and counted instead, so the
+    peak means *this* agent's peak and a replay does not inflate the request
+    count. Neither `RequestUsageEvent` nor `RateLimitEvent` is forwarded to
+    `req.on_progress` or the execution trace — the executor fans progress out to
+    live surfaces, and an accounting frame in a user's chat is a bug.
+
+    `cost_basis` comes from the `init` frame's `apiKeySource`, and an
+    unrecognized spelling is `unknown` rather than guessed into `api` — a
+    subscription's list-price equivalent must never render as spend. Only the
+    final in-brain retry attempt's usage is captured (a documented limitation),
+    but a retry that exhausts its attempts still records that attempt rather
+    than nothing.
 
 `_compose_full_result()` does NOT live in the brain — both brains will
 produce `(result_text, execution_trace)` and the executor reconciles them.

@@ -408,5 +408,11 @@ def from_task_usage(
         or usage.cache_write_tokens
     )
     usage.totals_source = TOTALS_SOURCE_DERIVED
-    usage.cost_basis = COST_BASIS_API if cost_reported else COST_BASIS_ESTIMATED
+    if not usage.has_totals:
+        # Nothing was measured, so there is no cost figure for a basis to
+        # describe. Labelling it `estimated` would put unmeasured attempts into
+        # a basis breakdown as though they carried a catalog price.
+        usage.cost_basis = COST_BASIS_UNKNOWN
+    else:
+        usage.cost_basis = COST_BASIS_API if cost_reported else COST_BASIS_ESTIMATED
     return usage

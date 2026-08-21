@@ -234,7 +234,7 @@ class TestSubagentAndCompaction:
         would inflate model_requests with nothing behind it."""
         compacted = _message_delta(
             input_tokens=5, cache_read=0, cache_write=100, output=10,
-            context_management={"applied_edits": []},
+            context_management={"applied_edits": [{"type": "clear_tool_uses_20250919"}]},
         )
 
         result = _run(
@@ -278,6 +278,69 @@ class TestTruncatedStream:
         result = _run([_init(model="claude-sonnet-5"), _REQ_1], tmp_path=tmp_path)
 
         assert result.usage.model == "claude-sonnet-5"
+
+
+class TestRetryWrapperKeepsUsage:
+    """The retry wrapper builds two `BrainResult`s of its own. They used to
+    carry no usage, so a run that streamed real requests and then exhausted its
+    retries recorded nothing — and that is the worst case to lose, because
+    `transient_api_error` is in the executor's default fallback trigger set: the
+    primary's spend would vanish and the fallback's would be the only tokens the
+    task ever recorded."""
+
+    _TRANSIENT = json.dumps({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "result": "API Error: 529 Overloaded",
+    })
+
+    def test_exhausted_retries_still_carry_the_last_attempt(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "istota.brain.claude_code._interruptible_sleep", lambda *a, **k: False
+        )
+        stream = [_init(), _REQ_1, _REQ_2, self._TRANSIENT]
+        processes = [_mock_process(list(stream)) for _ in range(3)]
+
+        with patch(
+            "istota.brain.claude_code.subprocess.Popen",
+            side_effect=processes,
+        ):
+            result = ClaudeCodeBrain().execute(
+                BrainRequest(
+                    prompt="hi", allowed_tools=["Bash"], cwd=tmp_path, env={},
+                    timeout_seconds=60, streaming=True,
+                )
+            )
+
+        assert result.stop_reason == "transient_api_error"
+        assert result.usage is not None
+        assert result.usage.model_requests == 2
+        assert result.usage.initial_context_tokens == 14434
+
+    def test_a_cancel_during_the_backoff_still_carries_usage(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "istota.brain.claude_code._interruptible_sleep", lambda *a, **k: True
+        )
+        stream = [_init(), _REQ_1, _REQ_2, self._TRANSIENT]
+
+        with patch(
+            "istota.brain.claude_code.subprocess.Popen",
+            side_effect=[_mock_process(list(stream)) for _ in range(3)],
+        ):
+            result = ClaudeCodeBrain().execute(
+                BrainRequest(
+                    prompt="hi", allowed_tools=["Bash"], cwd=tmp_path, env={},
+                    timeout_seconds=60, streaming=True,
+                )
+            )
+
+        assert result.stop_reason == "cancelled"
+        assert result.usage is not None
+        assert result.usage.model_requests == 2
 
 
 class TestFailurePathsStillMeasure:

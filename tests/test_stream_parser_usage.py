@@ -95,11 +95,28 @@ class TestRequestUsage:
 
     def test_a_compacted_frame_is_marked(self):
         event = parse_stream_line(
-            _message_delta(context_management={"applied_edits": []})
+            _message_delta(
+                context_management={"applied_edits": [{"type": "clear_tool_uses_20250919"}]}
+            )
         )
 
         assert isinstance(event, RequestUsageEvent)
         assert event.compacted is True
+
+    @pytest.mark.parametrize(
+        "cm", [None, {}, {"applied_edits": []}, "clearing", 7]
+    )
+    def test_an_empty_context_management_payload_is_not_a_compaction(self, cm):
+        """Keyed on the payload's content, not on the key being present. The
+        asymmetry decides it: a compacted request is excluded from the context
+        measures, so if the CLI attaches this key to every frame while context
+        management is merely enabled, a presence test reports NULL context and
+        zero requests for the whole run. Reading the content instead can only
+        miscount one replay."""
+        event = parse_stream_line(_message_delta(context_management=cm))
+
+        assert isinstance(event, RequestUsageEvent)
+        assert event.compacted is False
 
     def test_a_message_delta_without_usage_yields_nothing(self):
         line = json.dumps({

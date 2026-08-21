@@ -112,6 +112,47 @@ class TestTaskRows:
         assert row["initial_context_tokens"] == 14434
         assert row["peak_context_tokens"] == 14573
 
+    def test_the_callers_model_is_recorded_when_usage_carries_none(self, env):
+        """A native row reports one total with no per-model split, so
+        `usage.model` is empty and the caller's value is the only one there is.
+        Every other test here uses a fixture that pre-populates `usage.model`,
+        which is exactly why a dropped `model` argument reads as working."""
+        cfg, dbp, tid = env
+        native = _usage(models=[], model="")
+
+        with db.get_db(dbp) as conn:
+            _persist_task_usage(
+                cfg, conn, tid, native, user_id="alice", brain_kind="native",
+                model="claude-sonnet-5", effort="high",
+            )
+
+        row = _rows(dbp)[0]
+        assert row["model"] == "claude-sonnet-5"
+        assert row["effort"] == "high"
+
+    def test_usage_model_is_the_fallback_when_the_caller_names_none(self, env):
+        cfg, dbp, tid = env
+        with db.get_db(dbp) as conn:
+            _persist_task_usage(
+                cfg, conn, tid, _usage(model="model-a"), user_id="alice",
+                brain_kind="claude_code",
+            )
+
+        assert _rows(dbp)[0]["model"] == "model-a"
+
+    def test_the_callers_model_wins_over_the_dominant_model(self, env):
+        """They can disagree: `usage.model` is the CLI's cost-weighted dominant
+        model, which is not the same answer on a run whose out-of-band calls
+        outweigh a cheap main turn."""
+        cfg, dbp, tid = env
+        with db.get_db(dbp) as conn:
+            _persist_task_usage(
+                cfg, conn, tid, _usage(model="model-a"), user_id="alice",
+                brain_kind="claude_code", model="model-b",
+            )
+
+        assert _rows(dbp)[0]["model"] == "model-b"
+
     def test_none_usage_is_a_noop(self, env):
         cfg, dbp, tid = env
         with db.get_db(dbp) as conn:

@@ -192,6 +192,34 @@ def make_stream_parser() -> Callable[[str], StreamEvent | None]:
     return parse
 
 
+# SQLite binds INTEGER as signed 64-bit; mirrors `istota.usage`'s own bound.
+_SQLITE_INT_MIN = -(2**63)
+_SQLITE_INT_MAX = 2**63 - 1
+
+
+def _is_compaction(cm) -> bool:
+    """Whether a ``context_management`` payload records an actual compaction.
+
+    Keyed on the payload's *content*, not on the key being present, and the
+    asymmetry is why. A request marked compacted is excluded from the context
+    measures, so if the CLI turns out to attach this key to every
+    ``message_delta`` while context management is merely enabled, a presence
+    test would divert every request and report NULL context and zero requests
+    for the whole run. Reading the content instead fails the other way: the
+    worst case is that one replay is counted as a real request, which moves a
+    count by one rather than emptying three columns.
+
+    An empty ``applied_edits`` means nothing was compacted.
+    """
+    if not isinstance(cm, dict):
+        return False
+    edits = cm.get("applied_edits")
+    if isinstance(edits, list):
+        return bool(edits)
+    # An unfamiliar shape — any non-empty payload counts.
+    return bool(cm)
+
+
 def _usage_int(usage: dict, key: str) -> int:
     """One usage field as a non-negative int, tolerating anything else.
 
@@ -204,9 +232,16 @@ def _usage_int(usage: dict, key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
     try:
-        return max(0, int(value))
+        as_int = int(value)
     except (ValueError, OverflowError):
         return 0
+    # Same signed-64-bit bound `istota.usage._int` applies. Without it a nonsense
+    # magnitude survives here and is rejected downstream, which turns an
+    # unmeasurable context into a *measured* zero — and zero is the one value the
+    # context columns must never hold, since NULL is what marks them unmeasured.
+    if not _SQLITE_INT_MIN <= as_int <= _SQLITE_INT_MAX:
+        return 0
+    return max(0, as_int)
 
 
 def parse_stream_line(
@@ -283,7 +318,7 @@ def parse_stream_line(
                     # On the wrapper: null for the main agent, set for a
                     # `Task` sub-agent's requests.
                     is_subagent=data.get("parent_tool_use_id") is not None,
-                    compacted=inner.get("context_management") is not None,
+                    compacted=_is_compaction(inner.get("context_management")),
                 )
         return None
 

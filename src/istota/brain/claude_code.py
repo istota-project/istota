@@ -1097,12 +1097,26 @@ class ClaudeCodeBrain:
     # --- streaming path ---
 
     def _execute_streaming(self, cmd: list[str], req: BrainRequest) -> BrainResult:
-        """Popen + stream-json parsing with auto-retry on transient API errors."""
+        """Popen + stream-json parsing with auto-retry on transient API errors.
+
+        Only the final attempt's usage is carried, which is the documented
+        limitation: an in-brain retry can burn two context loads before a 529 and
+        this records one. What it must not do is record *none* — the two results
+        this function builds itself used to leave `usage` at None, so a run that
+        streamed real requests and then exhausted its retries wrote no row at
+        all. That is the worst case to lose, because `transient_api_error` is in
+        the executor's default fallback trigger set: the primary's spend would
+        vanish and the fallback's would be the only tokens the task ever
+        recorded.
+        """
         last_error = ""
         last_trace = None
+        last_usage = None
 
         for attempt in range(API_RETRY_MAX_ATTEMPTS):
             result = self._execute_streaming_once(cmd, req)
+            if result.usage is not None:
+                last_usage = result.usage
 
             if result.success:
                 return result
@@ -1132,6 +1146,7 @@ class ClaudeCodeBrain:
                         success=False,
                         result_text="Cancelled by user",
                         stop_reason="cancelled",
+                        usage=last_usage,
                     )
             else:
                 logger.error(
@@ -1144,6 +1159,7 @@ class ClaudeCodeBrain:
             result_text=last_error,
             execution_trace=last_trace,
             stop_reason="transient_api_error",
+            usage=last_usage,
         )
 
     @staticmethod
@@ -1158,7 +1174,21 @@ class ClaudeCodeBrain:
         silently dropping a measurement.
         """
         accounting: dict = {}
-        result = ClaudeCodeBrain._execute_streaming_once_inner(cmd, req, accounting)
+        try:
+            result = ClaudeCodeBrain._execute_streaming_once_inner(
+                cmd, req, accounting
+            )
+        except Exception as e:
+            # A raise past the inner body would otherwise discard everything
+            # measured before it: `execute`'s catch-all returns a bare result,
+            # and the tokens are spent either way. Converted to a failure result
+            # here so the accounting survives.
+            logger.exception("streaming attempt raised")
+            result = BrainResult(
+                success=False,
+                result_text=f"Execution error: {e}",
+                stop_reason="error",
+            )
         result.usage = usage_types.from_cli_result(
             accounting.get("result_frame"),
             accounting.get("requests") or [],

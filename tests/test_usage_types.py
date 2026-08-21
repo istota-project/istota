@@ -458,13 +458,24 @@ class TestFromTaskUsage:
         assert u.turns == 3
 
     def test_provider_reported_cost_is_api(self):
-        u = from_task_usage(TaskUsage(cost_usd=1.0), cost_reported=True)
+        u = from_task_usage(
+            TaskUsage(output_tokens=10, turns=1, cost_usd=1.0), cost_reported=True
+        )
         assert u.cost_basis == "api"
 
     def test_catalog_fallback_is_estimated(self):
         """The catalog prices an unknown model at zero; that is not real spend."""
-        u = from_task_usage(TaskUsage(cost_usd=0.0), cost_reported=False)
+        u = from_task_usage(
+            TaskUsage(output_tokens=10, turns=1, cost_usd=0.0), cost_reported=False
+        )
         assert u.cost_basis == "estimated"
+
+    def test_an_unmeasured_attempt_has_no_cost_basis(self):
+        """There is no cost figure for a basis to describe, and labelling it
+        `estimated` would put unmeasured attempts into a basis breakdown as
+        though they carried a catalog price."""
+        assert from_task_usage(TaskUsage()).cost_basis == "unknown"
+        assert from_task_usage(TaskUsage(), cost_reported=True).cost_basis == "unknown"
 
     def test_none_yields_an_empty_usage(self):
         u = from_task_usage(None)
