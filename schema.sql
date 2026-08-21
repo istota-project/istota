@@ -121,6 +121,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(scheduled_for) WHERE scheduled_for IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(queue, status);
+-- Dispatch's per-tick long-task scan (count_long_running_tasks_by_user): two
+-- equalities then a started_at range. idx_tasks_queue above covers only the
+-- equality prefix, and this scan runs every ~0.5s. user_id is carried to make
+-- the index *covering*, so the scan never touches the table; it does not order
+-- the GROUP BY, which still builds a temp b-tree — started_at is a range
+-- constraint, so index order is not user_id order. That b-tree spans one row
+-- per long task, which is single digits.
+CREATE INDEX IF NOT EXISTS idx_tasks_queue_started ON tasks(queue, status, started_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(user_id, created_at);
 

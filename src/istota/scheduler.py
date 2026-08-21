@@ -15,13 +15,19 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
+
+# Top-level rather than imported where used: the admission gate consults it on
+# every dispatch tick (~0.5s), and it is a stdlib-only leaf with no import of
+# its own back into the package, so there is no cycle to avoid.
+from . import host_pressure as host_pressure_mod
 
 logger = logging.getLogger("istota.scheduler")
 # Dedicated logger so operators can isolate the periodic health line from the
@@ -88,6 +94,7 @@ from .executor import (
 )
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
+from .modules import MODULE_NAMES
 from .notifications import effective_log_destinations, send_notification
 from .process_group import kill_process_group
 from .transport import (
@@ -864,6 +871,7 @@ def _worker_idle_wait(
     should_stop: Callable[[], bool],
     run_one: Callable[[], "tuple[int, bool] | None"],
     pending_count: Callable[[], int],
+    admission_open: Callable[[], bool] = lambda: True,
 ) -> "tuple[int, bool] | None":
     """Park an idle worker, re-checking for work on a fine cadence.
 
@@ -886,6 +894,18 @@ def _worker_idle_wait(
     race (``run_one`` returns ``None`` after a positive ``pending_count``) does
     not reset it, so two idle workers ping-ponging empty queues cannot keep each
     other alive forever.
+
+    ``admission_open`` is the memory gate. On the fine-cadence path a closed
+    gate skips the claim and keeps polling against the *same* deadline, so a
+    worker parked on a squeezed host ages out at ``worker_idle_timeout`` and
+    exits rather than holding a slot open indefinitely — under sustained
+    pressure the pool drains, and ``dispatch`` declines to refill it. Checked
+    ahead of ``pending_count`` because a closed gate should cost nothing at all,
+    not even the indexed read. On the legacy branch below there is no polling to
+    continue, so a closed gate returns ``None`` and the worker exits after that
+    single recheck; that is the same exit this branch already takes when
+    ``run_one`` finds nothing, so parity is preserved. Defaults to open, leaving
+    every existing caller unchanged.
     """
     idle_poll = config.scheduler.worker_idle_poll_interval
     idle_timeout = config.scheduler.worker_idle_timeout
@@ -900,6 +920,8 @@ def _worker_idle_wait(
             return None  # per-worker stop / global shutdown
         if should_stop():
             return None
+        if not admission_open():
+            return None
         return run_one()
 
     deadline = time.monotonic() + idle_timeout
@@ -910,6 +932,11 @@ def _worker_idle_wait(
         time.sleep(min(idle_poll, remaining))
         if should_stop() or stop_event.is_set():
             return None
+        # Memory gate first: a closed gate must cost nothing, not even the
+        # indexed read below. Keeps the same deadline, so a worker parked on a
+        # squeezed host ages out instead of holding its slot open.
+        if not admission_open():
+            continue
         # Cheap pre-check before the expensive claim. pending_count is a
         # claimability-aware indexed read (the same count dispatch() uses);
         # process_one_task -> claim_task additionally executes stale-lock /
@@ -951,23 +978,32 @@ class UserWorker(threading.Thread):
         logger.info("Worker started for user %s (%s)", self.user_id, self.queue_type)
         try:
             while not _shutdown_requested and not self._stop_event.is_set():
-                try:
-                    result = process_one_task(
-                        self.config, user_id=self.user_id, queue=self.queue_type,
-                    )
-                except Exception as e:
-                    logger.error("Worker %s/%s error: %s", self.user_id, self.queue_type, e)
-                    result = None
+                # The memory gate covers this fast path too, not just
+                # dispatch(). A worker that has already claimed one task loops
+                # straight back here, so gating only the spawn would let a
+                # squeezed host keep starting work in the slots it already has
+                # — and the incident's trigger was one task running a test
+                # suite, which is exactly what that lets through. When the gate
+                # is shut we fall through to the idle wait, which parks cheaply
+                # and eventually exits, so the pool drains under pressure.
+                if self.pool.admission_open():
+                    try:
+                        result = process_one_task(
+                            self.config, user_id=self.user_id, queue=self.queue_type,
+                        )
+                    except Exception as e:
+                        logger.error("Worker %s/%s error: %s", self.user_id, self.queue_type, e)
+                        result = None
 
-                if result is not None:
-                    task_id, success = result
-                    status = "completed" if success else "failed"
-                    logger.info(
-                        "Worker %s/%s: task %d %s",
-                        self.user_id, self.queue_type, task_id, status,
-                    )
-                    # Processed a task — immediately check for more
-                    continue
+                    if result is not None:
+                        task_id, success = result
+                        status = "completed" if success else "failed"
+                        logger.info(
+                            "Worker %s/%s: task %d %s",
+                            self.user_id, self.queue_type, task_id, status,
+                        )
+                        # Processed a task — immediately check for more
+                        continue
 
                 # No tasks available — linger, re-checking on a fine cadence
                 # until a new task arrives (claimed within ~one idle poll) or the
@@ -984,6 +1020,7 @@ class UserWorker(threading.Thread):
                     pending_count=lambda: _count_pending(
                         self.config, self.user_id, self.queue_type,
                     ),
+                    admission_open=self.pool.admission_open,
                 )
                 if idle_result is not None:
                     task_id, success = idle_result
@@ -1005,6 +1042,126 @@ class UserWorker(threading.Thread):
         self._stop_event.set()
 
 
+@dataclass(frozen=True)
+class ForegroundSlotPlan:
+    """What one user may hold this tick, after long tasks are discounted."""
+
+    interactive: int   # threads still counting against the interactive cap
+    may_spawn: int     # new workers this user may get on this tick
+    slot_range: int    # width of the slot index space to draw from
+
+
+def plan_foreground_slots(
+    *,
+    threads: int,
+    discounted: int,
+    pending: int,
+    user_fg_cap: int,
+    user_max_long_workers: int,
+) -> ForegroundSlotPlan:
+    """Per-user slot arithmetic for elapsed-time reclassification (spec C1).
+
+    The unit of accounting in the pool is a *thread*, not a task: `UserWorker`
+    claims serially and lingers when idle, and `_workers` is keyed by slot
+    index. With the cap at 2 and both slots held there was no free index, which
+    is what blocked a short question behind a forty-minute test run.
+
+    `discounted` is how many of this user's threads are excused from the
+    interactive cap, already bounded by both the per-user and the instance-wide
+    allowance (see `allocate_long_discounts`). The long allowance is additive
+    per user, so the thread ceiling is `user_fg_cap + user_max_long_workers`.
+
+    The `max(0, ...)` is required rather than defensive: the counts are read
+    before `WorkerPool._lock` is taken, so a long task can complete in between
+    and leave `discounted` momentarily larger than `threads`. Without it that
+    reads as negative occupancy and the caller's `range` arithmetic goes with
+    it.
+
+    What it does *not* do, and what no clamp here can do: `discounted` derives
+    from `running` task rows while `threads` counts pool worker threads, and
+    the two come apart whenever a row outlives its worker — the window before
+    the stuck-worker liveness reclaim fires (roughly the same ten minutes as
+    the long threshold), or a second process draining the queue with no pool at
+    all. Such a row excuses occupancy that no thread is holding, and the user
+    gets one extra thread on ordinary interactive work. Clamping `discounted`
+    to `threads` looks like the fix and is arithmetically inert — it changes
+    `interactive` in exactly no case that `max(0, ...)` does not already cover,
+    and it cannot tell a ghost row from a real one anyway. The over-grant is
+    instead bounded by the two ceilings that do hold unconditionally: the
+    additive per-user ceiling below, and `max_foreground_workers` in the
+    caller. It clears itself when the reclaim clears the row.
+
+    Pure. No config, no DB, no lock — the whole point is that the rule can be
+    read and tested without a pool around it.
+    """
+    interactive = max(0, threads - discounted)
+    slot_range = user_fg_cap + user_max_long_workers
+    may_spawn = min(
+        user_fg_cap - interactive,
+        slot_range - threads,
+        pending,
+    )
+    return ForegroundSlotPlan(
+        interactive=interactive,
+        may_spawn=max(0, may_spawn),
+        slot_range=slot_range,
+    )
+
+
+def allocate_long_discounts(
+    long_by_user: Mapping[str, int],
+    *,
+    priority: Sequence[str],
+    user_cap: int,
+    instance_cap: int,
+) -> dict[str, int]:
+    """Hand out at most `instance_cap` discounts, `user_cap` to any one user.
+
+    Per user the long allowance is additive — 2 interactive plus 1 long — so
+    one person's long job cannot consume their own interactivity. Instance-wide
+    it is partitioned instead: `max_foreground_workers` stays the hard ceiling
+    on foreground threads and this bounds how many of them may be discounted.
+    Making both additive would raise the instance ceiling from 5 threads to 7
+    and grow the box's worst-case memory exposure, which is the failure this
+    whole feature exists to bound — the head-of-line block is a fairness
+    problem, not a throughput one.
+
+    `long_by_user` must already be filtered to users a discount would actually
+    unblock — those at or over their interactive cap. Dispatch does that
+    filtering because it is the thing holding the thread counts. Skipping it
+    starves the user the feature exists for: `priority` is oldest-pending-first
+    and does not correlate with "at cap", so a user with a free interactive
+    slot — who was going to spawn anyway, discount or no discount — can take
+    the last of the budget and leave the genuinely blocked user refused.
+
+    `priority` is dispatch's own user order (longest-waiting first), so when the
+    budget is still scarce among eligible users it goes to whoever has waited
+    longest. Users holding a long task but nothing pending never reach
+    dispatch's loop, yet still hold the extra thread, so they are allocated
+    after the priority list rather than skipped — otherwise the budget
+    under-counts exactly the threads it exists to bound. Sorted, so the
+    allocation is deterministic under xdist and across ticks.
+
+    Users granted nothing are omitted rather than mapped to 0, so the result
+    reads the same as an empty allocation when the feature is off.
+    """
+    if user_cap <= 0 or instance_cap <= 0:
+        return {}
+    seen = list(priority) + sorted(set(long_by_user) - set(priority))
+    granted: dict[str, int] = {}
+    remaining = instance_cap
+    for user_id in seen:
+        if remaining <= 0:
+            break
+        long_tasks = long_by_user.get(user_id, 0)
+        if long_tasks <= 0:
+            continue
+        take = min(long_tasks, user_cap, remaining)
+        granted[user_id] = take
+        remaining -= take
+    return granted
+
+
 class WorkerPool:
     """Manages per-user, per-queue worker threads with a concurrency cap.
 
@@ -1016,15 +1173,187 @@ class WorkerPool:
         self.config = config
         self._workers: dict[tuple[str, str, int], UserWorker] = {}
         self._lock = threading.Lock()
+        # Latest host memory reading, pushed in by the main loop's sampler.
+        # ``None`` — the startup state, and the state on any host where
+        # /proc/meminfo does not parse — means no information, which the gate
+        # reads as open. See _admission_open.
+        self._pressure_sample: host_pressure_mod.PressureSample | None = None
+        self._pressure_lock = threading.Lock()
+        # Monotonic clock of the first tick of the current closed stretch, and
+        # of the last line logged about it. Both reset when the gate reopens,
+        # so a fresh squeeze is reported as a new event rather than being
+        # swallowed by the previous one's cooldown.
+        self._gate_closed_since: float | None = None
+        self._last_gate_log = 0.0
+
+    def update_pressure(
+        self, sample: "host_pressure_mod.PressureSample | None"
+    ) -> None:
+        """Hand the pool the latest host reading (main loop → gate).
+
+        ``None`` clears rather than preserves. A sampler that starts failing
+        must not leave the last bad reading latched: the gate would then stay
+        shut on evidence that is no longer being refreshed, which is the
+        indefinite-outage failure this whole spec exists to prevent.
+        """
+        with self._pressure_lock:
+            self._pressure_sample = sample
+
+    def gate_closed_seconds(self) -> float:
+        """How long admission has been continuously closed. ``0.0`` when open.
+
+        Read by the alerting path to decide how to word a notification: a gate
+        that has been shut for longer than the cooldown while istota itself is
+        running nothing means the pressure is coming from elsewhere on the box,
+        and istota is the victim rather than the cause.
+
+        Takes no ``now``. ``_gate_closed_since`` is a ``time.monotonic()``
+        stamp while every other ``now`` in this file is ``time.time()``, so a
+        parameter here would exist mainly to be handed the wrong clock — and
+        the failure is silent, since a wall-clock value yields a difference of
+        about 1.7e9 and makes every alert claim istota is a bystander.
+        """
+        with self._pressure_lock:
+            closed_since = self._gate_closed_since
+        if closed_since is None:
+            return 0.0
+        return max(0.0, time.monotonic() - closed_since)
+
+    def _admission_decision(
+        self,
+    ) -> "tuple[bool, host_pressure_mod.PressureSample | None]":
+        """Is there room on this host to *start* more work, and on what reading?
+
+        Never about stopping work. Already-running tasks are not consulted, not
+        counted and not touched; the gate refuses a *start* and the pending row
+        waits, exactly as it does when a cap is full.
+
+        Fails open in every uncertain case — feature disabled, both thresholds
+        zero, no sample yet, sample unreadable. A broken sampler must not be
+        able to halt work: an unexplained total outage is a far worse failure
+        than one task admitted onto a busy box, and it is the failure this
+        instrumentation was added to explain rather than to cause.
+
+        Pure. The sample comes back so the dispatch-side caller can log what it
+        decided on, without this having to know whether anyone wants that.
+        """
+        if not self.config.scheduler.host_pressure_enabled:
+            return True, None
+
+        with self._pressure_lock:
+            sample = self._pressure_sample
+        if sample is None:
+            return True, None
+
+        psi_threshold = self.config.scheduler.host_pressure_psi_threshold
+        min_available_mb = self.config.scheduler.min_available_memory_mb
+        # A zero floor with no PSI threshold would make the gate unreachable;
+        # keep the switch explicit rather than implied by the arithmetic.
+        if min_available_mb <= 0 and psi_threshold <= 0:
+            return True, sample
+
+        under = host_pressure_mod.is_under_pressure(
+            sample,
+            psi_threshold=psi_threshold if psi_threshold > 0 else float("inf"),
+            min_available_mb=min_available_mb,
+        )
+        return (not under), sample
+
+    def admission_open(self) -> bool:
+        """The gate, with no bookkeeping. What a *worker* asks before claiming.
+
+        Gating :meth:`dispatch` alone bounds new worker *threads*, not new task
+        *starts*. A worker already alive re-claims on its own — the fast path in
+        ``UserWorker.run`` and the poll inside ``_worker_idle_wait`` — so before
+        this existed a squeezed host kept starting work in whatever slots it
+        already had, while both this spec's C2 text and the scheduler rules said
+        the task would stay ``pending``. The incident's own trigger was a single
+        task running a test suite, so one claim into a lingering worker is the
+        whole failure; bounding concurrency growth was never enough on its own.
+
+        Deliberately free of the closed-since clock and the cooldown-limited log
+        line that :meth:`_admission_open` maintains. Workers poll this on the
+        idle cadence — several times a second, per worker — and a version that
+        stamped or logged would flood the log and keep re-arming state that
+        belongs to dispatch's once-per-tick view.
+        """
+        return self._admission_decision()[0]
+
+    def _admission_open(self) -> bool:
+        """:meth:`admission_open` plus the closed-since clock and the log line.
+
+        Dispatch's form, called once per tick. The lock is released before
+        either _note_gate_* helper, which take it themselves: ``threading.Lock``
+        is not reentrant, so folding those calls into a ``with`` block — the
+        obvious tidy-up — deadlocks the loop thread outright.
+        """
+        is_open, sample = self._admission_decision()
+        if is_open or sample is None:
+            self._note_gate_open()
+            return True
+        self._note_gate_closed(sample)
+        return False
+
+    def _note_gate_open(self) -> None:
+        with self._pressure_lock:
+            self._gate_closed_since = None
+
+    def _note_gate_closed(self, sample: "host_pressure_mod.PressureSample") -> None:
+        """Mark the gate shut and log at most one line per cooldown window."""
+        now = time.monotonic()
+        with self._pressure_lock:
+            first_closed_tick = self._gate_closed_since is None
+            if first_closed_tick:
+                self._gate_closed_since = now
+            cooldown = self.config.scheduler.host_pressure_alert_cooldown_seconds
+            due = first_closed_tick or (now - self._last_gate_log >= cooldown)
+            if due:
+                self._last_gate_log = now
+        if not due:
+            return
+        logger.warning(
+            "dispatch_admission_closed mem_available_mb=%d psi_mem_some_avg10=%s "
+            "swap_total_kb=%d — holding pending tasks, nothing running is affected",
+            sample.mem_available_kb // 1024,
+            "?" if sample.psi_mem_some_avg10 is None else f"{sample.psi_mem_some_avg10:.2f}",
+            sample.swap_total_kb,
+        )
 
     def dispatch(self) -> None:
         """Spawn workers for users with pending tasks, prioritizing foreground.
 
-        Three-tier concurrency control:
-        1. Instance-level fg cap: max_foreground_workers
+        Concurrency control, in the order it binds:
+        1. Instance-level fg cap: max_foreground_workers — a *hard* ceiling on
+           foreground threads, which the long allowance below never raises
         2. Instance-level bg cap: max_background_workers
         3. Per-user caps: effective_user_max_fg_workers / effective_user_max_bg_workers
+        4. Per-user long allowance (C1, foreground only): a running task past
+           `long_task_threshold_minutes` stops counting against (3), which
+           raises that user's thread ceiling to `user_fg_cap +
+           user_max_long_workers`. `max_long_workers` is the instance-wide
+           budget of such discounts — partitioned inside (1), not added to it.
+           See `plan_foreground_slots` / `allocate_long_discounts`.
+
+        Ahead of all of them sits the memory admission gate (C2): below the
+        floor, this tick spawns nothing at all and the pending rows wait. The
+        check is first so a squeezed host does not even pay for the DB scan.
         """
+        if not self._admission_open():
+            return
+
+        long_threshold = self.config.scheduler.long_task_threshold_minutes
+        user_max_long = self.config.scheduler.user_max_long_workers
+        # Any of the three at 0 is the documented off switch, and all three have
+        # to be checked here rather than only in the allocator: with the
+        # instance budget at 0 the query would still run every ~0.5s and have
+        # its result discarded, which is a cost the "0 disables" wording does
+        # not promise.
+        long_enabled = (
+            long_threshold > 0
+            and user_max_long > 0
+            and self.config.scheduler.max_long_workers > 0
+        )
+
         # Short busy_timeout: this scan is pure reads, so a DB locked past the
         # budget means "skip this dispatch tick" (dispatch runs again in ~0.5s)
         # rather than blocking the main loop for 30s and tripping the watchdog.
@@ -1041,6 +1370,18 @@ class WorkerPool:
                 # legitimate parallelism is unaffected.
                 fg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
                 bg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
+                # One extra grouped query, joining the same pre-lock scan: the
+                # per-user count of foreground tasks that have demonstrated
+                # they are not interactive (C1). Skipped entirely when the
+                # feature is off, so a deployment that does not want it does
+                # not pay for it on every ~0.5s tick.
+                fg_long = (
+                    db.count_long_running_tasks_by_user(
+                        conn, "foreground", long_threshold
+                    )
+                    if long_enabled
+                    else {}
+                )
         except sqlite3.OperationalError as exc:
             logger.warning("dispatch_scan_db_locked err=%s (skipping tick)", exc)
             return
@@ -1051,15 +1392,50 @@ class WorkerPool:
         with self._lock:
             # Phase 1: foreground workers
             active_fg = sum(1 for (_, qt, _) in self._workers if qt == "foreground")
+            fg_threads: dict[str, int] = {}
+            for (uid, qt, _) in self._workers:
+                if qt == "foreground":
+                    fg_threads[uid] = fg_threads.get(uid, 0) + 1
+            # Only users already at or over their interactive cap can be
+            # unblocked by a discount; anyone below it spawns on the ordinary
+            # cap regardless. Charging them the budget anyway is how the user
+            # this feature exists for — the one at cap with a question waiting
+            # — gets refused while someone who needed nothing takes the last
+            # of it. Allocated over every eligible user holding a long task,
+            # not only those with pending work: a user with an extra thread
+            # and an empty queue still occupies the exposure being bounded.
+            eligible_long = {
+                uid: n
+                for uid, n in fg_long.items()
+                if fg_threads.get(uid, 0)
+                >= self.config.effective_user_max_fg_workers(uid)
+            }
+            discounts = allocate_long_discounts(
+                eligible_long,
+                priority=fg_users,
+                user_cap=user_max_long,
+                instance_cap=self.config.scheduler.max_long_workers,
+            )
+            self._retire_surplus_foreground_workers(fg_threads, discounts)
             for user_id in fg_users:
+                # `fg_cap` stays the hard instance ceiling on foreground
+                # threads. The long allowance is additive per user and
+                # partitioned here, so a discount never buys a thread past it.
                 if active_fg >= fg_cap:
                     break
                 user_fg_cap = self.config.effective_user_max_fg_workers(user_id)
                 existing_slots = {s for (uid, qt, s) in self._workers if uid == user_id and qt == "foreground"}
-                user_fg_active = len(existing_slots)
-                pending = fg_pending.get(user_id, 0)
-                to_spawn = min(user_fg_cap - user_fg_active, pending)
-                available = (s for s in range(user_fg_cap) if s not in existing_slots)
+                plan = plan_foreground_slots(
+                    threads=len(existing_slots),
+                    discounted=discounts.get(user_id, 0),
+                    pending=fg_pending.get(user_id, 0),
+                    user_fg_cap=user_fg_cap,
+                    user_max_long_workers=user_max_long,
+                )
+                to_spawn = plan.may_spawn
+                user_discount = discounts.get(user_id, 0)
+                threads_now = len(existing_slots)
+                available = (s for s in range(plan.slot_range) if s not in existing_slots)
                 for slot in available:
                     if to_spawn <= 0 or active_fg >= fg_cap:
                         break
@@ -1067,7 +1443,19 @@ class WorkerPool:
                     worker = UserWorker(user_id, self.config, self, queue_type="foreground", slot=slot)
                     self._workers[key] = worker
                     worker.start()
-                    logger.info("Spawned foreground worker for user %s (slot %d)", user_id, slot)
+                    threads_now += 1
+                    # `threads` is the running total *after* this spawn, not the
+                    # plan-time figure: two spawns in one tick would otherwise
+                    # log the same number twice and a reader reconstructing
+                    # occupancy from the log would undercount. This line is the
+                    # only observability the allowance ships.
+                    logger.info(
+                        "Spawned foreground worker for user %s (slot %d, threads=%d "
+                        "interactive=%d long_discount=%d)",
+                        user_id, slot, threads_now,
+                        max(0, threads_now - user_discount),
+                        user_discount,
+                    )
                     active_fg += 1
                     to_spawn -= 1
 
@@ -1092,6 +1480,60 @@ class WorkerPool:
                     logger.info("Spawned background worker for user %s (slot %d)", user_id, slot)
                     active_bg += 1
                     to_spawn -= 1
+
+    def _retire_surplus_foreground_workers(
+        self, fg_threads: "dict[str, int]", discounts: "dict[str, int]"
+    ) -> None:
+        """Ask workers held up only by a lapsed discount to finish and exit.
+
+        Without this the long allowance is granted once and never taken back.
+        `dispatch` only ever *adds* threads, and a worker re-claims on its own
+        without rechecking its slot, so the moment a long task ended while its
+        user still had backlog the extra thread carried on serving ordinary
+        interactive work — turning the documented "2 interactive + 1 long" into
+        "3 interactive" for as long as the queue stayed non-empty. The instance
+        ceiling still held, so this was never box exposure; it was the per-user
+        cap quietly not meaning what it says.
+
+        Also covers the pre-existing case of a cap lowered under a live pool,
+        which stranded a worker at an index outside the new range.
+
+        `request_stop` is graceful: `UserWorker.run` checks the stop event at
+        the top of its loop, so a worker mid-task finishes that task and then
+        exits. Nothing is preempted, killed or migrated — the same rule the
+        long task itself is held to. Highest slot index first, so the retired
+        thread is the one the allowance added rather than an original.
+
+        Called with `self._lock` held; it only reads `_workers` and calls
+        `request_stop`, which sets an event and returns.
+        """
+        for user_id, threads in fg_threads.items():
+            user_fg_cap = self.config.effective_user_max_fg_workers(user_id)
+            interactive = max(0, threads - discounts.get(user_id, 0))
+            surplus = interactive - user_fg_cap
+            if surplus <= 0:
+                continue
+            slots = sorted(
+                (s for (uid, qt, s) in self._workers
+                 if uid == user_id and qt == "foreground"),
+                reverse=True,
+            )
+            for slot in slots[:surplus]:
+                worker = self._workers.get((user_id, "foreground", slot))
+                if worker is None:
+                    continue
+                # Already asked on an earlier tick — it is finishing its task.
+                # Re-asking is harmless but would re-log every ~0.5s until it
+                # exits, which is the wrong shape for a line an operator reads.
+                stop_event = getattr(worker, "_stop_event", None)
+                if stop_event is not None and stop_event.is_set():
+                    continue
+                worker.request_stop()
+                logger.info(
+                    "Retiring surplus foreground worker for user %s (slot %d, "
+                    "interactive=%d cap=%d) — long allowance lapsed",
+                    user_id, slot, interactive, user_fg_cap,
+                )
 
     def _on_worker_exit(self, user_id: str, queue_type: str, slot: int) -> None:
         """Called by a worker thread when it exits."""
@@ -3457,7 +3899,9 @@ def check_db_health(config: Config) -> list[CheckReport]:
     #    missing-mount, and we don't want any of those to skip a *file* that is
     #    actually on disk and might be corrupt.
     for user_id in config.users:
-        for module in ("feeds", "health", "location", "money", "briefings"):
+        # From the registry, not a copy of it: a list written out by hand here
+        # would silently stop covering the next module added (ISSUE-262).
+        for module in sorted(MODULE_NAMES):
             try:
                 db_path = config.module_db_path(user_id, module)
             except Exception as exc:  # noqa: BLE001
@@ -3646,10 +4090,24 @@ def _send_operator_alert(config: Config, user_id: str, message: str, *, timeout:
         logger.error("operator_alert_timed_out after %ss — send still running in background", timeout)
 
 
+def _db_backup_lookback_days() -> int:
+    """The 'vanished' window, read from where it's defined rather than restated.
+    Imported here so the alert text can't drift away from the actual window."""
+    from .db_backup import _VANISHED_LOOKBACK_DAYS
+
+    return _VANISHED_LOOKBACK_DAYS
+
+
 def _alert_backup_problems(config: Config, results: list[dict]) -> None:
-    """Fire one operator alert when a backup run reports any errored or suspect
-    (row-count collapse) DB. Best-effort — never raises into the loop."""
-    problems = [r for r in results if r.get("status") in ("error", "suspect")]
+    """Fire one operator alert when a backup run reports any errored, suspect
+    (row-count collapse) or vanished DB. Best-effort — never raises into the loop.
+
+    ``skip_missing`` is deliberately not a problem: a user who never opened a
+    module has no DB for it and never will. ``vanished`` is the same absence
+    with history behind it — the DB was being snapshotted days ago — which is
+    coverage shrinking rather than a module that was never used (ISSUE-262).
+    """
+    problems = [r for r in results if r.get("status") in ("error", "suspect", "vanished")]
     if not problems:
         return
     user = _operator_alert_user(config)
@@ -3657,10 +4115,12 @@ def _alert_backup_problems(config: Config, results: list[dict]) -> None:
         return
     lines = "\n".join(f"• {r['label']}: {r['status']}" for r in problems)
     message = (
-        f"⚠️ DB backup problem — {len(problems)} database(s) failed or were "
-        f"quarantined on the latest snapshot:\n{lines}\n"
+        f"⚠️ DB backup problem — {len(problems)} database(s) failed, were "
+        f"quarantined, or dropped out of coverage on the latest snapshot:\n{lines}\n"
         "A 'suspect' DB was empty/unreadable vs. the prior good snapshot and was "
-        "kept aside as .suspect; the prior good copy is preserved. Check the live DB."
+        f"kept aside as .suspect; the prior good copy is preserved. A 'vanished' DB "
+        f"had a snapshot within the last {_db_backup_lookback_days()} days and its "
+        "source file is now gone. Check the live DB."
     )
     _send_operator_alert(config, user, message)
 
@@ -3697,7 +4157,7 @@ def _maybe_alert_backup_stale(
 
 
 def _run_db_backup(config: Config) -> None:
-    """Snapshot every local DB, then alert on any errored/suspect result.
+    """Snapshot every local DB, then alert on any errored/suspect/vanished result.
 
     The snapshot and its alert are one unit so the whole thing can be handed to
     a background thread — the alert has to see the results of the run that
@@ -4153,6 +4613,15 @@ def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
         workers_active = pool.active_count if pool is not None else 0
         parts.append(f"workers_active={workers_active}")
 
+        # How long admission has been shut, 0 when open. Without this the health
+        # line cannot tell a quiet daemon from a held one: gating the claim
+        # paths means a shut gate drains the pool, so a squeeze with a full
+        # backlog now reports workers_active=0 and tasks_running=0 — identical
+        # to an idle night. The one WARNING per cooldown from dispatch() is the
+        # only other signal, and it is far too sparse to read a squeeze off.
+        if pool is not None:
+            parts.append(f"admission_closed_s={int(pool.gate_closed_seconds())}")
+
         _SCHEDULER_STATS_LOGGER.info("scheduler_stats " + " ".join(parts))
     except Exception as exc:  # noqa: BLE001  -- stats must never crash the loop
         # Route to the stats logger so a consumer filtering by logger name (not
@@ -4205,11 +4674,311 @@ def _emit_host_pressure_breadcrumb() -> None:
             return
 
         tmpfs = host_pressure.read_tmpfs_usage()
-        _HOST_PRESSURE_LOGGER.info(host_pressure.breadcrumb(sample, tmpfs))
+        # memory.events for the daemon's own cgroup. Stage 2 shipped
+        # MemoryHigh=5G but nothing read the counter it moves, so a throttled
+        # daemon looked exactly like a hung one: memory.high does not kill, it
+        # applies an allocation-time sleep to every process in the cgroup —
+        # the dispatch loop included. `high` rising across the series is what
+        # separates "we are being slowed by our own limit" from "the host is
+        # thrashing", and no other field on this line can tell them apart.
+        events = host_pressure.read_memory_events()
+        _HOST_PRESSURE_LOGGER.info(host_pressure.breadcrumb(sample, tmpfs, events))
     except Exception as exc:  # noqa: BLE001  -- instrumentation must never crash the loop
         _HOST_PRESSURE_LOGGER.warning(
             "host_pressure_error breadcrumb failed: %s", exc, exc_info=True,
         )
+
+
+def _claimable_backlog(config: Config) -> int:
+    """Total claimable tasks across both queues, or 0 if it cannot be read.
+
+    The signal that survives the admission gate. `active_count` does not: a shut
+    gate drains the pool within `worker_idle_timeout`, so "no workers" stops
+    meaning "no work to do" the moment the gate closes. Whether anything is
+    *queued* is independent of the gate, which is what makes it usable for
+    telling "istota is waiting behind someone else" from "istota is the cause".
+
+    Best-effort, like everything on this path: a locked DB reads as no backlog
+    rather than raising into the alert.
+    """
+    timeout_ms = config.scheduler.main_loop_read_timeout_ms or None
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=timeout_ms) as conn:
+            total = 0
+            for users, queue in (
+                (db.get_users_with_pending_fg_queue_tasks(conn), "foreground"),
+                (db.get_users_with_pending_bg_queue_tasks(conn), "background"),
+            ):
+                for user_id in users:
+                    total += db.count_claimable_tasks_for_user_queue(
+                        conn, user_id, queue
+                    )
+            return total
+    except Exception as exc:  # noqa: BLE001  -- alerting must never raise
+        logger.warning("host_pressure_error backlog read failed: %s", exc)
+        return 0
+
+
+def _check_host_pressure(
+    config: Config,
+    pool: "WorkerPool",
+    *,
+    last_alert: float,
+    alert_clocks: dict[str, float],
+    background_checks: dict[str, threading.Thread],
+    now: float,
+) -> float:
+    """Sample host memory, feed the admission gate, and snapshot on a crossing.
+
+    Two jobs off one reading, and they are deliberately not the same test.
+    The gate asks "is there room to start more work" and consults
+    :func:`host_pressure.is_under_pressure`. The snapshot asks "is something
+    happening we will want the evidence for" and consults
+    :func:`host_pressure.snapshot_trigger`, which additionally fires on a large
+    unaccounted-shmem residue. The production series is what forced the split:
+    on 2026-08-21 the host took 1.52 GB of shmem in under five minutes with PSI
+    at 0.07 and 2.9 GB still available. zram handled it, so refusing work would
+    have been wrong — but that burst is the one event in 24 hours whose
+    attribution anyone would want, and a single shared predicate can only get
+    one of those two answers right.
+
+    Returns the new ``last_alert`` clock and mutates ``alert_clocks``, which
+    holds one cooldown window per trigger class. Both are unchanged on a tick
+    that fired nothing, so a quiet stretch cannot push a window forward and
+    silence a squeeze that starts later.
+
+    Wrapped whole and never raises — the body lives in
+    :func:`_check_host_pressure_inner` and this function is the net around it.
+    That matters because it runs on the main loop thread and the call site is
+    bare: an instrument that can take the daemon down is worse than no
+    instrument, since it would produce exactly the unexplained outage this spec
+    was written to prevent. The sample is handed to the pool before anything
+    else is attempted, so a failure in the attribution half never costs the
+    admission half its input.
+    """
+    try:
+        return _check_host_pressure_inner(
+            config,
+            pool,
+            last_alert=last_alert,
+            alert_clocks=alert_clocks,
+            background_checks=background_checks,
+            now=now,
+        )
+    except Exception as exc:  # noqa: BLE001  -- instrumentation must never crash the loop
+        # The outer net. The inner blocks catch each reader at its own boundary
+        # so one failure does not cost the others their result; this catches
+        # everything between them — the config reads, the cooldown arithmetic,
+        # anything a later edit adds outside a try. The main loop calls this
+        # bare, on the strength of the promise above.
+        logger.warning("host_pressure_error check failed: %s", exc, exc_info=True)
+        return last_alert
+
+
+def _check_host_pressure_inner(
+    config: Config,
+    pool: "WorkerPool",
+    *,
+    last_alert: float,
+    alert_clocks: dict[str, float],
+    background_checks: dict[str, threading.Thread],
+    now: float,
+) -> float:
+    """The body of :func:`_check_host_pressure`. May raise; its caller catches."""
+    if not config.scheduler.host_pressure_enabled:
+        return last_alert
+
+    try:
+        sample = host_pressure_mod.read_sample()
+    except Exception as exc:  # noqa: BLE001
+        # Clear the reading before returning. Returning early here without
+        # doing so would leave the *last* sample latched in the pool, and if
+        # that sample was a starved one the gate stays shut for the life of
+        # the process — dispatch spawning nothing, one WARNING per cooldown as
+        # the only symptom. A sampler that has started throwing is exactly the
+        # case the fail-open rule exists for, so it must clear like a `None`
+        # return does rather than freeze the last thing it managed to read.
+        logger.warning("host_pressure_error sample failed: %s", exc, exc_info=True)
+        pool.update_pressure(None)
+        return last_alert
+
+    # Push the reading to the gate first, and push ``None`` through as well,
+    # on the same reasoning as the except branch above.
+    pool.update_pressure(sample)
+    if sample is None:
+        return last_alert
+
+    tmpfs_read_ok = True
+    try:
+        tmpfs = host_pressure_mod.read_tmpfs_usage()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error tmpfs read failed: %s", exc, exc_info=True)
+        tmpfs = []
+        tmpfs_read_ok = False
+
+    try:
+        # The residue arm is disarmed when the tmpfs read failed. Its
+        # arithmetic is `Shmem - Σ tmpfs`, so the empty list the failure path
+        # leaves behind makes the subtrahend zero and reports the *whole* of
+        # Shmem as unaccounted — a false burst on any host with more than the
+        # threshold in perfectly ordinary, perfectly accounted tmpfs. An empty
+        # list here means "the read failed", not "there are none", and this
+        # module is careful about that distinction everywhere else.
+        reason = host_pressure_mod.snapshot_trigger(
+            sample,
+            tmpfs,
+            psi_threshold=config.scheduler.host_pressure_psi_threshold,
+            min_available_mb=config.scheduler.min_available_memory_mb,
+            shmem_unaccounted_mb=(
+                config.scheduler.host_pressure_shmem_unaccounted_alert_mb
+                if tmpfs_read_ok
+                else 0
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error trigger failed: %s", exc, exc_info=True)
+        return last_alert
+
+    if reason is None:
+        return last_alert
+
+    # One cooldown per trigger class, not one for all three. The residue arm is
+    # the one that fires while the host is healthy, so a single shared window
+    # would let the cheapest alert suppress the most urgent: a residue notice
+    # at t=0 would silence a MemAvailable collapse at t=60 for the rest of the
+    # window, and that collapse is the one that halts dispatch.
+    trigger_class = reason.split("=", 1)[0]
+    cooldown = config.scheduler.host_pressure_alert_cooldown_seconds
+    previous = alert_clocks.get(trigger_class, 0.0)
+    # `now` is wall clock, so a backward NTP step can make this negative. Clamp
+    # rather than compare raw: a negative delta is not "inside the window", and
+    # reading it as one would mute every alert for the size of the step.
+    if previous and 0 <= now - previous < cooldown:
+        return last_alert
+
+    alert_clocks[trigger_class] = now
+    # Off the loop thread. The snapshot is the most expensive thing the daemon
+    # does — a Docker round-trip per container at 2s apiece, the whole process
+    # table, and a walk of every /proc/*/fd when the residue is large — and it
+    # runs at exactly the moment I/O is slowest. Then the operator alert joins
+    # for up to 30s on top. Inline, that is a minute of dispatch starvation
+    # during an incident, and the spec's own Track B constraint says this must
+    # never block the main loop. `_spawn_background_check` is the established
+    # answer here and its in-flight guard also stops two snapshots stacking.
+    # The sampling above stays inline: it is three file reads, and the gate
+    # needs the reading this tick rather than whenever a thread gets to it.
+    _spawn_background_check(
+        "host_pressure_snapshot",
+        lambda: _emit_host_pressure_snapshot(config, pool, sample, tmpfs, reason),
+        background_checks,
+    )
+    return now
+
+
+def _emit_host_pressure_snapshot(
+    config: Config,
+    pool: "WorkerPool",
+    sample: "host_pressure_mod.PressureSample",
+    tmpfs: "list[host_pressure_mod.TmpfsUsage]",
+    reason: str,
+) -> None:
+    """Write the structured snapshot and send one operator alert. Never raises.
+
+    The snapshot goes to the log at WARNING because it is the artefact someone
+    will go looking for after the fact, and the log is the only surface that
+    survives the host it describes. The notification is the operator's live
+    signal — learning about this from a user asking "are we back?" is the
+    failure mode being closed — and is best-effort on top: a wedged Talk must
+    not stop the evidence being recorded.
+    """
+    snapshot_written = False
+    try:
+        # An empty socket path is the operator switching container lookup off,
+        # so pass an explicit empty container list rather than a path that
+        # cannot connect: the two produce the same snapshot but only one of
+        # them says which it meant.
+        socket_path = config.scheduler.host_pressure_docker_socket
+        extra = (
+            {"docker_socket": Path(socket_path)} if socket_path else {"containers": []}
+        )
+        block = host_pressure_mod.snapshot(sample=sample, tmpfs=tmpfs, **extra)
+        logger.warning("%s\n  trigger=%s", block, reason)
+        snapshot_written = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error snapshot failed: %s", exc, exc_info=True)
+
+    try:
+        user = _operator_alert_user(config)
+        if not user:
+            return
+
+        # Say what is actually happening to the queue, not what usually
+        # happens when a snapshot fires. The residue arm of snapshot_trigger
+        # deliberately leaves admission open, so on the 2026-08-21 burst — the
+        # event that arm exists for — an unconditional "workers are held" would
+        # tell the operator the queue is stalled when it is running normally.
+        # The pure predicate, not `_admission_open()`. The bookkeeping variant
+        # stamps `_gate_closed_since` when it is None, so asking it here would
+        # reset the clock that `gate_closed_seconds()` is read from a few lines
+        # below — the alert would suppress its own escalation on every pass
+        # where the snapshot happened to ask first. It also runs off the loop
+        # thread, where it would spend dispatch's once-per-cooldown log budget.
+        gate_shut = not pool.admission_open()
+        if gate_shut:
+            queue_state = (
+                "No new task starts while this lasts; running tasks are untouched."
+            )
+        else:
+            queue_state = (
+                "Admission is still open and the queue is unaffected — this is a "
+                "record for attribution, not a stall."
+            )
+
+        # istota as victim rather than cause: the memory is being taken by
+        # something else on the box, which is a different remedy and one the
+        # operator cannot guess from a generic pressure alert.
+        #
+        # The discriminator is the *backlog*, not the worker count. Worker count
+        # used to carry that signal — a squeeze with queued work kept lingering
+        # workers claiming, so `active_count > 0` meant "istota is busy". Gating
+        # the claim paths ended that: a shut gate now drains the pool in
+        # `worker_idle_timeout` (10s by default), far inside the cooldown window
+        # this compares against, so `active_count` is 0 by then whatever the
+        # cause. Keying on it would print "istota is a bystander" during exactly
+        # the 2026-08-20 shape, where istota's own task left the residue behind,
+        # and send the operator looking off-box.
+        held = _claimable_backlog(config)
+        if (
+            gate_shut
+            and pool.active_count == 0
+            and held == 0
+            and pool.gate_closed_seconds()
+            >= config.scheduler.host_pressure_alert_cooldown_seconds
+        ):
+            queue_state += (
+                "\nNo istota worker is running and nothing is queued, so the "
+                "memory is being held by something else on the host — istota is "
+                "waiting behind it, not causing it."
+            )
+        elif gate_shut and held:
+            queue_state += f"\n{held} task(s) are queued and waiting for the gate."
+
+        evidence = (
+            "A host_pressure_snapshot naming the holders is in the log."
+            if snapshot_written
+            else "The snapshot could not be gathered; see host_pressure_error in the log."
+        )
+        message = (
+            f"⚠️ Host memory pressure — {reason}\n"
+            f"MemAvailable {sample.mem_available_kb // 1024} MB, "
+            f"Shmem {sample.shmem_kb // 1024} MB, "
+            f"swap {(sample.swap_total_kb - sample.swap_free_kb) // 1024}"
+            f"/{sample.swap_total_kb // 1024} MB used.\n"
+            f"{queue_state} {evidence}"
+        )
+        _send_operator_alert(config, user, message)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error alert failed: %s", exc, exc_info=True)
 
 
 def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
@@ -5443,6 +6212,15 @@ def run_daemon(
         and config.scheduler.host_pressure_breadcrumb_interval_seconds
         else "disabled",
     )
+    logger.info(
+        "STARTUP Memory admission gate: %s",
+        f"below {config.scheduler.min_available_memory_mb} MB available "
+        f"or PSI some avg10 > {config.scheduler.host_pressure_psi_threshold:g} "
+        f"(sampled every {config.scheduler.host_pressure_sample_interval_seconds}s)"
+        if config.scheduler.host_pressure_enabled
+        and config.scheduler.host_pressure_sample_interval_seconds
+        else "disabled",
+    )
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
@@ -5687,6 +6465,17 @@ def run_daemon(
     # the 2026-08-20 analysis turned on knowing the host idles at 85 MB of
     # Shmem. Waiting a full interval throws that sample away.
     last_pressure_breadcrumb = 0.0
+    # The gate/snapshot sampler runs on its own, faster cadence: the breadcrumb
+    # is a series and wants a slow regular beat, while the gate wants a reading
+    # recent enough to act on. Inits to 0.0 for the same reason — the gate
+    # should have a real reading on the first tick rather than failing open for
+    # a full interval after every restart.
+    last_pressure_sample = 0.0
+    # Cooldown clocks for the threshold snapshot + admin notification, one per
+    # trigger class so a residue notice cannot mute a MemAvailable collapse.
+    # Loop-local so a re-entered daemon and each test start clean.
+    last_pressure_alert = 0.0
+    pressure_alert_clocks: dict[str, float] = {}
     # In-flight registry for the slow periodic checks that run off this thread
     # (ISSUE-144). Loop-local rather than process-global so tests and a
     # re-entered daemon each get a clean slate.
@@ -5923,6 +6712,26 @@ def run_daemon(
         ):
             _emit_host_pressure_breadcrumb()
             last_pressure_breadcrumb = now
+
+        # Sample for the admission gate and the threshold snapshot. Separate
+        # cadence from the breadcrumb above, and separate purpose: this one
+        # feeds a decision, that one feeds a series. Never raises — see
+        # _check_host_pressure.
+        if (
+            config.scheduler.host_pressure_enabled
+            and config.scheduler.host_pressure_sample_interval_seconds
+            and now - last_pressure_sample
+            >= config.scheduler.host_pressure_sample_interval_seconds
+        ):
+            last_pressure_alert = _check_host_pressure(
+                config,
+                pool,
+                last_alert=last_pressure_alert,
+                alert_clocks=pressure_alert_clocks,
+                background_checks=background_checks,
+                now=now,
+            )
+            last_pressure_sample = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:

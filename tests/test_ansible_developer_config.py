@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from istota.config import DeveloperConfig
+from istota.config import DeveloperConfig, ReviewConfig
+from istota.skills.code_review import ASSEMBLY_ALLOWANCE_SECONDS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = REPO_ROOT / "deploy" / "ansible" / "templates" / "config.toml.j2"
@@ -34,32 +35,40 @@ _KEY_RE = re.compile(r"^([a-z_][a-z0-9_]*)\s*=", re.MULTILINE)
 _VAR_RE = re.compile(r"\b(istota_[a-z0-9_]+)\b")
 
 
-def _developer_block() -> str:
-    """The template text from `[developer]` to the `{% endif %}` closing it.
+def _block(header: str) -> str:
+    """The template text from `header` to whatever ends it.
 
-    Counted rather than searched for: the block has `{% if %}` blocks nested
-    inside it (`author_credit`, the two tokens under `istota_use_environment_
-    file`), so the first `{% endif %}` after `[developer]` closes one of those,
-    not the block.
+    Two things end it. The `{% endif %}` closing the enclosing
+    `{% if istota_developer_enabled %}` — counted rather than searched for,
+    since the block nests its own `{% if %}` blocks (`author_credit`, the two
+    tokens under `istota_use_environment_file`) and the first `{% endif %}`
+    after `[developer]` closes one of those. Or the next TOML section header,
+    which is what separates `[developer]` from the `[developer.review]`
+    subsection sharing the same `{% if %}`: in TOML every key after that header
+    belongs to the subsection, so a scanner that ran past it would attribute
+    the subsection's keys to the parent and check them against the wrong
+    dataclass.
     """
     text = TEMPLATE.read_text()
     lines = text.split("\n")
-    start = lines.index("[developer]")
+    start = lines.index(header)
     depth = 1  # already inside `{% if istota_developer_enabled %}`
     for offset, line in enumerate(lines[start:], start=start):
         stripped = line.strip()
+        if offset > start and stripped.startswith("["):
+            return "\n".join(lines[start:offset])
         if stripped.startswith("{% if "):
             depth += 1
         elif stripped.startswith("{% endif %}"):
             depth -= 1
             if depth == 0:
                 return "\n".join(lines[start:offset])
-    raise AssertionError("unterminated [developer] block in config.toml.j2")
+    raise AssertionError(f"unterminated {header} block in config.toml.j2")
 
 
 @pytest.fixture(scope="module")
 def block() -> str:
-    text = _developer_block()
+    text = _block("[developer]")
     # The scanner counts `{% if %}` / `{% endif %}` pairs, so a whitespace-
     # control tag or an inline conditional could skew the count and return a
     # short block — which would turn every `assert key not in block` below into
@@ -67,6 +76,16 @@ def block() -> str:
     # in the block.
     assert "devbox_proxy_audit_log" in text, (
         "the [developer] block scanner truncated early; the retirement "
+        "assertions below would pass vacuously"
+    )
+    return text
+
+
+@pytest.fixture(scope="module")
+def review_block() -> str:
+    text = _block("[developer.review]")
+    assert "timeout_seconds" in text, (
+        "the [developer.review] block scanner returned nothing usable; the "
         "assertions below would pass vacuously"
     )
     return text
@@ -162,3 +181,60 @@ def test_settings_to_vars_targets_real_ansible_vars():
         f"settings_to_vars.py maps to {missing}, which defaults/main.yml does "
         "not define — the override would silently do nothing."
     )
+
+
+def test_every_rendered_review_key_is_a_review_config_field(review_block):
+    """Same drift as the parent block, one level down. The loader reads
+    `[developer.review]` off a plain `dev.get("review", {})` with an explicit
+    name list, so a key it does not name is dropped without a word."""
+    field_names = {f.name for f in fields(ReviewConfig)}
+    rendered = set(_KEY_RE.findall(review_block))
+    unknown = sorted(rendered - field_names)
+    assert not unknown, (
+        f"config.toml.j2 renders {unknown} into [developer.review], but "
+        "ReviewConfig has no such field."
+    )
+
+
+def test_every_referenced_review_var_has_an_ansible_default(review_block):
+    defaults = DEFAULTS.read_text()
+    referenced = set(_VAR_RE.findall(review_block))
+    missing = sorted(
+        var for var in referenced if not re.search(rf"^{var}:", defaults, re.MULTILINE)
+    )
+    assert not missing, (
+        f"config.toml.j2 references {missing}, which defaults/main.yml does not "
+        "define — the template task fails at render time."
+    )
+
+
+def _default_int(name: str) -> int:
+    match = re.search(rf"^{name}:\s*(\d+)", DEFAULTS.read_text(), re.MULTILINE)
+    assert match, f"defaults/main.yml defines no integer {name}"
+    return int(match.group(1))
+
+
+def test_review_timeout_default_is_not_clamped_by_the_proxy_ceiling():
+    """`cmd_run` shrinks the agent budget to fit `skill_proxy_timeout` minus
+    the assembly allowance, because the proxy kills the whole command at the
+    ceiling. A default that needs clamping is the worst of both: the operator
+    sets a number, the envelope reports a smaller one, and the only trace is a
+    warning in the log. Raising either var without the other reintroduces
+    exactly that, which is what this catches."""
+    timeout = _default_int("istota_developer_review_timeout_seconds")
+    ceiling = _default_int("istota_security_skill_proxy_timeout")
+    assert timeout + ASSEMBLY_ALLOWANCE_SECONDS <= ceiling, (
+        f"istota_developer_review_timeout_seconds of {timeout}s plus "
+        f"{ASSEMBLY_ALLOWANCE_SECONDS}s of assembly exceeds "
+        f"istota_security_skill_proxy_timeout of {ceiling}s, so every deploy "
+        "renders a budget the skill silently clamps."
+    )
+
+
+def test_review_timeout_default_pays_for_a_second_round():
+    """The reason the var exists. The code default of 120s covers roughly one
+    reviewer call on a `smart` model, so a `need_files` round trip clears the
+    retry floor, gets charged, and then runs out of clock — the review is paid
+    for twice and reports once. The Ansible default has to be the larger of the
+    two or it is doing nothing."""
+    assert _default_int("istota_developer_review_timeout_seconds") > ReviewConfig().timeout_seconds

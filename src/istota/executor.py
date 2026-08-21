@@ -60,6 +60,7 @@ from .brain._fallback import (
 )
 from .events import EventWriter, random_progress_message
 from .skills.calendar import get_caldav_client, get_calendars_for_user
+from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 
 logger = logging.getLogger("istota.executor")
 
@@ -127,6 +128,12 @@ from .brain.claude_code import (  # noqa: E402,F401  (kept after module docstrin
 # Audio extensions eligible for pre-transcription (matches whisper skill file_types)
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"})
 
+# Wall clock for pre-transcribing *all* of one send's audio, not each file.
+# `_pre_transcribe_attachments` runs on a worker thread before the brain is
+# called, so `scheduler.task_timeout_minutes` does not cover it and this is the
+# only bound there is.
+_PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS = 900.0
+
 # Image extensions eligible for pre-shrinking before they reach the vision model
 _IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "heif"})
 
@@ -177,6 +184,19 @@ def _pre_transcribe_attachments(
     listen and summarize this"), and dropping that half loses the instruction
     the audio was sent under. A send with no typed text (the composer's
     record-and-send) carries only the transcript.
+
+    Each file is transcribed in its own child process. This used to call
+    `transcribe_audio` directly, which imported faster-whisper into the daemon
+    and left roughly 450 MB per transcription on glibc's free lists that
+    nothing ever returned — five voice messages walked the scheduler's RSS from
+    820 MB to 2894 MB in four steps, with no sign of stopping (ISSUE-273). See
+    `skills/whisper/out_of_process.py` for the measurements.
+
+    The whole loop shares one wall-clock budget rather than giving each file
+    its own. This runs on a worker thread *before* the brain call, so nothing
+    else bounds it — and a per-file timeout would mean a send carrying five
+    audio files could hold the worker for five times the limit, which is the
+    stall the timeout exists to prevent rather than a smaller version of it.
     """
     if not attachments:
         return prompt
@@ -190,16 +210,20 @@ def _pre_transcribe_attachments(
     if not audio_paths:
         return prompt
 
-    try:
-        from .skills.whisper.transcribe import transcribe_audio
-    except ImportError:
-        logger.debug("faster-whisper not available, skipping pre-transcription")
-        return prompt
-
+    deadline = time.monotonic() + _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS
     transcribed_parts = []
     for audio_path in audio_paths:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Keep what earlier files produced; the prompt is still better with
+            # a partial transcript than with none.
+            logger.warning(
+                "Pre-transcription budget exhausted, skipping %s and any files after it",
+                Path(audio_path).name,
+            )
+            break
         try:
-            result = transcribe_audio(audio_path)
+            result = transcribe_audio_out_of_process(audio_path, timeout=remaining)
             if result.get("status") == "ok" and result.get("text", "").strip():
                 text = result["text"].strip()
                 transcribed_parts.append(text)

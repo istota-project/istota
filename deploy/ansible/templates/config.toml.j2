@@ -325,6 +325,12 @@ db_backup_retention = {{ istota_scheduler_db_backup_retention }}
 scheduler_stats_interval = {{ istota_scheduler_stats_interval }}
 host_pressure_enabled = {{ istota_scheduler_host_pressure_enabled | lower }}
 host_pressure_breadcrumb_interval_seconds = {{ istota_scheduler_host_pressure_breadcrumb_interval }}
+host_pressure_sample_interval_seconds = {{ istota_scheduler_host_pressure_sample_interval }}
+host_pressure_psi_threshold = {{ istota_scheduler_host_pressure_psi_threshold }}
+host_pressure_alert_cooldown_seconds = {{ istota_scheduler_host_pressure_alert_cooldown }}
+host_pressure_shmem_unaccounted_alert_mb = {{ istota_scheduler_host_pressure_shmem_alert_mb }}
+host_pressure_docker_socket = "{{ istota_scheduler_host_pressure_docker_socket }}"
+min_available_memory_mb = {{ istota_scheduler_min_available_memory_mb }}
 
 # Progress / event streaming
 progress_updates = {{ istota_scheduler_progress_updates | lower }}
@@ -353,6 +359,9 @@ max_foreground_workers = {{ istota_scheduler_max_foreground_workers }}
 max_background_workers = {{ istota_scheduler_max_background_workers }}
 user_max_foreground_workers = {{ istota_scheduler_user_max_foreground_workers }}
 user_max_background_workers = {{ istota_scheduler_user_max_background_workers }}
+long_task_threshold_minutes = {{ istota_scheduler_long_task_threshold_minutes }}
+user_max_long_workers = {{ istota_scheduler_user_max_long_workers }}
+max_long_workers = {{ istota_scheduler_max_long_workers }}
 scheduled_job_max_consecutive_failures = {{ istota_scheduler_scheduled_job_max_consecutive_failures }}
 cron_max_staleness_minutes = {{ istota_scheduler_cron_max_staleness_minutes }}
 max_subtasks_per_task = {{ istota_scheduler_max_subtasks_per_task }}
@@ -562,6 +571,11 @@ glab_bin_path = "{{ istota_developer_glab_bin_path }}"
 devbox_proxy_enabled = {{ istota_devbox_proxy_enabled | ternary('true', 'false') }}
 devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
 devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
+
+# Subsection, so it has to stay last in the [developer] block: every key after
+# this header belongs to it.
+[developer.review]
+timeout_seconds = {{ istota_developer_review_timeout_seconds }}
 {% endif %}
 
 # User profiles, folder mounts, and briefing schedule/delivery live in the DB

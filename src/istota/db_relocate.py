@@ -39,6 +39,12 @@ from .db_health import check_and_repair
 
 logger = logging.getLogger(__name__)
 
+# Deliberately a fixed historical set, not ``modules.MODULE_NAMES``. This is a
+# one-shot migrator for DBs that were on the mount before 2026-07-12; the
+# briefings module was created eight days later and its DB has only ever been on
+# local disk, so there is nothing on the mount for it to move. A module added
+# after the relocation does not belong here, and the list must not track the
+# registry the way ``db_backup.MODULES`` does.
 MODULES = ("feeds", "health", "location", "money")
 
 

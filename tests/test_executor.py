@@ -1,5 +1,6 @@
 """Configuration loading for istota.executor module."""
 
+import sys
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -25,6 +26,7 @@ from istota.executor import (
     _apply_recency_window_talk,
     _apply_recency_window_db,
     _AUDIO_EXTENSIONS,
+    _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS,
     API_RETRY_MAX_ATTEMPTS,
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
@@ -1906,7 +1908,7 @@ class TestEmissariesInPrompt:
 # ---------------------------------------------------------------------------
 
 
-_TRANSCRIBE_PATCH = "istota.skills.whisper.transcribe.transcribe_audio"
+_TRANSCRIBE_PATCH = "istota.executor.transcribe_audio_out_of_process"
 
 
 class TestPreTranscribeAttachments:
@@ -1925,7 +1927,8 @@ class TestPreTranscribeAttachments:
         assert "remind me to buy groceries" in result
         assert "voice.mp3" in result
         assert "Transcribed voice message:" in result
-        mock_transcribe.assert_called_once_with("/tmp/voice.mp3")
+        assert mock_transcribe.call_count == 1
+        assert mock_transcribe.call_args[0][0] == "/tmp/voice.mp3"
 
     @patch(_TRANSCRIBE_PATCH)
     def test_empty_prompt_becomes_the_transcript(self, mock_transcribe):
@@ -1955,11 +1958,16 @@ class TestPreTranscribeAttachments:
         result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
         assert result == "[voice.mp3]"
 
-    def test_faster_whisper_not_installed_returns_prompt_unchanged(self):
-        """When the whisper module can't be imported, graceful fallback."""
-        with patch.dict("sys.modules", {"istota.skills.whisper.transcribe": None}):
-            result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
-            assert result == "[voice.mp3]"
+    @patch(_TRANSCRIBE_PATCH)
+    def test_faster_whisper_not_installed_returns_prompt_unchanged(self, mock_transcribe):
+        """The dependency is now missing *in the child*, which reports it as an
+        ordinary error result rather than raising in the daemon."""
+        mock_transcribe.return_value = {
+            "status": "error",
+            "error": "faster-whisper not installed. Install with: uv sync --extra whisper",
+        }
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
+        assert result == "[voice.mp3]"
 
     @patch(_TRANSCRIBE_PATCH)
     def test_mixed_audio_and_non_audio_attachments(self, mock_transcribe):
@@ -1970,7 +1978,8 @@ class TestPreTranscribeAttachments:
         )
         assert "schedule a meeting" in result
         assert "memo.m4a" in result
-        mock_transcribe.assert_called_once_with("/tmp/memo.m4a")
+        assert mock_transcribe.call_count == 1
+        assert mock_transcribe.call_args[0][0] == "/tmp/memo.m4a"
 
     @patch(_TRANSCRIBE_PATCH)
     def test_multiple_audio_attachments(self, mock_transcribe):
@@ -1996,6 +2005,96 @@ class TestPreTranscribeAttachments:
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
             assert ext in _AUDIO_EXTENSIONS
+
+
+class TestPreTranscriptionStaysOutOfTheDaemon:
+    """ISSUE-273.
+
+    `import faster_whisper` costs ~293 MB of resident set, and each
+    construct-transcribe-drop cycle leaves ~450 MB on glibc's free lists that
+    the daemon never calls `malloc_trim` to get back. Five voice messages over
+    one 66-hour run walked the scheduler from 820 MB to 2894 MB in four
+    discrete steps, each within three minutes of a transcription. None of that
+    memory may be spent in the daemon, so these tests pin *where* the work
+    runs, not just what it returns.
+    """
+
+    def test_it_spawns_the_whisper_cli_instead_of_importing_the_model(self):
+        with patch("istota.skills.whisper.out_of_process.subprocess.Popen") as popen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 0
+            proc.communicate.return_value = (
+                json.dumps({"status": "ok", "text": "buy milk"}),
+                "",
+            )
+            popen.return_value = proc
+            result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "")
+
+        argv = popen.call_args[0][0]
+        assert argv[0] == sys.executable
+        assert argv[1:5] == ["-P", "-m", "istota.skills.whisper", "transcribe"]
+        assert "buy milk" in result
+
+    def test_the_in_process_transcriber_is_never_called(self):
+        """The seam that carried the leak. `transcribe.transcribe_audio` is the
+        function that pulls faster_whisper into whichever process calls it."""
+        with patch("istota.skills.whisper.transcribe.transcribe_audio") as in_process, patch(
+            "istota.skills.whisper.out_of_process.subprocess.Popen"
+        ) as popen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 0
+            proc.communicate.return_value = (json.dumps({"status": "ok", "text": "hi"}), "")
+            popen.return_value = proc
+            _pre_transcribe_attachments(["/tmp/voice.mp3"], "")
+
+        in_process.assert_not_called()
+
+    def test_the_timeout_budget_is_shared_across_the_send_not_per_file(self):
+        """This runs on a worker thread before the brain call, so
+        `scheduler.task_timeout_minutes` does not cover it. A per-file limit
+        would let a five-attachment send hold the worker for five times the
+        bound — the stall the timeout exists to prevent, not a smaller one."""
+        with patch(_TRANSCRIBE_PATCH) as mock_transcribe:
+            mock_transcribe.return_value = {"status": "ok", "text": "x"}
+            _pre_transcribe_attachments(["/tmp/a.mp3", "/tmp/b.wav", "/tmp/c.m4a"], "")
+
+        budgets = [c.kwargs["timeout"] for c in mock_transcribe.call_args_list]
+        assert len(budgets) == 3
+        # Strictly decreasing: each call gets what is left, not a fresh grant.
+        assert budgets == sorted(budgets, reverse=True)
+        assert budgets[0] <= _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS
+        assert sum(budgets) < 3 * _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS
+
+    def test_files_after_the_budget_runs_out_are_skipped_and_earlier_text_kept(self):
+        def eat_the_budget(path, timeout=None):
+            # First file consumes the whole budget, as a wedged child would.
+            if path.endswith("a.mp3"):
+                _clock[0] += _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS + 1
+                return {"status": "ok", "text": "first one landed"}
+            raise AssertionError(f"should not have been called for {path}")
+
+        _clock = [1000.0]
+        with patch("istota.executor.time.monotonic", side_effect=lambda: _clock[0]), patch(
+            _TRANSCRIBE_PATCH, side_effect=eat_the_budget
+        ):
+            result = _pre_transcribe_attachments(["/tmp/a.mp3", "/tmp/b.wav"], "")
+
+        assert "first one landed" in result
+
+    def test_each_audio_file_gets_its_own_process(self):
+        """One process per file, so the ratchet resets between them rather than
+        accumulating across a multi-attachment send."""
+        with patch("istota.skills.whisper.out_of_process.subprocess.Popen") as popen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 0
+            proc.communicate.return_value = (json.dumps({"status": "ok", "text": "x"}), "")
+            popen.return_value = proc
+            _pre_transcribe_attachments(["/tmp/a.mp3", "/tmp/b.wav"], "")
+
+        assert popen.call_count == 2
 
 
 # ---------------------------------------------------------------------------

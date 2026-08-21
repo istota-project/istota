@@ -237,6 +237,32 @@ class SchedulerConfig:
     # an accumulation started). 288 lines a day at the default interval.
     host_pressure_enabled: bool = True  # master switch for host-pressure sampling
     host_pressure_breadcrumb_interval_seconds: int = 300  # cadence of the breadcrumb line (0 = disabled)
+    # Sampling for the admission gate and the threshold snapshot. Separate from
+    # the breadcrumb: the breadcrumb is a series and wants a slow, regular
+    # cadence, while the gate wants a reading recent enough to act on.
+    host_pressure_sample_interval_seconds: int = 30  # cadence of the gate/snapshot sample (0 = disabled)
+    host_pressure_psi_threshold: float = 40.0  # `memory some avg10` above this counts as pressure
+    host_pressure_alert_cooldown_seconds: int = 900  # min gap between snapshots + admin notifications
+    # Third snapshot trigger, from the production series rather than from
+    # theory. On 2026-08-21 the host took 1.52 GB of shmem in under five
+    # minutes with `memory some avg10` peaking at 0.07 and MemAvailable never
+    # below 2.9 GB — zram absorbed it exactly as intended, and both of the
+    # triggers above were right not to fire. But that burst is the one event in
+    # 24 hours whose attribution anyone would want, and without this key the
+    # snapshot could never fire on it. Deliberately not wired into the
+    # admission gate: a residue is a reason to collect evidence, not a reason
+    # to refuse work. 0 disables. Baseline residue on that host is ~80 MB.
+    host_pressure_shmem_unaccounted_alert_mb: int = 1024
+    # Read-only GET handle, used only to ask Docker which pid a container has
+    # so its tmpfs can be read through /proc/<pid>/root. Named here rather than
+    # borrowed from [devbox] because the browser container matters to this
+    # module whether or not devbox is enabled. Empty disables container lookup.
+    host_pressure_docker_socket: str = "/var/run/docker.sock"
+    # Admission gate (C2). Below this, dispatch spawns no new worker and pending
+    # tasks stay pending until the next tick. A floor, not a predictor: it makes
+    # no estimate of what the new task would need. Running tasks are never
+    # touched — the gate is on admission only, never on eviction.
+    min_available_memory_mb: int = 768
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
@@ -278,6 +304,29 @@ class SchedulerConfig:
     max_background_workers: int = 3  # instance-level background (scheduled/briefing) worker cap
     user_max_foreground_workers: int = 2  # global per-user fg worker default
     user_max_background_workers: int = 1  # global per-user bg worker default
+    # Elapsed-time slot reclassification (C1). A *running* foreground task older
+    # than the threshold stops counting against the user's interactive cap and
+    # counts against a separate long allowance instead; the task itself is not
+    # touched. Reactive rather than predictive on purpose — nothing observable
+    # at enqueue time separates "flex the developer skill on a worktree" from
+    # "what time is my meeting", and the task that caused the 2026-08-20
+    # head-of-line block arrived as an ordinary chat message. No completed
+    # foreground task crossed ten minutes in the seven days to 2026-08-20, so
+    # the default cannot misfire on an ordinary turn. 0 disables.
+    long_task_threshold_minutes: int = 10
+    # Per-user cap on *discounted* long tasks. Additive: the per-user foreground
+    # thread ceiling becomes user_max_foreground_workers + this. It bounds
+    # discounts, not long tasks — a task becomes long while already running, so
+    # the cap cannot refuse it retroactively, and long tasks beyond it keep
+    # counting as interactive occupancy. 0 disables.
+    user_max_long_workers: int = 1
+    # Instance-wide budget of discounts, partitioned *inside*
+    # max_foreground_workers rather than added to it: total foreground threads
+    # stay capped exactly as before, with at most this many of them discounted.
+    # The box's worst-case memory exposure is the subject of this whole feature
+    # and must not grow to buy per-user fairness. 0 disables, and like the two
+    # above it skips dispatch's per-tick query rather than discarding its result.
+    max_long_workers: int = 2
     scheduled_job_max_consecutive_failures: int = 5  # auto-disable after N failures (0 = never)
     # Insertion-time staleness gate for cron-driven tasks. When the daemon
     # comes back from a long outage, jobs and briefings whose computed
@@ -2216,6 +2265,27 @@ def load_config(config_path: Path | None = None) -> Config:
             scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
             loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
             host_pressure_enabled=sched.get("host_pressure_enabled", True),
+            # Coerced rather than passed through. These feed the admission
+            # gate, and a TOML string or float reaches `min_available_mb * 1024`
+            # inside the comparison — either raising TypeError from dispatch or
+            # comparing wrongly and silently. The neighbouring keys get away
+            # with a bare get(); the gate is a boundary they are not.
+            host_pressure_sample_interval_seconds=int(
+                sched.get("host_pressure_sample_interval_seconds", 30)
+            ),
+            host_pressure_psi_threshold=float(
+                sched.get("host_pressure_psi_threshold", 40.0)
+            ),
+            host_pressure_alert_cooldown_seconds=int(
+                sched.get("host_pressure_alert_cooldown_seconds", 900)
+            ),
+            host_pressure_shmem_unaccounted_alert_mb=int(
+                sched.get("host_pressure_shmem_unaccounted_alert_mb", 1024)
+            ),
+            host_pressure_docker_socket=sched.get(
+                "host_pressure_docker_socket", "/var/run/docker.sock"
+            ),
+            min_available_memory_mb=int(sched.get("min_available_memory_mb", 768)),
             host_pressure_breadcrumb_interval_seconds=sched.get(
                 "host_pressure_breadcrumb_interval_seconds", 300
             ),
@@ -2250,6 +2320,15 @@ def load_config(config_path: Path | None = None) -> Config:
             max_background_workers=sched.get("max_background_workers", 3),
             user_max_foreground_workers=sched.get("user_max_foreground_workers", 2),
             user_max_background_workers=sched.get("user_max_background_workers", 1),
+            # Coerced for the same reason the gate's keys are: these reach
+            # arithmetic that decides how many worker threads exist, and a TOML
+            # string would compare wrongly against an int rather than raising
+            # anywhere a reader would look.
+            long_task_threshold_minutes=int(
+                sched.get("long_task_threshold_minutes", 10)
+            ),
+            user_max_long_workers=int(sched.get("user_max_long_workers", 1)),
+            max_long_workers=int(sched.get("max_long_workers", 2)),
         )
 
     if "browser" in data:

@@ -157,7 +157,7 @@ After the main loop:
 
 After execution, the resolved skill set is persisted via `db.save_task_selected_skills()` so future tasks in the conversation can carry it forward.
 
-**Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` transcribes audio attachments and enriches `task.prompt` with the spoken text. Selection no longer keyword-matches the prompt, but the enriched prompt still flows into the menu-driven flow and is available to the model.
+**Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` transcribes audio attachments and enriches `task.prompt` with the spoken text. Selection no longer keyword-matches the prompt, but the enriched prompt still flows into the menu-driven flow and is available to the model. Each file is transcribed by **spawning the whisper skill's own CLI** (`skills/whisper/out_of_process.py` → `python -m istota.skills.whisper transcribe`), not by importing it: `faster_whisper` costs ~293 MB on import and each construct-transcribe-drop cycle strands ~450 MB on glibc's free lists that the daemon never calls `malloc_trim` to reclaim, so five voice messages walked the scheduler from 820 MB to 2894 MB in four steps with no plateau (ISSUE-273). A child process exits and gives all of it back. The runner is stdlib-only and never raises — a spawn failure, a timeout and a missing `whisper` extra all come back as an error dict, and the prompt is sent untranscribed. The timeout budget (`executor._PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS`) is **shared across all of one send's audio**, not per file: this runs on a worker thread before the brain call, so `scheduler.task_timeout_minutes` does not cover it and a per-file limit would let five attachments hold the worker for five times the bound. A timed-out child is killed by process group, and its buffered output is still parsed — the likely hang is *after* the CLI printed its result, while ctranslate2 tears down its worker threads, so discarding it would report failure for a transcription that finished.
 
 **Pass 2 (LLM semantic routing) was removed.** It ran a per-task `claude -p`
 subprocess to pre-guess extra skills; the cold-start cost dominated and timed out
@@ -351,6 +351,7 @@ Answered via `!drafts` (Talk and web). The scheduler's `nag_stale_outbound_draft
 **Env vars**: None (reads audio files from paths accessible via mount)
 **Key fns**: `transcribe_audio()`, `select_model()`, `format_srt()`, `format_vtt()`
 **Optional deps**: `faster-whisper>=1.1.0`, `psutil>=5.9.0` (in `whisper` extra group)
+**`out_of_process.py`**: the daemon-side seam. `transcribe_audio_out_of_process()` spawns this CLI with `sys.executable -m istota.skills.whisper` and parses the result off stdout, taking the first JSON object carrying `status` because ctranslate2 and huggingface warn onto stdout ahead of it. Stdlib-only on purpose — nothing in it can pull `faster_whisper` back into the caller. Called by `executor._pre_transcribe_attachments`; anything else on the daemon side that wants a transcript should call it too, and never `transcribe_audio` (ISSUE-273).
 
 ### `nextcloud/` - Nextcloud Sharing CLI
 **Subcommands**: `share list` (`--path`), `share create` (`--path`, `--type user|link|email`, `--permissions`), `share delete SHARE_ID`, `share search QUERY`

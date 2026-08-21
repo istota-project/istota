@@ -273,31 +273,34 @@ class TestAuditd:
 
 
 class TestBackupRetention:
+    # ISSUE-262 moved rotation out of the per-DB success path into one sweep,
+    # so the four `find` calls became four `_prune_tier` calls that take the
+    # window as an argument. These still guard the same thing they always did:
+    # which window each tier is pruned by. That the windows then behave
+    # differently is proved by executing the script in
+    # tests/test_ansible_backup_script.py.
+    def _prune_calls(self) -> list[str]:
+        return [
+            line.strip()
+            for line in render("istota-backup.sh.j2").splitlines()
+            if line.strip().startswith("_prune_tier ")
+        ]
+
     def test_remote_rotation_uses_the_remote_window(self):
-        """The bug this guards: both finds read the same variable, so shrinking
+        """The bug this guards: both tiers read the same variable, so shrinking
         the local window to save disk silently shortened the off-host tail
         too — the copies that exist precisely because the local disk can be
         lost."""
-        rendered = render("istota-backup.sh.j2")
-        remote_finds = [
-            line
-            for line in rendered.splitlines()
-            if "find " in line and "REMOTE_DIR" in line
-        ]
-        assert len(remote_finds) == 2, f"expected daily+weekly remote rotation, got {remote_finds}"
-        assert any("DAILY_RETENTION_REMOTE" in line for line in remote_finds)
-        assert any("WEEKLY_RETENTION_REMOTE" in line for line in remote_finds)
+        remote = [c for c in self._prune_calls() if "REMOTE_DIR" in c]
+        assert len(remote) == 2, f"expected daily+weekly remote rotation, got {remote}"
+        assert any("DAILY_RETENTION_REMOTE" in c for c in remote)
+        assert any("WEEKLY_RETENTION_REMOTE" in c for c in remote)
 
     def test_local_rotation_uses_the_local_window(self):
-        rendered = render("istota-backup.sh.j2")
-        local_finds = [
-            line
-            for line in rendered.splitlines()
-            if "find " in line and "LOCAL_DIR" in line
-        ]
-        assert len(local_finds) == 2
-        for line in local_finds:
-            assert "_REMOTE" not in line, "local rotation must not read the remote window"
+        local = [c for c in self._prune_calls() if "LOCAL_DIR" in c]
+        assert len(local) == 2
+        for call in local:
+            assert "_REMOTE" not in call, "local rotation must not read the remote window"
 
     def test_every_retention_variable_is_a_bare_integer(self):
         """These land in ``find -mtime +N``. A quoted or empty value makes find

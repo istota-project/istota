@@ -14,17 +14,25 @@ describe('formatCost', () => {
     expect(formatCost({ api: 1.5 })).toBe('$1.50');
   });
 
-  it('renders a placeholder naming the basis for a plan-equivalent', () => {
+  it('renders a bare placeholder for a plan-equivalent', () => {
     // A subscription figure is a list price, not spend. Showing it as currency
-    // is exactly the misread this rule refuses.
-    expect(formatCost({ subscription: 99 })).toBe(`${COST_PLACEHOLDER} (subscription)`);
+    // is exactly the misread this rule refuses — and the basis name is not
+    // carried alongside the dash, which says all a cost column needs to.
+    expect(formatCost({ subscription: 99 })).toBe(COST_PLACEHOLDER);
   });
 
-  it('renders a placeholder for a catalog estimate, including a zero one', () => {
+  it('renders a bare placeholder for a catalog estimate, including a zero one', () => {
     // The catalog prices an unknown model at zero, so this is the common shape.
-    // Keying on magnitude rather than presence would drop the label here and
-    // tell the reader there is no figure without saying why.
-    expect(formatCost({ estimated: 0 })).toBe(`${COST_PLACEHOLDER} (estimated)`);
+    expect(formatCost({ estimated: 0 })).toBe(COST_PLACEHOLDER);
+  });
+
+  it('renders every no-money group identically, however many bases it spans', () => {
+    // Nothing distinguishes these to a reader of the cost column: none of them
+    // is money. A suffix here would vary the rendering without varying that.
+    expect(formatCost({ estimated: 0, subscription: 1, unknown: 2 })).toBe(COST_PLACEHOLDER);
+    expect(formatCost({ subscription: 99 })).toBe(COST_PLACEHOLDER);
+    expect(formatCost({})).toBe(COST_PLACEHOLDER);
+    expect(formatCost(undefined)).toBe(COST_PLACEHOLDER);
   });
 
   it('marks a group spanning bases rather than summing it', () => {
@@ -37,15 +45,13 @@ describe('formatCost', () => {
     expect(out).not.toContain('100.5');
   });
 
-  it('is deterministic when several non-api bases are present', () => {
-    expect(formatCost({ estimated: 0, subscription: 1, unknown: 2 })).toBe(
-      `${COST_PLACEHOLDER} (estimated+subscription+unknown)`,
+  it('marks every non-api basis on a mixed group, in a stable order', () => {
+    // `estimated: 0` is still named: the marker is keyed on which bases are
+    // present, not on their magnitude, so a partial dollar figure cannot read
+    // as the whole of the group's spend.
+    expect(formatCost({ api: 1.5, unknown: 2, estimated: 0, subscription: 1 })).toBe(
+      '$1.50 +estimated+subscription+unknown',
     );
-  });
-
-  it('renders a placeholder for an empty or missing map', () => {
-    expect(formatCost({})).toBe(COST_PLACEHOLDER);
-    expect(formatCost(undefined)).toBe(COST_PLACEHOLDER);
   });
 
   it('renders a genuine zero of real money as currency', () => {

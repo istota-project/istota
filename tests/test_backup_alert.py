@@ -49,6 +49,21 @@ class TestAlertBackupProblems:
             _alert_backup_problems(cfg, results)
         notify.assert_called_once()
 
+    def test_alerts_on_vanished(self):
+        """A module DB that had a snapshot days ago and has no source file now.
+        The absence itself is unremarkable — ``skip_missing`` above stays
+        silent — but coverage shrinking without anyone deciding it should is
+        exactly what went unnoticed for 39 days in ISSUE-262."""
+        cfg = self._config()
+        results = [
+            {"label": "framework", "status": "ok"},
+            {"label": "feeds:alice", "status": "vanished"},
+        ]
+        with patch("istota.scheduler.send_notification") as notify:
+            _alert_backup_problems(cfg, results)
+        notify.assert_called_once()
+        assert "feeds:alice" in notify.call_args[0][2]
+
     def test_no_alert_when_no_users(self):
         cfg = Config(users={})
         results = [{"label": "framework", "status": "error"}]

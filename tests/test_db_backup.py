@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 import stat
 import sys
+from datetime import date as _date
+from datetime import timedelta
 from pathlib import Path
 
 
@@ -384,3 +386,92 @@ class TestForceEntrypoint:
         # A dated dir for today's real date exists (main() ignores the interval).
         dated = [p for p in _root(tmp_path).iterdir() if p.is_dir()]
         assert len(dated) == 1
+
+
+class TestModuleList:
+    def test_modules_come_from_the_registry(self):
+        """ISSUE-262: the Ansible backup script kept its own hand-maintained
+        bash array of module names and had already lost ``briefings``. This
+        tuple was a second copy of the same list, correct by coincidence."""
+        from istota.modules import MODULE_NAMES
+
+        assert db_backup.MODULES == tuple(sorted(MODULE_NAMES))
+
+
+class TestVanishedModuleDb:
+    """A module DB that had a good snapshot and now has none.
+
+    ``skip_missing`` is the right answer for a module a user never opened —
+    ``money:alice`` has no ``money.db`` and never will. It is the wrong answer
+    for a DB that was being snapshotted yesterday and isn't today: that is the
+    shape of ISSUE-262 itself (coverage silently shrinking), on the system now
+    responsible for module DBs.
+    """
+
+    def test_never_existed_stays_skip_missing(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        money = next(r for r in results if r["label"] == "money:alice")
+        assert money["status"] == "skip_missing"
+
+    def test_disappeared_source_is_flagged(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+
+        path.unlink()
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "vanished"
+
+    def test_a_suspect_prior_does_not_count_as_coverage(self, tmp_path):
+        """``_prior_good_snapshot`` skips quarantined copies, so a DB whose only
+        prior snapshot was quarantined and which then disappears reports
+        ``skip_missing`` — the alert for it already fired as ``suspect``."""
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-10")
+
+        conn = sqlite3.connect(path)
+        conn.execute("DELETE FROM places")
+        conn.commit()
+        conn.close()
+        db_backup.backup_databases(cfg, today="2026-07-11")  # -> suspect
+
+        # Drop the one good copy, leaving only the quarantined one behind.
+        (_root(tmp_path) / "2026-07-10" / "alice" / "location.db").unlink()
+        path.unlink()
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "skip_missing"
+
+    def test_stops_flagging_once_the_evidence_is_old(self, tmp_path):
+        """Self-limiting on purpose. ``_prune_old_snapshots`` never prunes the
+        dir holding the newest good copy of a DB, so the prior snapshot stays on
+        disk forever and an unbounded lookback would alert once per interval for
+        the rest of the deployment's life. An alert that repeats forever is one
+        an operator learns to ignore."""
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-10")
+        path.unlink()
+
+        stale_day = (
+            _date.fromisoformat("2026-07-10")
+            + timedelta(days=db_backup._VANISHED_LOOKBACK_DAYS + 1)
+        ).isoformat()
+        results = db_backup.backup_databases(cfg, today=stale_day)
+
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "skip_missing"
+        # The evidence is still there; it is the flag that ages out, not the copy.
+        assert (_root(tmp_path) / "2026-07-10" / "alice" / "location.db").exists()

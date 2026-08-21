@@ -9,13 +9,16 @@ import logging
 import re
 import sqlite3
 import struct
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
 logger = logging.getLogger("istota.memory_search")
 
-# Lazy-loaded embedding model singleton
+# Lazy-loaded embedding model singleton, and the lock that keeps concurrent
+# worker threads from each building their own copy of it (ISSUE-273).
 _model = None
+_model_lock = threading.Lock()
 _vec_available = None
 
 
@@ -50,21 +53,48 @@ class SearchResult:
 # ---------------------------------------------------------------------------
 
 def _get_model():
-    """Load sentence-transformers model on first call. Returns None if unavailable."""
+    """Load sentence-transformers model on first call. Returns None if unavailable.
+
+    Serialized, because `WorkerPool` workers are threads in the daemon and
+    several tasks routinely finish memory-indexing in the same second. Without
+    the lock each of them saw `_model is None` and built its own
+    `SentenceTransformer`; the last assignment won and the rest stayed resident
+    with nothing referencing them. Measured at 80 MB for three concurrent loads
+    against 34 MB for one, 46 MB of which survived both gc and `malloc_trim`
+    (ISSUE-273).
+
+    The unlocked read in front of the lock is the fast path — every call after
+    the first takes it, and the assignment below happens only once the model is
+    fully constructed. A load that fails still returns None *without* caching
+    the failure, so a transient error doesn't disable vector search until the
+    next restart.
+
+    Serializing does mean the cold load blocks the other callers, and on a host
+    with no cached copy of the weights that load includes a download. That is
+    the intended trade: concurrent loads are the defect, not a fast path worth
+    keeping, and the alternative — build outside the lock and compare-and-set —
+    reintroduces exactly the duplicate resident copies this exists to remove.
+    The log line below is what makes the resulting stall legible, since a
+    blocked worker thread otherwise looks like a hung task.
+    """
     global _model
     if _model is not None:
         return _model
-    try:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Loaded embedding model: all-MiniLM-L6-v2")
-        return _model
-    except ImportError:
-        logger.warning("sentence-transformers not installed, vector search unavailable")
-        return None
-    except Exception as e:
-        logger.warning("Failed to load embedding model: %s", e)
-        return None
+    with _model_lock:
+        if _model is not None:
+            return _model
+        logger.info("Loading embedding model (first use; other callers wait here)")
+        try:
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Loaded embedding model: all-MiniLM-L6-v2")
+            return _model
+        except ImportError:
+            logger.warning("sentence-transformers not installed, vector search unavailable")
+            return None
+        except Exception as e:
+            logger.warning("Failed to load embedding model: %s", e)
+            return None
 
 
 def embed_text(text: str) -> list[float] | None:

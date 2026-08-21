@@ -43,6 +43,8 @@ def cmd_transcribe(args) -> dict:
             out_path = Path(args.audio_path).with_suffix(".txt")
             out_path.write_text(text)
             result["saved_to"] = str(out_path)
+        if args.no_segments:
+            result.pop("segments", None)
         return result
 
     if output_format == "srt":
@@ -70,6 +72,13 @@ def cmd_transcribe(args) -> dict:
         out_path = Path(args.audio_path).with_suffix(".json")
         out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
         result["saved_to"] = str(out_path)
+
+    # After the save, so `--save` still writes the whole thing. `segments` is
+    # one entry per *word*, which is megabytes on a long recording; a caller
+    # that only wants the transcript should not have to receive it, parse it
+    # and drop it (ISSUE-273).
+    if args.no_segments:
+        result.pop("segments", None)
 
     return result
 
@@ -116,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--save",
         action="store_true",
         help="Save output to file alongside the audio file",
+    )
+    tr.add_argument(
+        "--no-segments",
+        action="store_true",
+        help="Omit per-word segments from json/text output (transcript text only)",
     )
 
     # models command

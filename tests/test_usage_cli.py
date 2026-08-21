@@ -122,9 +122,16 @@ def _run(capsys, **kw):
 
 
 class TestCostRendering:
-    def test_the_three_bases_render_differently_in_one_table(self, seeded, capsys):
+    def test_only_the_real_money_row_renders_as_currency(self, seeded, capsys):
         """Asserted together so a change that suppresses too much or too little
-        fails. One rule: no currency unless it is money."""
+        fails. One rule: no currency unless it is money.
+
+        The two non-money rows are asserted to be indistinguishable from each
+        other: alice's spend is `api`, bob's is a subscription's list-price
+        equivalent and carol's a catalog estimate, and the last two are both
+        just a dash. Naming the basis beside it varied the rendering without
+        varying the one thing the column reports.
+        """
         _, out = _run(capsys, by="user")
 
         # The first block is totals; the second is context. Both have a row per
@@ -133,9 +140,11 @@ class TestCostRendering:
         lines = {ln.split()[0]: ln for ln in totals.splitlines() if ln[:1].isalpha()}
         assert "$9.00" in lines["alice"]
         assert "$" not in lines["bob"]
-        assert "subscription" in lines["bob"]
+        assert "subscription" not in lines["bob"]
+        assert "—" in lines["bob"]
         assert "$" not in lines["carol"]
-        assert "estimated" in lines["carol"]
+        assert "estimated" not in lines["carol"]
+        assert "—" in lines["carol"]
 
     def test_a_subscription_only_window_still_prints_a_usable_table(
         self, seeded, capsys

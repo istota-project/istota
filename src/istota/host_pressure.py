@@ -121,6 +121,15 @@ class PressureSample:
     psi_io_some_avg10: float | None
     psi_cpu_some_avg10: float | None
     load1: float | None
+    # False = ``/proc/meminfo`` carried no ``MemAvailable`` line, so
+    # ``mem_available_kb`` is a default and not a measurement. A separate flag
+    # rather than ``int | None`` because the kernel *can* legitimately report
+    # zero — ``si_mem_available()`` clamps a negative estimate to 0 — so the
+    # value alone cannot distinguish "genuinely nothing left" from "the field
+    # was not there", and those two demand opposite responses from the gate.
+    # Trimmed meminfo is real: lxcfs and some container runtimes mask it.
+    # Trailing with a default so every existing constructor keeps working.
+    mem_available_measured: bool = True
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,31 @@ class ContainerShmUsage:
     used_bytes: int
     available: bool
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryEvents:
+    """cgroup v2 ``memory.events`` counters for the daemon's own cgroup.
+
+    Monotonic counts since the cgroup was created, not rates. ``high`` is the
+    one Stage 2 left unreadable: ``MemoryHigh=`` does not kill a cgroup that
+    exceeds it, it applies an allocation-time sleep penalty to every process
+    inside — the dispatch loop and the pollers included. So a throttled daemon
+    presents as "everything slow, nothing logged", which is the same shape as
+    the hang this module exists to explain. ``oom_kill`` is the counterpart for
+    a hard limit and is what Stage 5's per-task cgroups will trip.
+    """
+
+    low: int = 0
+    high: int = 0
+    max: int = 0
+    oom: int = 0
+    oom_kill: int = 0
+    # Which cgroup these counters actually came from. Recorded because the
+    # reader walks up to find them, so the answer is not always the cgroup the
+    # daemon sits in — and "high=777" means completely different things
+    # depending on whose limit moved.
+    source: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +311,7 @@ def read_sample(proc_root: Path = Path("/proc")) -> PressureSample | None:
         psi_io_some_avg10=psi_io.get("some"),
         psi_cpu_some_avg10=psi_cpu.get("some"),
         load1=_parse_load1(loadavg_text) if loadavg_text is not None else None,
+        mem_available_measured="MemAvailable" in mem,
     )
 
 
@@ -294,10 +329,202 @@ def is_under_pressure(
     ``MemAvailable`` floor to decide on its own. Treating "PSI is switched off
     on this kernel" as "the machine is not stalling" would report calm from a
     host that has no way to say otherwise.
+
+    The floor abstains on the same rule when ``MemAvailable`` was absent from
+    meminfo. Reading the default zero as a measurement would put the gate below
+    any floor forever, halting dispatch for the life of the process on a host
+    whose only fault is a trimmed ``/proc/meminfo`` — the opposite of the
+    fail-open rule this gate is built on. A threshold of zero disables its own
+    arm; with both at zero the function always returns ``False``.
     """
-    if sample.psi_mem_some_avg10 is not None and sample.psi_mem_some_avg10 > psi_threshold:
+    if (
+        psi_threshold > 0
+        and sample.psi_mem_some_avg10 is not None
+        and sample.psi_mem_some_avg10 > psi_threshold
+    ):
         return True
-    return sample.mem_available_kb < min_available_mb * 1024
+    if min_available_mb > 0 and sample.mem_available_measured:
+        return sample.mem_available_kb < min_available_mb * 1024
+    return False
+
+
+def snapshot_trigger(
+    sample: PressureSample,
+    tmpfs: Sequence[TmpfsUsage],
+    *,
+    psi_threshold: float,
+    min_available_mb: int,
+    shmem_unaccounted_mb: int,
+) -> str | None:
+    """Why a snapshot should be written now, or ``None`` to stay quiet.
+
+    Deliberately *not* the same predicate as :func:`is_under_pressure`, and the
+    difference is the point. That one gates admission: it answers "is there room
+    to start more work", so it reads the two figures that bear on that question
+    and nothing else. This one gates attribution: it answers "is something
+    happening that we will want the evidence for", which is a wider question and
+    catches an event the first one is right to ignore.
+
+    The third trigger comes from the production series rather than from theory.
+    Over the 24 hours after the breadcrumb was deployed, the production host
+    recorded exactly one event worth a snapshot: shmem went from 85 MB to
+    1.52 GB in under five minutes, none of it in any host tmpfs mount. zram
+    absorbed it — 2.27 GB of swap in use, ``MemAvailable`` never below 2.9 GB,
+    ``memory some avg10`` peaking at **0.07**. Both thresholds the spec named
+    would have looked straight past it, so the snapshot as originally specified
+    could never have fired on the one thing it exists to identify.
+
+    Growth in the residue is therefore its own signal. It says a large shmem
+    allocation exists that no mount can account for, which is the case where
+    walking ``/proc/*/fd`` is the only way to find a holder — and by the time
+    such an accumulation depresses ``MemAvailable``, the evidence naming its
+    owner is days old. Note what this does *not* do: a residue this size is not
+    a reason to refuse work, which is why it fires the snapshot and leaves
+    :func:`is_under_pressure` alone. Confusing the two would have closed the
+    admission gate through a burst that zram handled perfectly well.
+
+    Zero disables an arm, uniformly across all three: ``psi_threshold=0``,
+    ``min_available_mb=0`` and ``shmem_unaccounted_mb=0`` each switch off their
+    own test and leave the others standing. Without the explicit guard the PSI
+    arm would invert — a bare ``> 0`` fires on almost every sample a live host
+    produces, so the switch that reads as "off" would be the noisiest setting
+    available. An unmeasured PSI figure abstains rather than counting as zero.
+
+    The return is a short human-readable reason naming the figure and the
+    threshold it crossed, so the log line and the admin notification say *why*
+    they fired rather than leaving the reader to infer it from the snapshot.
+    """
+    if (
+        psi_threshold > 0
+        and sample.psi_mem_some_avg10 is not None
+        and sample.psi_mem_some_avg10 > psi_threshold
+    ):
+        return (
+            f"psi_mem_some_avg10={sample.psi_mem_some_avg10:.2f}>{psi_threshold:g}"
+        )
+
+    available_mb = sample.mem_available_kb // 1024
+    if (
+        min_available_mb > 0
+        and sample.mem_available_measured
+        and available_mb < min_available_mb
+    ):
+        return f"mem_available_mb={available_mb}<{min_available_mb}"
+
+    if shmem_unaccounted_mb > 0:
+        residue_mb = shmem_unaccounted_kb(sample, tmpfs) // 1024
+        if residue_mb >= shmem_unaccounted_mb:
+            return f"shmem_unaccounted_mb={residue_mb}>={shmem_unaccounted_mb}"
+
+    return None
+
+
+def read_memory_events(
+    proc_root: Path = Path("/proc"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> MemoryEvents | None:
+    """The daemon's own cgroup ``memory.events``, or ``None`` where there is none.
+
+    Resolves the calling process's unified-hierarchy cgroup from
+    ``/proc/self/cgroup`` rather than taking a path, so it reports on whichever
+    cgroup systemd actually placed the daemon in — which, after Stage 2's
+    ``DelegateSubgroup=supervisor``, is a leaf whose name the daemon does not
+    otherwise know.
+
+    **Then walks up to the nearest ancestor that has the file, which is the
+    whole trick.** A cgroup only gets a controller's interface files if its
+    *parent* lists that controller in ``cgroup.subtree_control``, so the leaf
+    the daemon actually sits in has none: on the production host,
+    ``system.slice/<unit>.service/`` carries ``memory.events`` and
+    ``memory.high`` while ``…/supervisor/`` carries neither, because the unit's
+    ``subtree_control`` is empty. Reading only the exact path from
+    ``/proc/self/cgroup`` therefore finds nothing on the one deployment this
+    was written for, and would have rendered ``?`` forever while looking like
+    an honest "not available here". Walking up is also the semantically right
+    answer: ``MemoryHigh=`` is applied to the *unit* cgroup, so the unit's
+    counter is the one that moves.
+
+    ``None`` covers every ordinary way this can be absent: cgroup v1, a host
+    with no ``memory`` controller anywhere above the process, a container that
+    does not expose the tree, and macOS. All are "no information", none are
+    errors — a counter this module cannot read must not stop the breadcrumb
+    that carries it. Both roots are parameters for the same reason every other
+    reader here takes one: so a fixture tree scopes the whole read.
+    """
+    try:
+        text = _read_text(Path(proc_root) / "self" / "cgroup")
+        if text is None:
+            return None
+
+        # cgroup v2 puts the process on a single ``0::<path>`` line. A v1 line
+        # (``11:memory:/…``) names a controller-specific hierarchy that has no
+        # memory.events at all, so matching loosely here would build a path
+        # that either does not exist or, worse, exists and means something else.
+        rel = None
+        for line in text.splitlines():
+            fields = line.split(":", 2)
+            if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
+                rel = fields[2].strip()
+                break
+        if rel is None:
+            return None
+
+        # Walk from the process's own cgroup up to the root, stopping at the
+        # first ancestor that actually has the file. Bounded by the depth of
+        # the path, and it never escapes ``cgroup_root``.
+        base = Path(cgroup_root)
+        # ``..`` is dropped rather than trusted. A real procfs cannot produce
+        # one, but this reader takes its roots as parameters so a fixture (or a
+        # container's rewritten cgroup line) can, and joining it would walk out
+        # of ``cgroup_root`` — which the loop below otherwise assumes it cannot.
+        parts = [p for p in rel.split("/") if p and p != ".."]
+
+        # Do not walk above our own unit. Past that point the counters belong
+        # to `system.slice` or to the cgroup root, which aggregate every
+        # service on the box — and `memory_events_high=777` read off the slice
+        # says "something on this host was throttled", not "istota hit its own
+        # MemoryHigh". That inverts the one diagnostic this field exists for,
+        # so a miss is reported as a miss instead.
+        floor = 0
+        for i, part in enumerate(parts):
+            if part.endswith((".service", ".scope")):
+                floor = i + 1
+                break
+
+        events_text = None
+        while True:
+            resolved = parts[:]
+            candidate = base.joinpath(*resolved) / "memory.events"
+            events_text = _read_text(candidate)
+            if events_text is not None or len(parts) <= floor:
+                break
+            parts.pop()
+        if events_text is None:
+            return None
+        source = "/" + "/".join(resolved)
+
+        values: dict[str, int] = {}
+        for line in events_text.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            try:
+                values[fields[0]] = int(fields[1])
+            except ValueError:
+                # A field that will not parse is left at its default rather
+                # than sinking the other four. Same rule as _parse_meminfo.
+                continue
+
+        return MemoryEvents(
+            low=values.get("low", 0),
+            high=values.get("high", 0),
+            max=values.get("max", 0),
+            oom=values.get("oom", 0),
+            oom_kill=values.get("oom_kill", 0),
+            source=source,
+        )
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +681,11 @@ def _fmt_float(value: float | None) -> str:
     return "?" if value is None else f"{value:.2f}"
 
 
-def breadcrumb(sample: PressureSample, tmpfs: Sequence[TmpfsUsage]) -> str:
+def breadcrumb(
+    sample: PressureSample,
+    tmpfs: Sequence[TmpfsUsage],
+    events: MemoryEvents | None = None,
+) -> str:
     """The single line written every interval.
 
     **This is a data format, not log chatter.** It will be grepped and parsed
@@ -480,7 +711,13 @@ def breadcrumb(sample: PressureSample, tmpfs: Sequence[TmpfsUsage]) -> str:
     The variable-length tmpfs list goes last so a parser can take the fixed
     fields positionally. It renders ``-`` rather than an empty value when there
     are no tmpfs mounts, because ``k=`` followed by a space is ambiguous to
-    split on.
+    split on. New fixed fields are appended after the existing ones and before
+    that list, which is what keeps every earlier field at the position a reader
+    of the older series already learned.
+
+    ``events`` is optional and renders ``?`` when absent, on the same rule as
+    the PSI fields: a host with no delegated cgroup has not reported that
+    nothing was throttled, it has reported nothing.
     """
     mounts = (
         ",".join(
@@ -492,7 +729,7 @@ def breadcrumb(sample: PressureSample, tmpfs: Sequence[TmpfsUsage]) -> str:
         [
             "host_pressure",
             f"mem_total_kb={sample.mem_total_kb}",
-            f"mem_available_kb={sample.mem_available_kb}",
+            f"mem_available_kb={sample.mem_available_kb if sample.mem_available_measured else '?'}",
             f"shmem_kb={sample.shmem_kb}",
             f"shmem_unaccounted_kb={shmem_unaccounted_kb(sample, tmpfs)}",
             f"tmpfs_sum_kb={tmpfs_accounted_kb(tmpfs)}",
@@ -504,6 +741,9 @@ def breadcrumb(sample: PressureSample, tmpfs: Sequence[TmpfsUsage]) -> str:
             f"psi_io_some_avg10={_fmt_float(sample.psi_io_some_avg10)}",
             f"psi_cpu_some_avg10={_fmt_float(sample.psi_cpu_some_avg10)}",
             f"load1={_fmt_float(sample.load1)}",
+            f"memory_events_high={'?' if events is None else events.high}",
+            f"memory_events_oom_kill={'?' if events is None else events.oom_kill}",
+            f"memory_events_cgroup={'?' if events is None else _escape_field(events.source)}",
             f"tmpfs_used_kb={mounts}",
         ]
     )
@@ -825,6 +1065,7 @@ def snapshot(
     proc_root: Path = Path("/proc"),
     top_n: int = 20,
     *,
+    sample: PressureSample | None = None,
     tmpfs: Sequence[TmpfsUsage] | None = None,
     containers: Sequence[ContainerShmUsage] | None = None,
     statvfs: Callable[[str], object] = os.statvfs,
@@ -852,7 +1093,13 @@ def snapshot(
     proc_root = Path(proc_root)
     lines = ["host_pressure_snapshot"]
 
-    sample = read_sample(proc_root)
+    # Prefer the caller's sample. Re-reading here would let the block's own
+    # headline figures disagree with the `trigger=` line printed beside them —
+    # seconds pass while the Docker round-trips run, and a block reading
+    # `mem_available_kb=3100000` under `trigger=mem_available_mb=700<768` reads
+    # as a bug in the trigger rather than as a fast-moving host.
+    if sample is None:
+        sample = read_sample(proc_root)
     if sample is None:
         lines.append("  sample=unavailable (no readable /proc/meminfo)")
     else:

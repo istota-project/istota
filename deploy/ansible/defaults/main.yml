@@ -224,6 +224,26 @@ istota_scheduler_stats_interval: 60              # scheduler_stats health line i
 istota_scheduler_host_pressure_enabled: true     # Master switch for host-pressure sampling
 istota_scheduler_host_pressure_breadcrumb_interval: 300  # Breadcrumb cadence in seconds (0 = disabled)
 
+# Memory admission gate + threshold snapshot (Track B alerting, Track C2).
+# Below the floor, dispatch spawns no new worker and pending tasks wait for a
+# later tick; nothing running is ever stopped, preempted or failed.
+istota_scheduler_host_pressure_sample_interval: 30   # Gate/snapshot sample cadence in seconds (0 = disabled)
+istota_scheduler_host_pressure_psi_threshold: 40.0   # `memory some avg10` above this counts as pressure
+istota_scheduler_host_pressure_alert_cooldown: 900   # Min seconds between snapshots + admin notifications
+istota_scheduler_min_available_memory_mb: 768        # Admission floor
+# Third snapshot trigger, from the production series rather than from theory.
+# A production host took 1.52 GB of shmem in under five minutes with PSI
+# peaking at 0.07 and 2.9 GB still available — zram absorbed it, so the two
+# thresholds above were right not to fire, but that burst is the one event in
+# 24 hours whose attribution anyone would want. Not wired into the gate: a
+# residue is a reason to collect evidence, not a reason to refuse work.
+# Baseline residue on that host is ~80 MB. 0 disables.
+istota_scheduler_host_pressure_shmem_alert_mb: 1024
+# Read-only GET handle, used only to ask Docker which pid a container has so
+# its tmpfs can be read through /proc/<pid>/root — container mounts are
+# invisible in the host mount table. Empty string disables container lookup.
+istota_scheduler_host_pressure_docker_socket: /var/run/docker.sock
+
 # ---------------------------------------------------------------------------
 # Host memory headroom (host-and-scheduler-robustness spec, Track A)
 # ---------------------------------------------------------------------------
@@ -324,6 +344,14 @@ istota_scheduler_max_foreground_workers: 5         # Instance-level foreground (
 istota_scheduler_max_background_workers: 3         # Instance-level background (scheduled/briefing) worker cap
 istota_scheduler_user_max_foreground_workers: 2    # Global per-user fg worker default
 istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker default
+# Elapsed-time slot reclassification: a running foreground task older than the
+# threshold stops counting against its user's interactive cap. Both allowances
+# bound discounts, not long tasks. Per-user additive (thread ceiling 2+1=3),
+# instance-wide partitioned inside max_foreground_workers, which stays the hard
+# ceiling. 0 on either of the first two restores the pre-change behaviour.
+istota_scheduler_long_task_threshold_minutes: 10   # A running fg task older than this stops counting as interactive
+istota_scheduler_user_max_long_workers: 1          # Per-user discount allowance (additive)
+istota_scheduler_max_long_workers: 2               # Instance-wide discount budget (inside max_foreground_workers)
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
 istota_scheduler_cron_max_staleness_minutes: 60             # Skip cron-driven catch-up fires older than this (jobs + briefings); 0 = legacy unconditional catch-up
 istota_scheduler_max_subtasks_per_task: 10                  # Cap deferred subtasks created per task
@@ -1063,6 +1091,19 @@ istota_developer_forge_cli_permit: []             # Baseline entries to turn off
 # install gh or glab from the vendors' own repos or by hand.
 istota_developer_gh_bin_path: "/usr/bin/gh"
 istota_developer_glab_bin_path: "/usr/bin/glab"
+
+# Wall-clock budget for one code-review agent. Both agents run concurrently, so
+# this is the whole review's clock and not half of it, and it covers the entire
+# round: a `need_files` re-invocation and a malformed-output retry come out of
+# this budget rather than out of a fresh one. The code default of 120s fits one
+# reviewer call on a `smart` model and leaves too little for a second, so the
+# round trip gets charged and then times out.
+#
+# The skill clamps this down to istota_security_skill_proxy_timeout minus 60s
+# of assembly allowance, because the proxy kills the whole command at the
+# ceiling. At the default 300s ceiling that puts the largest unclamped value at
+# 240. Raise the ceiling first if you want more than that here.
+istota_developer_review_timeout_seconds: 240
 
 # Public hostname for nginx (web UI, webhooks)
 istota_hostname: "{{ istota_namespace }}.example.com"
