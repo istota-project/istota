@@ -400,33 +400,101 @@ def _resolve_advisor(task, config: Config) -> str:
     return (config.advisor_model or "").strip()
 
 
-def _persist_task_usage(config: Config, conn, task_id: int, usage) -> None:
-    """Record native-brain token/cost telemetry to ``task_logs`` + an INFO log.
+def persist_brain_usage(
+    config: Config,
+    conn,
+    *,
+    usage,
+    origin: str,
+    user_id: str,
+    brain_kind: str = "",
+    task_id: int | None = None,
+    source_type: str = "",
+    is_fallback: bool = False,
+    model: str = "",
+    effort: str = "",
+    stop_reason: str = "",
+    success: bool = False,
+) -> None:
+    """Record one brain attempt's token/cost usage. Best-effort throughout.
 
-    ``usage`` is a ``TaskUsage`` or None. ClaudeCodeBrain leaves it None (the CLI
-    doesn't surface per-call usage), so this is a no-op for it. Persisting to
-    ``task_logs`` keeps cost observable in production with no schema migration.
-    Best-effort — a logging failure never affects task success.
+    ``usage`` is a ``BrainUsage`` or None (``TmuxClaudeBrain`` leaves it None —
+    it reconstructs events from a transcript and has no result frame, so a row
+    would be a synthetic zero dragging every average).
+
+    ``origin`` names the caller: ``task`` for the executor's own path, or the
+    daemon call site for the model invocations that have no task at all
+    (``sleep_cycle``, ``shared_blocks``, ``health_ocr``, …). Those pass
+    ``task_id=None``; without the column they would be invisible in both
+    directions — absent from the usage table and absent from any unmeasured-task
+    count, because they were never tasks.
+
+    The ``logger.info`` breadcrumb is kept deliberately: it is what leaves a
+    figure greppable in the journal when the DB write is the thing that failed.
+
+    Never raises. Telemetry must not turn a completed task into a failed one,
+    and the writer's SAVEPOINT means the swallowed case is always a *complete*
+    failure rather than a parent with a partial per-model split.
     """
     if usage is None:
         return
-    payload = json.dumps(
-        {
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "cache_read_tokens": usage.cache_read_tokens,
-            "cost_usd": round(usage.cost_usd, 6),
-        }
+    logger.info(
+        "brain_usage origin=%s task_id=%s brain=%s model=%s billed_input=%d "
+        "cache_read=%d cache_write=%d output=%d cost=%s basis=%s",
+        origin, task_id, brain_kind, model or usage.model,
+        usage.billed_input_tokens, usage.cache_read_tokens,
+        usage.cache_write_tokens, usage.output_tokens,
+        round(usage.cost_usd, 6), usage.cost_basis,
     )
-    logger.info("native_usage task_id=%s %s", task_id, payload)
     try:
         if conn is not None:
-            db.log_task(conn, task_id, "info", f"usage {payload}")
+            _insert_usage_row(
+                conn, usage=usage, origin=origin, user_id=user_id,
+                brain_kind=brain_kind, task_id=task_id, source_type=source_type,
+                is_fallback=is_fallback, effort=effort, stop_reason=stop_reason,
+                success=success,
+            )
         else:
             with db.get_db(config.db_path) as usage_conn:
-                db.log_task(usage_conn, task_id, "info", f"usage {payload}")
+                _insert_usage_row(
+                    usage_conn, usage=usage, origin=origin, user_id=user_id,
+                    brain_kind=brain_kind, task_id=task_id,
+                    source_type=source_type, is_fallback=is_fallback,
+                    effort=effort, stop_reason=stop_reason, success=success,
+                )
     except Exception:
-        logger.debug("failed to persist usage for task %s", task_id, exc_info=True)
+        logger.warning(
+            "failed to persist usage (origin=%s task=%s) — spend not recorded",
+            origin, task_id, exc_info=True,
+        )
+
+
+def _insert_usage_row(conn, **kwargs) -> None:
+    db.insert_task_usage(conn, **kwargs)
+
+
+def _persist_task_usage(
+    config: Config,
+    conn,
+    task_id: int,
+    usage,
+    *,
+    user_id: str = "",
+    source_type: str = "",
+    brain_kind: str = "",
+    is_fallback: bool = False,
+    model: str = "",
+    effort: str = "",
+    stop_reason: str = "",
+    success: bool = False,
+) -> None:
+    """The task-shaped wrapper over `persist_brain_usage`."""
+    persist_brain_usage(
+        config, conn, usage=usage, origin="task", user_id=user_id,
+        brain_kind=brain_kind, task_id=task_id, source_type=source_type,
+        is_fallback=is_fallback, model=model, effort=effort,
+        stop_reason=stop_reason, success=success,
+    )
 
 
 def _native_with_user_key(native_config, config: Config, user_id: str):
@@ -4191,6 +4259,9 @@ def execute_task(
         _cooldown = config.brain.fallback_cooldown_seconds
         _breaker = get_availability_breaker()
         _dropped_pin = None
+        # The primary's result, held only when a fallback replaced it, so both
+        # attempts' usage can be written from the one call site that has a `conn`.
+        _primary_usage_result = None
         _skip_primary = (
             _fallback_kind is not None
             and _cooldown > 0
@@ -4267,6 +4338,17 @@ def execute_task(
                             config, _brain_config, _fallback_kind, task, req
                         )
                         if _fb is not None:
+                            # The fallback *replaces* brain_result, so without
+                            # this the single persist call below would record the
+                            # fallback's numbers under the primary's identity and
+                            # the primary's own spend would be unrecoverable. It
+                            # is captured rather than written here because
+                            # `_run_fallback` takes no `conn`: opening a second
+                            # one would block on the write lock for the full 30s
+                            # busy timeout whenever `execute_task` was entered
+                            # with an open write transaction, as the interactive
+                            # path does.
+                            _primary_usage_result = brain_result
                             brain_result = _fb
                     elif brain_result.success and _cooldown > 0:
                         # Primary healthy again → close the breaker.
@@ -4304,8 +4386,27 @@ def execute_task(
             except Exception:
                 logger.debug("persisting task model_used failed", exc_info=True)
 
-        # Persist native-brain token/cost telemetry (no-op for claude_code).
-        _persist_task_usage(config, conn, task.id, brain_result.usage)
+        # Persist this attempt's token/cost telemetry. Both rows are written
+        # here, from the one place that already holds a `conn`. On an in-attempt
+        # brain fallback there are two: `attempt_seq` 1 and 2, each with its own
+        # `brain_kind` and `is_fallback`, which summed is the task's real cost.
+        if _primary_usage_result is not None:
+            _persist_task_usage(
+                config, conn, task.id, _primary_usage_result.usage,
+                user_id=task.user_id, source_type=task.source_type,
+                brain_kind=_primary_usage_result.brain_kind,
+                model=_primary_usage_result.model_used, effort=req.effort,
+                stop_reason=_primary_usage_result.stop_reason,
+                success=_primary_usage_result.success,
+            )
+        _persist_task_usage(
+            config, conn, task.id, brain_result.usage,
+            user_id=task.user_id, source_type=task.source_type,
+            brain_kind=brain_result.brain_kind,
+            is_fallback=_primary_usage_result is not None,
+            model=brain_result.model_used, effort=req.effort,
+            stop_reason=brain_result.stop_reason, success=brain_result.success,
+        )
 
         # CM-aware / terse-result composition: reconcile result_text with
         # the trace so substantial intermediate text isn't lost when the

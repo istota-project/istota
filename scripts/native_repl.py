@@ -176,9 +176,13 @@ def main() -> int:
     print(f"\033[1mstop_reason:\033[0m {result.stop_reason}  success={result.success}")
     if result.usage is not None:
         u = result.usage
+        # A currency figure only where it is real money; everything else is
+        # read through its tokens. Same rule the operator surfaces apply.
+        cost = f"${u.cost_usd:.4f}" if u.cost_basis == "api" else f"— ({u.cost_basis})"
         print(
-            f"\033[1musage:\033[0m in={u.input_tokens} out={u.output_tokens} "
-            f"cache_read={u.cache_read_tokens} ${u.cost_usd:.4f}"
+            f"\033[1musage:\033[0m in={u.billed_input_tokens} "
+            f"out={u.output_tokens} cache_read={u.cache_read_tokens} "
+            f"cache_write={u.cache_write_tokens} {cost}"
         )
     if args.show_events and result.execution_trace:
         print("\033[1m--- trace ---\033[0m")

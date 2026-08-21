@@ -23,6 +23,8 @@ import time
 
 from ._events import (
     ContextManagementEvent,
+    RateLimitEvent,
+    RequestUsageEvent,
     ResultEvent,
     TextDeltaEvent,
     TextEvent,
@@ -31,6 +33,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from istota import usage as usage_types
 from ..process_group import kill_process_group
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
@@ -114,6 +117,9 @@ _RETRY_AFTER_RE = re.compile(
 )
 
 # Retry configuration for transient API errors
+# What a usage row records as the brain that ran. One of KNOWN_BRAIN_KINDS.
+BRAIN_KIND = "claude_code"
+
 API_RETRY_MAX_ATTEMPTS = 3
 API_RETRY_DELAY_SECONDS = 5
 # Ceiling on a provider-supplied Retry-After. A worker parked on the provider's
@@ -891,6 +897,16 @@ class ClaudeCodeBrain:
     # --- Execution (Brain Protocol) ----------------------------------------
 
     def execute(self, req: BrainRequest) -> BrainResult:
+        # Stamped on the way out rather than at each of the ~30 return sites
+        # below, so a return added later cannot forget it. `brain_kind` is what
+        # the usage row records as the brain that ran, and it has to be right on
+        # the fallback path, where the executor's own variable no longer
+        # describes the result it is holding.
+        result = self._execute(req)
+        result.brain_kind = BRAIN_KIND
+        return result
+
+    def _execute(self, req: BrainRequest) -> BrainResult:
         try:
             # --dangerously-skip-permissions (added by _build_command for
             # tool-bearing tasks) is refused under root/sudo unless IS_SANDBOX=1
@@ -1132,6 +1148,32 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _execute_streaming_once(cmd: list[str], req: BrainRequest) -> BrainResult:
+        """One streaming attempt, with its usage attached to whatever it returns.
+
+        The accounting is collected into a dict the inner function fills as it
+        parses, and the `BrainUsage` is built here — once, on the way out. The
+        inner function has around a dozen return points (cancel, timeout, OOM,
+        several error classifications) and tokens are spent on all of them, so
+        stamping at a single exit is what keeps a later-added return from
+        silently dropping a measurement.
+        """
+        accounting: dict = {}
+        result = ClaudeCodeBrain._execute_streaming_once_inner(cmd, req, accounting)
+        result.usage = usage_types.from_cli_result(
+            accounting.get("result_frame"),
+            accounting.get("requests") or [],
+            accounting.get("api_key_source"),
+            model_hint=accounting.get("model_seen", ""),
+            subagent_requests=accounting.get("subagent_requests", 0),
+            compacted_requests=accounting.get("compacted_requests", 0),
+            rate_limit=accounting.get("rate_limit"),
+        )
+        return result
+
+    @staticmethod
+    def _execute_streaming_once_inner(
+        cmd: list[str], req: BrainRequest, accounting: dict
+    ) -> BrainResult:
         actions_descriptions: list[str] = []
         execution_trace: list[dict] = []
         stderr_lines: list[str] = []
@@ -1217,24 +1259,70 @@ class ClaudeCodeBrain:
         # frame carries it (it reflects the resolved default when --model was
         # omitted), so this is more accurate than req.model for the default case.
         model_seen = ""
+        # Usage accounting, collected alongside the model sniff. `api_key_source`
+        # decides whether the cost figure is real money or a plan-equivalent.
+        api_key_source: str | None = None
+        requests: list[usage_types.RequestUsage] = []
+        accounting["requests"] = requests
         parse_line = make_stream_parser()
 
         try:
             for line in process.stdout:
                 raw_stdout_lines.append(line)
-                if not model_seen and '"model"' in line:
+                if (not model_seen or api_key_source is None) and (
+                    '"model"' in line or '"apiKeySource"' in line
+                ):
                     try:
                         _d = json.loads(line)
-                        if _d.get("type") == "system" and _d.get("model"):
-                            model_seen = str(_d["model"])
+                        if _d.get("type") == "system":
+                            if not model_seen and _d.get("model"):
+                                model_seen = str(_d["model"])
+                                accounting["model_seen"] = model_seen
+                            if api_key_source is None and _d.get("apiKeySource"):
+                                api_key_source = str(_d["apiKeySource"])
+                                accounting["api_key_source"] = api_key_source
                     except (json.JSONDecodeError, AttributeError):
                         pass
                 event = parse_line(line)
                 if event is None:
                     continue
 
+                # Accounting frames are consumed here and never reach
+                # `execution_trace` or `req.on_progress`. That is load-bearing:
+                # the executor fans progress events out to live surfaces, and a
+                # token-accounting frame appearing in a user's chat is a bug.
+                if isinstance(event, RequestUsageEvent):
+                    if event.is_subagent:
+                        # Keeps `peak_context_tokens` meaning *this* agent's
+                        # peak. Counted rather than dropped, so the number can
+                        # be checked against reality later — fan-out is denied
+                        # today, so a non-zero value means the deny list changed
+                        # or the CLI dropped the `Agent` alias.
+                        accounting["subagent_requests"] = (
+                            accounting.get("subagent_requests", 0) + 1
+                        )
+                    elif event.compacted:
+                        # A compaction replays the previous response; counting it
+                        # would inflate `model_requests` with no real request.
+                        accounting["compacted_requests"] = (
+                            accounting.get("compacted_requests", 0) + 1
+                        )
+                    else:
+                        requests.append(
+                            usage_types.RequestUsage(
+                                prompt_tokens=event.prompt_tokens,
+                                output_tokens=event.output_tokens,
+                                model=event.model or model_seen,
+                            )
+                        )
+                    continue
+                if isinstance(event, RateLimitEvent):
+                    accounting["rate_limit"] = event.info
+                    continue
+
                 if isinstance(event, ResultEvent):
                     final_result = event
+                    accounting["result_frame"] = event.raw
                 elif isinstance(event, ContextManagementEvent):
                     execution_trace.append({"type": "cm_boundary"})
                     continue  # don't stream CM markers

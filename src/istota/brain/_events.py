@@ -62,6 +62,56 @@ class TextDeltaEvent:
 class ResultEvent:
     success: bool
     text: str
+    # The whole terminal frame, uninterpreted. `_events` stays a parser and
+    # `istota.usage` owns the interpretation, so a CLI schema change touches one
+    # pure, unit-tested function rather than this module. The default keeps
+    # `tmux_claude.py`'s keyword construction compiling.
+    raw: dict | None = None
+
+
+@dataclass
+class RequestUsageEvent:
+    """Final usage for one API request, from a ``message_delta`` frame.
+
+    This is the right source for per-request measures and the ``assistant``
+    frames are not, on four counts: it needs no `message.id` dedup, it carries
+    the true output token count (an `assistant` frame carries a per-content-block
+    snapshot — 4 and 1 against real values of 119 and 28 on the capture), it
+    arrives exactly once per request, and emitting it does not fight the parser.
+    That last one decides it: `parse_stream_line` returns one event per line, and
+    the `assistant` branch already ends in a priority ladder returning a
+    `ToolUseEvent` / `TextEvent` / `ThinkingEvent`. Emitting usage there would
+    consume the return slot and drop the tool event, costing a tool chip on the
+    live surface, an `actions_taken` entry and the `execution_trace` entry the
+    sleep cycle reads for playbook extraction. The `stream_event` branch already
+    returns None for these frames, so emitting here consumes nothing.
+
+    ``prompt_tokens`` is input + cache read + cache write — the whole prompt the
+    model saw, which is what the context window bounds.
+    """
+
+    prompt_tokens: int
+    output_tokens: int
+    model: str = ""
+    # From `parent_tool_use_id` on the *wrapper*, not the inner event. A
+    # sub-agent's context is not this agent's context.
+    is_subagent: bool = False
+    # From `context_management` on the inner event. A compaction replays the
+    # previous response, so counting it as a request inflates `model_requests`
+    # with no real request behind it.
+    compacted: bool = False
+
+
+@dataclass
+class RateLimitEvent:
+    """A live quota posture, emitted early in a run.
+
+    Recorded, not acted on. The fallback breaker currently learns about a
+    subscription limit only by hitting it and parsing the banner; storing the
+    posture is what makes a preemptive trip specifiable later.
+    """
+
+    info: dict
 
 
 @dataclass
@@ -119,6 +169,8 @@ StreamEvent = (
     | ToolProgressEvent
     | ThinkingEvent
     | ThinkingDeltaEvent
+    | RequestUsageEvent
+    | RateLimitEvent
 )
 
 
@@ -138,6 +190,23 @@ def make_stream_parser() -> Callable[[str], StreamEvent | None]:
         return parse_stream_line(line, _seen=seen_block_ids)
 
     return parse
+
+
+def _usage_int(usage: dict, key: str) -> int:
+    """One usage field as a non-negative int, tolerating anything else.
+
+    The frames are not a contract we control, and this value ends up in a
+    dataclass the brain's return path builds — a retyped field must yield a zero
+    here, not an exception three layers up. `bool` is excluded because it is an
+    `int` subclass and `True` would read as a token count of 1.
+    """
+    value = usage.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    try:
+        return max(0, int(value))
+    except (ValueError, OverflowError):
+        return 0
 
 
 def parse_stream_line(
@@ -167,7 +236,11 @@ def parse_stream_line(
     if event_type == "result":
         success = data.get("subtype") == "success"
         text = data.get("result", "")
-        return ResultEvent(success=success, text=text)
+        return ResultEvent(success=success, text=text, raw=data)
+
+    if event_type == "rate_limit_event":
+        info = data.get("rate_limit_info")
+        return RateLimitEvent(info=info if isinstance(info, dict) else {})
 
     # Partial-message frames (--include-partial-messages). These wrap the raw
     # Anthropic SSE events under ``event`` and carry the answer/thinking text
@@ -176,11 +249,14 @@ def parse_stream_line(
     # (web/repl) can render the final response live instead of all-at-once; the
     # later whole-block TextEvent/ThinkingEvent is deduped against these by the
     # executor (it alone knows the surface). All other partial frames
-    # (message_start/_stop, content_block_start/_stop, message_delta, tool-input
-    # deltas) map to no user-visible event.
+    # (message_start/_stop, content_block_start/_stop, tool-input deltas) map to
+    # no user-visible event. `message_delta` is the one exception: it carries the
+    # final usage for one API request and yields a RequestUsageEvent, which the
+    # brain consumes for accounting and never forwards to a surface.
     if event_type == "stream_event":
         inner = data.get("event", {})
-        if inner.get("type") == "content_block_delta":
+        inner_type = inner.get("type")
+        if inner_type == "content_block_delta":
             delta = inner.get("delta", {})
             delta_type = delta.get("type")
             if delta_type == "text_delta":
@@ -191,6 +267,24 @@ def parse_stream_line(
                 thinking = delta.get("thinking", "")
                 if thinking:
                     return ThinkingDeltaEvent(thinking=thinking)
+        elif inner_type == "message_delta":
+            # Deliberately not `message_start`, whose output_tokens is a partial
+            # (3 on the capture, against a real 119).
+            usage = inner.get("usage")
+            if isinstance(usage, dict):
+                return RequestUsageEvent(
+                    prompt_tokens=(
+                        _usage_int(usage, "input_tokens")
+                        + _usage_int(usage, "cache_read_input_tokens")
+                        + _usage_int(usage, "cache_creation_input_tokens")
+                    ),
+                    output_tokens=_usage_int(usage, "output_tokens"),
+                    model=str(data.get("model") or ""),
+                    # On the wrapper: null for the main agent, set for a
+                    # `Task` sub-agent's requests.
+                    is_subagent=data.get("parent_tool_use_id") is not None,
+                    compacted=inner.get("context_management") is not None,
+                )
         return None
 
     if event_type == "assistant":

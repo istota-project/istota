@@ -132,7 +132,8 @@ class TestRecoveryEndToEnd:
         assert result.success is True
         assert result.result_text == "Recovered answer."
         assert spy["continue"] == 1  # recovery entered exactly once
-        assert result.usage.input_tokens > 0  # usage spans the recovered segment
+        # usage spans the recovered segment
+        assert result.usage.billed_input_tokens > 0
 
     def test_budget_exhausted_returns_error(self, tmp_path, monkeypatch):
         spy = {"continue": 0}
