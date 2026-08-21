@@ -22,6 +22,7 @@ import pytest
 from istota import task_cgroup
 from istota.executor import execute_task
 
+from .test_task_cgroup import _kernelish_rmdir
 from .test_executor_streaming import (
     _EXECUTOR_PATCH_RETURNS,
     _EXECUTOR_PATCHES,
@@ -45,31 +46,6 @@ def cgroup_root(tmp_path: Path) -> Path:
     return root
 
 
-# Bound before any patching, so the emulation below calls the real function
-# rather than the mock that is standing in for it.
-_REAL_DESTROY = task_cgroup.destroy
-
-
-def _cgroupfs_destroy(path: Path) -> None:
-    """``destroy`` with the one bit of cgroupfs a ``tmp_path`` tree cannot have.
-
-    ``memory.max`` and friends are kernel interface files: nothing can unlink
-    them, and they cease to exist with the cgroup, so ``rmdir`` on a real
-    cgroup that holds no processes succeeds. Under ``tmp_path`` they are
-    ordinary files and ``rmdir`` gets ``ENOTEMPTY``.
-
-    So the fixture removes them first and then calls the real function. This
-    file is about the *executor's* wiring — that a cgroup is given back on
-    every exit path — and ``tests/test_task_cgroup.py`` owns ``destroy``'s own
-    semantics, including that it leaves a still-busy cgroup alone.
-    """
-    if path.is_dir():
-        for child in path.iterdir():
-            if child.is_file():
-                child.unlink()
-    _REAL_DESTROY(path)
-
-
 def _patches(cgroup_root: Path, *, stdout: str = "done", returncode: int = 0):
     result = MagicMock()
     result.stdout = stdout
@@ -81,7 +57,11 @@ def _patches(cgroup_root: Path, *, stdout: str = "done", returncode: int = 0):
     ] + [
         patch("istota.executor.subprocess.run", return_value=result),
         patch("istota.task_cgroup.resolve_root", return_value=cgroup_root),
-        patch("istota.task_cgroup.destroy", side_effect=_cgroupfs_destroy),
+        # cgroupfs semantics for `rmdir`, shared with tests/test_task_cgroup.py.
+        # Patching `rmdir` rather than `destroy` itself matters here: the real
+        # `destroy` now kills a cgroup that still holds processes, and stubbing
+        # the whole function would mean the executor path never exercises it.
+        patch.object(Path, "rmdir", _kernelish_rmdir),
     ]
 
 
@@ -115,13 +95,15 @@ def test_creates_the_cgroup_with_the_configured_limits_and_removes_it(
         success, _result, _actions, _trace = execute_task(task, config, [])
 
     assert success is True
-    assert seen["path"] == cgroup_root / "task-77"
+    # The attempt is part of the name: a retry reuses the task row, so the id
+    # alone would land attempt 2 in the directory attempt 1 left behind.
+    assert seen["path"] == cgroup_root / "task-77-0"
     assert seen["memory.max"] == str(1024 * 1024 * 1024)
     assert seen["pids.max"] == "128"
     assert seen["cpu.max"] == "150000 100000"
     # Given back on the way out, so a long-lived daemon does not accumulate one
     # directory per task it ever ran.
-    assert not (cgroup_root / "task-77").exists()
+    assert not (cgroup_root / "task-77-0").exists()
 
 
 def test_the_cgroup_is_removed_when_the_task_fails(tmp_path, cgroup_root):
@@ -135,7 +117,7 @@ def test_the_cgroup_is_removed_when_the_task_fails(tmp_path, cgroup_root):
         success, _result, _actions, _trace = execute_task(task, config, [])
 
     assert success is False
-    assert not (cgroup_root / "task-78").exists()
+    assert not (cgroup_root / "task-78-0").exists()
     assert [p.name for p in cgroup_root.iterdir() if p.is_dir()] == []
 
 
@@ -189,6 +171,63 @@ def test_nothing_is_created_when_the_feature_is_off(tmp_path, cgroup_root):
 
     assert success is True
     assert list(cgroup_root.iterdir()) == []
+
+
+def test_an_oom_kill_is_named_before_the_counters_are_removed(
+    tmp_path, cgroup_root, caplog
+):
+    """``memory.events`` has to be read before ``rmdir`` takes it away.
+
+    Otherwise the feature's first visible effect on a real host is that builds
+    and suites which used to pass start failing, reported as an opaque killed
+    child with nothing anywhere mentioning a cap — the task is told it died and
+    the operator has no way to find out why.
+    """
+    import logging
+
+    config = _make_config(tmp_path)
+    task = _make_task(id=82)
+
+    real_create = task_cgroup.create
+
+    def create_with_an_oom(task_id, limits, **kwargs):
+        path = real_create(task_id, limits, **kwargs)
+        # What the kernel would have left behind after killing the tree.
+        (path / "memory.events").write_text("low 0\nhigh 4\nmax 9\noom 1\noom_kill 3\n")
+        return path
+
+    with contextmanager_chain(
+        _patches(cgroup_root)
+        + [patch("istota.task_cgroup.create", side_effect=create_with_an_oom)]
+    ):
+        with caplog.at_level(logging.WARNING, logger="istota.executor"):
+            execute_task(task, config, [])
+
+    assert "OOM-killed" in caplog.text
+    assert "task_memory_max_mb" in caplog.text
+    assert not (cgroup_root / "task-82-0").exists()
+
+
+def test_the_cgroup_is_released_when_the_run_raises_before_the_exit_stack(
+    tmp_path, cgroup_root
+):
+    """The cgroup is created ~200 lines before the ExitStack that cleans it up.
+
+    Everything in between — brain construction, model resolution, the
+    BrainRequest itself — is inside the function-wide try, whose handler
+    returns without the stack ever being entered. A raise there leaked the
+    directory until the next daemon start.
+    """
+    config = _make_config(tmp_path)
+    task = _make_task(id=83)
+
+    with contextmanager_chain(_patches(cgroup_root)):
+        with patch("istota.executor.make_brain", side_effect=RuntimeError("boom")):
+            success, output, _actions, _trace = execute_task(task, config, [])
+
+    assert success is False
+    assert "boom" in output
+    assert [p.name for p in cgroup_root.iterdir() if p.is_dir()] == []
 
 
 def test_a_task_still_runs_when_no_cgroup_can_be_created(tmp_path):

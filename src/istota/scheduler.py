@@ -6009,8 +6009,13 @@ def _report_task_cgroups(config: Config) -> None:
     a deployment without ``Delegate=`` runs every task uncontained; without a
     line saying so at startup, the *only* difference between "containment on"
     and "containment silently absent" is a warning that fires once, whenever the
-    first task happens to run. Resolving the root here is a pair of file reads
-    and answers the question up front.
+    first task happens to run.
+
+    For that line to be worth anything it has to be a *measurement*, which is
+    what ``probe`` makes it. Resolving the root is not enough on its own — it
+    succeeds on any systemd host — and a report that cannot fail is a report
+    that says nothing. The negative case is logged at warning rather than info,
+    since "your containment is not running" is not an informational fact.
     """
     if not config.scheduler.task_cgroup_enabled:
         logger.info("STARTUP Per-task cgroups: disabled")
@@ -6018,21 +6023,34 @@ def _report_task_cgroups(config: Config) -> None:
     try:
         root = task_cgroup.resolve_root()
         if root is None:
-            logger.info(
-                "STARTUP Per-task cgroups: enabled but inert "
+            logger.warning(
+                "STARTUP Per-task cgroups: enabled but INERT "
                 "(no delegated unit cgroup — tasks run uncontained)"
             )
             return
-        swept = task_cgroup.sweep_stale(root)
+        # Resolving the root is not evidence, which is the trap the first cut of
+        # this function fell into: `resolve_root` answers on every systemd host,
+        # `Delegate=` applied or not, so the affirmative line printed on hosts
+        # where every `create` would go on to fail. Probe instead.
+        reason = task_cgroup.probe(root)
+        if reason is not None:
+            logger.warning(
+                "STARTUP Per-task cgroups: enabled but INERT (%s); tasks run "
+                "uncontained. Check Delegate= and DelegateSubgroup= on the unit",
+                reason,
+            )
+            return
+        removed, surviving = task_cgroup.sweep_stale(root)
         logger.info(
-            "STARTUP Per-task cgroups: %s (memory.max=%s, pids.max=%d, cpu.max=%s)%s",
+            "STARTUP Per-task cgroups: %s (memory.max=%s, pids.max=%d, cpu.max=%s)%s%s",
             root,
             "max" if config.scheduler.task_memory_max_mb <= 0
             else f"{config.scheduler.task_memory_max_mb}M",
             config.scheduler.task_pids_max,
             "unset" if config.scheduler.task_cpu_max_percent <= 0
             else f"{config.scheduler.task_cpu_max_percent}%",
-            f"; swept {swept} stale" if swept else "",
+            f"; swept {removed} stale" if removed else "",
+            f"; {surviving} still holding live processes" if surviving else "",
         )
     except Exception as e:  # noqa: BLE001
         # A startup report must never be what stops the daemon from starting.

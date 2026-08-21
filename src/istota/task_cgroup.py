@@ -55,6 +55,8 @@ __all__ = [
     "create",
     "destroy",
     "place",
+    "probe",
+    "read_events",
     "resolve_root",
     "sweep_stale",
 ]
@@ -107,6 +109,16 @@ class CgroupLimits:
     pids_max: int = 512
     cpu_max_percent: int = 200
 
+    # Swap is deliberately not bounded here, and it is worth being explicit
+    # because Stage 2 gave this host 4 GB of zram. `memory.max` covers anon +
+    # page cache; `memory.swap.max` is a separate knob defaulting to `max`, so
+    # a tree past its limit is reclaimed into swap and only OOM-killed once
+    # reclaim stops making progress. Capping swap would make a task die sooner
+    # and more predictably; leaving it uncapped lets zram absorb a burst the
+    # way it absorbed the 1.44 GB one on 2026-08-21, which is what Track A was
+    # for. Left uncapped on that reasoning, not by oversight — revisit if a
+    # contained task is observed driving host swap I/O rather than dying.
+
 
 def resolve_root(
     proc_root: Path = Path("/proc"),
@@ -121,9 +133,12 @@ def resolve_root(
     — the one holding no processes of its own and therefore able to enable
     controllers for its children.
 
-    Truncating rather than taking the path verbatim is deliberate, and it is the
-    same walk :func:`istota.host_pressure.read_memory_events` makes for the same
-    reason. ``/proc/self/cgroup`` reports ``…/<unit>.service/supervisor``, and a
+    Truncating rather than taking the path verbatim is deliberate, for the same
+    reason :func:`istota.host_pressure.read_memory_events` walks up — the leaf
+    carries no controller files. The two are not the same walk, though: that one
+    starts at the leaf and climbs until it finds ``memory.events``, using the
+    unit component only as a floor, while this goes straight to the unit.
+    ``/proc/self/cgroup`` reports ``…/<unit>.service/supervisor``, and a
     ``task-<id>/`` made *there* would inherit the leaf's emptiness of
     controllers rather than the unit's delegation.
 
@@ -156,11 +171,19 @@ def resolve_root(
         # `cgroup_root`.
         parts = [p for p in rel.split("/") if p and p != ".."]
 
+        # The *last* unit component, not the first. Under a systemd user
+        # manager the line is
+        # `/user.slice/user-1000.slice/user@1000.service/app.slice/istota.service/…`,
+        # and taking the first match resolves to `user@1000.service` — the user
+        # manager's own cgroup, which is delegated and writable, so `mkdir` and
+        # the `memory.max` write both succeed and the kernel-is-the-probe rule
+        # returns a false positive. Task cgroups would land beside every other
+        # unit that user runs, outside this unit's accounting, and `sweep_stale`
+        # would then be deleting `task-*` out of a directory it does not own.
         unit_end = None
         for i, part in enumerate(parts):
             if part.endswith((".service", ".scope")):
                 unit_end = i + 1
-                break
         if unit_end is None:
             return None
 
@@ -202,6 +225,7 @@ def create(
     task_id: int,
     limits: CgroupLimits,
     *,
+    attempt: int | None = None,
     root: Path | None = None,
     proc_root: Path = Path("/proc"),
     cgroup_root: Path = Path("/sys/fs/cgroup"),
@@ -236,7 +260,14 @@ def create(
         )
         return None
 
-    path = Path(root) / f"task-{int(task_id)}"
+    # The attempt is in the name because the task id is not unique over time.
+    # A retry reuses the same row, so attempt 2 of task 41 would otherwise land
+    # in the directory attempt 1 left behind — and attempt 1 is the one whose
+    # tree escaped its process group, which is why the directory is still there
+    # at all. The new attempt would then share its budget with the runaway that
+    # caused the retry and be OOM-killed on the spot.
+    name = f"task-{int(task_id)}" if attempt is None else f"task-{int(task_id)}-{int(attempt)}"
+    path = Path(root) / name
     try:
         path.mkdir(exist_ok=True)
     except OSError as exc:
@@ -295,6 +326,66 @@ def create(
     return path
 
 
+def probe(root: Path) -> str | None:
+    """Try the whole thing once. ``None`` if containment will work, else why not.
+
+    The module's own argument is that the kernel is the only honest capability
+    check — interface files cannot be created by a writer, so a ``memory.max``
+    write that succeeds proves the controller is delegated. The startup report
+    was the one place not taking that advice: it asked :func:`resolve_root`,
+    which answers on any systemd host whether or not ``Delegate=`` was ever
+    applied, and then printed the limits as though they were in force.
+
+    That is the failure the spec's A6 notes name directly — "containment would
+    never engage and nothing would report it" — reintroduced by the very line
+    written to prevent it. So this does a real ``mkdir`` + ``memory.max`` write
+    + ``rmdir`` under a reserved name, at startup, once. Three syscalls to turn
+    a claim into a measurement.
+    """
+    scratch = Path(root) / "task-probe"
+    try:
+        scratch.mkdir(exist_ok=True)
+    except OSError as exc:
+        return f"cannot create cgroups under {root} ({exc.strerror or exc})"
+
+    enable_controllers(root)
+    try:
+        (scratch / "memory.max").write_text("max\n")
+    except OSError as exc:
+        destroy(scratch)
+        return (
+            f"no memory.max in a new cgroup ({exc.strerror or exc}) — the memory "
+            "controller is not delegated to this subtree"
+        )
+
+    destroy(scratch)
+    return None
+
+
+def read_events(path: Path) -> dict[str, int]:
+    """``memory.events`` for one task cgroup, or ``{}`` where it cannot be read.
+
+    Read before :func:`destroy`, because ``rmdir`` takes the counters with it.
+    Without this a task killed by its own ``memory.max`` is unattributable: the
+    brain reports a killed child, and nothing anywhere mentions a cap. That is
+    a bad trade for a feature that is on by default and whose first visible
+    effect on a real host is that builds which used to pass start failing.
+    """
+    events: dict[str, int] = {}
+    text = _read_text(Path(path) / "memory.events")
+    if text is None:
+        return events
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            events[fields[0]] = int(fields[1])
+        except ValueError:
+            continue
+    return events
+
+
 def place(pid: int, path: Path) -> bool:
     """Move ``pid`` — and every process it goes on to spawn — into ``path``.
 
@@ -316,8 +407,14 @@ def place(pid: int, path: Path) -> bool:
             # Already gone. Nothing to contain, nothing wrong.
             logger.debug("task cgroup: pid %d exited before placement", pid)
             return False
+        # Keyed on the errno, not on a constant. A placement failure is a fact
+        # about *this* task, not about the deployment, and the two other keys
+        # here are deployment facts. With one shared key the first uncontained
+        # task would be the only one ever reported and every later one would be
+        # silent — the "must not look alike in a log" rule this module states
+        # for itself, broken by its own logging.
         _log_once(
-            "place-failed",
+            f"place-failed:{exc.errno}",
             "task cgroup: cannot place pid %d into %s (%s); this task runs uncontained",
             pid,
             path,
@@ -326,27 +423,77 @@ def place(pid: int, path: Path) -> bool:
         return False
 
 
-def destroy(path: Path) -> None:
-    """Remove a task cgroup. A no-op if it is already gone.
+def destroy(path: Path) -> bool:
+    """Remove a task cgroup, killing anything still in it. True if it is gone.
 
-    ``EBUSY`` means processes are still in it — a tree that outlived the brain
-    subprocess. Removing a cgroup does not kill anything, so there is nothing
-    useful to do here beyond leaving it: :func:`sweep_stale` takes it on the
-    next daemon start, once the processes really are gone.
+    ``EBUSY`` means processes are still in there — a tree that outlived the
+    brain subprocess, which is the exact shape of ISSUE-257: a `pytest -n auto`
+    whose workers survived the kill aimed at their parent. Leaving them is not
+    an option this module can defend. They are the task's own runaway
+    descendants, the task is over, and they now hold a memory budget nobody is
+    watching; the next daemon start cannot reclaim the directory either, since
+    ``rmdir`` keeps returning ``EBUSY`` for as long as they live.
+
+    So the ``EBUSY`` path writes ``cgroup.kill``, which has been in cgroup v2
+    since Linux 5.14 (Debian 13 ships 6.x). It kills **every** member of the
+    cgroup, including descendants that escaped their process group — the one
+    guarantee ``killpg`` cannot make, and the reason this is worth doing here
+    rather than leaving it to :func:`process_group.kill_process_group`.
+
+    A failure to kill is logged at warning, not swallowed: a task cgroup that
+    cannot be emptied is a live runaway, which is the thing this module exists
+    to prevent.
     """
+    path = Path(path)
     try:
-        Path(path).rmdir()
+        path.rmdir()
+        return True
     except FileNotFoundError:
-        return
+        return True
     except OSError as exc:
-        logger.debug(
-            "task cgroup: could not remove %s (%s)", path, exc.strerror or exc
+        if exc.errno != errno.EBUSY:
+            logger.debug(
+                "task cgroup: could not remove %s (%s)", path, exc.strerror or exc
+            )
+            return False
+
+    try:
+        (path / "cgroup.kill").write_text("1\n")
+    except OSError as exc:
+        logger.warning(
+            "task cgroup %s still holds processes and cannot be killed (%s); "
+            "a runaway task tree is still running",
+            path,
+            exc.strerror or exc,
         )
+        return False
+
+    try:
+        path.rmdir()
+        logger.warning(
+            "task cgroup %s still held processes at task exit; killed them", path
+        )
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        # The kill is asynchronous, so a rmdir immediately after can still find
+        # members. The sweep at the next daemon start collects it.
+        logger.debug(
+            "task cgroup: %s not removable after kill (%s)", path, exc.strerror or exc
+        )
+        return False
 
 
 def sweep_stale(root: Path | None = None, *, proc_root: Path = Path("/proc"),
-                cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
-    """Remove ``task-*`` directories left behind by a previous run. Returns the count.
+                cgroup_root: Path = Path("/sys/fs/cgroup")) -> tuple[int, int]:
+    """Remove ``task-*`` left by a previous run. Returns ``(removed, surviving)``.
+
+    Both numbers, because the second is the interesting one. A directory that
+    will not go is one whose processes are still alive — the daemon died and
+    the tree that killed it did not — and counting only removals reports that
+    case identically to a clean start. :func:`destroy` kills what it finds, so
+    a survivor here means even the kill did not take.
 
     A daemon killed hard — the OOM killer, ``SIGKILL``, a reboot — leaves its
     task cgroups on disk. They hold nothing and cost nothing, but they
@@ -360,13 +507,14 @@ def sweep_stale(root: Path | None = None, *, proc_root: Path = Path("/proc"),
     if root is None:
         root = resolve_root(proc_root=proc_root, cgroup_root=cgroup_root)
     if root is None:
-        return 0
+        return (0, 0)
 
     removed = 0
+    surviving = 0
     try:
         entries = sorted(os.listdir(root))
     except OSError:
-        return 0
+        return (0, 0)
 
     for name in entries:
         if not name.startswith("task-"):
@@ -374,11 +522,16 @@ def sweep_stale(root: Path | None = None, *, proc_root: Path = Path("/proc"),
         candidate = Path(root) / name
         if not candidate.is_dir():
             continue
-        before = candidate.exists()
-        destroy(candidate)
-        if before and not candidate.exists():
+        if destroy(candidate):
             removed += 1
-    return removed
+        else:
+            surviving += 1
+            logger.warning(
+                "task cgroup %s survived the startup sweep — a process tree from "
+                "a previous run is still alive in it",
+                candidate,
+            )
+    return (removed, surviving)
 
 
 def _read_text(path: Path) -> str | None:
