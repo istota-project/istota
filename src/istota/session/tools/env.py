@@ -112,6 +112,11 @@ class ToolEnv:
     deferred_dir: Path | None = None
     # Whether Bash spills over-cap output to a file (vs. cap-only truncation).
     bash_spill_full_output: bool = True
+    # Per-task cgroup v2 directory (A6), or ``None`` where the deployment has
+    # no delegated subtree. Bash moves each child it spawns into it, which is
+    # the only way this brain's subprocesses get contained: it has no single
+    # long-lived child for the executor's ``on_pid`` path to place.
+    task_cgroup: Path | None = None
 
     # Native WebFetch policy. ``None`` → the tool is omitted from
     # ``build_default_tools`` (the model never sees it). See WebFetchPolicy.

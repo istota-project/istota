@@ -222,3 +222,45 @@ class TestBashProcessHandling:
         await asyncio.sleep(0.5)
         mtime2 = marker.stat().st_mtime if marker.exists() else 0
         assert mtime1 == mtime2, "subprocess survived cancellation"
+
+
+class TestBashTaskCgroup:
+    """A6 — the Bash tool places each child it spawns in the task's cgroup.
+
+    NativeBrain never calls ``on_pid``: it has no single long-lived child for
+    the executor to place. So without this, the brain that runs a task's test
+    suite would be the one brain per-task containment silently skipped, and
+    nothing would say so. These run a real subprocess against a fake cgroup
+    directory under ``tmp_path``.
+    """
+
+    async def test_places_the_child_pid_in_the_task_cgroup(self, tmp_path):
+        cg = tmp_path / "task-5"
+        cg.mkdir()
+        env = _env(tmp_path, task_cgroup=cg)
+
+        result = await _run(make_bash_tool(env), {"command": "echo placed"})
+
+        assert "placed" in _text(result)
+        # cgroup v2 membership is inherited across fork, so placing `bash`
+        # places everything the command goes on to spawn.
+        assert (cg / "cgroup.procs").read_text().strip().isdigit()
+
+    async def test_writes_nothing_when_no_cgroup_was_created(self, tmp_path):
+        # The fail-open path: no `Delegate=` on the deployment, so the executor
+        # handed down None and the command must run exactly as it always did.
+        env = _env(tmp_path)
+
+        result = await _run(make_bash_tool(env), {"command": "echo fine"})
+
+        assert "fine" in _text(result)
+        assert not (tmp_path / "cgroup.procs").exists()
+
+    async def test_a_command_still_runs_when_placement_fails(self, tmp_path):
+        # Containment is best-effort; losing it must never cost the task its
+        # command. The directory here does not exist, so the write raises.
+        env = _env(tmp_path, task_cgroup=tmp_path / "gone")
+
+        result = await _run(make_bash_tool(env), {"command": "echo survived"})
+
+        assert "survived" in _text(result)

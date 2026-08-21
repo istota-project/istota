@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from . import db
 from . import email_support
+from . import task_cgroup
 from .config import Config
 from .context import (
     build_talk_context,
@@ -936,6 +937,33 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
 })
 
 _bwrap_checked: bool | None = None
+
+
+def _release_task_cgroup(task_id: int, path: Path) -> None:
+    """Give a task's cgroup back, naming an OOM kill on the way out (A6).
+
+    ``memory.events`` has to be read *before* ``rmdir``, because the counters
+    go with the directory. Without this the feature's first visible effect on a
+    real host is that builds and test suites which used to pass start failing,
+    reported as an opaque killed child with nothing anywhere mentioning a cap —
+    a task told it was killed, and an operator with no way to find out why.
+
+    Never raises: this runs from an ``ExitStack`` callback on the task's exit
+    path, where an exception would replace the task's real result with this
+    one's.
+    """
+    try:
+        events = task_cgroup.read_events(path)
+        if events.get("oom_kill"):
+            logger.warning(
+                "task %d: %d process(es) OOM-killed inside the task's own cgroup "
+                "(scheduler.task_memory_max_mb) — the task exceeded its memory "
+                "cap; the rest of the host was unaffected",
+                task_id, events["oom_kill"],
+            )
+        task_cgroup.destroy(path)
+    except Exception:  # noqa: BLE001
+        logger.debug("task %d: cgroup cleanup failed", task_id, exc_info=True)
 
 
 def _bwrap_available() -> bool:
@@ -3806,6 +3834,14 @@ def execute_task(
     if result_file.exists():
         result_file.unlink()
 
+    # Bound here rather than at its assignment below, so the handler at the
+    # bottom of this function can release it. The cgroup is created roughly 200
+    # lines before the ExitStack that registers its cleanup, and everything in
+    # between — brain construction, model resolution, the BrainRequest itself —
+    # is inside this try. An exception there returns without the stack ever
+    # being entered, leaking the directory until the next daemon start.
+    _task_cg = None
+
     try:
         if event_writer is not None:
             # Stamp a generic progress verb so stream surfaces (web chat) show a
@@ -4332,7 +4368,31 @@ def execute_task(
                     _flush_deltas()  # turn/CM boundary
                 event_writer.emit("context_management")
 
+        # Per-task cgroup (A6). Created before the brain is asked for anything,
+        # because the pid it hands back has already been spawned and every
+        # microsecond between spawn and placement is time the tree runs
+        # unbounded. `None` on any deployment without `Delegate=` — the module
+        # logs why once and everything below carries on as it did before.
+        if config.scheduler.task_cgroup_enabled:
+            _task_cg = task_cgroup.create(
+                task.id,
+                task_cgroup.CgroupLimits(
+                    memory_max_mb=config.scheduler.task_memory_max_mb,
+                    pids_max=config.scheduler.task_pids_max,
+                    cpu_max_percent=config.scheduler.task_cpu_max_percent,
+                ),
+                # A retry reuses the task row, so the id alone would put this
+                # attempt in the directory the previous one left behind —
+                # together with whatever of its tree escaped the kill.
+                attempt=task.attempt_count,
+            )
+
         def _on_pid(pid: int) -> None:
+            # Placement first, DB second. `update_task_pid` can block on the
+            # SQLite write lock, and the whole value of the cgroup is in the
+            # window before the child's own work starts.
+            if _task_cg is not None:
+                task_cgroup.place(pid, _task_cg)
             try:
                 with db.get_db(config.db_path) as pid_conn:
                     db.update_task_pid(pid_conn, task.id, pid)
@@ -4447,6 +4507,10 @@ def execute_task(
             # anyway, so this is defense-in-depth.
             poll_steers=_poll_steers if getattr(brain, "supports_steering", False) else None,
             on_pid=_on_pid,
+            # NativeBrain has no single subprocess and so never calls `on_pid`
+            # — its Bash tool spawns one child per execution. It places each of
+            # those itself, from this path. Other brains ignore the field.
+            task_cgroup=_task_cg,
             sandbox_wrap=_sandbox_wrap,
             # Filesystem confinement for NativeBrain's in-process file tools
             # (NB-1). Populated only when effective sandboxing is on; other
@@ -4500,6 +4564,11 @@ def execute_task(
                     stack.enter_context(_proxy_ctx)
                 if _net_proxy_ctx is not None:
                     stack.enter_context(_net_proxy_ctx)
+                # Every exit path — success, failure, timeout, cancellation,
+                # a fallback brain replacing the primary — gives the directory
+                # back and kills anything still in it.
+                if _task_cg is not None:
+                    stack.callback(_release_task_cgroup, task.id, _task_cg)
 
                 if _skip_primary:
                     # Cooling down — go straight to the fallback, no primary call.
@@ -4693,6 +4762,11 @@ def execute_task(
         return success, result, actions, trace
 
     except Exception as e:
+        # Reached when the failure happened before the ExitStack was entered;
+        # once it has been, the callback already ran and this is a no-op on a
+        # directory that is gone.
+        if _task_cg is not None:
+            _release_task_cgroup(task.id, _task_cg)
         return False, f"Execution error: {e}", None, None
 
 

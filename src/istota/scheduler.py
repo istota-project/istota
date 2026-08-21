@@ -28,6 +28,7 @@ from croniter import croniter
 # every dispatch tick (~0.5s), and it is a stdlib-only leaf with no import of
 # its own back into the package, so there is no cycle to avoid.
 from . import host_pressure as host_pressure_mod
+from . import task_cgroup
 
 logger = logging.getLogger("istota.scheduler")
 # Dedicated logger so operators can isolate the periodic health line from the
@@ -6199,6 +6200,67 @@ def _dispatch_sleep(
             logger.error("Error dispatching workers: %s", e)
 
 
+def _report_task_cgroups(config: Config) -> None:
+    """Sweep cgroups a previous run left behind, and say at startup what A6 will do.
+
+    The sweep is here rather than in the executor because it is a statement
+    about the *previous* process: a daemon killed by the OOM killer or a reboot
+    — exactly the events this spec exists to survive — leaves its ``task-*``
+    directories on disk, and they accumulate across restarts until the next
+    incident, when ``systemd-cgls`` is what an operator reaches for first.
+
+    The startup line is the other half. ``task_cgroup`` fails open by design, so
+    a deployment without ``Delegate=`` runs every task uncontained; without a
+    line saying so at startup, the *only* difference between "containment on"
+    and "containment silently absent" is a warning that fires once, whenever the
+    first task happens to run.
+
+    For that line to be worth anything it has to be a *measurement*, which is
+    what ``probe`` makes it. Resolving the root is not enough on its own — it
+    succeeds on any systemd host — and a report that cannot fail is a report
+    that says nothing. The negative case is logged at warning rather than info,
+    since "your containment is not running" is not an informational fact.
+    """
+    if not config.scheduler.task_cgroup_enabled:
+        logger.info("STARTUP Per-task cgroups: disabled")
+        return
+    try:
+        root = task_cgroup.resolve_root()
+        if root is None:
+            logger.warning(
+                "STARTUP Per-task cgroups: enabled but INERT "
+                "(no delegated unit cgroup — tasks run uncontained)"
+            )
+            return
+        # Resolving the root is not evidence, which is the trap the first cut of
+        # this function fell into: `resolve_root` answers on every systemd host,
+        # `Delegate=` applied or not, so the affirmative line printed on hosts
+        # where every `create` would go on to fail. Probe instead.
+        reason = task_cgroup.probe(root)
+        if reason is not None:
+            logger.warning(
+                "STARTUP Per-task cgroups: enabled but INERT (%s); tasks run "
+                "uncontained. Check Delegate= and DelegateSubgroup= on the unit",
+                reason,
+            )
+            return
+        removed, surviving = task_cgroup.sweep_stale(root)
+        logger.info(
+            "STARTUP Per-task cgroups: %s (memory.max=%s, pids.max=%d, cpu.max=%s)%s%s",
+            root,
+            "max" if config.scheduler.task_memory_max_mb <= 0
+            else f"{config.scheduler.task_memory_max_mb}M",
+            config.scheduler.task_pids_max,
+            "unset" if config.scheduler.task_cpu_max_percent <= 0
+            else f"{config.scheduler.task_cpu_max_percent}%",
+            f"; swept {removed} stale" if removed else "",
+            f"; {surviving} still holding live processes" if surviving else "",
+        )
+    except Exception as e:  # noqa: BLE001
+        # A startup report must never be what stops the daemon from starting.
+        logger.warning("STARTUP Per-task cgroups: check failed: %s", e)
+
+
 def run_daemon(
     config: Config,
     *,
@@ -6286,6 +6348,7 @@ def run_daemon(
         and config.scheduler.host_pressure_sample_interval_seconds
         else "disabled",
     )
+    _report_task_cgroups(config)
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)

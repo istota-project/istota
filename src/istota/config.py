@@ -263,6 +263,27 @@ class SchedulerConfig:
     # no estimate of what the new task would need. Running tasks are never
     # touched — the gate is on admission only, never on eviction.
     min_available_memory_mb: int = 768
+    # Per-task containment (A6). The gate above refuses *new* work when the
+    # host is already squeezed; this bounds what a task that did start can do,
+    # which is the half that would have prevented the incident — its trigger was
+    # one task's test suite, admitted onto a host with room for it.
+    #
+    # Inert wherever `Delegate=` has not been applied: `task_cgroup.create`
+    # returns None, logs the reason once, and the task spawns exactly as it did
+    # before. That is the deployment shape for anything not running the Ansible
+    # unit files, so "on by default" here does not mean "enforced by default".
+    task_cgroup_enabled: bool = True
+    # `memory.max` for a task cgroup. A tree past this is OOM-killed inside its
+    # own cgroup: one failed task rather than a global OOM that picks an
+    # unrelated victim. 0 leaves memory unbounded (writes `max`), which keeps
+    # the cgroup and its other limits.
+    task_memory_max_mb: int = 2048
+    task_pids_max: int = 512  # `pids.max` — bounds a fork storm
+    # `cpu.max` as a percentage of one core (200 = two cores). 0 leaves CPU
+    # unbounded and writes no file at all. CPU was never the binding constraint
+    # on 2026-08-20 (`cpu full avg10=0`), so this is the original reading of
+    # ISSUE-257 rather than a fix for the observed failure.
+    task_cpu_max_percent: int = 200
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
@@ -2286,6 +2307,14 @@ def load_config(config_path: Path | None = None) -> Config:
                 "host_pressure_docker_socket", "/var/run/docker.sock"
             ),
             min_available_memory_mb=int(sched.get("min_available_memory_mb", 768)),
+            task_cgroup_enabled=sched.get("task_cgroup_enabled", True),
+            # Coerced for the same reason the gate's keys are: these reach
+            # arithmetic (`mb * 1024 * 1024`, `percent * 1000`) whose result is
+            # written into a kernel file, and a TOML string would either raise
+            # inside the spawn path or write a value the kernel rejects.
+            task_memory_max_mb=int(sched.get("task_memory_max_mb", 2048)),
+            task_pids_max=int(sched.get("task_pids_max", 512)),
+            task_cpu_max_percent=int(sched.get("task_cpu_max_percent", 200)),
             host_pressure_breadcrumb_interval_seconds=sched.get(
                 "host_pressure_breadcrumb_interval_seconds", 300
             ),

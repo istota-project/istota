@@ -1654,6 +1654,46 @@ class TestWorkerConcurrencyConfig:
         assert cfg.scheduler.user_max_long_workers == 2
         assert cfg.scheduler.max_long_workers == 3
 
+    def test_task_cgroup_defaults(self):
+        cfg = Config()
+        assert cfg.scheduler.task_cgroup_enabled is True
+        assert cfg.scheduler.task_memory_max_mb == 2048
+        assert cfg.scheduler.task_pids_max == 512
+        assert cfg.scheduler.task_cpu_max_percent == 200
+
+    def test_task_cgroup_keys_from_toml(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[scheduler]\n'
+            'task_cgroup_enabled = false\n'
+            'task_memory_max_mb = 4096\n'
+            'task_pids_max = 1024\n'
+            'task_cpu_max_percent = 0\n'
+        )
+        cfg = load_config(p)
+        assert cfg.scheduler.task_cgroup_enabled is False
+        assert cfg.scheduler.task_memory_max_mb == 4096
+        assert cfg.scheduler.task_pids_max == 1024
+        assert cfg.scheduler.task_cpu_max_percent == 0
+
+    def test_task_cgroup_keys_are_coerced_to_int(self, tmp_path, monkeypatch):
+        """These reach arithmetic whose result is written into a kernel file.
+        A TOML string would raise `can't multiply sequence` from inside the
+        spawn path — a task failure attributed to the brain, not the config."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[scheduler]\n'
+            'task_memory_max_mb = "4096"\n'
+            'task_pids_max = "1024"\n'
+            'task_cpu_max_percent = "150"\n'
+        )
+        cfg = load_config(p)
+        assert cfg.scheduler.task_memory_max_mb == 4096
+        assert cfg.scheduler.task_pids_max == 1024
+        assert cfg.scheduler.task_cpu_max_percent == 150
+
     def test_load_config_user_worker_defaults_match_dataclass(self, tmp_path, monkeypatch):
         """load_config() without explicit settings should match Config() defaults."""
         monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
