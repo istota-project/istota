@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -8210,3 +8210,484 @@ def code_review_calls_increment(
     ).fetchone()
     conn.commit()
     return int(row["calls"])
+
+
+# ---------------------------------------------------------------------------
+# Token/cost usage (`task_usage`, `task_usage_models`)
+#
+# Every date comparison in this section builds its bounds in the ISO-Z format
+# `task_usage.created_at` stores. Do NOT reach for the `datetime('now', '-N
+# days')` idiom `cleanup_old_tasks` uses: against ISO-Z values ' ' sorts below
+# 'T' and same-day comparisons invert, which loses rows without raising.
+# `unmeasured_task_count` is the one function here that reads `tasks`, and it
+# therefore takes the *other* format — see its docstring.
+# ---------------------------------------------------------------------------
+
+USAGE_GROUP_BY = {
+    "day": "substr(u.created_at, 1, 10)",
+    "user": "u.user_id",
+    "source": "u.source_type",
+    "brain": "u.brain_kind",
+    "origin": "u.origin",
+    # "model" is handled separately: it reads the child table, because a
+    # multi-model run has no single model on its parent row.
+}
+
+
+def iso_utc_now() -> str:
+    """`task_usage.created_at`'s format, for building query bounds in Python."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def iso_utc_days_ago(days: int) -> str:
+    """An ISO-Z bound `days` before now."""
+    then = datetime.now(timezone.utc) - timedelta(days=days)
+    return then.strftime("%Y-%m-%dT%H:%M:%S.") + f"{then.microsecond // 1000:03d}Z"
+
+
+def sql_datetime_days_ago(days: int) -> str:
+    """The `datetime('now')` format `tasks.created_at` stores.
+
+    Kept beside its ISO-Z sibling on purpose: a caller that needs both (the
+    admin Users section does) should be picking between two named functions
+    rather than reusing one bound in the wrong place.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def insert_task_usage(
+    conn: sqlite3.Connection,
+    *,
+    usage: Any,
+    task_id: int | None = None,
+    origin: str = "task",
+    user_id: str = "",
+    source_type: str = "",
+    brain_kind: str = "",
+    is_fallback: bool = False,
+    effort: str = "",
+    stop_reason: str = "",
+    success: bool = False,
+) -> int:
+    """Write one usage row plus its per-model children. Returns the parent id.
+
+    Two things here are load-bearing and neither is obvious.
+
+    **`attempt_seq` is assigned in a single statement.** A `SELECT MAX(...)+1`
+    followed by an `INSERT` is not safe even "inside the same transaction":
+    `get_db` uses the default isolation level, so a bare SELECT opens no
+    transaction and takes no write lock, and nothing in this codebase issues
+    `BEGIN IMMEDIATE`. Two workers really can run one task — the
+    duplicate-execution guard in the scheduler is post-hoc, running after
+    `execute_task` returns. The `INSERT ... SELECT` below closes that window;
+    the caller retries once on `IntegrityError`.
+
+    **Parent and children land together, or not at all.** A failure at child 3
+    of 5 would otherwise commit a parent whose totals do not equal the sum of
+    its children, which is the exact invariant `--by model` depends on. The
+    SAVEPOINT means the bare `except` in the best-effort caller swallows a
+    complete failure, never a partial split.
+
+    Does not commit — the caller owns the transaction.
+    """
+    savepoint = f"usage_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO task_usage (
+                task_id, attempt_seq, origin, user_id, source_type, brain_kind,
+                is_fallback, model, effort, stop_reason, success,
+                has_totals, totals_source, billed_input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, cost_usd, cost_basis,
+                turns, model_requests, subagent_requests, compacted_requests,
+                initial_context_tokens, peak_context_tokens, context_window,
+                duration_ms, duration_api_ms, service_tier, session_id,
+                rate_limit_type, rate_limit_status, rate_limit_resets_at
+            )
+            SELECT
+                ?, COALESCE(MAX(attempt_seq), 0) + 1, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?
+            FROM task_usage WHERE task_id IS NOT NULL AND task_id = ?
+            """,
+            (
+                task_id, origin, user_id, source_type, brain_kind,
+                1 if is_fallback else 0, usage.model, effort, stop_reason,
+                1 if success else 0,
+                1 if usage.has_totals else 0, usage.totals_source,
+                usage.billed_input_tokens, usage.output_tokens,
+                usage.cache_read_tokens, usage.cache_write_tokens,
+                usage.cost_usd, usage.cost_basis,
+                usage.turns, usage.model_requests, usage.subagent_requests,
+                usage.compacted_requests,
+                usage.initial_context_tokens, usage.peak_context_tokens,
+                usage.context_window,
+                usage.duration_ms, usage.duration_api_ms, usage.service_tier,
+                usage.session_id,
+                _rate_limit_field(usage, "rateLimitType"),
+                _rate_limit_field(usage, "status"),
+                _rate_limit_field(usage, "resetsAt", numeric=True),
+                task_id,
+            ),
+        )
+        row_id = int(cursor.lastrowid)
+
+        for model in usage.models:
+            conn.execute(
+                """
+                INSERT INTO task_usage_models (
+                    task_usage_id, model, billed_input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens, cost_usd, context_window
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row_id, model.model, model.billed_input_tokens,
+                    model.output_tokens, model.cache_read_tokens,
+                    model.cache_write_tokens, model.cost_usd, model.context_window,
+                ),
+            )
+    except Exception:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise
+    conn.execute(f"RELEASE {savepoint}")
+    return row_id
+
+
+def _rate_limit_field(usage: Any, key: str, *, numeric: bool = False):
+    """Pull one field out of the captured rate-limit posture, or None."""
+    info = getattr(usage, "rate_limit", None)
+    if not isinstance(info, dict):
+        return None
+    value = info.get(key)
+    if value is None:
+        return None
+    if numeric:
+        return value if isinstance(value, (int, float)) else None
+    return str(value)
+
+
+def _usage_filters(
+    *,
+    since: str | None,
+    until: str | None,
+    user_id: str | None,
+    brain_kind: str | None,
+    source_type: str | None,
+    origin: str | None,
+) -> tuple[str, list]:
+    """Shared WHERE clause. Date bounds are half-open `[since, until)`."""
+    clauses = []
+    params: list = []
+    if since:
+        clauses.append("u.created_at >= ?")
+        params.append(since)
+    if until:
+        clauses.append("u.created_at < ?")
+        params.append(until)
+    if user_id:
+        clauses.append("u.user_id = ?")
+        params.append(user_id)
+    if brain_kind:
+        clauses.append("u.brain_kind = ?")
+        params.append(brain_kind)
+    if source_type:
+        clauses.append("u.source_type = ?")
+        params.append(source_type)
+    if origin:
+        clauses.append("u.origin = ?")
+        params.append(origin)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def query_usage(
+    conn: sqlite3.Connection,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    user_id: str | None = None,
+    brain_kind: str | None = None,
+    source_type: str | None = None,
+    origin: str | None = None,
+    model: str | None = None,
+    limit: int | None = None,
+) -> list[sqlite3.Row]:
+    """Raw usage rows in a window. Bounds are ISO-Z and half-open.
+
+    `model` filters through the child table, because a multi-model run's parent
+    row names only its largest cost share.
+    """
+    where, params = _usage_filters(
+        since=since, until=until, user_id=user_id, brain_kind=brain_kind,
+        source_type=source_type, origin=origin,
+    )
+    if model:
+        clause = (
+            "u.id IN (SELECT task_usage_id FROM task_usage_models WHERE model = ?)"
+        )
+        where = f"{where} AND {clause}" if where else f" WHERE {clause}"
+        params.append(model)
+    sql = f"SELECT u.* FROM task_usage u{where} ORDER BY u.created_at DESC"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    return list(conn.execute(sql, params).fetchall())
+
+
+# Token aggregates filter `has_totals = 1`; context aggregates filter
+# `initial_context_tokens IS NOT NULL` (which `COUNT` and `AVG` do for free).
+# The two filters are independent because the two measures are: a run killed
+# before its result frame has real context and meaningless zero tokens.
+_USAGE_TOKEN_AGGREGATES = """
+    COUNT(*) AS row_count,
+    SUM(CASE WHEN u.has_totals = 1 THEN 1 ELSE 0 END) AS measured_rows,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.billed_input_tokens ELSE 0 END), 0)
+        AS billed_input_tokens,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.output_tokens ELSE 0 END), 0)
+        AS output_tokens,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.cache_read_tokens ELSE 0 END), 0)
+        AS cache_read_tokens,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.cache_write_tokens ELSE 0 END), 0)
+        AS cache_write_tokens,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.turns ELSE 0 END), 0) AS turns,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.model_requests ELSE 0 END), 0)
+        AS model_requests,
+    COUNT(u.initial_context_tokens) AS context_rows,
+    AVG(u.initial_context_tokens) AS avg_initial_context_tokens,
+    AVG(u.peak_context_tokens) AS avg_peak_context_tokens,
+    AVG(u.context_window) AS avg_context_window
+"""
+
+
+def _usage_row_to_dict(row: sqlite3.Row) -> dict:
+    out = {k: row[k] for k in row.keys()}
+    out["rows"] = out.pop("row_count")
+    total_prompt = (
+        out["billed_input_tokens"] + out["cache_read_tokens"] + out["cache_write_tokens"]
+    )
+    out["total_prompt_tokens"] = total_prompt
+    out["total_tokens"] = total_prompt + out["output_tokens"]
+    out["cache_hit_rate"] = (
+        out["cache_read_tokens"] / total_prompt if total_prompt > 0 else 0.0
+    )
+    return out
+
+
+def usage_summary(
+    conn: sqlite3.Connection,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    user_id: str | None = None,
+    brain_kind: str | None = None,
+    source_type: str | None = None,
+    origin: str | None = None,
+    model: str | None = None,
+    group_by: str | None = None,
+) -> Any:
+    """Aggregate usage. Returns one dict, or a list of dicts when grouped.
+
+    Cost is always a **map keyed by `cost_basis`**, never a scalar. A window's
+    rows can span bases — an operator switching the CLI from a subscription to
+    an API key mid-window is exactly the case — and summing a plan-equivalent
+    into real spend is the misread this whole design refuses. Nothing here sums
+    across bases, at any grouping.
+    """
+    where, params = _usage_filters(
+        since=since, until=until, user_id=user_id, brain_kind=brain_kind,
+        source_type=source_type, origin=origin,
+    )
+    model_clause = ""
+    model_params: list = []
+    if model:
+        model_clause = (
+            " AND u.id IN (SELECT task_usage_id FROM task_usage_models WHERE model = ?)"
+        )
+        model_params = [model]
+        if not where:
+            where = " WHERE 1=1"
+
+    if group_by == "model":
+        return _usage_summary_by_model(conn, where, params + model_params, model_clause)
+
+    if group_by:
+        expr = USAGE_GROUP_BY.get(group_by)
+        if expr is None:
+            raise ValueError(f"unknown grouping: {group_by}")
+        rows = conn.execute(
+            f"SELECT {expr} AS key, {_USAGE_TOKEN_AGGREGATES}"
+            f" FROM task_usage u{where}{model_clause}"
+            f" GROUP BY {expr}",
+            params + model_params,
+        ).fetchall()
+        groups = [_usage_row_to_dict(r) for r in rows]
+        for group in groups:
+            group["cost_by_basis"] = _cost_by_basis(
+                conn, where, params + model_params, model_clause,
+                extra=f"{expr} IS ?", extra_params=[group["key"]],
+            )
+        if group_by == "day":
+            groups.sort(key=lambda g: g["key"] or "")
+        else:
+            groups.sort(key=lambda g: -g["total_tokens"])
+        return groups
+
+    row = conn.execute(
+        f"SELECT {_USAGE_TOKEN_AGGREGATES} FROM task_usage u{where}{model_clause}",
+        params + model_params,
+    ).fetchone()
+    summary = _usage_row_to_dict(row)
+    summary["cost_by_basis"] = _cost_by_basis(
+        conn, where, params + model_params, model_clause
+    )
+    return summary
+
+
+def _cost_by_basis(
+    conn: sqlite3.Connection,
+    where: str,
+    params: list,
+    model_clause: str = "",
+    *,
+    extra: str = "",
+    extra_params: list | None = None,
+) -> dict:
+    """Cost totalled per `cost_basis`. Never collapsed into one figure."""
+    clause = where
+    all_params = list(params)
+    if extra:
+        clause = f"{clause} AND {extra}" if clause else f" WHERE {extra}"
+        all_params = all_params + list(extra_params or [])
+    rows = conn.execute(
+        f"SELECT u.cost_basis, COALESCE(SUM(u.cost_usd), 0.0) AS cost"
+        f" FROM task_usage u{clause}{model_clause}"
+        f" GROUP BY u.cost_basis",
+        all_params,
+    ).fetchall()
+    return {r["cost_basis"]: float(r["cost"]) for r in rows}
+
+
+def _usage_summary_by_model(
+    conn: sqlite3.Connection, where: str, params: list, model_clause: str
+) -> list[dict]:
+    """Per-model grouping reads the child table.
+
+    The parent row carries only the run's largest cost share, so grouping on it
+    would attribute a whole multi-model run to one model. Context measures
+    belong to the run rather than to a model and are reported as NULL here —
+    averaging a run's peak once per model it used would double-count it.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT m.model AS key,
+               COUNT(*) AS row_count,
+               COUNT(*) AS measured_rows,
+               COALESCE(SUM(m.billed_input_tokens), 0) AS billed_input_tokens,
+               COALESCE(SUM(m.output_tokens), 0) AS output_tokens,
+               COALESCE(SUM(m.cache_read_tokens), 0) AS cache_read_tokens,
+               COALESCE(SUM(m.cache_write_tokens), 0) AS cache_write_tokens,
+               0 AS turns,
+               0 AS model_requests,
+               0 AS context_rows,
+               NULL AS avg_initial_context_tokens,
+               NULL AS avg_peak_context_tokens,
+               MAX(m.context_window) AS avg_context_window
+        FROM task_usage_models m
+        JOIN task_usage u ON u.id = m.task_usage_id
+        {where}{model_clause}
+        GROUP BY m.model
+        """,
+        params,
+    ).fetchall()
+    groups = [_usage_row_to_dict(r) for r in rows]
+    for group in groups:
+        joined_where = where if where else " WHERE 1=1"
+        basis_rows = conn.execute(
+            f"""
+            SELECT u.cost_basis, COALESCE(SUM(m.cost_usd), 0.0) AS cost
+            FROM task_usage_models m
+            JOIN task_usage u ON u.id = m.task_usage_id
+            {joined_where}{model_clause} AND m.model = ?
+            GROUP BY u.cost_basis
+            """,
+            params + [group["key"]],
+        ).fetchall()
+        group["cost_by_basis"] = {
+            r["cost_basis"]: float(r["cost"]) for r in basis_rows
+        }
+    groups.sort(key=lambda g: -g["total_tokens"])
+    return groups
+
+
+def unmeasured_task_count(
+    conn: sqlite3.Connection,
+    *,
+    since: str,
+    until: str | None = None,
+    user_id: str | None = None,
+) -> int:
+    """Tasks in the window with no `task_usage` row at all.
+
+    An honesty counter: `TmuxClaudeBrain` spends real tokens and writes no row,
+    and recording a synthetic zero for it would drag every average down while
+    making the dashboard look complete.
+
+    **`since` and `until` are in `tasks.created_at`'s format**
+    (`2026-08-20 09:00:00`), not the ISO-Z format every other function in this
+    section takes. Passing an ISO-Z bound here compares `'…T…'` against
+    `'… …'` and silently excludes every task on the boundary day — no error,
+    just a smaller number. Build them with `sql_datetime_days_ago`.
+    """
+    clauses = ["t.created_at >= ?"]
+    params: list = [since]
+    if until:
+        clauses.append("t.created_at < ?")
+        params.append(until)
+    if user_id:
+        clauses.append("t.user_id = ?")
+        params.append(user_id)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM tasks t
+        WHERE {" AND ".join(clauses)}
+          AND NOT EXISTS (SELECT 1 FROM task_usage u WHERE u.task_id = t.id)
+        """,
+        params,
+    ).fetchone()
+    return int(row[0])
+
+
+def prune_old_usage(conn: sqlite3.Connection, retention_days: int) -> int:
+    """Delete usage rows older than `retention_days`. Returns rows deleted.
+
+    `0` disables pruning. Children are deleted explicitly and first: the FK is
+    decorative because `PRAGMA foreign_keys` is never enabled on these
+    connections, so ON DELETE CASCADE would leave orphans behind.
+
+    Bounds are built in Python as ISO-Z rather than with `datetime('now', '-N
+    days')`. That idiom is what `cleanup_old_tasks` uses against
+    `tasks.created_at`, and copying it here would compare a space-separated
+    bound against ISO-Z values and invert same-day comparisons.
+    """
+    if retention_days <= 0:
+        return 0
+    cutoff = iso_utc_days_ago(retention_days)
+    conn.execute(
+        """
+        DELETE FROM task_usage_models
+        WHERE task_usage_id IN (SELECT id FROM task_usage WHERE created_at < ?)
+        """,
+        (cutoff,),
+    )
+    cursor = conn.execute("DELETE FROM task_usage WHERE created_at < ?", (cutoff,))
+    return cursor.rowcount

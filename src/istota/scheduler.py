@@ -4292,6 +4292,20 @@ def run_cleanup_checks(config: Config) -> None:
         if pruned > 0:
             logger.info(f"Pruned {pruned} message-deletion ledger row(s)")
 
+    # 4d. Prune token/cost rows, in a transaction of its own. The block above is
+    # one long write transaction and this retention window is 180 days against
+    # the task table's 7, so the delete it issues on the day it finally bites is
+    # far larger than anything up there. Holding the write lock for it would
+    # stall the dispatch loop's readers on their busy timeout.
+    try:
+        with db.get_db(config.db_path) as conn:
+            usage_rows = db.prune_old_usage(conn, sched.usage_retention_days)
+        if usage_rows > 0:
+            logger.info(f"Pruned {usage_rows} usage row(s)")
+    except Exception as e:
+        # Telemetry retention is never worth failing a cleanup pass over.
+        logger.debug(f"Usage prune skipped: {e}")
+
     # 4c. Tell users about the confirmations that just expired. Outside the
     # transaction on purpose — see `expiry_notices` above.
     for user_id, message, token in expiry_notices:
