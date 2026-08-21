@@ -51,6 +51,7 @@ src/istota/
 ├── webhook_receiver.py   # FastAPI: Overland GPS, etc.
 ├── garmin_routes.py      # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
 ├── web_app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)
+├── usage.py              # Normalized per-attempt token/cost telemetry (`BrainUsage`, `ModelUsage`, `from_cli_result`, `from_task_usage`). The one place each brain's own reporting shape is converted to a single vocabulary, so the schema and the read surfaces never learn which brain produced a row. Pure: no DB, no config, no brain imports, and neither adapter raises — they sit on the brain's return path
 ├── admin_logs.py         # Read-only log sources for the admin UI: the rotating app log file (+ its rotation chain, backward-scanning paged reader + live tail) and the `task_logs` table. A caller names a *source id*, never a path
 ├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (field-level + dotted keys, so it can back an editor later; credentials never leave the process)
 ├── secrets_store.py      # Encrypted credential store (Fernet via scrypt-derived key)

@@ -248,6 +248,178 @@ def cmd_run(args):
     reset_async_runtime()
 
 
+# A dollar figure renders only for rows whose cost is real money. A
+# subscription's list-price equivalent and a catalog estimate both read as spend
+# at a glance, and a surface that quietly invents an invoice is worse than one
+# that declines to guess. `--json` is exempt: `cost_basis` travels with the
+# figure there, so a consumer can apply its own rule.
+COST_PLACEHOLDER = "—"
+
+
+def _render_cost(cost_by_basis: dict) -> str:
+    """One rule: no currency unless it is money.
+
+    Returns a dollar figure when the group's spend is entirely `api`, and the
+    placeholder otherwise. A group spanning bases is never summed into one
+    number — an operator who switched the CLI's auth mid-window has rows of both
+    kinds, and adding a plan-equivalent to real spend is the misread this whole
+    design refuses.
+    """
+    # Keyed on which bases are *present*, not on their magnitude. A catalog
+    # estimate is routinely 0.0 — that is the whole reason `estimated` exists as
+    # a basis — and a zero that vanished would render as a bare placeholder,
+    # telling the operator there is no figure but not why.
+    bases = cost_by_basis or {}
+    real = bases.get("api")
+    other = sorted(b for b in bases if b != "api")
+    if real is not None and not other:
+        return f"${real:.4f}"
+    if real is not None:
+        return f"${real:.4f} +{'+'.join(other)}"
+    if other:
+        return f"{COST_PLACEHOLDER} ({'+'.join(other)})"
+    return COST_PLACEHOLDER
+
+
+def _fmt_int(value) -> str:
+    return f"{int(value):,}" if value is not None else COST_PLACEHOLDER
+
+
+def _fmt_context(value) -> str:
+    if value is None:
+        return COST_PLACEHOLDER
+    return f"{int(round(value)):,}"
+
+
+def _usage_window(args) -> tuple[str, str | None]:
+    """Resolve the CLI's date arguments into ISO-Z bounds, half-open.
+
+    A bare `--until D` is expanded to D+1 at midnight. Without that,
+    `--since 2026-08-01 --until 2026-08-20` silently loses the whole of 20 Aug,
+    which is the kind of wrong number nobody notices.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    def _iso(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+    def _parse_day(value):
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    if args.since:
+        since = _iso(_parse_day(args.since))
+    else:
+        since = db.iso_utc_days_ago(args.days)
+
+    until = None
+    if args.until:
+        until = _iso(_parse_day(args.until) + timedelta(days=1))
+    return since, until
+
+
+def cmd_usage(args):
+    """Report token and cost usage. Operator-facing; run from the shell."""
+    import json as _json
+
+    config = load_config(Path(args.config) if args.config else None)
+
+    try:
+        since, until = _usage_window(args)
+    except ValueError:
+        print("Dates must be YYYY-MM-DD")
+        return 1
+
+    filters = dict(
+        since=since, until=until, user_id=args.user, brain_kind=args.brain,
+        source_type=args.source, origin=args.origin, model=args.model,
+    )
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            if args.by:
+                groups = db.usage_summary(conn, group_by=args.by, **filters)
+            else:
+                groups = [db.usage_summary(conn, **filters)]
+                groups[0]["key"] = "all"
+            unmeasured = db.unmeasured_task_count(
+                conn,
+                since=db.sql_datetime_days_ago(args.days),
+                user_id=args.user,
+            )
+    except db.sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            print(
+                "No usage data yet — the task_usage table is created on the "
+                "next database open. Restart the daemon, or run `istota init`."
+            )
+            return 1
+        raise
+
+    if args.json:
+        # Deliberately exempt from the cost-render rule: `cost_basis` travels
+        # with the figure, so a consumer can apply its own. Suppressing the
+        # field here would force it to re-derive what is already known — the
+        # suppression is a rendering rule, not a data rule.
+        print(_json.dumps({
+            "since": since, "until": until,
+            "group_by": args.by, "unmeasured_tasks": unmeasured,
+            "groups": groups,
+        }, indent=2, default=str))
+        return 0
+
+    if not any(g["rows"] for g in groups):
+        print("No usage recorded in this window.")
+        return 0
+
+    label = {"day": "Day", "user": "User", "model": "Model", "source": "Source",
+             "brain": "Brain", "origin": "Origin"}.get(args.by, "")
+
+    # Two column blocks, visually separated, because the two groups of measures
+    # are not comparable: the first sums across requests, the second is a first
+    # and a max over per-request prompt sizes.
+    header = (
+        f"{label or 'Totals':<22} {'Rows':>6} {'Billed in':>12} {'Cache rd':>12} "
+        f"{'Cache wr':>12} {'Output':>10} {'Hit%':>6} {'Cost':>16}"
+    )
+    print(header)
+    print("-" * len(header))
+    for g in groups:
+        key = str(g.get("key") or "")[:22]
+        print(
+            f"{key:<22} {g['rows']:>6} {_fmt_int(g['billed_input_tokens']):>12} "
+            f"{_fmt_int(g['cache_read_tokens']):>12} "
+            f"{_fmt_int(g['cache_write_tokens']):>12} "
+            f"{_fmt_int(g['output_tokens']):>10} "
+            f"{g['cache_hit_rate'] * 100:>5.1f}% {_render_cost(g['cost_by_basis']):>16}"
+        )
+
+    print()
+    ctx_header = (
+        f"{label or 'Context':<22} {'Measured':>9} {'Avg initial':>13} "
+        f"{'Avg peak':>13} {'Peak % of window':>18}"
+    )
+    print(ctx_header)
+    print("-" * len(ctx_header))
+    for g in groups:
+        key = str(g.get("key") or "")[:22]
+        window = g.get("avg_context_window")
+        peak = g.get("avg_peak_context_tokens")
+        pct = f"{peak / window * 100:.1f}%" if window and peak else COST_PLACEHOLDER
+        print(
+            f"{key:<22} {g['context_rows']:>9} "
+            f"{_fmt_context(g.get('avg_initial_context_tokens')):>13} "
+            f"{_fmt_context(peak):>13} {pct:>18}"
+        )
+
+    if unmeasured:
+        print(
+            f"\n{unmeasured} task(s) in this window recorded no usage "
+            "(a tmux-brain run reports none; a synthetic zero would drag every "
+            "average)."
+        )
+    return 0
+
+
 def cmd_list(args):
     """List tasks."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1683,6 +1855,36 @@ def main():
     list_parser.add_argument("-u", "--user", help="Filter by user")
     list_parser.add_argument("-n", "--limit", type=int, default=20, help="Max results")
 
+    # usage — token/cost reporting. Operator-facing only: it runs from the
+    # operator's shell, so per-user cost data never reaches a user-facing
+    # surface and `--user` is a convenience filter rather than a boundary.
+    usage_parser = subparsers.add_parser(
+        "usage", help="Report token and cost usage"
+    )
+    usage_parser.add_argument(
+        "--days", type=int, default=30, help="Window size in days (default: 30)"
+    )
+    usage_parser.add_argument("--since", help="Start date, YYYY-MM-DD")
+    usage_parser.add_argument(
+        "--until",
+        help="End date, YYYY-MM-DD (inclusive — expanded to the following midnight)",
+    )
+    usage_parser.add_argument("-u", "--user", help="Filter by user")
+    usage_parser.add_argument("--brain", help="Filter by brain kind")
+    usage_parser.add_argument("--source", help="Filter by task source type")
+    usage_parser.add_argument("--model", help="Filter by model")
+    usage_parser.add_argument(
+        "--origin", help="Filter by origin (task, sleep_cycle, health_ocr, …)"
+    )
+    usage_parser.add_argument(
+        "--by",
+        choices=["day", "user", "model", "source", "brain", "origin"],
+        help="Group results",
+    )
+    usage_parser.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of a table"
+    )
+
     # show
     show_parser = subparsers.add_parser("show", help="Show task details")
     show_parser.add_argument("task_id", type=int, help="Task ID")
@@ -2058,6 +2260,7 @@ def main():
         "task": cmd_task,
         "run": cmd_run,
         "list": cmd_list,
+        "usage": cmd_usage,
         "show": cmd_show,
         "resource": cmd_resource,
         "briefing": cmd_briefing,
