@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sending a voice message no longer permanently enlarges the bot. Transcription ran inside the long-lived scheduler process, and each one left roughly 450 MB behind that the process never handed back to the system — five voice messages over one weekend took it from 820 MB to 2894 MB with nothing to stop it climbing further. Transcription now runs in a separate short-lived process, which returns everything it used when it finishes; a transcription that hangs is now also cut off rather than tying up a worker until the next restart.
+
+- Several tasks finishing at the same moment no longer each load their own copy of the memory-search model. They raced, the extra copies were abandoned but stayed in memory, and nothing ever freed them. One load is now shared, as was always intended.
+
 - The host backup script no longer reports success for a run that covered almost nothing. It found each user's feature databases by scanning the shared workspace, and those moved onto local disk a while back, so for over a month it backed up one database, matched nothing else, and printed "complete". Nothing was at risk, because the scheduler's own snapshot follows those files wherever they live, and it now owns them outright. A source database the script cannot find is a failure that alerts, not a line in a log nobody reads.
 
 - Old backups whose source database is gone are pruned again. Retention ran at the end of each successful backup, so anything that stopped being backed up also stopped being cleaned up and was kept forever, filling a disk that had already tripped its usage alarm. It is now one sweep per run that happens whether or not the run succeeded, keeping the last couple of copies of a database still in use so a stretch of failures cannot sweep away the backups it needs.
