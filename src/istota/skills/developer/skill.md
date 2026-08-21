@@ -30,7 +30,7 @@ Git credentials are configured automatically for both platforms — clone and pu
 
 `gh` and `glab` are the real GitHub and GitLab command-line tools. You reach them through a wrapper that fetches the token when you invoke them and then gets out of the way, so the whole flag surface is yours — `gh <command> --help` and `glab <command> --help` are accurate.
 
-**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped.
+**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped. **A remote URL never carries a credential.** `origin` is always a bare `https://host/namespace/project.git`, because remote URLs get *printed* — by `git remote -v`, `git config --list` and several push failures — so a token in one lands in the task result and the transcript. Never build one with credentials in it, never `set-url` one, never paste a token into a clone command; find one carrying a secret between `:` and `@` and you stop, report it as a credential to rotate without quoting the value, and do not use it.
 
 **Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` / `glab api` are refused too — an explicit `-X POST`, and any body flag (`-f`, `-F`, `--field`, `--raw-field`, `--form`, `--input`), which both CLIs treat as an implicit POST. Use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
 
@@ -170,10 +170,14 @@ cd "$BARE_DIR"
 git rev-parse --is-bare-repository
 git symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main or origin/master
 git fetch origin --prune
+git config --list --includes | awk -F= '{ k = $1 }
+    k ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "credential embedded in a config key"; next }
+    /^http\..*extraheader=/ || /:\/\/[^\/@]*:[^\/@]+@/ { print k }'   # end of the credential check
 ```
 
 - No repository, or the fetch fails: stop and report. Do not clone something else and carry on.
 - The base branch is whatever `symbolic-ref` reports, stripped of `origin/`. Never assume `main` — plenty of repositories are still on `master`, and a worktree branched from a base that does not exist is the single most common way this dies.
+- The credential check reads the whole config, not just remotes, and prints a setting's *name* and never its value. It printing anything: stop. Every worktree you cut inherits that setting, and the next `git remote -v` puts it in your context. Report what it printed — that line only, never the value — as a credential to rotate, and do not work in that repository. The daemon sweeps these at task setup, so one appearing here appeared afterwards. It matches `:secret@` rather than a bare `@` because `git@github.com:owner/repo` is a username; it is a tripwire and simpler than the daemon's sweep, so a clean result is not proof.
 
 ### 2. Create the worktree, then read back what was made
 

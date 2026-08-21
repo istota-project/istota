@@ -1,6 +1,8 @@
 """Developer skill — setup_env hook.
 
-Generates, inside the task's user temp directory:
+Sweeps ``repos_dir`` for credentials embedded in remote URLs and strips them
+(:mod:`istota.git_remote_scrub`, ISSUE-270) before generating anything, then
+generates, inside the task's user temp directory:
 
 - the credential-fetch helper and the per-platform git-credential-helper
   scripts, plus the ``GIT_CONFIG_*`` vars that point git at them;
@@ -35,6 +37,7 @@ import shutil
 from pathlib import Path
 
 from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
+from istota.git_remote_scrub import scrub_and_report
 
 logger = logging.getLogger("istota.skills.developer")
 
@@ -321,5 +324,21 @@ def setup_env(ctx) -> dict[str, str]:
         # See executor.HOOK_PATH_PREPEND_KEY — that ordering is a security
         # property, not housekeeping.
         env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
+
+    # ISSUE-270: strip any credential embedded in a git config under repos_dir
+    # before the model can read one. `repos_dir` is bound read-write into the
+    # sandbox a few steps from here, every worktree inherits its bare clone's
+    # remotes, and `git remote -v` prints a URL in full — so a token in one
+    # reaches the model's context as a matter of routine, around the helper
+    # registered above. Nothing here writes such a config; this catches one
+    # that arrived by hand.
+    #
+    # Last, and after `env` is complete, deliberately. `dispatch_setup_env_hooks`
+    # wraps each hook in `try/except` and keeps only what it returned, so an
+    # exception raised here would not fail the task — it would silently discard
+    # the credential helper, GIT_CONFIG_COUNT and the forge-CLI wiring, leaving
+    # a task that looks fine and cannot authenticate. `scrub_and_report` holds a
+    # never-raises contract of its own; this ordering is the second guard.
+    scrub_and_report(Path(dev.repos_dir))
 
     return env

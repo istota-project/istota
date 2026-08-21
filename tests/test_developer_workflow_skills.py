@@ -897,3 +897,107 @@ class TestGlabFieldReads:
         assert proc.returncode != 0, (
             "an unset MR_IID did not stop the fence that merges on it"
         )
+
+
+class TestCredentialFreeConfigs:
+    """ISSUE-270. A credential in a git config routes around the credential
+    helper the skill registers, and every worktree cut from the clone inherits
+    it. `git remote -v` and `git config --list` then print it into the model's
+    context as a matter of routine. The daemon strips these on the way in
+    (`istota.git_remote_scrub`); the body has to state the invariant and give
+    the model a check too, because the daemon's sweep runs at setup and the
+    model can be handed a repository at any point after that."""
+
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def _preflight(self) -> str:
+        return _extract("git config --list --includes | awk", "# end of the credential check")
+
+    def test_the_invariant_is_stated(self):
+        assert "**A remote URL never carries a credential.**" in self._body(), (
+            "the clone/push recipes are the step that would otherwise bake one in"
+        )
+
+    def test_the_body_never_shows_a_credentialed_url(self):
+        """The cheapest way to teach the model the wrong thing is an example.
+        No line of the body may carry a `scheme://user:secret@host` shape."""
+        for i, line in enumerate(self._body().splitlines(), 1):
+            assert not re.search(r"://[^/@\s]+:[^/@\s]+@", line), (
+                f"developer/skill.md:{i} shows a credentialed URL: {line!r}"
+            )
+
+    def test_flags_a_credentialed_remote_by_name_only(self, bare_clone):
+        """The fragment is *run*, not restated. It must print the setting's
+        name and never the value — echoing the value is the leak it looks for."""
+        _git(bare_clone, "remote", "add", "leaky",
+             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.leaky.url"]
+        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out
+
+    def test_is_silent_on_credential_free_remotes(self, bare_clone):
+        """A bare-username https remote and an scp-style ssh remote both
+        contain an `@` and neither carries a secret. Flagging them would make
+        the check noise the model learns to skip."""
+        _git(bare_clone, "remote", "add", "ssh", "git@github.com:ns/p.git")
+        _git(bare_clone, "remote", "add", "user", "https://oauth2@gitlab.com/ns/p.git")
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.strip() == "", f"false positive: {out!r}"
+
+    def test_catches_a_pushurl(self, bare_clone):
+        """`git remote -v` prints the pushurl on its own line, so a credential
+        there leaks exactly the same way."""
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+        _git(bare_clone, "config", "remote.origin.pushurl",
+             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.origin.pushurl"]
+
+    def test_catches_an_empty_username(self, bare_clone):
+        """`https://:tok@host/x` is a credential the daemon strips. A check
+        that misses it disagrees with the sweep it is documented to back up,
+        and the model-facing one is the weaker of the two."""
+        _git(bare_clone, "remote", "add", "leaky", "https://:glpat-xxxxxxxxxxxxxxxxxxxx@h/x.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.leaky.url"]
+
+    def test_catches_a_credential_riding_in_a_key(self, bare_clone):
+        """`url.<base>.insteadOf` puts the secret in the key, so `remote -v`
+        shows something clean while every fetch is rewritten through it."""
+        _git(bare_clone, "config",
+             "url.https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@example.com/.insteadOf",
+             "https://example.com/")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert "credential embedded in a config key" in out
+        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out, "the check printed the secret"
+
+    def test_catches_an_extraheader(self, bare_clone):
+        """An Authorization header never appears in a URL at all."""
+        _git(bare_clone, "config", "http.https://gitlab.com/.extraheader",
+             "AUTHORIZATION: basic eHh4eHh4eHh4")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["http.https://gitlab.com/.extraheader"]
+        assert "eHh4eHh4eHh4" not in out
+
+    def test_does_not_print_a_port_as_a_credential(self, bare_clone):
+        """`https://gitlab.com:8443/ns/p.git` has a colon before no `@` of its
+        own — a naive pattern reads the port as a password."""
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com:8443/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.strip() == "", f"false positive on a port: {out!r}"
