@@ -37,6 +37,7 @@ import threading
 import time
 from pathlib import Path
 
+from istota import usage as usage_types
 from istota.agent.events import AgentEvent, _describe_tool_use, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
@@ -81,6 +82,9 @@ from ._types import BrainRequest, BrainResult
 from .claude_code import is_usage_limit_error
 
 logger = logging.getLogger("istota.brain.native")
+
+# What a usage row records as the brain that ran. One of KNOWN_BRAIN_KINDS.
+BRAIN_KIND = "native"
 
 # Process-global coordinator for the live OpenRouter model-catalog fetch
 # (ISSUE-182). Each task runs on its own worker thread + event loop, so without
@@ -566,6 +570,12 @@ class NativeBrain:
         The scheduler calls brains from a thread pool, so ``asyncio.run`` here is
         safe — each task gets its own loop.
         """
+        result = self._execute_sync(req)
+        # Stamped on the way out, so a return added later cannot forget it.
+        result.brain_kind = BRAIN_KIND
+        return result
+
+    def _execute_sync(self, req: BrainRequest) -> BrainResult:
         async def _run_and_close() -> BrainResult:
             try:
                 return await self._execute_async(req)
@@ -743,6 +753,19 @@ class NativeBrain:
         model = req.model or self._config.model
         provider = _RetryingProvider(self._provider, abort)
         usage = TaskUsage()
+        # Cost provenance, for the usage row's `cost_basis`. `TaskUsage.add`
+        # decides per turn whether to take the provider's reported cost or fall
+        # back to catalog prices, and records nothing about which it did — so
+        # the two counters are tracked here rather than by changing that type.
+        # Conservative by contract: `api` only when *every* accumulated turn
+        # reported a cost. One catalog-priced turn makes the total partly
+        # invented, and the catalog prices an unknown model at zero, so a
+        # fabricated 0.0 would otherwise be labelled as real spend.
+        turns_accumulated = 0
+        turns_costed = 0
+
+        def _all_turns_costed() -> bool:
+            return turns_accumulated > 0 and turns_costed == turns_accumulated
 
         # Live model-catalog enrichment (ISSUE-182). Populate the per-model
         # metadata catalog from OpenRouter before the loop resolves windows /
@@ -810,6 +833,7 @@ class NativeBrain:
 
         async def emit(event: AgentEvent) -> None:
             nonlocal last_assistant_text, final_turn_text, last_error_message
+            nonlocal turns_accumulated, turns_costed
             if event.type == "message_update":
                 ae = event.assistant_event
                 if isinstance(ae, TextDelta) and ae.text:
@@ -870,6 +894,9 @@ class NativeBrain:
                     # otherwise silently drop its charge from the task total.
                     if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
                         usage.add(msg.usage, get_model_info(model))
+                        turns_accumulated += 1
+                        if msg.usage.cost_usd is not None:
+                            turns_costed += 1
                     text = msg.text.strip()
                     # The durable answer is the *final* turn's text, not the
                     # last turn that happened to carry text: a tool-only or
@@ -1184,7 +1211,9 @@ class NativeBrain:
                 actions_taken=json.dumps(actions) if actions else None,
                 execution_trace=json.dumps(trace) if trace else None,
                 stop_reason="timeout",
-                usage=usage,
+                usage=usage_types.from_task_usage(
+                    usage, cost_reported=_all_turns_costed()
+                ),
                 model_used=model,
             )
 
@@ -1226,11 +1255,13 @@ class NativeBrain:
                 return self._build_result(
                     "error", marker, last_error_message,
                     trace, actions, usage, model,
+                    cost_reported=_all_turns_costed(),
                 )
 
         return self._build_result(
             final_stop["reason"], result_text, last_error_message,
             trace, actions, usage, model,
+            cost_reported=_all_turns_costed(),
         )
 
     # --- helpers -----------------------------------------------------------
@@ -1407,6 +1438,7 @@ class NativeBrain:
     @staticmethod
     def _build_result(
         stop_reason, text, error_message, trace, actions, usage, model="",
+        *, cost_reported: bool = False,
     ) -> BrainResult:
         # Map the loop's agent_end stop_reason to the executor's tag vocabulary.
         # The executor drops stop_reason and the scheduler dispatches purely on
@@ -1416,6 +1448,12 @@ class NativeBrain:
         # or retries a policy refusal instead of failing fast with an alert).
         actions_json = json.dumps(actions) if actions else None
         trace_json = json.dumps(trace) if trace else None
+        # Converted once here rather than at each return below. `TaskUsage` keeps
+        # its shape (its `input_tokens` is OpenAI-compat `prompt_tokens`,
+        # inclusive of cache reads, which `_log_cache_telemetry` depends on);
+        # the adapter reconciles that with Anthropic's exclusive count at the
+        # boundary and labels the result `derived`.
+        usage = usage_types.from_task_usage(usage, cost_reported=cost_reported)
         if stop_reason == "aborted":
             return BrainResult(
                 success=False,

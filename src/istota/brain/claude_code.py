@@ -23,6 +23,8 @@ import time
 
 from ._events import (
     ContextManagementEvent,
+    RateLimitEvent,
+    RequestUsageEvent,
     ResultEvent,
     TextDeltaEvent,
     TextEvent,
@@ -31,6 +33,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from istota import usage as usage_types
 from ..process_group import kill_process_group
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
@@ -114,6 +117,9 @@ _RETRY_AFTER_RE = re.compile(
 )
 
 # Retry configuration for transient API errors
+# What a usage row records as the brain that ran. One of KNOWN_BRAIN_KINDS.
+BRAIN_KIND = "claude_code"
+
 API_RETRY_MAX_ATTEMPTS = 3
 API_RETRY_DELAY_SECONDS = 5
 # Ceiling on a provider-supplied Retry-After. A worker parked on the provider's
@@ -123,6 +129,66 @@ RETRY_AFTER_MAX_SECONDS = 60.0
 # Slice length for the retry backoff, so `!stop` lands within a slice
 # instead of waiting out a (now potentially 60s) provider-requested delay.
 _RETRY_SLEEP_SLICE_SECONDS = 0.5
+
+
+def _parse_simple_json_output(stdout: str):
+    """Read `--output-format json` stdout into `(answer_text, BrainUsage | None)`.
+
+    Returns `(None, None)` for anything that is not a JSON array of frames, and
+    that fallback is load-bearing rather than defensive: roughly ninety tests
+    across six files patch `subprocess.run` with plain-text stdout, and a
+    deployment running a CLI that ignores the flag behaves the same way. A
+    `(None, None)` answer means the caller treats stdout as the answer exactly
+    as it did before, so the new behaviour is confined to the case where the
+    array really parses.
+
+    Non-streaming output carries no `message_delta` frames, so these runs get
+    totals and NULL context columns.
+    """
+    if not stdout or not stdout.lstrip().startswith("["):
+        return None, None
+    try:
+        frames = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None, None
+    if not isinstance(frames, list):
+        return None, None
+
+    result_frame = None
+    model_seen = ""
+    api_key_source = None
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        kind = frame.get("type")
+        if kind == "result":
+            result_frame = frame
+        elif kind == "system":
+            if not model_seen and frame.get("model"):
+                model_seen = str(frame["model"])
+            if api_key_source is None and frame.get("apiKeySource"):
+                api_key_source = str(frame["apiKeySource"])
+    if result_frame is None:
+        return None, None
+
+    usage = usage_types.from_cli_result(
+        result_frame, [], api_key_source, model_hint=model_seen,
+    )
+    answer = result_frame.get("result")
+    if not isinstance(answer, str):
+        # An `error_during_execution`-shaped frame carries no `result`. Falling
+        # through to an empty string would blank the answer, and the caller's
+        # `if returncode == 0 and output:` guard would then skip the classifiers
+        # entirely — so a provider failure that used to be read off stdout and
+        # classified would come back as "produced no output" with a generic
+        # `error`, which is in neither the fallback trigger set nor the
+        # breaker's cooldown set.
+        answer = result_frame.get("error")
+    if not isinstance(answer, str):
+        # Nothing textual in the frame at all. `None` tells the caller to keep
+        # raw stdout, so the classifiers still have something to read.
+        return None, usage
+    return answer, usage
 
 
 def parse_api_error(text: str) -> dict | None:
@@ -891,6 +957,16 @@ class ClaudeCodeBrain:
     # --- Execution (Brain Protocol) ----------------------------------------
 
     def execute(self, req: BrainRequest) -> BrainResult:
+        # Stamped on the way out rather than at each of the ~30 return sites
+        # below, so a return added later cannot forget it. `brain_kind` is what
+        # the usage row records as the brain that ran, and it has to be right on
+        # the fallback path, where the executor's own variable no longer
+        # describes the result it is holding.
+        result = self._execute(req)
+        result.brain_kind = BRAIN_KIND
+        return result
+
+    def _execute(self, req: BrainRequest) -> BrainResult:
         try:
             # --dangerously-skip-permissions (added by _build_command for
             # tool-bearing tasks) is refused under root/sudo unless IS_SANDBOX=1
@@ -959,6 +1035,16 @@ class ClaudeCodeBrain:
                 "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
             ]
+        else:
+            # The non-streaming path is where the daemon's own model calls run
+            # — the nightly sleep cycle, shared briefing blocks, four health OCR
+            # paths, the code reviewer — none of which has a task row. Without a
+            # structured format they were the largest unmeasured spend in the
+            # deployment. `json` emits an array of the same frames terminated by
+            # the same `result` frame, so the existing parser applies unchanged.
+            # There are no `message_delta` frames here, so these runs carry
+            # totals and NULL context.
+            cmd += ["--output-format", "json"]
         return cmd
 
     # --- non-streaming path ---
@@ -1011,6 +1097,25 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _execute_simple_once(cmd: list[str], req: BrainRequest) -> BrainResult:
+        """One non-streaming attempt, with its usage attached to whatever it
+        returns.
+
+        Same single-exit shape as the streaming path, and for the same reason:
+        the inner function has several return points and tokens are spent on
+        all of them.
+        """
+        # A `subprocess.TimeoutExpired` propagates to the caller's own timeout
+        # handling, which builds the result itself. Nothing was parsed by then,
+        # so there is no usage to carry and no handler is needed here.
+        accounting: dict = {}
+        result = ClaudeCodeBrain._execute_simple_once_inner(cmd, req, accounting)
+        result.usage = accounting.get("usage")
+        return result
+
+    @staticmethod
+    def _execute_simple_once_inner(
+        cmd: list[str], req: BrainRequest, accounting: dict
+    ) -> BrainResult:
         # Still subprocess.run, and so still killing only the direct child on
         # timeout — the non-streaming path's grandchildren are orphaned the way
         # the streaming path's used to be (ISSUE-257, deferred half). Fixing it
@@ -1034,6 +1139,21 @@ class ClaudeCodeBrain:
         )
 
         output = result.stdout.strip()
+
+        # `--output-format json` gives a JSON array of the same frames the
+        # streaming path emits, terminated by the same `result` frame. Parsed
+        # here so the daemon's task-less model calls are measured at all.
+        #
+        # The parse is guarded and the fallback is the whole point: roughly
+        # ninety tests across six files patch `subprocess.run` with plain-text
+        # stdout, and every real deployment predating this flag behaves the same
+        # way. Anything that does not decode as an array of frames is treated as
+        # the answer text exactly as before, so new behaviour is confined to the
+        # case where the array actually parses.
+        answer_text, simple_usage = _parse_simple_json_output(output)
+        if answer_text is not None:
+            output = answer_text
+        accounting["usage"] = simple_usage
 
         signal_death = _signal_result(result.returncode, None)
         if signal_death is not None:
@@ -1081,12 +1201,26 @@ class ClaudeCodeBrain:
     # --- streaming path ---
 
     def _execute_streaming(self, cmd: list[str], req: BrainRequest) -> BrainResult:
-        """Popen + stream-json parsing with auto-retry on transient API errors."""
+        """Popen + stream-json parsing with auto-retry on transient API errors.
+
+        Only the final attempt's usage is carried, which is the documented
+        limitation: an in-brain retry can burn two context loads before a 529 and
+        this records one. What it must not do is record *none* — the two results
+        this function builds itself used to leave `usage` at None, so a run that
+        streamed real requests and then exhausted its retries wrote no row at
+        all. That is the worst case to lose, because `transient_api_error` is in
+        the executor's default fallback trigger set: the primary's spend would
+        vanish and the fallback's would be the only tokens the task ever
+        recorded.
+        """
         last_error = ""
         last_trace = None
+        last_usage = None
 
         for attempt in range(API_RETRY_MAX_ATTEMPTS):
             result = self._execute_streaming_once(cmd, req)
+            if result.usage is not None:
+                last_usage = result.usage
 
             if result.success:
                 return result
@@ -1116,6 +1250,7 @@ class ClaudeCodeBrain:
                         success=False,
                         result_text="Cancelled by user",
                         stop_reason="cancelled",
+                        usage=last_usage,
                     )
             else:
                 logger.error(
@@ -1128,10 +1263,51 @@ class ClaudeCodeBrain:
             result_text=last_error,
             execution_trace=last_trace,
             stop_reason="transient_api_error",
+            usage=last_usage,
         )
 
     @staticmethod
     def _execute_streaming_once(cmd: list[str], req: BrainRequest) -> BrainResult:
+        """One streaming attempt, with its usage attached to whatever it returns.
+
+        The accounting is collected into a dict the inner function fills as it
+        parses, and the `BrainUsage` is built here — once, on the way out. The
+        inner function has around a dozen return points (cancel, timeout, OOM,
+        several error classifications) and tokens are spent on all of them, so
+        stamping at a single exit is what keeps a later-added return from
+        silently dropping a measurement.
+        """
+        accounting: dict = {}
+        try:
+            result = ClaudeCodeBrain._execute_streaming_once_inner(
+                cmd, req, accounting
+            )
+        except Exception as e:
+            # A raise past the inner body would otherwise discard everything
+            # measured before it: `execute`'s catch-all returns a bare result,
+            # and the tokens are spent either way. Converted to a failure result
+            # here so the accounting survives.
+            logger.exception("streaming attempt raised")
+            result = BrainResult(
+                success=False,
+                result_text=f"Execution error: {e}",
+                stop_reason="error",
+            )
+        result.usage = usage_types.from_cli_result(
+            accounting.get("result_frame"),
+            accounting.get("requests") or [],
+            accounting.get("api_key_source"),
+            model_hint=accounting.get("model_seen", ""),
+            subagent_requests=accounting.get("subagent_requests", 0),
+            compacted_requests=accounting.get("compacted_requests", 0),
+            rate_limit=accounting.get("rate_limit"),
+        )
+        return result
+
+    @staticmethod
+    def _execute_streaming_once_inner(
+        cmd: list[str], req: BrainRequest, accounting: dict
+    ) -> BrainResult:
         actions_descriptions: list[str] = []
         execution_trace: list[dict] = []
         stderr_lines: list[str] = []
@@ -1217,24 +1393,70 @@ class ClaudeCodeBrain:
         # frame carries it (it reflects the resolved default when --model was
         # omitted), so this is more accurate than req.model for the default case.
         model_seen = ""
+        # Usage accounting, collected alongside the model sniff. `api_key_source`
+        # decides whether the cost figure is real money or a plan-equivalent.
+        api_key_source: str | None = None
+        requests: list[usage_types.RequestUsage] = []
+        accounting["requests"] = requests
         parse_line = make_stream_parser()
 
         try:
             for line in process.stdout:
                 raw_stdout_lines.append(line)
-                if not model_seen and '"model"' in line:
+                if (not model_seen or api_key_source is None) and (
+                    '"model"' in line or '"apiKeySource"' in line
+                ):
                     try:
                         _d = json.loads(line)
-                        if _d.get("type") == "system" and _d.get("model"):
-                            model_seen = str(_d["model"])
+                        if _d.get("type") == "system":
+                            if not model_seen and _d.get("model"):
+                                model_seen = str(_d["model"])
+                                accounting["model_seen"] = model_seen
+                            if api_key_source is None and _d.get("apiKeySource"):
+                                api_key_source = str(_d["apiKeySource"])
+                                accounting["api_key_source"] = api_key_source
                     except (json.JSONDecodeError, AttributeError):
                         pass
                 event = parse_line(line)
                 if event is None:
                     continue
 
+                # Accounting frames are consumed here and never reach
+                # `execution_trace` or `req.on_progress`. That is load-bearing:
+                # the executor fans progress events out to live surfaces, and a
+                # token-accounting frame appearing in a user's chat is a bug.
+                if isinstance(event, RequestUsageEvent):
+                    if event.is_subagent:
+                        # Keeps `peak_context_tokens` meaning *this* agent's
+                        # peak. Counted rather than dropped, so the number can
+                        # be checked against reality later — fan-out is denied
+                        # today, so a non-zero value means the deny list changed
+                        # or the CLI dropped the `Agent` alias.
+                        accounting["subagent_requests"] = (
+                            accounting.get("subagent_requests", 0) + 1
+                        )
+                    elif event.compacted:
+                        # A compaction replays the previous response; counting it
+                        # would inflate `model_requests` with no real request.
+                        accounting["compacted_requests"] = (
+                            accounting.get("compacted_requests", 0) + 1
+                        )
+                    else:
+                        requests.append(
+                            usage_types.RequestUsage(
+                                prompt_tokens=event.prompt_tokens,
+                                output_tokens=event.output_tokens,
+                                model=event.model or model_seen,
+                            )
+                        )
+                    continue
+                if isinstance(event, RateLimitEvent):
+                    accounting["rate_limit"] = event.info
+                    continue
+
                 if isinstance(event, ResultEvent):
                     final_result = event
+                    accounting["result_frame"] = event.raw
                 elif isinstance(event, ContextManagementEvent):
                     execution_trace.append({"type": "cm_boundary"})
                     continue  # don't stream CM markers

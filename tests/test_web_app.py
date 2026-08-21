@@ -1042,6 +1042,16 @@ class TestAdminStats:
             assert "storage" in data
             assert "modules" in data
 
+            # Usage rides the same payload. Present and empty rather than
+            # absent, so the frontend has one shape to render either way.
+            assert "usage" in data
+            assert data["usage"]["totals_24h"]["rows"] == 0
+            assert data["usage"]["totals_24h"]["cost_by_basis"] == {}
+            # And on the user rows, beside the task counts.
+            assert alice_row["usage_tokens_24h"] == 0
+            assert alice_row["usage_cost_24h"] == {}
+            assert alice_row["usage_avg_initial_context"] is None
+
     async def test_admin_stats_aggregates_tasks(self, tmp_path):
         from istota import db
         config = self._config_with_admin(tmp_path)

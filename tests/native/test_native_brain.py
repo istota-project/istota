@@ -71,7 +71,9 @@ class TestTextCompletion:
         )
         result = _brain(provider).execute(_req("go", tmp_path))
         assert result.usage is not None
-        assert result.usage.input_tokens == 200
+        # `BrainUsage.billed_input_tokens` excludes cache reads; this turn had
+        # none, so it equals the provider's inclusive `prompt_tokens`.
+        assert result.usage.billed_input_tokens == 200
         assert result.usage.output_tokens == 20
         assert result.usage.turns == 1
 

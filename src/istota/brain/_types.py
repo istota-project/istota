@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 from ._events import StreamEvent
 
 if TYPE_CHECKING:
-    from istota.session.usage import TaskUsage
+    from istota.usage import BrainUsage
 
 
 @dataclass
@@ -132,10 +132,21 @@ class BrainResult:
     # attempt).
     stop_reason: str = "completed"
 
-    # Native-brain only: per-task token + cost telemetry. ClaudeCodeBrain leaves
-    # this None (the CLI doesn't surface per-call usage), so it's purely
-    # additive — the existing path is untouched.
-    usage: "TaskUsage | None" = None
+    # Per-attempt token + cost telemetry, normalized across brains
+    # (`istota.usage.BrainUsage`). Every brain that can measure sets this on
+    # *every* return, success or failure — tokens are spent either way.
+    # ClaudeCodeBrain builds it from the CLI's terminal frame plus the
+    # per-request `message_delta` frames; NativeBrain converts its `TaskUsage`
+    # at the boundary. TmuxClaudeBrain leaves it None: it drives the interactive
+    # TUI and reconstructs events from a JSONL transcript, so there is no result
+    # frame to read, and a synthetic zero would drag every average.
+    usage: "BrainUsage | None" = None
+
+    # Which brain produced this result, for the usage row's `brain_kind`. Set by
+    # the brain rather than threaded from the executor's construction site, so
+    # it stays correct on the fallback path for free — there the executor's own
+    # variable no longer describes the result it holds.
+    brain_kind: str = ""
 
     # The model the brain actually invoked (canonical ID). Each brain sets this
     # to the model it used so the executor can record it on the task row and

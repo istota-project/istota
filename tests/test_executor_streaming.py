@@ -223,7 +223,13 @@ class TestSimpleExecution:
         assert result == "Result from file"
 
     def test_no_stream_json_flag(self, tmp_path):
-        """Simple path does NOT include --output-format stream-json."""
+        """Simple path takes plain `json`, never the streaming format.
+
+        It used to pass no `--output-format` at all, which made every one of the
+        daemon's task-less model calls — the nightly sleep cycle, shared
+        briefing blocks, health OCR, the code reviewer — unmeasurable. `json`
+        emits the same frames as an array, so the totals are readable; there are
+        no `message_delta` frames, so those runs carry NULL context."""
         config = _make_config(tmp_path)
         task = _make_task()
 
@@ -243,7 +249,10 @@ class TestSimpleExecution:
         with contextmanager_chain(patches):
             execute_task(task, config, [])
 
-        assert "--output-format" not in captured_cmd
+        assert "stream-json" not in captured_cmd
+        assert "--include-partial-messages" not in captured_cmd
+        assert "--output-format" in captured_cmd
+        assert captured_cmd[captured_cmd.index("--output-format") + 1] == "json"
         assert "--allowedTools" not in captured_cmd
         assert "--dangerously-skip-permissions" in captured_cmd
 

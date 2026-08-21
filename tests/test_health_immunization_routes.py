@@ -440,7 +440,7 @@ class TestParseAndBulkRoutes:
         """
         captured: dict[str, Path] = {}
 
-        def _fake_extract(path, mime, refs, *, config=None):
+        def _fake_extract(path, mime, refs, *, config=None, user_id=""):
             captured["path"] = Path(path)
             return {"rows": [], "mode": "vision", "warnings": []}
 
@@ -558,7 +558,7 @@ class TestImmunizationImportDocumentAttachment:
     """Proof of immunization is a document, so the upload is kept."""
 
     def _extract(self, client, monkeypatch, *, rows=None):
-        def _fake(path, mime, refs, *, config=None):
+        def _fake(path, mime, refs, *, config=None, user_id=""):
             return {
                 "rows": rows if rows is not None else [],
                 "mode": "vision",

@@ -261,6 +261,7 @@ class SchedulerConfig:
     worker_heartbeat_seconds: int = 60  # running worker pings liveness this often (0 disables)
     worker_stuck_minutes: int = 10  # reclaim a heartbeating worker's task after this much heartbeat silence (higher = fewer false-dead reclaims of a slow-but-alive worker, slower genuine-crash recovery)
     task_retention_days: int = 7  # delete completed/failed/cancelled tasks older than this
+    usage_retention_days: int = 180  # prune token/cost rows after N days, 0 to disable. Deliberately far above task_retention_days — the whole point of a separate table is that spend outlives the task. 180 rather than a year because db_backup snapshots the framework DB into dated dirs and keeps several, so every row is duplicated on the backup target
     email_retention_days: int = 7  # delete emails older than N days from IMAP, 0 to disable
     processed_email_retention_days: int = 90  # prune the processed_emails dedup ledger after N days, 0 to disable. Never applied below email_retention_days — a row is what stops a message still in the mailbox from being re-ingested
     temp_file_retention_days: int = 7  # delete temp files older than N days, 0 to disable
@@ -2226,6 +2227,7 @@ def load_config(config_path: Path | None = None) -> Config:
             worker_heartbeat_seconds=sched.get("worker_heartbeat_seconds", 60),
             worker_stuck_minutes=sched.get("worker_stuck_minutes", 10),
             task_retention_days=sched.get("task_retention_days", 7),
+            usage_retention_days=sched.get("usage_retention_days", 180),
             email_retention_days=sched.get("email_retention_days", 7),
             processed_email_retention_days=sched.get("processed_email_retention_days", 90),
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),

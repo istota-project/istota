@@ -14,6 +14,7 @@ from .. import db
 from ..brain import BrainRequest, make_brain
 from ..brain import primary_brain_unavailable, report_brain_result
 from ..config import Config
+from ..usage import SYSTEM_USER_ID
 from ..storage import (
     _get_mount_path,
     get_user_memories_path,
@@ -152,7 +153,8 @@ _SLEEP_CYCLE_TIMEOUT_SECONDS = 120
 
 
 def _run_sleep_cycle_brain(
-    config: Config, prompt: str, model: str, label: str
+    config: Config, prompt: str, model: str, label: str, user_id: str = "",
+    conn=None,
 ) -> tuple[bool, str]:
     """Run a privileged text-only model call through the configured brain.
 
@@ -211,6 +213,24 @@ def _run_sleep_cycle_brain(
     # Feed the result into the shared availability breaker so a usage_limit /
     # not_found opens it (one-shot alert) and a success closes it. Mirrors the
     # executor's task path so the breaker is a single signal across all callers.
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import persist_brain_usage
+
+    # This runs nightly, per user and per channel, against a general-tier model
+    # and has no task row — which made it the largest single piece of spend the
+    # deployment could not see.
+    # The caller's connection where it has one. Each pass holds a single write
+    # transaction for its duration, so opening a second connection here would
+    # block on the write lock for the full busy timeout.
+    persist_brain_usage(
+        config, conn, usage=result.usage, origin="sleep_cycle",
+        user_id=user_id, brain_kind=result.brain_kind,
+        model=result.model_used or req.model, stop_reason=result.stop_reason,
+        success=result.success,
+    )
+
     _opened_reason = report_brain_result(result, config.brain)
     if _opened_reason:
         _alert_brain_unavailable(config, label, _opened_reason)
@@ -892,6 +912,8 @@ def process_user_sleep_cycle(
         config, prompt,
         model=sleep_config.extraction_model,
         label=f"Sleep cycle extraction for {user_id}",
+        user_id=user_id,
+        conn=conn,
     )
     if not ok:
         return False
@@ -1292,6 +1314,8 @@ def curate_user_memory(
         config, prompt,
         model=config.sleep_cycle.curation_model,
         label=f"USER.md curation for {user_id}",
+        user_id=user_id,
+        conn=conn,
     )
     if not ok:
         return False
@@ -1976,6 +2000,10 @@ def process_channel_sleep_cycle(
         config, prompt,
         model=csc.extraction_model,
         label=f"Channel sleep cycle extraction for {conversation_token}",
+        # A channel pass has no single owner — same sentinel shared briefing
+        # blocks use, so a per-user grouping keeps one no-owner bucket.
+        user_id=SYSTEM_USER_ID,
+        conn=conn,
     )
     if not ok:
         return False

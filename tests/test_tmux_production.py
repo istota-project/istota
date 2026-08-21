@@ -87,9 +87,18 @@ class TestFlagHelper:
             "--system-prompt-file", str(sp),
         ]
         # And the brain's _build_command wraps it identically (plus the
-        # non-interactive skip-permissions flag).
+        # non-interactive skip-permissions flag and, on the non-streaming path,
+        # `--output-format json`). That last one is what makes the daemon's
+        # task-less model calls measurable at all; it is added by the brain's
+        # own wrapper, so the flag builder the tmux brain shares is untouched —
+        # which is the property this golden exists to pin.
         cmd = claude_code.ClaudeCodeBrain._build_command(req)
-        assert cmd == ["claude", "-p", "-"] + flags + ["--dangerously-skip-permissions"]
+        assert cmd == (
+            ["claude", "-p", "-"]
+            + flags
+            + ["--dangerously-skip-permissions", "--output-format", "json"]
+        )
+        assert "stream-json" not in cmd
 
     def test_unsupported_flag_dropped(self, tmp_path, caplog):
         claude_code._WARNED_UNSUPPORTED_FLAGS.clear()

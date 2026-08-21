@@ -244,7 +244,9 @@ def _parse_llm_response(raw: str) -> tuple[list[dict], int]:
     return [], 0
 
 
-def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
+def _call_brain(
+    prompt: str, config, *, allow_read: bool = False, user_id: str = ""
+) -> str | None:
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
     except ImportError as e:
@@ -272,6 +274,19 @@ def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
     except Exception as e:  # noqa: BLE001
         logger.warning("health_imm_ocr_brain_failed error=%s", e)
         return None
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import persist_brain_usage
+
+    # One call per uploaded document, with no task row behind it.
+    persist_brain_usage(
+        config, None, usage=result.usage, origin="health_immunization_ocr",
+        user_id=user_id, brain_kind=result.brain_kind,
+        model=result.model_used or req.model,
+        stop_reason=result.stop_reason, success=result.success,
+    )
+
     if not result.success:
         logger.warning(
             "health_imm_ocr_brain_unsuccessful stop_reason=%s",
@@ -287,6 +302,7 @@ def extract_from_file(
     refs: list[ImmunizationRef],
     *,
     config=None,
+    user_id: str = "",
 ) -> dict:
     """Run text → fallback-vision extraction against an uploaded file.
 
@@ -304,10 +320,12 @@ def extract_from_file(
 
     if mode == "text":
         prompt = _build_text_prompt(text, refs)
-        response = _call_brain(prompt, config)
+        response = _call_brain(prompt, config, user_id=user_id)
     else:
         prompt = _build_vision_prompt(source_path, refs)
-        response = _call_brain(prompt, config, allow_read=True)
+        response = _call_brain(
+            prompt, config, allow_read=True, user_id=user_id
+        )
 
     if not response:
         return {

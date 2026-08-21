@@ -91,6 +91,59 @@ export interface AdminStatsUser {
   tasks_automated_24h: number;
   tasks_failed_24h: number;
   last_active: string | null;
+  // Usage sits on the same row as the task counts, so "how much is this user
+  // costing" is answered where "how much is this user running" already is.
+  //
+  // `usage_cost_*` is a map keyed by cost basis, never a scalar: one user's
+  // rows can span bases when an operator switches the CLI's auth mid-window,
+  // and nothing sums across them. `usage_rows_24h` can exceed
+  // `tasks_last_24h` by design — it includes spend with no task row at all
+  // (a nightly sleep cycle, health OCR), which `usage_by_origin_24h` is what
+  // makes legible.
+  usage_tokens_24h: number;
+  usage_tokens_30d: number;
+  usage_cost_24h: Record<string, number>;
+  usage_cost_30d: Record<string, number>;
+  usage_by_origin_24h: Record<string, { rows: number; tokens: number }>;
+  usage_avg_initial_context: number | null;
+  usage_avg_peak_context: number | null;
+  usage_cache_hit_rate_24h: number;
+  usage_rows_24h: number;
+  usage_unmeasured_24h: number;
+}
+
+export interface AdminUsageTotals {
+  rows: number;
+  measured_rows: number;
+  billed_input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cache_hit_rate: number;
+  cost_by_basis: Record<string, number>;
+  avg_initial_context_tokens: number | null;
+  avg_peak_context_tokens: number | null;
+  context_rows: number;
+}
+
+export interface AdminUsageGroup extends AdminUsageTotals {
+  key: string;
+}
+
+export interface AdminStatsUsage {
+  totals_24h?: AdminUsageTotals;
+  totals_30d?: AdminUsageTotals;
+  by_model_30d?: AdminUsageGroup[];
+  // The model list is capped at five; this is how many it left out.
+  by_model_30d_omitted?: number;
+  by_brain_30d?: AdminUsageGroup[];
+  by_origin_24h?: AdminUsageGroup[];
+  unmeasured_tasks_24h?: number;
+  context_unmeasured_rows_30d?: number;
+  // Best-effort like every other section: a failure is an error string in the
+  // payload rather than a 500 on the whole dashboard.
+  error?: string;
 }
 
 export interface AdminStatsJob {
@@ -123,6 +176,7 @@ export interface AdminStats {
     last_errors: { job_name: string; error: string; timestamp: string | null }[];
   };
   modules: Record<string, Record<string, unknown>>;
+  usage: AdminStatsUsage;
   tasks: {
     total: number;
     last_24h: number;

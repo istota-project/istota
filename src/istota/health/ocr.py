@@ -369,7 +369,9 @@ def _coerce_str(v) -> str | None:
     return s
 
 
-def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
+def _call_brain(
+    prompt: str, config, *, allow_read: bool = False, user_id: str = ""
+) -> str | None:
     """Run the extraction prompt through the active brain.
 
     Returns the raw response text or ``None`` on failure. Pass
@@ -404,6 +406,19 @@ def _call_brain(prompt: str, config, *, allow_read: bool = False) -> str | None:
     except Exception as e:  # noqa: BLE001
         logger.warning("health_ocr_brain_failed error=%s", e)
         return None
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import persist_brain_usage
+
+    # One call per uploaded document, with no task row behind it.
+    persist_brain_usage(
+        config, None, usage=result.usage, origin="health_ocr",
+        user_id=user_id, brain_kind=result.brain_kind,
+        model=result.model_used or req.model,
+        stop_reason=result.stop_reason, success=result.success,
+    )
+
     if not result.success:
         logger.warning(
             "health_ocr_brain_unsuccessful stop_reason=%s",
@@ -533,10 +548,12 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
 
     if mode == "text":
         prompt = _build_extraction_prompt(text, refs)
-        response = _call_brain(prompt, config)
+        response = _call_brain(prompt, config, user_id=ctx.user_id)
     else:
         prompt = _build_vision_prompt(source_path, refs)
-        response = _call_brain(prompt, config, allow_read=True)
+        response = _call_brain(
+            prompt, config, allow_read=True, user_id=ctx.user_id
+        )
 
     if not response:
         return {

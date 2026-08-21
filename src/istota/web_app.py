@@ -54,6 +54,7 @@ from . import user_profiles
 from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
+from .usage import SYSTEM_USER_ID
 from .location_logic import (
     _location_discover_places,
     _location_dismiss_cluster,
@@ -1202,6 +1203,20 @@ async def api_me(user: dict = Depends(_require_api_auth)):
 # ---- Admin dashboard ----
 
 
+def _iso_z(dt: datetime) -> str:
+    """A bound in the format `task_usage.created_at` stores.
+
+    Named apart from the space-separated `strftime` the `tasks` queries use, so
+    a caller needing both has to choose between two named things rather than
+    reuse one in the wrong place. Mixing them fails in *both* directions and neither raises: `' '` (0x20)
+    sorts below `'T'` (0x54), so a space-separated bound against the ISO-Z
+    column **over-includes** (a 24h window silently widens to ~36h), while an
+    ISO-Z bound against the space-separated column **drops** every row on the
+    boundary day. Both report a plausible number.
+    """
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
 def _iso_utc(ts: str | None) -> str | None:
     """Normalize a heterogeneous timestamp string to ISO 8601 UTC.
 
@@ -1244,6 +1259,7 @@ def _gather_admin_stats() -> dict:
         "scheduler": {"jobs_total": 0, "jobs_active": 0, "jobs_paused": 0, "last_errors": []},
         "modules": {},
         "tasks": {},
+        "usage": {},
         "storage": _admin_storage_section(db_path),
     }
 
@@ -1252,6 +1268,13 @@ def _gather_admin_stats() -> dict:
             payload["users"] = _admin_users_section(conn, now)
             payload["scheduler"] = _admin_scheduler_section(conn)
             payload["tasks"] = _admin_tasks_section(conn, now)
+            # Best-effort like every other section: a failure here is an error
+            # string in the payload, not a 500 on the whole dashboard.
+            try:
+                payload["usage"] = _admin_usage_section(conn, now)
+            except Exception as usage_exc:
+                logger.exception("admin usage section failed")
+                payload["usage"] = {"error": str(usage_exc)}
             last_run, healthy = _admin_scheduler_health(conn, now)
             payload["system"]["last_scheduler_run"] = last_run
             payload["system"]["scheduler_healthy"] = healthy
@@ -1554,6 +1577,14 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     """
     cutoff_24h = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     cutoff_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    # A SECOND pair, in the other format, and the distinct names are the point.
+    # The queries above compare against `tasks.created_at`, which SQLite writes
+    # as `2026-08-20 09:00:00`; the usage query below compares against
+    # `task_usage.created_at`, which is ISO-Z. `' '` (0x20) sorts below `'T'`
+    # (0x54), so reusing `cutoff_24h` for the usage query silently drops every
+    # row before the first `'T'`-sorted value — no error, just a smaller number.
+    cutoff_24h_iso = _iso_z(now - timedelta(hours=24))
+    cutoff_30d_iso = _iso_z(now - timedelta(days=30))
     interactive = sorted(_INTERACTIVE_SOURCES)
     placeholders = ", ".join("?" * len(interactive))
 
@@ -1600,8 +1631,28 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
             ),
         }
 
+    # Guarded on its own rather than riding the caller's: `_gather_admin_stats`
+    # wraps Users, Scheduler and Tasks in one try, so before this stage a
+    # failure here could only come from `tasks` — a table that always exists.
+    # These queries read `task_usage`, which a web process upgraded ahead of its
+    # database does not have (`get_db` does not run `init_db`), and one missing
+    # table would take out three sections that have nothing to do with usage.
+    try:
+        usage_by_user = _admin_user_usage(conn, cutoff_24h_iso, cutoff_30d_iso)
+        # Deliberately the space-separated bound: this one reads `tasks`.
+        unmeasured_by_user = _admin_unmeasured_by_user(conn, cutoff_24h)
+    except Exception:
+        logger.exception("admin per-user usage failed; rendering task counts only")
+        usage_by_user = {}
+        unmeasured_by_user = {}
+
     out = []
     user_ids = set(_config.users.keys()) | set(by_user.keys()) if _config else set(by_user.keys())
+    # Ownerless spend (the channel sleep-cycle pass, shared briefing blocks) is
+    # recorded against a sentinel, which is not a person and must not appear in
+    # a table of people. It stays in the fleet pane's per-origin split, where it
+    # is legible as what it is.
+    user_ids |= set(usage_by_user) - {SYSTEM_USER_ID}
     for user_id in sorted(user_ids):
         uc = _config.users.get(user_id) if _config else None
         row = by_user.get(user_id)
@@ -1629,8 +1680,269 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
             "tasks_automated_24h": automated_24h,
             "tasks_failed_24h": failed_24h,
             "last_active": _iso_utc(row["last_active"]) if row else None,
+            # Usage joins the same row rather than a separate pane, so "how much
+            # is this user costing" is answered where "how much is this user
+            # running" already is. A user in config with no rows gets zeros and
+            # None contexts through the same `.get` fallback as above.
+            **(usage_by_user.get(user_id) or _empty_user_usage()),
+            "usage_unmeasured_24h": unmeasured_by_user.get(user_id, 0),
         })
     return out
+
+
+def _empty_user_usage() -> dict:
+    """The shape a user with no usage rows gets.
+
+    `None` for the context averages rather than 0, matching the column
+    semantics: a zero would be a measurement.
+
+    A factory rather than a module constant because the caller spreads it with
+    `**`, which copies the top level only — every empty row would otherwise
+    share one `usage_cost_24h` dict with every other and with the constant.
+    Nothing mutates them today; the cost of not having to remember that is one
+    function call per empty row.
+    """
+    return {
+        "usage_tokens_24h": 0,
+        "usage_tokens_30d": 0,
+        "usage_cost_24h": {},
+        "usage_cost_30d": {},
+        "usage_by_origin_24h": {},
+        "usage_avg_initial_context": None,
+        "usage_avg_peak_context": None,
+        "usage_cache_hit_rate_24h": 0.0,
+        "usage_rows_24h": 0,
+    }
+
+
+def _admin_user_usage(
+    conn: sqlite3.Connection, cutoff_24h_iso: str, cutoff_30d_iso: str
+) -> dict[str, dict]:
+    """Per-user token and cost usage, keyed by user id.
+
+    Three things here are traps the surrounding code walks past.
+
+    **Cost is a map keyed by basis, never a scalar.** One user's rows can span
+    bases — an operator switching the CLI from a subscription to an API key
+    mid-window is exactly that case — and the no-summing rule holds per user as
+    much as globally.
+
+    **Token aggregates filter `has_totals`; context aggregates filter NULL.**
+    The two measures are independent, so their filters are too: a run killed
+    before its result frame has real context and meaningless zero tokens.
+
+    **`usage_rows_24h` can exceed `tasks_last_24h`, by design.** It includes the
+    user's non-task spend — their nightly sleep cycle, their health OCR — which
+    has no task row at all. `usage_by_origin_24h` is what makes that legible;
+    without it the row reads as an arithmetic error.
+    """
+    rows = conn.execute(
+        """
+        SELECT user_id,
+               COUNT(*) AS rows_24h,
+               COALESCE(SUM(CASE WHEN has_totals = 1 THEN
+                   billed_input_tokens + cache_read_tokens
+                   + cache_write_tokens + output_tokens ELSE 0 END), 0) AS tokens_24h,
+               COALESCE(SUM(CASE WHEN has_totals = 1
+                   THEN cache_read_tokens ELSE 0 END), 0) AS cache_read_24h,
+               COALESCE(SUM(CASE WHEN has_totals = 1 THEN
+                   billed_input_tokens + cache_read_tokens
+                   + cache_write_tokens ELSE 0 END), 0) AS prompt_24h
+        FROM task_usage
+        WHERE created_at >= ?
+        GROUP BY user_id
+        """,
+        (cutoff_24h_iso,),
+    ).fetchall()
+
+    thirty = conn.execute(
+        """
+        SELECT user_id,
+               COALESCE(SUM(CASE WHEN has_totals = 1 THEN
+                   billed_input_tokens + cache_read_tokens
+                   + cache_write_tokens + output_tokens ELSE 0 END), 0) AS tokens_30d,
+               AVG(initial_context_tokens) AS avg_initial,
+               AVG(peak_context_tokens) AS avg_peak
+        FROM task_usage
+        WHERE created_at >= ?
+        GROUP BY user_id
+        """,
+        (cutoff_30d_iso,),
+    ).fetchall()
+
+    cost_24h = _admin_cost_by_user(conn, cutoff_24h_iso)
+    cost_30d = _admin_cost_by_user(conn, cutoff_30d_iso)
+
+    origin_rows = conn.execute(
+        """
+        SELECT user_id, origin, COUNT(*) AS n,
+               COALESCE(SUM(CASE WHEN has_totals = 1 THEN
+                   billed_input_tokens + cache_read_tokens
+                   + cache_write_tokens + output_tokens ELSE 0 END), 0) AS tokens
+        FROM task_usage
+        WHERE created_at >= ?
+        GROUP BY user_id, origin
+        """,
+        (cutoff_24h_iso,),
+    ).fetchall()
+    by_origin: dict[str, dict] = {}
+    for r in origin_rows:
+        by_origin.setdefault(r["user_id"], {})[r["origin"]] = {
+            "rows": int(r["n"]),
+            "tokens": int(r["tokens"]),
+        }
+
+    thirty_by_user = {r["user_id"]: r for r in thirty}
+    day_by_user = {r["user_id"]: r for r in rows}
+
+    out: dict[str, dict] = {}
+    # Keyed over both windows, not just the 24h one. A user whose only spend is
+    # older than a day but inside the month still has numbers worth showing, and
+    # keying on the narrow window alone would drop them off the Users list
+    # entirely when they have no task rows either.
+    for user_id in set(day_by_user) | set(thirty_by_user):
+        r = day_by_user.get(user_id)
+        t30 = thirty_by_user.get(user_id)
+        prompt = int(r["prompt_24h"]) if r else 0
+        out[user_id] = {
+            "usage_tokens_24h": int(r["tokens_24h"]) if r else 0,
+            "usage_tokens_30d": int(t30["tokens_30d"]) if t30 else 0,
+            "usage_cost_24h": cost_24h.get(user_id, {}),
+            "usage_cost_30d": cost_30d.get(user_id, {}),
+            "usage_by_origin_24h": by_origin.get(user_id, {}),
+            "usage_avg_initial_context": (
+                round(float(t30["avg_initial"]), 1)
+                if t30 and t30["avg_initial"] is not None else None
+            ),
+            "usage_avg_peak_context": (
+                round(float(t30["avg_peak"]), 1)
+                if t30 and t30["avg_peak"] is not None else None
+            ),
+            "usage_cache_hit_rate_24h": (
+                round(int(r["cache_read_24h"]) / prompt, 4)
+                if r and prompt > 0 else 0.0
+            ),
+            "usage_rows_24h": int(r["rows_24h"]) if r else 0,
+        }
+    return out
+
+
+def _admin_cost_by_user(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, dict]:
+    """Cost per user, broken out by basis. Never collapsed into one figure."""
+    rows = conn.execute(
+        """
+        SELECT user_id, cost_basis, COALESCE(SUM(cost_usd), 0.0) AS cost
+        FROM task_usage
+        WHERE created_at >= ?
+        GROUP BY user_id, cost_basis
+        """,
+        (cutoff_iso,),
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        # Not rounded, matching `db._cost_by_basis`. Two paths over one column
+        # rounding differently is the "two chances to disagree" this section
+        # argues against everywhere else.
+        out.setdefault(r["user_id"], {})[r["cost_basis"]] = float(r["cost"])
+    return out
+
+
+def _admin_unmeasured_by_user(
+    conn: sqlite3.Connection, cutoff_sql: str
+) -> dict[str, int]:
+    """Tasks per user in the window with no usage row.
+
+    Takes the **space-separated** bound, because it reads `tasks`. Passing the
+    ISO-Z one here drops every task on the boundary day — `' '` sorts below
+    `'T'`, so a task stamped `2026-08-19 12:30:00` fails `>= '2026-08-19T…'` —
+    and reports a plausible smaller number rather than raising.
+    """
+    rows = conn.execute(
+        """
+        SELECT t.user_id, COUNT(*) AS n
+        FROM tasks t
+        WHERE t.created_at >= ?
+          AND NOT EXISTS (SELECT 1 FROM task_usage u WHERE u.task_id = t.id)
+        GROUP BY t.user_id
+        """,
+        (cutoff_sql,),
+    ).fetchall()
+    return {r["user_id"]: int(r["n"]) for r in rows}
+
+
+def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
+    """Fleet-wide token and cost aggregates.
+
+    Deliberately carries **no** top-5-by-user list. Per-user usage lives on the
+    Users rows, beside that user's task counts; duplicating it here would give
+    the same data two places to disagree. Per-model, per-brain and per-origin
+    belong here, because they are not a property of any one user.
+
+    Two cutoff formats again, and for the same reason: the token aggregates read
+    `task_usage.created_at` (ISO-Z) while `unmeasured_tasks` reads
+    `tasks.created_at` (space-separated). Passing one where the other belongs
+    is wrong in opposite directions and neither raises: a space bound against
+    the ISO-Z column over-includes, an ISO bound against the space column drops
+    the boundary day.
+    """
+    from . import db as _db
+
+    since_24h = _iso_z(now - timedelta(hours=24))
+    since_30d = _iso_z(now - timedelta(days=30))
+    tasks_since_24h = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _shape(summary: dict) -> dict:
+        return {
+            "rows": summary["rows"],
+            "measured_rows": summary["measured_rows"],
+            "billed_input_tokens": summary["billed_input_tokens"],
+            "cache_read_tokens": summary["cache_read_tokens"],
+            "cache_write_tokens": summary["cache_write_tokens"],
+            "output_tokens": summary["output_tokens"],
+            "total_tokens": summary["total_tokens"],
+            "cache_hit_rate": round(summary["cache_hit_rate"], 4),
+            # A map keyed by basis, never a scalar — the render rule needs the
+            # basis alongside the figure, and nothing sums across them.
+            "cost_by_basis": summary["cost_by_basis"],
+            "avg_initial_context_tokens": summary["avg_initial_context_tokens"],
+            "avg_peak_context_tokens": summary["avg_peak_context_tokens"],
+            "context_rows": summary["context_rows"],
+        }
+
+    def _groups(group_by: str, since: str, limit: int | None = None) -> list[dict]:
+        rows = _db.usage_summary(conn, since=since, group_by=group_by)
+        out = [{"key": g["key"], **_shape(g)} for g in rows]
+        return out[:limit] if limit else out
+
+    by_model = _groups("model", since_30d)
+
+    totals_24h = _db.usage_summary(conn, since=since_24h)
+    totals_30d = _db.usage_summary(conn, since=since_30d)
+
+    context_unmeasured = conn.execute(
+        "SELECT COUNT(*) FROM task_usage"
+        " WHERE created_at >= ? AND initial_context_tokens IS NULL",
+        (since_30d,),
+    ).fetchone()[0]
+
+    return {
+        "totals_24h": _shape(totals_24h),
+        "totals_30d": _shape(totals_30d),
+        "by_model_30d": by_model[:5],
+        # The list is capped at five, so its rows do not sum to the totals
+        # above them. Said out loud rather than left to be noticed, on the same
+        # reasoning as the two counters below.
+        "by_model_30d_omitted": max(0, len(by_model) - 5),
+        "by_brain_30d": _groups("brain", since_30d),
+        "by_origin_24h": _groups("origin", since_24h),
+        # Two honesty counters. A tmux-brain task spends real tokens and writes
+        # no row, and the native brain records no context — recording synthetic
+        # zeroes for either would make the dashboard complete and wrong.
+        "unmeasured_tasks_24h": _db.unmeasured_task_count(
+            conn, since=tasks_since_24h
+        ),
+        "context_unmeasured_rows_30d": int(context_unmeasured),
+    }
 
 
 def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:

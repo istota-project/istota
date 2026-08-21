@@ -202,7 +202,7 @@ class TestExtractFromPanel:
         )
         captured: dict = {}
 
-        def _fake_brain(prompt, config, *, allow_read=False):
+        def _fake_brain(prompt, config, *, allow_read=False, user_id=""):
             captured["allow_read"] = allow_read
             captured["prompt"] = prompt
             return fake_response

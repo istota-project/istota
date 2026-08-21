@@ -8,6 +8,13 @@
     type AdminStatsUserSource,
   } from '$lib/api';
   import { NoticeBanner, StatTile } from '$lib/components/ui';
+  import {
+    formatCost,
+    formatContext,
+    formatNumber,
+    formatPercent,
+    usageOriginTitle,
+  } from '$lib/usageFormat';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
@@ -67,10 +74,6 @@
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
-  }
-
-  function formatNumber(n: number): string {
-    return n.toLocaleString();
   }
 
   function moduleErrorCount(mod: Record<string, unknown>): number {
@@ -369,6 +372,16 @@
               <th class="num col-failed">Failed</th>
               <th class="num col-avg">Avg/day</th>
               <th
+                class="num col-tokens"
+                title="Tokens in the last 24h. Includes spend with no task row — a nightly sleep cycle, health OCR — so this can exceed what the task counts suggest."
+                >Tokens 24h</th
+              >
+              <th
+                class="num col-cost"
+                title="A currency figure only where the cost is real money. A subscription's list-price equivalent and a catalog estimate show a dash."
+                >Cost 24h</th
+              >
+              <th
                 class="col-active"
                 title="Most recent interactive task. Scheduled jobs, briefings, heartbeats and subtasks don't count."
                 >Last active</th
@@ -427,6 +440,10 @@
                   {/if}
                 </td>
                 <td class="num col-avg">{u.tasks_avg_per_day}</td>
+                <td class="num col-tokens" title={usageOriginTitle(u)}
+                  >{formatNumber(u.usage_tokens_24h)}</td
+                >
+                <td class="num col-cost">{formatCost(u.usage_cost_24h)}</td>
                 <td class="col-active">{formatTimestamp(u.last_active)}</td>
               </tr>
             {/each}
@@ -493,6 +510,109 @@
         </div>
       {/if}
     </section>
+
+    <!-- Token usage. Per-model, per-brain and per-origin live here; per-user
+         lives on the Users rows above, beside that user's task counts.
+         Duplicating per-user here would give the same data two places to
+         disagree. -->
+    {#if stats.usage && !stats.usage.error && stats.usage.totals_30d}
+      {@const u24 = stats.usage.totals_24h}
+      {@const u30 = stats.usage.totals_30d}
+      <section class="card">
+        <header class="section-header">
+          <h2>Token usage</h2>
+        </header>
+        <div class="kpi-grid card-grid">
+          <StatTile label="Tokens 24h" sub="{formatNumber(u30.total_tokens)} (30d)">
+            {formatNumber(u24?.total_tokens ?? 0)}
+          </StatTile>
+          <StatTile label="Cost 24h" sub="{formatCost(u30.cost_by_basis)} (30d)">
+            {formatCost(u24?.cost_by_basis)}
+          </StatTile>
+          <StatTile label="Cache hit rate" sub="30d">
+            {formatPercent(u30.cache_hit_rate)}
+          </StatTile>
+          <!-- The two context measures are a first and a max over per-request
+               prompt sizes. They do not sum, so they are never shown beside a
+               token total as though they were the same kind of number. -->
+          <StatTile label="Avg initial context" sub="30d, measured rows only">
+            {formatContext(u30.avg_initial_context_tokens)}
+          </StatTile>
+          <StatTile label="Avg peak context" sub="30d, measured rows only">
+            {formatContext(u30.avg_peak_context_tokens)}
+          </StatTile>
+        </div>
+
+        {#if (stats.usage.by_model_30d ?? []).length > 0}
+          <h3 class="usage-sub">
+            By model (30d){#if (stats.usage.by_model_30d_omitted ?? 0) > 0}<span
+                class="usage-omitted"
+              >
+                — top 5 of {(stats.usage.by_model_30d ?? []).length +
+                  (stats.usage.by_model_30d_omitted ?? 0)}</span
+              >{/if}
+          </h3>
+          <div class="usage-rows">
+            {#each stats.usage.by_model_30d ?? [] as g (g.key)}
+              <div class="usage-row">
+                <div class="usage-key">{g.key}</div>
+                <div class="usage-num">{formatNumber(g.total_tokens)}</div>
+                <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        {#if (stats.usage.by_brain_30d ?? []).length > 0}
+          <h3 class="usage-sub">By brain (30d)</h3>
+          <div class="usage-rows">
+            {#each stats.usage.by_brain_30d ?? [] as g (g.key)}
+              <div class="usage-row">
+                <div class="usage-key">{g.key}</div>
+                <div class="usage-num">{formatNumber(g.total_tokens)}</div>
+                <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        {#if (stats.usage.by_origin_24h ?? []).length > 0}
+          <h3 class="usage-sub">By origin (24h)</h3>
+          <div class="usage-rows">
+            {#each stats.usage.by_origin_24h ?? [] as g (g.key)}
+              <div class="usage-row">
+                <div class="usage-key">{g.key}</div>
+                <div class="usage-num">{formatNumber(g.total_tokens)}</div>
+                <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Two honesty counters. A tmux-brain task spends real tokens and
+             writes no row, and the native brain records no context; a synthetic
+             zero for either would make this pane complete and wrong. -->
+        {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0 || (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
+          <p class="usage-note">
+            {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0}
+              {formatNumber(stats.usage.unmeasured_tasks_24h ?? 0)} task(s) in the last 24h recorded no
+              usage.
+            {/if}
+            {#if (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
+              {formatNumber(stats.usage.context_unmeasured_rows_30d ?? 0)} row(s) in 30d carry no context
+              measurement.
+            {/if}
+          </p>
+        {/if}
+      </section>
+    {:else if stats.usage?.error}
+      <section class="card">
+        <header class="section-header">
+          <h2>Token usage</h2>
+        </header>
+        <p class="usage-note">Usage stats unavailable: {stats.usage.error}</p>
+      </section>
+    {/if}
 
     <!-- Modules -->
     {#if Object.keys(stats.modules).length > 0}
@@ -867,7 +987,11 @@
 
   /* Per-user 24h breakdown — stacked bar + tag list. */
   .users-grid {
-    min-width: 680px;
+    /* Raised by the two usage columns' 14rem. The sized columns must not add up
+		   to the whole table, or `col-24h` — the one deliberately left auto, since
+		   it carries the stacked bar and the per-source chips — is squeezed to
+		   nothing at the declared minimum. */
+    min-width: 904px;
   }
 
   /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
@@ -888,8 +1012,66 @@
     width: 5rem;
   }
 
+  .users-grid .col-tokens {
+    width: 7rem;
+  }
+
+  .users-grid .col-cost {
+    width: 7rem;
+  }
+
   .users-grid .col-active {
     width: 9rem;
+  }
+
+  .usage-sub {
+    margin: var(--space-2) 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .usage-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .usage-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: var(--space-2);
+    align-items: baseline;
+    font-size: var(--text-sm);
+  }
+
+  .usage-key {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .usage-num,
+  .usage-cost {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .usage-cost {
+    min-width: 7rem;
+    color: var(--text-muted);
+  }
+
+  .usage-omitted {
+    font-weight: 400;
+    text-transform: none;
+    color: var(--text-dim);
+  }
+
+  .usage-note {
+    margin-top: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
 
   .users-grid .col-24h {
@@ -1146,6 +1328,12 @@
     }
     .users-grid .col-avg {
       width: 4rem;
+    }
+    .users-grid .col-tokens {
+      width: 5rem;
+    }
+    .users-grid .col-cost {
+      width: 5.5rem;
     }
     /* The user column is too narrow to hold name + chip on one line, and the
 		   wrap leaves the chip stranded under an off-centre name. Admin status

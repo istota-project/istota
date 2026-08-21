@@ -155,6 +155,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `worker_heartbeat_seconds` | `60` | How often a running worker pings liveness (0 disables). Stuck-task reclaim uses the heartbeat to tell a slow-but-alive worker from a dead one. |
 | `worker_stuck_minutes` | `10` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
 | `task_retention_days` | `7` | Delete old completed tasks |
+| `usage_retention_days` | `180` | Prune token/cost records. Kept far longer than tasks so spend history survives task cleanup; `0` disables |
 | `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
 | `processed_email_retention_days` | `90` | Prune the processed-email dedup ledger (0 = disable). Floored at `email_retention_days + 1`; disabled entirely when `email_retention_days` is 0 |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |

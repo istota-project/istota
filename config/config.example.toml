@@ -509,6 +509,12 @@ worker_heartbeat_seconds = 60
 worker_stuck_minutes = 10
 # Delete completed/failed/cancelled tasks older than N days (default: 7)
 task_retention_days = 7
+# Prune token/cost rows after N days (default: 180, 0 to disable). Far above
+# task_retention_days on purpose — spend records live in their own table so they
+# outlive the tasks they came from. 180 rather than a year because the backup
+# job snapshots the whole framework database into dated directories and keeps
+# several of them, so every row here is duplicated on the backup target.
+usage_retention_days = 180
 # Delete emails older than N days from IMAP inbox (default: 7, 0 to disable).
 # The sweep is an IMAP BEFORE search, so it is proportional to what has
 # actually expired rather than to a fixed slice of the newest mail.

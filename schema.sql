@@ -1030,3 +1030,93 @@ CREATE TABLE IF NOT EXISTS code_review_calls (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (task_id)
 );
+
+-- One row per brain attempt, task-bound or not.
+--
+-- Deliberately NOT foreign-keyed to tasks: `cleanup_old_tasks` deletes tasks at
+-- `scheduler.task_retention_days` (7) and this record must outlive that, at
+-- `scheduler.usage_retention_days` (180). `task_id` dangles afterwards, and is
+-- NULL for the daemon's model calls that have no task at all (sleep cycle,
+-- shared briefing blocks, health OCR, code review) — see `origin`. The
+-- denormalized identity columns keep every row self-sufficient, so no aggregate
+-- ever joins `tasks`. `tasks.id` is AUTOINCREMENT, so a dangling `task_id` can
+-- never be reassigned to a different task.
+--
+-- Every date comparison against this table uses the ISO-Z format below, NOT the
+-- `datetime('now')` idiom `cleanup_old_tasks` uses: ' ' (0x20) sorts below 'T'
+-- (0x54), so mixing the two silently drops boundary-day rows instead of raising.
+CREATE TABLE IF NOT EXISTS task_usage (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id                INTEGER,          -- NULL for non-task calls; may dangle
+    attempt_seq            INTEGER NOT NULL DEFAULT 1,
+    origin                 TEXT NOT NULL DEFAULT 'task',
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    user_id                TEXT NOT NULL,
+    source_type            TEXT NOT NULL DEFAULT '',  -- '' for non-task rows
+    brain_kind             TEXT NOT NULL,
+    is_fallback            INTEGER NOT NULL DEFAULT 0,
+    model                  TEXT NOT NULL DEFAULT '',  -- largest cost share
+    effort                 TEXT NOT NULL DEFAULT '',
+    stop_reason            TEXT NOT NULL DEFAULT '',
+    success                INTEGER NOT NULL DEFAULT 0,
+
+    -- Token totals. Valid only when has_totals = 1; a run killed before the
+    -- result frame has real context columns and meaningless zeroes here, so
+    -- EVERY token aggregate must filter on has_totals.
+    has_totals             INTEGER NOT NULL DEFAULT 0,
+    totals_source          TEXT NOT NULL DEFAULT 'unknown',  -- model_usage|derived
+    billed_input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens          INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens     INTEGER NOT NULL DEFAULT 0,
+
+    cost_usd               REAL NOT NULL DEFAULT 0.0,
+    cost_basis             TEXT NOT NULL DEFAULT 'unknown',  -- api|subscription|estimated|unknown
+
+    turns                  INTEGER NOT NULL DEFAULT 0,
+    model_requests         INTEGER NOT NULL DEFAULT 0,
+    subagent_requests      INTEGER NOT NULL DEFAULT 0,
+    compacted_requests     INTEGER NOT NULL DEFAULT 0,
+
+    -- NULL, never 0, when unmeasured (native brain, non-streaming run, or a run
+    -- with no message_delta). SQL AVG skips NULL, which is exactly what the
+    -- context averages need — a zero would halve a mixed-brain mean.
+    initial_context_tokens INTEGER,
+    peak_context_tokens    INTEGER,
+    context_window         INTEGER,
+
+    duration_ms            INTEGER NOT NULL DEFAULT 0,
+    duration_api_ms        INTEGER NOT NULL DEFAULT 0,
+    service_tier           TEXT NOT NULL DEFAULT '',
+    session_id             TEXT NOT NULL DEFAULT '',
+
+    rate_limit_type        TEXT,
+    rate_limit_status      TEXT,
+    rate_limit_resets_at   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_usage_created ON task_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_task_usage_user    ON task_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_usage_task    ON task_usage(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_usage_origin  ON task_usage(origin, created_at);
+-- Partial: non-task rows all carry task_id NULL and must not collide.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_usage_attempt
+    ON task_usage(task_id, attempt_seq) WHERE task_id IS NOT NULL;
+
+-- Per-model split. The FK is documentation only: istota never sets
+-- PRAGMA foreign_keys=ON, so `prune_old_usage` deletes children explicitly,
+-- parents second, on one connection.
+CREATE TABLE IF NOT EXISTS task_usage_models (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_usage_id       INTEGER NOT NULL REFERENCES task_usage(id) ON DELETE CASCADE,
+    model               TEXT NOT NULL,
+    billed_input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens       INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens   INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens  INTEGER NOT NULL DEFAULT 0,
+    cost_usd            REAL    NOT NULL DEFAULT 0.0,
+    context_window      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_usage_models_parent ON task_usage_models(task_usage_id);
+CREATE INDEX IF NOT EXISTS idx_task_usage_models_model  ON task_usage_models(model);
