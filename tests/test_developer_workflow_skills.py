@@ -7,7 +7,9 @@ whatever the shipped files happen to say.
 """
 
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -149,22 +151,35 @@ class TestCliFlagMatchesReality:
         assert repos.sensitive is False, "a directory path is not a credential"
 
 
-def _fenced_lines(body: str):
-    """Lines inside ``` blocks — the ones a model will copy and run.
+def _fenced_blocks(body: str):
+    """Each ``` block, as its own string. The one fence parser in this file.
 
     Toggling on `line.startswith` misses an indented fence, which is the normal
     way to put a recipe inside a list item; `developer` has two, in the Error
     Handling bullets. Miss those and every following line is classified
     inversely, so a guard that only inspects runnable lines silently starts
     inspecting prose instead.
+
+    The toggle assumes fences nest nowhere and come in pairs — true of this
+    document, and it would break on a heredoc that printed three backticks.
+    Kept in one place so that assumption has one home rather than three.
     """
-    in_fence = False
+    current, in_fence = [], False
     for line in body.splitlines():
         if line.lstrip().startswith("```"):
+            if in_fence:
+                yield "\n".join(current)
+                current = []
             in_fence = not in_fence
             continue
         if in_fence:
-            yield line
+            current.append(line)
+
+
+def _fenced_lines(body: str):
+    """Lines inside ``` blocks — the ones a model will copy and run."""
+    for block in _fenced_blocks(body):
+        yield from block.splitlines()
 
 
 class TestBodiesDoNotContradict:
@@ -488,3 +503,258 @@ class TestBareCloneRecipe:
         out = _run_fragment(fragment + '\necho "$DEFAULT_BRANCH"', bare_clone)
 
         assert out.strip() == "master", f"origin/HEAD ignored, got {out.strip()!r}"
+
+
+def _fenced_block(body: str, marker: str) -> str:
+    """The whole ``` block containing `marker`.
+
+    `_extract` takes a start line and a stop line, which needs a stop token
+    appearing nowhere earlier in the block. The GitLab recipe has none worth
+    relying on — `fi` is a substring of `confirm`, `exit 1` occurs twice — so
+    the fence is the safer unit to lift.
+    """
+    hits = [b for b in _fenced_blocks(body) if marker in b]
+    assert len(hits) == 1, (
+        f"expected exactly one fenced block containing {marker!r}, got {len(hits)}"
+    )
+    return hits[0]
+
+
+def _stanza_through(block: str, marker: str, closer: str) -> str:
+    """From the line containing `marker` through the first line that is exactly
+    `closer`. The guards in this document end in one of two ways: a `fi` closing
+    an `if`, or a `}` closing a `|| { … }` block."""
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if marker in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == closer)
+    return "\n".join(lines[start:end + 1])
+
+
+def _stanza_through_fi(block: str, marker: str) -> str:
+    """From the line containing `marker` through the `fi` closing its guard.
+
+    Equality on the stripped line rather than a substring test: `confirm`
+    contains `fi`, and matching that would lift a fragment stopping two lines
+    before the guard it is meant to exercise — passing while proving nothing.
+    """
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if marker in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
+    return "\n".join(lines[start:end + 1])
+
+
+_NAMESPACE_CHECK_MARKER = "RESOLVED=$(glab repo view"
+
+
+@pytest.fixture
+def glab_153(tmp_path) -> Path:
+    """A `glab` shaped like the 1.53 in the Debian archive: `-F json`, no `--jq`.
+
+    The Docker image pins glab 1.114, which does have `--jq`; the Ansible path
+    installs whatever trixie ships, which does not. A recipe in the body has to
+    run on both, so the stub is the older one — and it rejects `--jq` the way
+    the real binary does, so reverting a recipe to the `gh` idiom fails here
+    and not only in the text guard.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "glab"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "json=\n"
+        'for arg in "$@"; do\n'
+        "    case \"$arg\" in\n"
+        "        --jq|--jq=*|-q)\n"
+        '            echo "unknown flag: $arg" >&2\n'
+        "            exit 1 ;;\n"
+        "        json) json=1 ;;\n"
+        "    esac\n"
+        "done\n"
+        # Real glab defaults to `-F text`, so a recipe that stopped asking for
+        # JSON would get prose and the parse would die. Refuse it here too,
+        # rather than handing back well-formed JSON the real binary never sent.
+        'if [ -z "$json" ]; then\n'
+        '    echo "glab stub: expected -F json" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'if [ -n "${GLAB_STUB_FAIL:-}" ]; then\n'
+        '    echo "glab: could not reach the instance" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'printf "%s" "${GLAB_STUB_JSON:-}"\n'
+    )
+    stub.chmod(0o755)
+    # The recipes shell out to `python3`; pin it to the interpreter running the
+    # suite rather than depending on what the host happens to have on PATH.
+    (bin_dir / "python3").symlink_to(sys.executable)
+    return bin_dir
+
+
+def _run_recipe(fragment: str, bin_dir: Path, **env) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-c", fragment],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", **env},
+    )
+
+
+def _namespace_check(body: str) -> str:
+    return _stanza_through_fi(
+        _fenced_block(body, _NAMESPACE_CHECK_MARKER), _NAMESPACE_CHECK_MARKER
+    )
+
+
+class TestGlabFieldReads:
+    """ISSUE-268. `glab` grew `--jq` well after the version the Ansible path
+    installs, so every glab field read written in the `gh` idiom exits `unknown
+    flag` — including the namespace check whose whole job is to stop a push
+    reaching the wrong project."""
+
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def test_no_runnable_glab_line_uses_a_gh_only_filter_flag(self):
+        """The seven originals. `gh` keeps `--jq`/`-q`; glab must not borrow it.
+
+        Comments are skipped deliberately: the fix puts the reason *why* glab
+        has no `--jq` in a comment beside the recipe, and a guard that could not
+        tell an explanation from an invocation would forbid saying so.
+        """
+        # Join backslash continuations first. The document writes multi-line glab
+        # invocations that way (`glab mr create`), so a flag parked on a
+        # continuation line sits on a line with no `glab` in it and would slip
+        # past a per-line scan — the exact regression this guard exists to catch.
+        for block in _fenced_blocks(self._body()):
+            for line in re.sub(r"\\\n\s*", " ", block).splitlines():
+                if "glab" not in line or line.lstrip().startswith("#"):
+                    continue
+                assert "--jq" not in line, (
+                    f"developer filters glab output with gh's flag: {line.strip()!r}"
+                )
+                # `-q` is the short form and fails the same way. Match it as a
+                # whole argument, not a substring, so `--quiet` and a `-q` inside
+                # a quoted expression are not mistaken for it.
+                assert "-q" not in line.split(), (
+                    f"developer filters glab output with gh's short flag: "
+                    f"{line.strip()!r}"
+                )
+
+    def test_prose_does_not_promise_glab_a_jq_flag(self):
+        """The generalization the six lesser recipes were written from. Left
+        standing it regenerates them the next time someone adds a field read."""
+        assert "`--json`/`-F json` plus `--jq`/`-q`" not in self._body(), (
+            "the claim that produced all seven broken recipes is back in the body"
+        )
+
+    def test_namespace_check_reads_the_project_without_jq(self, glab_153):
+        """The check has to actually resolve a namespace on the old glab.
+        `unknown flag` assigned an empty string, which is how a guard that never
+        ran still looked like it was running."""
+        proc = _run_recipe(
+            "set -o pipefail\n"
+            + _namespace_check(self._body()).replace("namespace/project", "acme/widget")
+            + '\necho "RESOLVED=$RESOLVED"',
+            glab_153,
+            GLAB_STUB_JSON='{"path_with_namespace": "acme/widget"}',
+        )
+
+        assert proc.returncode == 0, f"aborted on a matching project:\n{proc.stderr}"
+        assert "RESOLVED=acme/widget" in proc.stdout
+
+    def test_namespace_check_aborts_on_the_wrong_project(self, glab_153):
+        """The case the check exists for."""
+        proc = _run_recipe(
+            "set -o pipefail\n"
+            + _namespace_check(self._body()).replace("namespace/project", "acme/widget"),
+            glab_153,
+            GLAB_STUB_JSON='{"path_with_namespace": "someone-else/widget"}',
+        )
+
+        assert proc.returncode != 0, "a push to the wrong project was not stopped"
+        assert "someone-else/widget" in proc.stdout + proc.stderr
+
+    def test_namespace_check_fails_closed_when_glab_fails(self, glab_153):
+        """The property the entry asked for by name. A tool error must not
+        become a value: the old shape turned `unknown flag` into an empty string
+        and then compared it, so the abort was an accident of the comparison
+        rather than a decision — and a recipe whose expected value was itself
+        empty would have sailed through."""
+        proc = _run_recipe(
+            "set -o pipefail\n"
+            + _namespace_check(self._body()).replace("namespace/project", ""),
+            glab_153,
+            GLAB_STUB_FAIL="1",
+        )
+
+        assert proc.returncode != 0, (
+            "glab failed and the check passed — the empty result compared equal"
+        )
+
+    def test_every_piping_recipe_sets_pipefail_before_it_pipes(self):
+        """Reading a glab field means a pipeline, and a pipeline's exit status is
+        the last command's — so a glab that exits non-zero *after* printing is
+        masked by a python3 that parsed what it printed.
+
+        Every fence that pipes, not just the namespace check: each fence is a
+        separate Bash tool call and shell options do not survive between them, so
+        `set -o pipefail` in one buys the others nothing.
+        """
+        piping = [
+            block
+            for block in _fenced_blocks(self._body())
+            if any("| python3" in line for line in block.splitlines())
+        ]
+        assert piping, "no piped recipe found — the guard is inspecting nothing"
+
+        for block in piping:
+            lines = block.splitlines()
+            pipefail = next(
+                (i for i, line in enumerate(lines) if "set -o pipefail" in line), None
+            )
+            first_pipe = next(i for i, line in enumerate(lines) if "| python3" in line)
+            assert pipefail is not None, (
+                f"a recipe pipes without setting pipefail: {lines[first_pipe].strip()!r}"
+            )
+            assert pipefail < first_pipe, (
+                f"pipefail is set after the pipeline it governs: "
+                f"{lines[first_pipe].strip()!r}"
+            )
+
+    @pytest.mark.parametrize(
+        "marker", ["MR_IID=$(glab mr view", "PIPELINE_ID=$(glab ci list"]
+    )
+    def test_captures_feeding_a_later_command_abort_on_failure(self, marker, glab_153):
+        """`MR_IID` and `PIPELINE_ID` are read here and consumed later. An empty
+        one is not inert: `glab mr view ""` and `glab mr merge "" --yes` fall back
+        to the current branch's merge request, so a swallowed read acts on
+        something nobody named — the namespace check's original defect again.
+
+        Run rather than pattern-matched: asserting the line ends in `|| {` would
+        equally accept `|| { echo "oops"; }`, a guard that announces the failure
+        and then carries on.
+        """
+        stanza = _stanza_through(
+            _fenced_block(self._body(), marker), marker, "}"
+        )
+        proc = _run_recipe("set -o pipefail\n" + stanza, glab_153, GLAB_STUB_FAIL="1")
+
+        assert proc.returncode != 0, (
+            f"glab failed and the capture carried on: {stanza!r}"
+        )
+
+    def test_merge_fence_rechecks_the_id_it_did_not_set(self, glab_153):
+        """The capture and the merge live in different fences, and a fence is its
+        own `bash -c`. A guard in the capturing shell therefore protects nothing
+        at the point of use, so the merging fence has to re-check for itself."""
+        block = _fenced_block(self._body(), 'glab mr merge "$MR_IID"')
+        guard = next(
+            (line for line in block.splitlines() if "MR_IID" in line and "-n " in line),
+            None,
+        )
+        assert guard is not None, "the merging fence never checks that MR_IID is set"
+
+        proc = _run_recipe(guard, glab_153)
+        assert proc.returncode != 0, (
+            "an unset MR_IID did not stop the fence that merges on it"
+        )
