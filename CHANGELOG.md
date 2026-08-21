@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A code review now reports the budget each reviewer was given, and quotes it when the review ran short. A budget that will not fit under the proxy's own ceiling is cut down to one that does, and nothing said so — the warning went to the server log, so a review with a third of its intended time looked exactly like one that had all of it. The cut itself was wrong in two ways worth knowing if you set these by hand: a budget already under the ceiling could be revised upwards, and a zero or negative one reached the model unchanged, which on one of the two brains means no time limit at all.
+
+- The documented way to run a code review named a branch that does not exist in the repositories the bot works in, so copying the example produced a range error and blocked the merge request it was meant to precede. The example now omits the branch and uses the default, which was already right.
+
 - The docker image now ships the `gh` and `glab` the developer skill needs. Its git half worked — clone, branch, commit, push — but every command that would publish the work failed with "cannot run /usr/local/bin/gh", because neither binary was in the image; anyone who had set a repository directory and a forge token hit it, and a stock install with neither set was unaffected. Upgrading an existing container is enough to fix it, with no config change needed.
 
 - The GitLab reviewer setting takes a username, and every place it was documented asked for a numeric user ID — including the example value, which was a number. The setting is handed to `glab mr create --reviewer`, which wants a username, so an operator who followed the example got merge requests with no reviewer on them and a note about the misconfiguration on each one. The setting itself is unchanged; check yours if it holds a number.

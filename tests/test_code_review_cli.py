@@ -856,6 +856,9 @@ class TestCallCap:
 # --------------------------------------------------------------------------
 
 
+MIN = code_review.MIN_AGENT_TIMEOUT_SECONDS
+
+
 class TestTimeoutBudget:
     def test_each_agent_gets_the_configured_timeout(
         self, capsys, worktree, review_env, developer_config, stub_brain
@@ -900,6 +903,137 @@ class TestTimeoutBudget:
             )
         assert envelope["reason"] == "call_cap"
         assert any("skill_proxy_timeout" in r.message for r in caplog.records)
+
+    def test_the_envelope_reports_the_budget_each_agent_actually_got(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A caller reporting a review has to be able to say what it ran on.
+        Unclamped, the effective budget is the configured one and `clamped` is
+        false — the field is present on every run, not only on the short ones,
+        because a reader who has to infer "not clamped" from a missing key is
+        back to guessing."""
+        developer_config(timeout_seconds=45)
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == 45
+        assert envelope["agent_timeout_configured"] == 45
+        assert envelope["agent_timeout_clamped"] is False
+
+    def test_a_clamped_budget_says_so_in_the_envelope(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The clamp warns into the daemon journal, which the model that invoked
+        the CLI cannot read. Without this the only difference between a review
+        that had its whole budget and one cut to a third of it is in a log the
+        caller has no route to — same shape, same `status: ok`, quietly less
+        thinking behind the findings."""
+        cfg = developer_config(timeout_seconds=400)
+        cfg.security.skill_proxy_timeout = 300
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        effective = 300 - code_review.ASSEMBLY_ALLOWANCE_SECONDS
+        assert envelope["agent_timeout_seconds"] == effective
+        assert envelope["agent_timeout_configured"] == 400
+        assert envelope["agent_timeout_clamped"] is True
+        assert stub_brain.timeouts == [effective]
+
+    def test_an_empty_range_still_carries_the_budget_fields(
+        self, capsys, empty_worktree, review_env, developer_config, stub_brain
+    ):
+        """`run_review` promises every return path the same key set, and the
+        empty-range path returns before any reviewer is sized. A consumer that
+        reads the budget without first branching on `empty` must not hit a
+        KeyError."""
+        developer_config(timeout_seconds=45)
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(empty_worktree), "--base", "main",
+        )
+        assert envelope["empty"] is True
+        assert envelope["agent_timeout_seconds"] == 45
+        assert envelope["agent_timeout_clamped"] is False
+
+    def test_a_clamp_that_changes_nothing_does_not_claim_a_short_review(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A budget already at the floor trips the ceiling arithmetic without
+        losing a second. `clamped` answers "did this review run short", not "was
+        the branch taken", so it stays false."""
+        cfg = developer_config(timeout_seconds=MIN)
+        cfg.security.skill_proxy_timeout = MIN + 50
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == MIN
+        assert envelope["agent_timeout_configured"] == MIN
+        assert envelope["agent_timeout_clamped"] is False
+        assert stub_brain.timeouts == [MIN]
+
+    def test_the_clamp_never_raises_a_budget_that_already_fit(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`max(floor, ceiling - allowance)` on its own turned a configured 25s
+        into 30s — a "clamp" that made the fit worse, under a ceiling the
+        original 25s already fit. The floor may still raise the budget, but the
+        ceiling arithmetic must only ever lower it, and a budget that came out
+        above the configured one is not a short review."""
+        cfg = developer_config(timeout_seconds=MIN - 5)
+        cfg.security.skill_proxy_timeout = MIN + 50
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == MIN - 5
+        assert envelope["agent_timeout_configured"] == MIN - 5
+        assert envelope["agent_timeout_clamped"] is False
+        assert stub_brain.timeouts == [MIN - 5]
+
+    def test_a_nonpositive_budget_is_floored_rather_than_passed_to_the_brain(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """Nothing in the config loader floors `timeout_seconds`, and the brains
+        disagree about what a 0 means: the native one runs unbounded until the
+        proxy kills the command, `claude_code` hands it to a `threading.Timer`
+        and kills each agent at once. Neither is a review, and before this the
+        envelope reported the deployment had got exactly what it asked for."""
+        developer_config(timeout_seconds=0)
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert stub_brain.timeouts == [MIN]
+        assert envelope["agent_timeout_seconds"] == MIN
+        assert envelope["agent_timeout_configured"] == 0
+        assert envelope["agent_timeout_clamped"] is False
+
+    def test_a_ceiling_too_tight_for_the_floor_says_so_on_its_own_line(
+        self, capsys, caplog, worktree, review_env, developer_config, stub_brain
+    ):
+        """The clamp cannot deliver a fit under a ceiling smaller than the
+        assembly allowance plus the floor, so the proxy kills the command with
+        empty stdout and the caller gets no envelope at all. The log is the only
+        place that deployment can say what happened, so it gets its own line
+        rather than the ordinary "being given less" warning."""
+        cfg = developer_config(timeout_seconds=120)
+        cfg.security.skill_proxy_timeout = code_review.ASSEMBLY_ALLOWANCE_SECONDS
+        with caplog.at_level("WARNING"):
+            drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert any("cannot fit a review at all" in r.message for r in caplog.records)
+        assert stub_brain.timeouts == [MIN]
+
+    def test_a_nonpositive_proxy_ceiling_does_not_blame_a_clamp(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A negative ceiling is truthy. Read as a real ceiling it pinned every
+        review to the floor and reported a clamp whose stated cause never
+        happened; the proxy surfaces the misconfiguration itself by killing the
+        command immediately."""
+        cfg = developer_config(timeout_seconds=45)
+        cfg.security.skill_proxy_timeout = -1
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == 45
+        assert envelope["agent_timeout_clamped"] is False
 
 
 # --------------------------------------------------------------------------
