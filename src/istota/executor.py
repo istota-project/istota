@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from . import db
 from . import email_support
+from . import task_cgroup
 from .config import Config
 from .context import (
     build_talk_context,
@@ -4332,7 +4333,28 @@ def execute_task(
                     _flush_deltas()  # turn/CM boundary
                 event_writer.emit("context_management")
 
+        # Per-task cgroup (A6). Created before the brain is asked for anything,
+        # because the pid it hands back has already been spawned and every
+        # microsecond between spawn and placement is time the tree runs
+        # unbounded. `None` on any deployment without `Delegate=` — the module
+        # logs why once and everything below carries on as it did before.
+        _task_cg = None
+        if config.scheduler.task_cgroup_enabled:
+            _task_cg = task_cgroup.create(
+                task.id,
+                task_cgroup.CgroupLimits(
+                    memory_max_mb=config.scheduler.task_memory_max_mb,
+                    pids_max=config.scheduler.task_pids_max,
+                    cpu_max_percent=config.scheduler.task_cpu_max_percent,
+                ),
+            )
+
         def _on_pid(pid: int) -> None:
+            # Placement first, DB second. `update_task_pid` can block on the
+            # SQLite write lock, and the whole value of the cgroup is in the
+            # window before the child's own work starts.
+            if _task_cg is not None:
+                task_cgroup.place(pid, _task_cg)
             try:
                 with db.get_db(config.db_path) as pid_conn:
                     db.update_task_pid(pid_conn, task.id, pid)
@@ -4447,6 +4469,10 @@ def execute_task(
             # anyway, so this is defense-in-depth.
             poll_steers=_poll_steers if getattr(brain, "supports_steering", False) else None,
             on_pid=_on_pid,
+            # NativeBrain has no single subprocess and so never calls `on_pid`
+            # — its Bash tool spawns one child per execution. It places each of
+            # those itself, from this path. Other brains ignore the field.
+            task_cgroup=_task_cg,
             sandbox_wrap=_sandbox_wrap,
             # Filesystem confinement for NativeBrain's in-process file tools
             # (NB-1). Populated only when effective sandboxing is on; other
@@ -4500,6 +4526,12 @@ def execute_task(
                     stack.enter_context(_proxy_ctx)
                 if _net_proxy_ctx is not None:
                     stack.enter_context(_net_proxy_ctx)
+                # Every exit path — success, failure, timeout, cancellation,
+                # a fallback brain replacing the primary — gives the directory
+                # back. `destroy` is a no-op on a cgroup that still holds
+                # processes, and the startup sweep collects those.
+                if _task_cg is not None:
+                    stack.callback(task_cgroup.destroy, _task_cg)
 
                 if _skip_primary:
                     # Cooling down — go straight to the fallback, no primary call.

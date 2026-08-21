@@ -69,6 +69,17 @@ class BrainRequest:
     # Called once with the subprocess PID after spawn (for !stop support).
     on_pid: Callable[[int], None] | None = None
 
+    # Per-task cgroup v2 directory (A6), already created with its limits
+    # written, or None where the deployment has no delegated subtree.
+    #
+    # Only NativeBrain reads this. The brains that spawn one long-lived child
+    # are placed by the executor's `on_pid` callback, which is the pid that
+    # matters for them; NativeBrain spawns a fresh child per Bash execution and
+    # never calls `on_pid` at all, so without this field the brain that runs a
+    # task's `pytest` in the daemon's own cgroup would be the one brain the
+    # containment silently skipped.
+    task_cgroup: Path | None = None
+
     # Wraps a command list (e.g. for bubblewrap sandboxing). The brain
     # builds its raw command, then calls sandbox_wrap(cmd) before exec
     # if provided. Returning the cmd unchanged is the no-op default.

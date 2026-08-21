@@ -352,6 +352,15 @@ istota_scheduler_user_max_background_workers: 1    # Global per-user bg worker d
 istota_scheduler_long_task_threshold_minutes: 10   # A running fg task older than this stops counting as interactive
 istota_scheduler_user_max_long_workers: 1          # Per-user discount allowance (additive)
 istota_scheduler_max_long_workers: 2               # Instance-wide discount budget (inside max_foreground_workers)
+# Per-task cgroups (A6). Each task's process tree gets its own cgroup v2 group
+# under the scheduler unit, so a tree that overruns is OOM-killed inside it
+# rather than taking the host with it. Depends on Delegate= + DelegateSubgroup=
+# on the unit; where those are absent the daemon logs the reason once at
+# startup and every task runs exactly as it did before.
+istota_scheduler_task_cgroup_enabled: true         # Place each task's tree in its own cgroup
+istota_scheduler_task_memory_max_mb: 2048          # memory.max per task (0 = unbounded)
+istota_scheduler_task_pids_max: 512                # pids.max per task — bounds a fork storm
+istota_scheduler_task_cpu_max_percent: 200         # cpu.max as % of one core (200 = two cores; 0 = unset)
 istota_scheduler_scheduled_job_max_consecutive_failures: 5  # Auto-disable after N failures (0=never)
 istota_scheduler_cron_max_staleness_minutes: 60             # Skip cron-driven catch-up fires older than this (jobs + briefings); 0 = legacy unconditional catch-up
 istota_scheduler_max_subtasks_per_task: 10                  # Cap deferred subtasks created per task

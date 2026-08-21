@@ -18,6 +18,7 @@ from pathlib import Path
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
+from istota import task_cgroup
 from istota.process_group import kill_process_group
 
 from .env import ToolEnv
@@ -78,6 +79,15 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
             )
         except (OSError, ValueError) as exc:
             return ToolResult(content=[TextContent(text=f"Failed to start command: {exc}")])
+
+        # Per-task cgroup (A6). Placed from here rather than from a preexec_fn:
+        # this process is heavily threaded, and a preexec_fn runs between fork
+        # and exec where opening a file is not async-signal-safe. The cost is a
+        # short window in which the child is outside the cgroup — negligible
+        # against a `bash -c` that has yet to exec its real work, and the
+        # alternative trades a bounded race for an unbounded one.
+        if env.task_cgroup is not None:
+            task_cgroup.place(proc.pid, env.task_cgroup)
 
         out = bytearray()
         total_bytes = 0

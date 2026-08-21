@@ -1356,6 +1356,7 @@ class NativeBrain:
             web_fetch_url_corpus=corpus,
             deferred_dir=Path(deferred) if deferred else None,
             bash_spill_full_output=getattr(self._config, "bash_spill_full_output", True),
+            task_cgroup=req.task_cgroup,
         )
         allowed = set(req.allowed_tools)
         return [t for t in build_default_tools(env) if t.schema.name in allowed]
