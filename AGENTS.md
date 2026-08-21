@@ -63,6 +63,7 @@ src/istota/
 ├── user_briefings.py     # Per-user briefings store (Phase 7b)
 ├── notifications.py      # Talk / Email / ntfy dispatcher
 ├── ntfy_headers.py       # RFC 2047 encoding for ntfy header values (stdlib-only leaf, shared by transport/ntfy + skills/ntfy so the skill subprocess needn't import the transport package)
+├── git_remote_scrub.py   # Strips credentials out of the git configs under `developer.repos_dir` (ISSUE-270), run from the developer skill's `setup_env` before `repos_dir` is bound into the sandbox. `git config` is the parser, never the file: `--includes` + `--show-origin` so a value pulled in from another file is found and corrected where it lives, `-z` so a value containing a newline cannot forge an entry, `--fixed-value` so a multivar `remote.*.url` keeps its clean siblings. Covers the key as well as the value (`url.<base>.insteadOf` hides the secret in the key while `remote -v` looks clean), per-worktree `config.worktree`, and `http.*.extraheader`. Detects a userinfo password or a known forge-token prefix — not a bare `@`, so `git@host:path` is left alone. Never raises (a setup-path guard), never logs the value, and reports a credential it could not remove rather than returning silence. stdlib-only leaf
 ├── skill_proxy.py        # Unix-socket proxy for credential isolation
 ├── skill_host_paths.py   # Host-path allowlist shared by the skill CLIs that take one (devbox `cp-in`/`cp-out`, `kv set --value-file`). A skill CLI runs host-side, so a path argument is an arbitrary read/write unless scoped; the roots mirror what the sandbox binds for that caller. stdlib-only leaf, importable from a skill subprocess
 ├── process_group.py      # `kill_process_group(pid, sig)` — signal a subprocess and every descendant sharing its group, falling back to the single process when the pid leads no group of its own (a non-leader shares the daemon's group, so signalling it would kill the scheduler; both of today's `worker_pid` writers record leaders, so the fallback guards a future caller rather than either brain). Used by both kill paths in ClaudeCodeBrain's streaming spawn, by `!stop` and the web cancel endpoint, and by the scheduler / native-bash timeout kills. Never raises — the brain's timeout calls it from a `threading.Timer` callback, where an exception would report a timeout while leaving the process alive. stdlib-only leaf
@@ -88,7 +89,7 @@ src/istota/
 └── logging_setup.py
 ```
 
-Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/, skills/ — read by the daemon, never bound into the sandbox), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `schema.sql`.
+Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `schema.sql`.
 
 ## Key Concepts
 

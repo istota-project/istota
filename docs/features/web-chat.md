@@ -53,7 +53,7 @@ Deletion is not private to you: rooms are shared, so a message you delete is gon
 
 ## Confirmations and attachments
 
-- **Confirmations** — an action that needs approval parks correctly and renders a Confirm/Cancel card; staged side effects wait until you confirm.
+- **Confirmations** — an action that needs approval parks correctly and renders a Confirm/Cancel card; staged side effects wait until you confirm. Approving keeps the record of what the task had already done before it stopped to ask — the tools it ran, the steps it took — and the resumed run appends to it. That first pass used to be erased on approval, so a finished task showed only what happened after you said yes; approving the same task from a Talk room never did this.
 - **Attachments** — drag, paste, or use the `+` button. In a browser that opens the file picker; in the iOS app it opens a menu offering your photo library, the camera, or a file. A message can only reference files you uploaded.
 - **Voice messages** — the microphone button in the composer records, shows the elapsed time, and lets you discard or keep the take. The recording is attached like any other file and transcribed on arrival. It needs a secure connection to reach the microphone at all, so the button is simply absent over plain http, and transcription needs the optional speech extra.
 - **Sending only a file** — a message with attachments and no text is accepted; the transcript shows what was sent in place of the missing text.

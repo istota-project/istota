@@ -643,23 +643,115 @@ class TestReviewRun:
         with db.get_db(review_db) as conn:
             assert db.code_review_calls_get(conn, review_env) == 1
 
-    def test_malformed_twice_is_an_error_carrying_the_raw_output(
+    def test_malformed_twice_is_skipped_not_errored_and_carries_the_raw_output(
         self, capsys, worktree, review_env, developer_config, stub_brain
     ):
+        """A bad *response* is not a bad request. Nothing about the diff, the
+        range or the paths caused it, and no change to any of them fixes it —
+        so blocking the push on it strands finished work for a reason the
+        branch cannot answer for. A broken adapter did exactly that on
+        2026-08-21: every review on the deployment came back malformed."""
         developer_config()
         stub_brain.replies["conformance"] = ["not json", "still not json"]
         code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
-        assert code == 1
-        assert envelope["status"] == "error"
+        assert code == 0
+        assert envelope["status"] == "skipped"
         assert envelope["reason"] == "malformed_output"
         assert "not json" in envelope["error"]
+
+    def test_every_reviewer_failing_its_call_is_skipped_not_errored(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The other half of the same block. A reviewer whose call never
+        returned is the degraded brain `skipped` already exists for; it reached
+        the caller as `error` only because it shared a return with the
+        malformed path."""
+        developer_config()
+        for agent in ("conformance", "bughunt"):
+            # One reply each: `_run_agent` returns on `not reply.ok` without
+            # retrying, so a second would be dead setup claiming a retry exists.
+            stub_brain.replies[agent] = [
+                StubResult(success=False, stop_reason="api_error")
+            ]
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+        assert code == 0
+        assert envelope["status"] == "skipped"
+        assert envelope["reason"] == "review_failed"
+        assert "api_error" in envelope["error"]
+        # Both really ran. Conformance failing alone reaches the same reason, so
+        # without this the `--agents both` argument carries no weight.
+        assert sorted(stub_brain.calls) == ["bughunt", "conformance"]
+
+    def test_a_request_fault_inside_a_reviewer_still_blocks_the_push(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """`_one`'s catch-all sits between a containment refusal and a push. It
+        was safe by accident while every all-failed round was `error`; once that
+        became `skipped` a `ReviewError` caught there would have told the
+        workflow to land a branch whose worktree reaches outside the allowed
+        roots. Nothing raises there today — this pins the classification so a
+        future unwrapped raiser fails closed."""
+        from istota.skills.code_review import engine
+
+        developer_config()
+        monkeypatch.setattr(
+            engine, "_run_agent",
+            lambda *a, **k: (_ for _ in ()).throw(
+                engine.ReviewError(
+                    "repo reaches outside DEVELOPER_REPOS_DIR",
+                    reason="git_dir_not_allowed",
+                )
+            ),
+        )
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert code == 1
+        assert envelope["status"] == "error"
+        # The ReviewError's own slug, not a category: the workflow branches on it.
+        assert envelope["reason"] == "git_dir_not_allowed"
+        assert "reaches outside" in envelope["error"]
+
+    def test_a_skip_that_spent_model_calls_says_so(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`rounds` is what separates a skip that burned invocations from one
+        that refused before spending any. Both are `status: skipped` with an
+        empty `findings`, and a caller deciding whether re-running is free
+        cannot tell them apart otherwise."""
+        developer_config()
+        stub_brain.replies["conformance"] = ["not json", "still not json"]
+        _, spent = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert spent["status"] == "skipped"
+        assert spent["rounds"] == 1
+
+        developer_config(enabled=False)
+        _, refused = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert refused["status"] == "skipped"
+        assert refused["reason"] == "review_disabled"
+        assert refused.get("rounds", 0) == 0
+
+    def test_an_all_failed_review_carries_its_own_notice(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The ordinary notice opens by talking about findings, and there are
+        none here. What this envelope carries is raw reviewer output in `error`,
+        on a status whose instruction is to land the work and name the reason —
+        so the untrusted-input warning has to cover that field, not findings."""
+        developer_config()
+        stub_brain.replies["conformance"] = ["not json", "still not json"]
+        _, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert envelope["findings"] == []
+        assert "error` field quotes raw reviewer output" in envelope["notice"]
 
     def test_a_round_that_spent_calls_and_failed_still_charges_the_budget(
         self, capsys, worktree, review_env, developer_config, stub_brain, review_db
     ):
         """Otherwise a reviewer that reliably answers in prose loops forever:
-        error, exit 1, the workflow retries, and the cap that is supposed to
-        stop the spend never moves because no round ever "succeeded"."""
+        the round returns nothing usable, the workflow re-runs, and the cap that
+        is supposed to stop the spend never moves because no round ever
+        "succeeded". The charge is what bounds it, not the exit code."""
         developer_config()
         stub_brain.replies["conformance"] = ["not json", "still not json"]
         drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
@@ -718,8 +810,9 @@ class TestReviewRun:
         self, capsys, worktree, review_env, developer_config, stub_brain
     ):
         """A consumer must be able to read `findings` or `counts` without first
-        branching on `status`, and the error path — the only one that embeds raw
-        model text — must carry the untrusted-input notice like the rest."""
+        branching on `status`, and the all-reviewers-failed path — the only one
+        that embeds raw model text — must carry the untrusted-input notice like
+        the rest."""
         developer_config()
         _, ok = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
         stub_brain.replies["conformance"] = ["not json", "still not json"]
@@ -856,6 +949,9 @@ class TestCallCap:
 # --------------------------------------------------------------------------
 
 
+MIN = code_review.MIN_AGENT_TIMEOUT_SECONDS
+
+
 class TestTimeoutBudget:
     def test_each_agent_gets_the_configured_timeout(
         self, capsys, worktree, review_env, developer_config, stub_brain
@@ -900,6 +996,137 @@ class TestTimeoutBudget:
             )
         assert envelope["reason"] == "call_cap"
         assert any("skill_proxy_timeout" in r.message for r in caplog.records)
+
+    def test_the_envelope_reports_the_budget_each_agent_actually_got(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A caller reporting a review has to be able to say what it ran on.
+        Unclamped, the effective budget is the configured one and `clamped` is
+        false — the field is present on every run, not only on the short ones,
+        because a reader who has to infer "not clamped" from a missing key is
+        back to guessing."""
+        developer_config(timeout_seconds=45)
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == 45
+        assert envelope["agent_timeout_configured"] == 45
+        assert envelope["agent_timeout_clamped"] is False
+
+    def test_a_clamped_budget_says_so_in_the_envelope(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """The clamp warns into the daemon journal, which the model that invoked
+        the CLI cannot read. Without this the only difference between a review
+        that had its whole budget and one cut to a third of it is in a log the
+        caller has no route to — same shape, same `status: ok`, quietly less
+        thinking behind the findings."""
+        cfg = developer_config(timeout_seconds=400)
+        cfg.security.skill_proxy_timeout = 300
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        effective = 300 - code_review.ASSEMBLY_ALLOWANCE_SECONDS
+        assert envelope["agent_timeout_seconds"] == effective
+        assert envelope["agent_timeout_configured"] == 400
+        assert envelope["agent_timeout_clamped"] is True
+        assert stub_brain.timeouts == [effective]
+
+    def test_an_empty_range_still_carries_the_budget_fields(
+        self, capsys, empty_worktree, review_env, developer_config, stub_brain
+    ):
+        """`run_review` promises every return path the same key set, and the
+        empty-range path returns before any reviewer is sized. A consumer that
+        reads the budget without first branching on `empty` must not hit a
+        KeyError."""
+        developer_config(timeout_seconds=45)
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(empty_worktree), "--base", "main",
+        )
+        assert envelope["empty"] is True
+        assert envelope["agent_timeout_seconds"] == 45
+        assert envelope["agent_timeout_clamped"] is False
+
+    def test_a_clamp_that_changes_nothing_does_not_claim_a_short_review(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A budget already at the floor trips the ceiling arithmetic without
+        losing a second. `clamped` answers "did this review run short", not "was
+        the branch taken", so it stays false."""
+        cfg = developer_config(timeout_seconds=MIN)
+        cfg.security.skill_proxy_timeout = MIN + 50
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == MIN
+        assert envelope["agent_timeout_configured"] == MIN
+        assert envelope["agent_timeout_clamped"] is False
+        assert stub_brain.timeouts == [MIN]
+
+    def test_the_clamp_never_raises_a_budget_that_already_fit(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """`max(floor, ceiling - allowance)` on its own turned a configured 25s
+        into 30s — a "clamp" that made the fit worse, under a ceiling the
+        original 25s already fit. The floor may still raise the budget, but the
+        ceiling arithmetic must only ever lower it, and a budget that came out
+        above the configured one is not a short review."""
+        cfg = developer_config(timeout_seconds=MIN - 5)
+        cfg.security.skill_proxy_timeout = MIN + 50
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == MIN - 5
+        assert envelope["agent_timeout_configured"] == MIN - 5
+        assert envelope["agent_timeout_clamped"] is False
+        assert stub_brain.timeouts == [MIN - 5]
+
+    def test_a_nonpositive_budget_is_floored_rather_than_passed_to_the_brain(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """Nothing in the config loader floors `timeout_seconds`, and the brains
+        disagree about what a 0 means: the native one runs unbounded until the
+        proxy kills the command, `claude_code` hands it to a `threading.Timer`
+        and kills each agent at once. Neither is a review, and before this the
+        envelope reported the deployment had got exactly what it asked for."""
+        developer_config(timeout_seconds=0)
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert stub_brain.timeouts == [MIN]
+        assert envelope["agent_timeout_seconds"] == MIN
+        assert envelope["agent_timeout_configured"] == 0
+        assert envelope["agent_timeout_clamped"] is False
+
+    def test_a_ceiling_too_tight_for_the_floor_says_so_on_its_own_line(
+        self, capsys, caplog, worktree, review_env, developer_config, stub_brain
+    ):
+        """The clamp cannot deliver a fit under a ceiling smaller than the
+        assembly allowance plus the floor, so the proxy kills the command with
+        empty stdout and the caller gets no envelope at all. The log is the only
+        place that deployment can say what happened, so it gets its own line
+        rather than the ordinary "being given less" warning."""
+        cfg = developer_config(timeout_seconds=120)
+        cfg.security.skill_proxy_timeout = code_review.ASSEMBLY_ALLOWANCE_SECONDS
+        with caplog.at_level("WARNING"):
+            drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert any("cannot fit a review at all" in r.message for r in caplog.records)
+        assert stub_brain.timeouts == [MIN]
+
+    def test_a_nonpositive_proxy_ceiling_does_not_blame_a_clamp(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """A negative ceiling is truthy. Read as a real ceiling it pinned every
+        review to the floor and reported a clamp whose stated cause never
+        happened; the proxy surfaces the misconfiguration itself by killing the
+        command immediately."""
+        cfg = developer_config(timeout_seconds=45)
+        cfg.security.skill_proxy_timeout = -1
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+        )
+        assert envelope["agent_timeout_seconds"] == 45
+        assert envelope["agent_timeout_clamped"] is False
 
 
 # --------------------------------------------------------------------------

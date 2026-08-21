@@ -30,7 +30,7 @@ Git credentials are configured automatically for both platforms — clone and pu
 
 `gh` and `glab` are the real GitHub and GitLab command-line tools. You reach them through a wrapper that fetches the token when you invoke them and then gets out of the way, so the whole flag surface is yours — `gh <command> --help` and `glab <command> --help` are accurate.
 
-**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped.
+**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped. **A remote URL never carries a credential.** `origin` is always a bare `https://host/namespace/project.git`, because remote URLs get *printed* — by `git remote -v`, `git config --list` and several push failures — so a token in one lands in the task result and the transcript. Never build one with credentials in it, never `set-url` one, never paste a token into a clone command; find one carrying a secret between `:` and `@` and you stop, report it as a credential to rotate without quoting the value, and do not use it.
 
 **Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` / `glab api` are refused too — an explicit `-X POST`, and any body flag (`-f`, `-F`, `--field`, `--raw-field`, `--form`, `--input`), which both CLIs treat as an implicit POST. Use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
 
@@ -39,7 +39,7 @@ This is an accident guard, not a security boundary. Hitting it means you are abo
 **No terminal, and a 120-second budget.** These commands run non-interactively under a Bash tool that times out. Avoid every watch and follow mode: `gh pr checks --watch`, `gh run watch`, `glab ci status --live`, `glab ci status --wait`, `glab ci trace`, and `glab ci view` (a full-screen TUI). Run the plain command again instead of waiting inside one.
 
 **Pre-submission checks** (mandatory before every MR/PR):
-1. **Namespace verification**: Before creating any MR or PR, confirm the remote you are about to push to is the intended one — and read it from the worktree rather than from a path you retyped, because the worktree's `origin` is what will actually receive the push. From inside `$WORK_DIR`: `gh repo view --json nameWithOwner -q .nameWithOwner` or `glab repo view -F json --jq .path_with_namespace`. If the user said "submit to `acme/widget`", verify it resolves to `acme`. Abort and ask on any mismatch.
+1. **Namespace verification**: Before creating any MR or PR, confirm the remote you are about to push to is the intended one — and read it from the worktree rather than from a path you retyped, because the worktree's `origin` is what will actually receive the push. From inside `$WORK_DIR`: `gh repo view --json nameWithOwner -q .nameWithOwner`, or on GitLab `glab repo view -F json` piped to a parser — glab has no `--jq`, and the full recipe below fails closed on a glab error rather than comparing an empty string. If the user said "submit to `acme/widget`", verify it resolves to `acme`. Abort and ask on any mismatch.
 2. **Response verification**: `gh pr create` and `glab mr create` exit non-zero on failure and print the URL on success, so check the exit status rather than scraping the output for error text. Then confirm the thing exists before reporting success: `gh pr view --json number,url,state` or `glab mr view -F json`.
 3. **No live source editing**: Never edit files under production installation paths (e.g., `/srv/app/*/src/`). All source changes must go through worktrees in `$DEVELOPER_REPOS_DIR` and be submitted as MRs/PRs.
 
@@ -62,55 +62,77 @@ First time — create a bare clone:
 ```bash
 BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
 
+FRESH=""
 if [ ! -d "$BARE_DIR" ]; then
     mkdir -p "$(dirname "$BARE_DIR")"
     # Use $GITLAB_URL or $GITHUB_URL depending on where the repo lives
     git clone --bare "$GITLAB_URL/namespace/project.git" "$BARE_DIR"
-    # Configure fetch to track remote branches under refs/remotes/origin/*
     git -C "$BARE_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-    git -C "$BARE_DIR" fetch origin
-
-    # Delete the clone-day local heads and repoint HEAD at the remote default.
-    # WHY (ISSUE-125): `git clone --bare` populates refs/heads/* once, at clone
-    # time, and the remote-tracking refspec above never updates them again — so
-    # a local `main`/`master` stays frozen at clone day while origin/main moves
-    # on. `git show main:db.py` then silently returns clone-day source. Deleting
-    # the fossils turns that silent-wrong into a loud `unknown revision`: you
-    # can't act on stale bytes you can't read. Worktree creation is unaffected —
-    # it branches from `origin/$DEFAULT_BRANCH` (below), not a local head.
-    DEFAULT_BRANCH=$(git -C "$BARE_DIR" remote show origin | sed -n 's/.*HEAD branch: //p')
-    git -C "$BARE_DIR" symbolic-ref HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
-    # Skip any head currently checked out by a worktree (an istota/<task> branch);
-    # only the unused clone-day main/master get dropped.
-    CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
-    for ref in $(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/); do
-        # `update-ref -d`, not `branch -D`: HEAD was just repointed at a
-        # remote-tracking ref, and every `branch` subcommand then dies with
-        # `fatal: HEAD not found below refs/heads!` before deleting anything.
-        # `branch -D` here silently left the clone-day fossils in place.
-        echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" update-ref -d "refs/heads/$ref"
-    done
+    FRESH=1
 fi
 
 # Always fetch latest
 git -C "$BARE_DIR" fetch origin
+
+# Everything below restores the invariant stated after this block. It runs on
+# every pass, not just at clone time: the shape lives on disk, so a clone made
+# before ISSUE-269 is still broken and the `if` above never runs for it again.
+# `rev-parse`, not `symbolic-ref`: a dangling origin/HEAD survives the upstream
+# default branch being renamed and reads as present to a check that does not
+# resolve it (code_review's `_default_base` guards the same state).
+git -C "$BARE_DIR" rev-parse -q --verify origin/HEAD >/dev/null 2>&1 ||
+    git -C "$BARE_DIR" remote set-head origin -a
+DEFAULT_REF=$(git -C "$BARE_DIR" symbolic-ref -q refs/remotes/origin/HEAD)
+DEFAULT_BRANCH="${DEFAULT_REF#refs/remotes/origin/}"
+[ -n "$DEFAULT_BRANCH" ] || { echo "origin has no default branch"; exit 1; }
+
+# HEAD below refs/heads/ (ISSUE-269): pointed into refs/remotes/ it reads as
+# stale just the same, but `worktree add -b` resolves HEAD while writing its new
+# local head and aborts with `fatal: HEAD not found below refs/heads!`. `-q` so
+# a detached HEAD is a state to repair, not a `fatal:` in the log.
+case "$(git -C "$BARE_DIR" symbolic-ref -q HEAD)" in
+    "refs/heads/$DEFAULT_BRANCH") ;;
+    *) git -C "$BARE_DIR" symbolic-ref HEAD "refs/heads/$DEFAULT_BRANCH" ;;
+esac
+
+# ...and nothing under it (ISSUE-125): `clone --bare` fills refs/heads/* once,
+# at clone time, and the remote-tracking refspec never updates them again, so a
+# local `main` stays frozen at clone day while origin/main moves on and
+# `git show main:db.py` silently returns clone-day source. Deleting the fossils
+# turns that silent-wrong into a loud `invalid object name`. Only on clone day
+# is *every* local head a fossil: later, refs/heads/ also holds the
+# {BOT_DIR}/<task> branch of every worktree ever made here, and one whose
+# worktree was pruned may be the only copy of that work.
+if [ -n "$FRESH" ]; then
+    FOSSILS=$(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/)
+else
+    FOSSILS="$DEFAULT_BRANCH"
+fi
+CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
+for ref in $FOSSILS; do
+    # `update-ref -d`, not `branch -D`: it takes a full refname and consults
+    # neither HEAD nor the worktree list, so CHECKED_OUT is the only thing
+    # deciding what survives.
+    echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" update-ref -d "refs/heads/$ref"
+done
 ```
 
 ### Reading current source from a bare clone
 
-**Invariant: in a bare clone, never name a local branch — always `origin/<branch>`
-or `origin/HEAD`.** A local `main`/`master` is a clone-day fossil (deleted by the
-setup above, but the habit still bites on an older clone). To read the live tree
-in one fetch-then-read step that can't point at a stale ref, use:
+**Invariant: `refs/remotes/origin/HEAD` resolves, `HEAD` is a `refs/heads/` ref
+that does not, and you never name a local branch — always `origin/<branch>` or
+`origin/HEAD`.** The first lets every later step discover the base branch
+instead of assuming `main`; the rest keeps a clone-day fossil unreadable rather
+than silently stale. To read the live tree in one step that can't point at a
+stale ref:
 
 ```bash
 # dev-show <BARE_DIR> <path> — current source from origin/HEAD, always fetched.
 git -C "$BARE_DIR" fetch -q origin && git -C "$BARE_DIR" show origin/HEAD:"$path"
 ```
 
-Use this (or `git -C "$BARE_DIR" log origin/HEAD`, `git -C "$BARE_DIR" show
-origin/main:<path>`) for any hand-rolled verification read. Never `git show
-main:<path>` / `git log master` against a bare clone.
+Use this (or `git -C "$BARE_DIR" log origin/HEAD`) for any hand-rolled
+verification read. Never `git show main:<path>` / `git log master` on a bare clone.
 
 ## Creating a Worktree for Development
 
@@ -148,10 +170,14 @@ cd "$BARE_DIR"
 git rev-parse --is-bare-repository
 git symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main or origin/master
 git fetch origin --prune
+git config --list --includes | awk -F= '{ k = $1 }
+    k ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "credential embedded in a config key"; next }
+    /^http\..*extraheader=/ || /:\/\/[^\/@]*:[^\/@]+@/ { print k }'   # end of the credential check
 ```
 
 - No repository, or the fetch fails: stop and report. Do not clone something else and carry on.
 - The base branch is whatever `symbolic-ref` reports, stripped of `origin/`. Never assume `main` — plenty of repositories are still on `master`, and a worktree branched from a base that does not exist is the single most common way this dies.
+- The credential check reads the whole config, not just remotes, and prints a setting's *name* and never its value. It printing anything: stop. Every worktree you cut inherits that setting, and the next `git remote -v` puts it in your context. Report what it printed — that line only, never the value — as a credential to rotate, and do not work in that repository. The daemon sweeps these at task setup, so one appearing here appeared afterwards. It matches `:secret@` rather than a bare `@` because `git@github.com:owner/repo` is a username; it is a tripwire and simpler than the daemon's sweep, so a clean result is not proof.
 
 ### 2. Create the worktree, then read back what was made
 
@@ -231,7 +257,7 @@ Unless the change is Fast tier, run a review after the work's full pass and afte
 
 The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
 
-If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached — that is a state of the environment, not of the diff. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself: report it and do not open the MR.
+If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached, no reviewer returned a usable answer — that is a state of the environment, not of the diff. It comes back `skipped`. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself — a bad range, a path outside the allowed roots — and it is yours to correct: report it and do not open the MR.
 
 ### 10. Land
 
@@ -269,8 +295,16 @@ Run these from inside `$WORK_DIR` — both CLIs read the repository from the wor
 ```bash
 cd "$WORK_DIR"
 
+# glab has no `--jq`: a field read is `-F json` piped to a parser. pipefail so a
+# glab that fails after printing is not masked by the python3 that parsed it.
+set -o pipefail
+
 # REQUIRED: confirm the project before creating anything (pre-submission check 1).
-RESOLVED=$(glab repo view -F json --jq .path_with_namespace)
+# `||` fails closed: a glab error aborts rather than becoming an empty string.
+RESOLVED=$(glab repo view -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)["path_with_namespace"])') || {
+    echo "ERROR: could not read origin's project path from glab. Aborting."
+    exit 1
+}
 if [ "$RESOLVED" != "namespace/project" ]; then
     echo "ERROR: origin resolves to '$RESOLVED', not 'namespace/project'. Aborting."
     exit 1
@@ -299,8 +333,14 @@ glab mr create \
 Then verify it exists, and capture the id for later steps (pre-submission check 2):
 
 ```bash
-MR_IID=$(glab mr view -F json --jq .iid)
-glab mr view -F json --jq '"!\(.iid) \(.web_url)"'
+set -o pipefail
+# Abort rather than carry an empty id: `glab mr merge ""` acts on whatever MR the
+# current branch has.
+MR_IID=$(glab mr view -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)["iid"])') || {
+    echo "ERROR: could not read the merge request id. Aborting."
+    exit 1
+}
+glab mr view -F json | python3 -c 'import json,sys; d=json.load(sys.stdin); print("!%s %s" % (d["iid"], d["web_url"]))'
 ```
 
 ## GitHub: Pushing and Creating a Pull Request
@@ -358,8 +398,12 @@ git push origin HEAD
 ## GitLab: Listing and Merging MRs
 
 ```bash
+set -o pipefail
+# $MR_IID came from an earlier block, and a block is its own shell. Re-check it:
+# `glab mr merge ""` merges the current branch's MR rather than refusing.
+[ -n "${MR_IID:-}" ] || { echo "ERROR: MR_IID is empty. Re-read it before merging."; exit 1; }
 glab mr list                       # open MRs, human-readable
-glab mr list -F json --jq '.[] | "!\(.iid) \(.title)"'
+glab mr list -F json | python3 -c 'import json,sys; print("\n".join("!%s %s" % (m["iid"], m["title"]) for m in json.load(sys.stdin)) or "(none open)")'
 glab mr view "$MR_IID"             # description, discussions, pipeline state
 glab mr diff "$MR_IID"
 
@@ -397,7 +441,11 @@ gh run view "$RUN_ID" --log-failed  # only the failing steps
 # GitLab
 glab ci status                     # current branch's pipeline
 glab ci list --ref "$BRANCH"
-PIPELINE_ID=$(glab ci list --ref "$BRANCH" --per-page 1 -F json --jq '.[0].id')
+set -o pipefail
+PIPELINE_ID=$(glab ci list --ref "$BRANCH" --per-page 1 -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])') || {
+    echo "No pipeline for $BRANCH yet, or glab could not read one. Re-run shortly."
+    exit 1
+}
 glab ci get -p "$PIPELINE_ID"
 ```
 
@@ -433,7 +481,7 @@ git -C "$BARE_DIR" branch -d "istota/42-add-auth"
 | File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ...` |
 | Look up a user | `gh api /users/USERNAME` | `glab api /users?username=USERNAME` |
 
-Both CLIs take `--json`/`-F json` plus `--jq`/`-q` for structured output, so there is no need to pipe through `python3` to read a field. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
+**The two CLIs do not have the same structured-output surface.** `gh` takes `--json` plus `--jq`/`-q` and filters in-process. `glab` takes `-F json` and nothing else — there is no `--jq` — so a glab field read is `-F json` piped to `python3`, and the pipeline needs `set -o pipefail` for its exit status to mean anything. Newer glab does have `--jq`, which is the trap: the deployment installs glab from the Debian archive on the Ansible path and pins a much newer build in the Docker image, so a recipe here has to run on the older of the two. Check `glab <command> --help` on the deployed binary before using a flag you know from `gh`. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
 
 Check the help before trusting a spelling from memory — the deployed CLIs may be older than the ones these examples were written against, and `glab mr note` in particular was restructured. Newer glab wants `glab mr note create N -m "..."`; older glab wants `glab mr note N -m "..."` with no subcommand. Run `glab mr note --help` and use whichever it shows.
 

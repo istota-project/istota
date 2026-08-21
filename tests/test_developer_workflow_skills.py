@@ -7,7 +7,9 @@ whatever the shipped files happen to say.
 """
 
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -149,22 +151,35 @@ class TestCliFlagMatchesReality:
         assert repos.sensitive is False, "a directory path is not a credential"
 
 
-def _fenced_lines(body: str):
-    """Lines inside ``` blocks — the ones a model will copy and run.
+def _fenced_blocks(body: str):
+    """Each ``` block, as its own string. The one fence parser in this file.
 
     Toggling on `line.startswith` misses an indented fence, which is the normal
     way to put a recipe inside a list item; `developer` has two, in the Error
     Handling bullets. Miss those and every following line is classified
     inversely, so a guard that only inspects runnable lines silently starts
     inspecting prose instead.
+
+    The toggle assumes fences nest nowhere and come in pairs — true of this
+    document, and it would break on a heredoc that printed three backticks.
+    Kept in one place so that assumption has one home rather than three.
     """
-    in_fence = False
+    current, in_fence = [], False
     for line in body.splitlines():
         if line.lstrip().startswith("```"):
+            if in_fence:
+                yield "\n".join(current)
+                current = []
             in_fence = not in_fence
             continue
         if in_fence:
-            yield line
+            current.append(line)
+
+
+def _fenced_lines(body: str):
+    """Lines inside ``` blocks — the ones a model will copy and run."""
+    for block in _fenced_blocks(body):
+        yield from block.splitlines()
 
 
 class TestBodiesDoNotContradict:
@@ -345,9 +360,18 @@ class TestBodiesDoNotContradict:
 class TestLoadBudget:
     """Goal 5: the split grows what a coding task loads, so the ceiling is
     stated rather than assumed. Parity with the pre-split single file is not
-    achievable — `developer` sheds ~52 lines and gains more than that back."""
+    achievable — `developer` sheds ~52 lines and gains more than that back.
 
-    BUDGET_LINES = 675
+    The ceiling is 700 because that is the figure `.claude/rules/skills.md`
+    already documents as the contract ("held under a 700-line budget"). It sat
+    at 675 here, below the number the rules file states, and four fixes to the
+    recipes landing in one week (ISSUE-264, -267, -268, -269) ran it out. Fitting
+    them meant deleting reviewed content from a recipe the model executes, so
+    the test moved to the documented number rather than the recipes shrinking to
+    an undocumented one. Raise this again only by changing the rules file first.
+    """
+
+    BUDGET_LINES = 700
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
@@ -403,20 +427,42 @@ def _extract(marker: str, stop: str) -> str:
     return "\n".join(body[start:end + 1])
 
 
-def _run_fragment(fragment: str, bare: Path) -> str:
+def _run_fragment(fragment: str, bare: Path, **env: str) -> str:
     proc = subprocess.run(
         ["bash", "-c", fragment],
         capture_output=True, text=True,
-        env={**os.environ, **GIT_ISOLATION, "BARE_DIR": str(bare)},
+        env={**os.environ, **GIT_ISOLATION, "BARE_DIR": str(bare), **env},
     )
     assert proc.returncode == 0, f"fragment failed:\n{fragment}\n{proc.stderr}"
     return proc.stdout
 
 
+# The always-run block that brings any clone to the invariant: origin/HEAD
+# resolves, HEAD is a refs/heads/ ref that does not. Extracted as one piece
+# because its three steps depend on each other's variables.
+_INVARIANT_BLOCK = ("rev-parse -q --verify origin/HEAD", "done")
+
+
+def _drop_origin_head(bare: Path) -> None:
+    """Remove `refs/remotes/origin/HEAD` if this git created one on fetch.
+
+    Git 2.48 learned to write it during `fetch`; the devbox runs git 2.39,
+    which does not. Normalising to *absent* is what makes these tests say the
+    same thing on both, rather than passing on the developer's machine because
+    a newer git quietly did the recipe's job for it.
+    """
+    subprocess.run(
+        ["git", "-C", str(bare), "symbolic-ref", "-d", "refs/remotes/origin/HEAD"],
+        capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+    )
+
+
 @pytest.fixture
 def bare_clone(tmp_path) -> Path:
-    """A bare clone in the shape `developer/skill.md` documents: remote-tracking
-    refspec configured, fetched, HEAD repointed at `refs/remotes/origin/*`."""
+    """A bare clone in the shape clones made before ISSUE-269 are still in:
+    remote-tracking refspec configured, fetched, HEAD pointed into
+    `refs/remotes/origin/*`. The clone block overwrites HEAD when a test runs
+    it; the repair path is what has to cope with a clone left like this."""
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     _git(upstream, "init", "-q", "-b", "main", ".")
@@ -437,27 +483,45 @@ class TestBareCloneRecipe:
 
     def test_fossil_deletion_survives_the_repointed_head(self, bare_clone):
         """ISSUE-125 deletes the clone-day `refs/heads/*` fossils, but the step
-        before it points HEAD at `refs/remotes/origin/main`. Every `git branch`
-        subcommand then fails with `fatal: HEAD not found below refs/heads!`
-        before deleting anything, so the fossils the loop exists to remove
-        survived every clone."""
+        before it used to point HEAD at `refs/remotes/origin/main`. Every `git
+        branch` subcommand then failed with `fatal: HEAD not found below
+        refs/heads!` before deleting anything, so the fossils the loop exists to
+        remove survived every clone."""
         assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
 
-        _run_fragment(_extract("CHECKED_OUT=$(git -C", "done"), bare_clone)
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
 
         refs = _git(bare_clone, "for-each-ref", "--format=%(refname)")
         assert "refs/heads/main" not in refs, f"clone-day fossil survived: {refs}"
         assert "refs/remotes/origin/main" in refs, "the remote-tracking ref must remain"
 
-    def test_branch_d_would_not_have_worked(self, bare_clone):
-        """The test above passes trivially if someone swaps the delete back to
-        `branch -D`, so pin the reason: `branch -D` really does fail here."""
-        proc = subprocess.run(
-            ["git", "-C", str(bare_clone), "branch", "-D", "main"],
-            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
-        )
-        assert proc.returncode != 0
-        assert "HEAD not found below refs/heads" in proc.stderr
+    def test_the_loop_deletes_the_head_that_head_names(self, bare_clone):
+        """The block points HEAD at `refs/heads/$DEFAULT` *before* the loop
+        runs, so the ref the loop must drop is the one HEAD names. Deleting it
+        is the step that leaves HEAD unborn; a delete that refused here would
+        put the fossil back within reach of `git show`."""
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
+
+        assert "refs/heads/main" not in _git(bare_clone, "for-each-ref", "--format=%(refname)")
+        assert _git(bare_clone, "symbolic-ref", "HEAD").strip() == "refs/heads/main"
+
+    def test_a_task_branch_survives_the_loop_on_an_existing_clone(self, bare_clone, tmp_path):
+        """On a clone that already exists, `refs/heads/` holds the branch of
+        every worktree ever made in it — including one whose worktree was
+        pruned, which may be the only copy of that work. Only the ref HEAD
+        names is a fossil there, and a live worktree's branch is skipped on
+        both paths."""
+        live = tmp_path / "live-worktree"
+        _git(bare_clone, "symbolic-ref", "HEAD", "refs/heads/main")
+        _git(bare_clone, "worktree", "add", "-q", "-b", "istota/9-live", str(live), "origin/main")
+        _git(bare_clone, "branch", "istota/8-pruned", "origin/main")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        refs = _git(bare_clone, "for-each-ref", "--format=%(refname)", "refs/heads/")
+        assert "refs/heads/istota/8-pruned" in refs, f"unpushed task branch deleted: {refs}"
+        assert "refs/heads/istota/9-live" in refs, f"live worktree branch deleted: {refs}"
+        assert "refs/heads/main" not in refs, f"the fossil HEAD names survived: {refs}"
 
     def test_default_branch_falls_back_when_origin_head_is_absent(self, bare_clone):
         """`symbolic-ref ... | sed ... || echo "main"` takes the *pipeline's*
@@ -466,7 +530,7 @@ class TestBareCloneRecipe:
         created from `origin/`, an unknown revision. `refs/remotes/origin/HEAD`
         is absent on any clone made before git 2.48, so this was the ordinary
         path rather than an edge case."""
-        _git(bare_clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+        _drop_origin_head(bare_clone)
 
         fragment = _extract(
             "symbolic-ref --short refs/remotes/origin/HEAD", "DEFAULT_BRANCH:-main"
@@ -488,3 +552,452 @@ class TestBareCloneRecipe:
         out = _run_fragment(fragment + '\necho "$DEFAULT_BRANCH"', bare_clone)
 
         assert out.strip() == "master", f"origin/HEAD ignored, got {out.strip()!r}"
+
+    def _assert_invariant(self, bare: Path, branch: str = "main") -> None:
+        """Both halves, stated once: origin/HEAD resolves, HEAD is a
+        `refs/heads/` ref that does not."""
+        assert _git(bare, "rev-parse", "--verify", "origin/HEAD").strip()
+        assert _git(bare, "symbolic-ref", "HEAD").strip() == f"refs/heads/{branch}"
+        proc = subprocess.run(
+            ["git", "-C", str(bare), "rev-parse", "--verify", branch],
+            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+        )
+        assert proc.returncode != 0, f"a local `{branch}` resolved; the fossil is readable"
+
+    def test_worktree_add_survives_the_block(self, bare_clone, tmp_path):
+        """ISSUE-269. `worktree add -b` writes a new local head and resolves
+        HEAD while doing it, so a HEAD under `refs/remotes/` aborts it with
+        `fatal: HEAD not found below refs/heads!` and no worktree is created —
+        the very next step of the lifecycle has nothing to work in."""
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
+
+        work = tmp_path / "project--task"
+        proc = subprocess.run(
+            ["git", "-C", str(bare_clone), "worktree", "add", "-b", "istota/1-slug",
+             str(work), "origin/main"],
+            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+        )
+        assert proc.returncode == 0, f"worktree add failed:\n{proc.stderr}"
+        assert (work / ".git").exists(), "worktree directory was not created"
+
+    def test_a_fresh_clone_reaches_the_invariant(self, bare_clone):
+        """Both halves at once. Moving HEAD back below `refs/heads/` must not
+        resurrect a *readable* fossil — it stays unborn, so naming a local
+        branch still errors instead of returning clone-day bytes (ISSUE-125),
+        and `origin/HEAD` is established because `clone --bare` never writes
+        it and git only started doing so on fetch in 2.48."""
+        _drop_origin_head(bare_clone)
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
+
+        self._assert_invariant(bare_clone)
+
+    def test_an_existing_clone_reaches_the_invariant(self, bare_clone, tmp_path):
+        """The clone step sits inside `if [ ! -d "$BARE_DIR" ]`, so a clone that
+        already exists — the production one did — is never revisited by it. The
+        block runs on every pass for that reason, and has to land the same
+        invariant from the broken shape, fossil included."""
+        _drop_origin_head(bare_clone)
+        assert _git(bare_clone, "symbolic-ref", "HEAD").strip() == "refs/remotes/origin/main"
+        assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        self._assert_invariant(bare_clone)
+        work = tmp_path / "project--task"
+        _git(bare_clone, "worktree", "add", "-b", "istota/1-slug", str(work), "origin/main")
+
+    def test_a_dangling_origin_head_is_refreshed(self, bare_clone):
+        """`origin/HEAD` survives the upstream default branch being renamed, so
+        it can name a ref that no longer exists — `code_review`'s `_default_base`
+        carries the same note. A presence check reads that as healthy, and the
+        block would then point HEAD at a branch nothing can resolve and hand the
+        worktree step a base that does not exist."""
+        _git(bare_clone, "update-ref", "refs/remotes/origin/gone", "refs/remotes/origin/main")
+        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
+        _git(bare_clone, "update-ref", "-d", "refs/remotes/origin/gone")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        self._assert_invariant(bare_clone)
+
+    def test_a_detached_head_is_repaired_quietly(self, bare_clone):
+        """A bare HEAD holding a raw sha is a state to repair. `symbolic-ref`
+        without `-q` prints `fatal: ref HEAD is not a symbolic ref` while doing
+        it, and the lifecycle tells the model to stop on failure output."""
+        _git(bare_clone, "update-ref", "--no-deref", "HEAD", "refs/remotes/origin/main")
+
+        out = _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        self._assert_invariant(bare_clone)
+        assert "fatal:" not in out
+
+    def test_the_block_is_idempotent_and_respects_master(self, bare_clone):
+        """It runs on every pass, so a second pass over a healthy clone has to
+        change nothing — and must read the default branch rather than assume
+        `main` on a repository using `master`."""
+        _git(bare_clone, "update-ref", "refs/remotes/origin/master", "refs/remotes/origin/main")
+        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+        self._assert_invariant(bare_clone, branch="master")
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+        self._assert_invariant(bare_clone, branch="master")
+
+def _fenced_block(body: str, marker: str) -> str:
+    """The whole ``` block containing `marker`.
+
+    `_extract` takes a start line and a stop line, which needs a stop token
+    appearing nowhere earlier in the block. The GitLab recipe has none worth
+    relying on — `fi` is a substring of `confirm`, `exit 1` occurs twice — so
+    the fence is the safer unit to lift.
+    """
+    hits = [b for b in _fenced_blocks(body) if marker in b]
+    assert len(hits) == 1, (
+        f"expected exactly one fenced block containing {marker!r}, got {len(hits)}"
+    )
+    return hits[0]
+
+
+def _stanza_through(block: str, marker: str, closer: str) -> str:
+    """From the line containing `marker` through the first line that is exactly
+    `closer`. The guards in this document end in one of two ways: a `fi` closing
+    an `if`, or a `}` closing a `|| { … }` block."""
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if marker in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == closer)
+    return "\n".join(lines[start:end + 1])
+
+
+def _stanza_through_fi(block: str, marker: str) -> str:
+    """From the line containing `marker` through the `fi` closing its guard.
+
+    Equality on the stripped line rather than a substring test: `confirm`
+    contains `fi`, and matching that would lift a fragment stopping two lines
+    before the guard it is meant to exercise — passing while proving nothing.
+    """
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if marker in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
+    return "\n".join(lines[start:end + 1])
+
+
+_NAMESPACE_CHECK_MARKER = "RESOLVED=$(glab repo view"
+
+
+@pytest.fixture
+def glab_153(tmp_path) -> Path:
+    """A `glab` shaped like the 1.53 in the Debian archive: `-F json`, no `--jq`.
+
+    The Docker image pins glab 1.114, which does have `--jq`; the Ansible path
+    installs whatever trixie ships, which does not. A recipe in the body has to
+    run on both, so the stub is the older one — and it rejects `--jq` the way
+    the real binary does, so reverting a recipe to the `gh` idiom fails here
+    and not only in the text guard.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "glab"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "json=\n"
+        'for arg in "$@"; do\n'
+        "    case \"$arg\" in\n"
+        "        --jq|--jq=*|-q)\n"
+        '            echo "unknown flag: $arg" >&2\n'
+        "            exit 1 ;;\n"
+        "        json) json=1 ;;\n"
+        "    esac\n"
+        "done\n"
+        # Real glab defaults to `-F text`, so a recipe that stopped asking for
+        # JSON would get prose and the parse would die. Refuse it here too,
+        # rather than handing back well-formed JSON the real binary never sent.
+        'if [ -z "$json" ]; then\n'
+        '    echo "glab stub: expected -F json" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'if [ -n "${GLAB_STUB_FAIL:-}" ]; then\n'
+        '    echo "glab: could not reach the instance" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'printf "%s" "${GLAB_STUB_JSON:-}"\n'
+    )
+    stub.chmod(0o755)
+    # The recipes shell out to `python3`; pin it to the interpreter running the
+    # suite rather than depending on what the host happens to have on PATH.
+    (bin_dir / "python3").symlink_to(sys.executable)
+    return bin_dir
+
+
+def _run_recipe(fragment: str, bin_dir: Path, **env) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-c", fragment],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", **env},
+    )
+
+
+def _namespace_check(body: str) -> str:
+    return _stanza_through_fi(
+        _fenced_block(body, _NAMESPACE_CHECK_MARKER), _NAMESPACE_CHECK_MARKER
+    )
+
+
+class TestGlabFieldReads:
+    """ISSUE-268. `glab` grew `--jq` well after the version the Ansible path
+    installs, so every glab field read written in the `gh` idiom exits `unknown
+    flag` — including the namespace check whose whole job is to stop a push
+    reaching the wrong project."""
+
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def test_no_runnable_glab_line_uses_a_gh_only_filter_flag(self):
+        """The seven originals. `gh` keeps `--jq`/`-q`; glab must not borrow it.
+
+        Comments are skipped deliberately: the fix puts the reason *why* glab
+        has no `--jq` in a comment beside the recipe, and a guard that could not
+        tell an explanation from an invocation would forbid saying so.
+        """
+        # Join backslash continuations first. The document writes multi-line glab
+        # invocations that way (`glab mr create`), so a flag parked on a
+        # continuation line sits on a line with no `glab` in it and would slip
+        # past a per-line scan — the exact regression this guard exists to catch.
+        for block in _fenced_blocks(self._body()):
+            for line in re.sub(r"\\\n\s*", " ", block).splitlines():
+                if "glab" not in line or line.lstrip().startswith("#"):
+                    continue
+                assert "--jq" not in line, (
+                    f"developer filters glab output with gh's flag: {line.strip()!r}"
+                )
+                # `-q` is the short form and fails the same way. Match it as a
+                # whole argument, not a substring, so `--quiet` and a `-q` inside
+                # a quoted expression are not mistaken for it.
+                assert "-q" not in line.split(), (
+                    f"developer filters glab output with gh's short flag: "
+                    f"{line.strip()!r}"
+                )
+
+    def test_prose_does_not_promise_glab_a_jq_flag(self):
+        """The generalization the six lesser recipes were written from. Left
+        standing it regenerates them the next time someone adds a field read."""
+        assert "`--json`/`-F json` plus `--jq`/`-q`" not in self._body(), (
+            "the claim that produced all seven broken recipes is back in the body"
+        )
+
+    def test_namespace_check_reads_the_project_without_jq(self, glab_153):
+        """The check has to actually resolve a namespace on the old glab.
+        `unknown flag` assigned an empty string, which is how a guard that never
+        ran still looked like it was running."""
+        proc = _run_recipe(
+            "set -o pipefail\n"
+            + _namespace_check(self._body()).replace("namespace/project", "acme/widget")
+            + '\necho "RESOLVED=$RESOLVED"',
+            glab_153,
+            GLAB_STUB_JSON='{"path_with_namespace": "acme/widget"}',
+        )
+
+        assert proc.returncode == 0, f"aborted on a matching project:\n{proc.stderr}"
+        assert "RESOLVED=acme/widget" in proc.stdout
+
+    def test_namespace_check_aborts_on_the_wrong_project(self, glab_153):
+        """The case the check exists for."""
+        proc = _run_recipe(
+            "set -o pipefail\n"
+            + _namespace_check(self._body()).replace("namespace/project", "acme/widget"),
+            glab_153,
+            GLAB_STUB_JSON='{"path_with_namespace": "someone-else/widget"}',
+        )
+
+        assert proc.returncode != 0, "a push to the wrong project was not stopped"
+        assert "someone-else/widget" in proc.stdout + proc.stderr
+
+    def test_namespace_check_fails_closed_when_glab_fails(self, glab_153):
+        """The property the entry asked for by name. A tool error must not
+        become a value: the old shape turned `unknown flag` into an empty string
+        and then compared it, so the abort was an accident of the comparison
+        rather than a decision — and a recipe whose expected value was itself
+        empty would have sailed through."""
+        proc = _run_recipe(
+            "set -o pipefail\n"
+            + _namespace_check(self._body()).replace("namespace/project", ""),
+            glab_153,
+            GLAB_STUB_FAIL="1",
+        )
+
+        assert proc.returncode != 0, (
+            "glab failed and the check passed — the empty result compared equal"
+        )
+
+    def test_every_piping_recipe_sets_pipefail_before_it_pipes(self):
+        """Reading a glab field means a pipeline, and a pipeline's exit status is
+        the last command's — so a glab that exits non-zero *after* printing is
+        masked by a python3 that parsed what it printed.
+
+        Every fence that pipes, not just the namespace check: each fence is a
+        separate Bash tool call and shell options do not survive between them, so
+        `set -o pipefail` in one buys the others nothing.
+        """
+        piping = [
+            block
+            for block in _fenced_blocks(self._body())
+            if any("| python3" in line for line in block.splitlines())
+        ]
+        assert piping, "no piped recipe found — the guard is inspecting nothing"
+
+        for block in piping:
+            lines = block.splitlines()
+            pipefail = next(
+                (i for i, line in enumerate(lines) if "set -o pipefail" in line), None
+            )
+            first_pipe = next(i for i, line in enumerate(lines) if "| python3" in line)
+            assert pipefail is not None, (
+                f"a recipe pipes without setting pipefail: {lines[first_pipe].strip()!r}"
+            )
+            assert pipefail < first_pipe, (
+                f"pipefail is set after the pipeline it governs: "
+                f"{lines[first_pipe].strip()!r}"
+            )
+
+    @pytest.mark.parametrize(
+        "marker", ["MR_IID=$(glab mr view", "PIPELINE_ID=$(glab ci list"]
+    )
+    def test_captures_feeding_a_later_command_abort_on_failure(self, marker, glab_153):
+        """`MR_IID` and `PIPELINE_ID` are read here and consumed later. An empty
+        one is not inert: `glab mr view ""` and `glab mr merge "" --yes` fall back
+        to the current branch's merge request, so a swallowed read acts on
+        something nobody named — the namespace check's original defect again.
+
+        Run rather than pattern-matched: asserting the line ends in `|| {` would
+        equally accept `|| { echo "oops"; }`, a guard that announces the failure
+        and then carries on.
+        """
+        stanza = _stanza_through(
+            _fenced_block(self._body(), marker), marker, "}"
+        )
+        proc = _run_recipe("set -o pipefail\n" + stanza, glab_153, GLAB_STUB_FAIL="1")
+
+        assert proc.returncode != 0, (
+            f"glab failed and the capture carried on: {stanza!r}"
+        )
+
+    def test_merge_fence_rechecks_the_id_it_did_not_set(self, glab_153):
+        """The capture and the merge live in different fences, and a fence is its
+        own `bash -c`. A guard in the capturing shell therefore protects nothing
+        at the point of use, so the merging fence has to re-check for itself."""
+        block = _fenced_block(self._body(), 'glab mr merge "$MR_IID"')
+        guard = next(
+            (line for line in block.splitlines() if "MR_IID" in line and "-n " in line),
+            None,
+        )
+        assert guard is not None, "the merging fence never checks that MR_IID is set"
+
+        proc = _run_recipe(guard, glab_153)
+        assert proc.returncode != 0, (
+            "an unset MR_IID did not stop the fence that merges on it"
+        )
+
+
+class TestCredentialFreeConfigs:
+    """ISSUE-270. A credential in a git config routes around the credential
+    helper the skill registers, and every worktree cut from the clone inherits
+    it. `git remote -v` and `git config --list` then print it into the model's
+    context as a matter of routine. The daemon strips these on the way in
+    (`istota.git_remote_scrub`); the body has to state the invariant and give
+    the model a check too, because the daemon's sweep runs at setup and the
+    model can be handed a repository at any point after that."""
+
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def _preflight(self) -> str:
+        return _extract("git config --list --includes | awk", "# end of the credential check")
+
+    def test_the_invariant_is_stated(self):
+        assert "**A remote URL never carries a credential.**" in self._body(), (
+            "the clone/push recipes are the step that would otherwise bake one in"
+        )
+
+    def test_the_body_never_shows_a_credentialed_url(self):
+        """The cheapest way to teach the model the wrong thing is an example.
+        No line of the body may carry a `scheme://user:secret@host` shape."""
+        for i, line in enumerate(self._body().splitlines(), 1):
+            assert not re.search(r"://[^/@\s]+:[^/@\s]+@", line), (
+                f"developer/skill.md:{i} shows a credentialed URL: {line!r}"
+            )
+
+    def test_flags_a_credentialed_remote_by_name_only(self, bare_clone):
+        """The fragment is *run*, not restated. It must print the setting's
+        name and never the value — echoing the value is the leak it looks for."""
+        _git(bare_clone, "remote", "add", "leaky",
+             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.leaky.url"]
+        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out
+
+    def test_is_silent_on_credential_free_remotes(self, bare_clone):
+        """A bare-username https remote and an scp-style ssh remote both
+        contain an `@` and neither carries a secret. Flagging them would make
+        the check noise the model learns to skip."""
+        _git(bare_clone, "remote", "add", "ssh", "git@github.com:ns/p.git")
+        _git(bare_clone, "remote", "add", "user", "https://oauth2@gitlab.com/ns/p.git")
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.strip() == "", f"false positive: {out!r}"
+
+    def test_catches_a_pushurl(self, bare_clone):
+        """`git remote -v` prints the pushurl on its own line, so a credential
+        there leaks exactly the same way."""
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+        _git(bare_clone, "config", "remote.origin.pushurl",
+             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.origin.pushurl"]
+
+    def test_catches_an_empty_username(self, bare_clone):
+        """`https://:tok@host/x` is a credential the daemon strips. A check
+        that misses it disagrees with the sweep it is documented to back up,
+        and the model-facing one is the weaker of the two."""
+        _git(bare_clone, "remote", "add", "leaky", "https://:glpat-xxxxxxxxxxxxxxxxxxxx@h/x.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.leaky.url"]
+
+    def test_catches_a_credential_riding_in_a_key(self, bare_clone):
+        """`url.<base>.insteadOf` puts the secret in the key, so `remote -v`
+        shows something clean while every fetch is rewritten through it."""
+        _git(bare_clone, "config",
+             "url.https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@example.com/.insteadOf",
+             "https://example.com/")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert "credential embedded in a config key" in out
+        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out, "the check printed the secret"
+
+    def test_catches_an_extraheader(self, bare_clone):
+        """An Authorization header never appears in a URL at all."""
+        _git(bare_clone, "config", "http.https://gitlab.com/.extraheader",
+             "AUTHORIZATION: basic eHh4eHh4eHh4")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["http.https://gitlab.com/.extraheader"]
+        assert "eHh4eHh4eHh4" not in out
+
+    def test_does_not_print_a_port_as_a_credential(self, bare_clone):
+        """`https://gitlab.com:8443/ns/p.git` has a colon before no `@` of its
+        own — a naive pattern reads the port as a password."""
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com:8443/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.strip() == "", f"false positive on a port: {out!r}"
