@@ -32,9 +32,27 @@ istota secret ensure --user alice --service monarch --key csrftoken  --value …
 
 Imports are content-hash deduped, so re-running one is safe.
 
+### Settling invoices from the feed
+
+A sync books incoming payments into the ledger. It also closes the invoice each one paid, where it can say which: a credit that fits exactly one open invoice — same amount, issued no later than the payment — marks that invoice paid. It records the payment directly rather than routing through `invoice paid`, because the sync has already written the income to the ledger and going through the command would post it twice.
+
+Anything ambiguous is reported for you to settle rather than guessed at. Two open invoices at the same amount, two credits fitting one invoice, or a credit that fits to the cent but predates the invoice — all are named in the output and left alone. Three shapes of invoice are excluded from matching outright, because for each the total on hand is not the amount owed: partly paid ones, fully paid ones, and any invoice with a line whose service has left the config, which makes it look cheaper than it is.
+
+`--tolerance` allows for a wire fee. `--no-match-invoices` turns matching off. `invoice unpaid` undoes a match that was wrong — `invoice void` is not the inverse, since it clears the invoice number and un-invoices the work.
+
+Matching runs once across all sync profiles rather than once per profile. `sync_all_profiles` fetches from Monarch once and dedups per profile, so two profiles can each book a credit fitting the same invoice; a per-profile pass would let whichever ran first settle it and leave the other unreported, with profile order deciding the winner.
+
 ## Business
 
 The web dashboard's Business section is **Work | Invoices | Clients**. Work is a full CRUD surface over the file-based work-entry store — entries addressed by stable id, with per-entry etags so a concurrent agent edit conflicts loudly instead of being silently reverted. Clients, together with the money settings page, is the CRUD surface over the invoicing config (clients, entities, services), so nothing about invoicing needs the CLI.
+
+### Invoice dates
+
+An invoice is a set of work entries sharing an `invoice` string. Entries carry an `invoice_date`, stamped inside the same work-lock acquisition as the number so the two cannot diverge, and cleared by `void_invoice`. Generation passes the date it already put on the PDF rather than taking a fresh `date.today()`, which would disagree with the document across midnight. One function, `invoice_issue_date`, is what the matcher and both invoice lists read, so they cannot drift apart.
+
+Both invoice lists used to show the *earliest* work on an invoice under a column labelled its date. They show the issue date now.
+
+Invoices raised before this have no date and nothing can reconstruct one, so they keep a fallback: the latest work billed on them, which is also what their listed date now shows. Hand-attaching a forgotten entry to an already-issued invoice inherits that invoice's date rather than stamping today — otherwise the whole invoice moves forward and the bound passes the payment that actually settled it. An entry joining a pre-field invoice stays unstamped instead of being handed a synthesized date.
 
 ## Taxes
 

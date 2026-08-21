@@ -22,6 +22,25 @@ istota show <task-id>                        # Task details
 istota run [--once] [--briefings] [--dry-run]  # Process pending tasks
 ```
 
+### Usage and cost
+
+```bash
+istota usage                                 # Last 30 days, one total
+istota usage --days 7                        # Window size in days
+istota usage --since 2026-08-01 --until 2026-08-14   # Explicit window (--until inclusive)
+istota usage --by day|user|model|source|brain|origin  # Group results
+istota usage -u USER                         # Filter by user
+istota usage --brain native                  # Filter by brain kind
+istota usage --source talk                   # Filter by task source type
+istota usage --model MODEL                   # Filter by model
+istota usage --origin sleep_cycle            # Filter by where the call came from
+istota usage --json                          # Machine-readable
+```
+
+Operator-facing: it runs from the operator's shell, so `--user` is a convenience filter rather than a boundary. Filters combine with any grouping.
+
+A cost column shows a dollar figure only when every row in the group reports a real charged cost. A plan-equivalent or a catalog estimate renders as `—` with the basis named, and is never summed into a real figure — see [token usage and cost](../features/usage.md) for what each basis means and for `--origin`'s values.
+
 ### User management
 
 ```bash

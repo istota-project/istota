@@ -93,6 +93,10 @@ def _skip(reason: str, message: str, **extra):
     these, because none of them resolves by refusing to push — and a review that
     errors *does* block, so misfiling one here would strand finished work on a
     branch nobody is watching. A skipped review still counts as unreviewed.
+
+    Not the only producer of `skipped`: the engine returns it too, when every
+    reviewer failed (`review_failed` / `malformed_output`). Same reasoning,
+    reached after the run rather than before it.
     """
     logger.info(
         "code_review skipped (task=%s, reason=%s): %s",
@@ -184,20 +188,58 @@ def cmd_run(args):
     # learns about it even on a run those short-circuit — a warning that only
     # fires on the runs that were going to work is not much of a warning.
     proxy_ceiling = config.security.skill_proxy_timeout
-    agent_timeout = review_cfg.timeout_seconds
-    if proxy_ceiling and agent_timeout + ASSEMBLY_ALLOWANCE_SECONDS > proxy_ceiling:
+    # Coerced rather than trusted: nothing in the loader validates either value,
+    # and a float from the TOML would land in the envelope as a float where the
+    # doc promises whole seconds.
+    configured = int(review_cfg.timeout_seconds)
+    # Only the non-positive case is floored. A `timeout_seconds` of 0 or less
+    # otherwise reaches the brains, which disagree about what it means — the
+    # native one runs unbounded until the proxy kills the command, `claude_code`
+    # hands it to a `threading.Timer` and kills each agent at once — and neither
+    # is a review. A small *positive* budget is left alone: it is a choice an
+    # operator can legitimately make, and raising it would mean overriding the
+    # number the envelope reports in the same breath as reporting it.
+    agent_timeout = configured if configured > 0 else MIN_AGENT_TIMEOUT_SECONDS
+    # `> 0` rather than a truthiness test: a non-positive ceiling is a
+    # misconfiguration the proxy surfaces on its own by killing the command
+    # immediately, and reading it as "no ceiling" at least leaves the budget
+    # saying what was configured instead of blaming a clamp that never applied.
+    if proxy_ceiling > 0:
         # Clamped, not just warned about. Left alone, every agent would be given
         # a budget the proxy kills the whole command before it can spend, so
         # each review would die half-finished having paid for both agents.
         # Shrinking is the only outcome that returns anything.
-        agent_timeout = max(
+        #
+        # Downward only, and the floor bounds how far down rather than being
+        # applied to the result. Written the other way round — as
+        # `max(floor, ceiling - allowance)` over the configured value — it could
+        # *raise* a small budget: 25s under an 85s ceiling became 30s, which is
+        # not a clamp, and it made the fit strictly worse rather than better.
+        ceiling_budget = max(
             MIN_AGENT_TIMEOUT_SECONDS, proxy_ceiling - ASSEMBLY_ALLOWANCE_SECONDS
         )
+        agent_timeout = min(agent_timeout, ceiling_budget)
+        if proxy_ceiling - ASSEMBLY_ALLOWANCE_SECONDS < MIN_AGENT_TIMEOUT_SECONDS:
+            # The floor won, so the clamp could not deliver the fit it exists to
+            # produce and the command will overrun the ceiling anyway. Worth its
+            # own line: the caller gets no envelope at all in this case — the
+            # proxy kills the command with empty stdout — so the log is the only
+            # place the deployment can say what went wrong.
+            logger.warning(
+                "security.skill_proxy_timeout of %ss cannot fit a review at all: "
+                "%ss of assembly plus the %ss agent floor needs %ss. The proxy "
+                "will kill this command before it answers. Raise "
+                "skill_proxy_timeout.",
+                proxy_ceiling, ASSEMBLY_ALLOWANCE_SECONDS,
+                MIN_AGENT_TIMEOUT_SECONDS,
+                ASSEMBLY_ALLOWANCE_SECONDS + MIN_AGENT_TIMEOUT_SECONDS,
+            )
+    if agent_timeout < configured:
         logger.warning(
             "code_review timeout_seconds of %ss plus %ss of assembly exceeds "
             "security.skill_proxy_timeout of %ss, so each agent is being given "
             "%ss instead. Lower timeout_seconds or raise skill_proxy_timeout.",
-            review_cfg.timeout_seconds, ASSEMBLY_ALLOWANCE_SECONDS,
+            configured, ASSEMBLY_ALLOWANCE_SECONDS,
             proxy_ceiling, agent_timeout,
         )
 
@@ -374,6 +416,40 @@ def cmd_run(args):
             )
     envelope["calls_used"] = calls_used
     envelope["max_calls"] = cap
+    # `agent_timeout_seconds` comes back from the engine, which was handed the
+    # already-clamped value. These two are what make it readable: without the
+    # configured number there is nothing to compare it against, and the clamp's
+    # own warning goes to the daemon journal, which the model that invoked this
+    # CLI has no route to. Derived from the comparison rather than from a flag
+    # set at the clamp, and `<` rather than `!=`, so that the two cases where
+    # the clamp runs without costing anything — a budget already at the floor,
+    # and one the floor raised — report honestly. The question a caller is
+    # asking is "did this review run short", not "was the branch taken".
+    envelope["agent_timeout_configured"] = configured
+    envelope["agent_timeout_clamped"] = agent_timeout < configured
+    if envelope["status"] != "ok":
+        # The guard refusals above each log through `_fail` / `_skip`; a run that
+        # got as far as calling models and came back with nothing had no line at
+        # any level, because the engine does not log and `invoke` logs only a
+        # call that failed — a reviewer answering unparseably is `success=True`.
+        # That silence is the expensive part. A broken adapter makes *every*
+        # review on the deployment come back this way (ISSUE-271), and since
+        # this status no longer blocks the push, nothing else would show it: the
+        # branch lands unreviewed, the breaker sees a healthy call, and a
+        # scheduled review exits 0 and never trips the auto-disable counter.
+        # WARNING because one of these is a bad day and a run of them is an
+        # outage, and the reason slug is what tells them apart.
+        logger.warning(
+            "code_review returned no findings (task=%s, status=%s, reason=%s, "
+            "rounds=%s): %s",
+            os.environ.get("ISTOTA_TASK_ID", "-"), envelope["status"],
+            envelope.get("reason", "-"), rounds,
+            str(envelope.get("error", ""))[:200],
+        )
+    # Kept on the envelope rather than popped with the charge: it is what
+    # separates a skip that spent model calls from one that refused before
+    # spending any, and those two read identically otherwise.
+    envelope["rounds"] = rounds
     _emit(envelope, 1 if envelope["status"] == "error" else 0)
 
 

@@ -30,11 +30,12 @@ When you connect it to Nextcloud, it integrates as a regular Nextcloud user: fil
 ## Features at a glance
 
 - **Messaging** -- Nextcloud Talk (DMs and group rooms), in-app web chat (always-on rooms with live streaming), email (IMAP/SMTP with threading), TASKS.md file polling, interactive REPL, CLI
-- **Skills** -- 34 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Beancount accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, health tracking, and more
+- **Skills** -- 36 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Beancount accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, health tracking, and more
 - **Memory** -- Per-user persistent memory (with op-based nightly curation), per-channel memory, dated memory files, BM25 + vector search, temporal knowledge graph
 - **Scheduling** -- Cron jobs via CRON.md, natural-language reminders, scheduled briefings with calendar/markets/headlines/news/todos
 - **Multi-user** -- Per-user config, resource permissions, worker pools, filesystem sandboxing, admin/non-admin isolation
 - **Security** -- Bubblewrap sandbox, credential stripping, network isolation via CONNECT proxy, deferred DB writes
+- **Spend visibility** -- Per-attempt token and cost accounting across every brain, on the CLI and the admin dashboard, covering the daemon's own model calls as well as user tasks
 - **Constitution** -- [Emissaries](https://github.com/istota-project/emissaries) layer defining how the agent handles data, privacy, and responsibility
 
 ## Quick links
