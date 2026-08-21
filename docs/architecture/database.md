@@ -85,6 +85,21 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 | `heartbeat_state` | Per-check monitoring state (timestamps, consecutive errors) |
 | `reminder_state` | Shuffle queue for briefing reminders |
 
+### Usage
+
+| Table | Purpose |
+|---|---|
+| `task_usage` | One row per brain attempt — tokens, cost, timing, and the identity to attribute them |
+| `task_usage_models` | Per-model split of one `task_usage` row, where the brain reports one |
+
+`task_usage` is deliberately **not** foreign-keyed to `tasks`. `cleanup_old_tasks` deletes tasks at `task_retention_days` (7) and a usage row must outlive that, at `usage_retention_days` (180), so `task_id` dangles afterwards. It is NULL outright for the daemon's own model calls, which have no task — the sleep cycle, shared briefing blocks, health OCR, code review — and `origin` names which. The denormalized identity columns (`user_id`, `source_type`, `brain_kind`, `model`) keep every row self-sufficient, so no aggregate ever joins `tasks`. `tasks.id` is `AUTOINCREMENT`, so a dangling `task_id` can never be reassigned.
+
+Two traps in this table. Every date comparison against it uses the ISO-Z format `created_at` stores, **not** the `datetime('now')` idiom `cleanup_old_tasks` uses — `' '` (0x20) sorts below `'T'` (0x54), so mixing the two silently drops boundary-day rows instead of raising. And every token aggregate must filter on `has_totals`: a run killed before its result frame has meaningless zeroes in the token columns.
+
+The `task_usage_models` foreign key is documentation only. Istota never sets `PRAGMA foreign_keys=ON`, so `prune_old_usage` deletes children explicitly and parents second, on one connection.
+
+See [token usage and cost](../features/usage.md) for what is recorded and how it is read back.
+
 ### Tracking
 
 | Table | Purpose |
@@ -188,6 +203,7 @@ get_conversation_history(conn, token, exclude_task_id=None, limit=10)
 expire_stale_confirmations(conn, timeout_minutes)  # -> list of expired tasks
 fail_ancient_pending_tasks(conn, fail_hours)        # -> list of failed tasks
 cleanup_old_tasks(conn, retention_days)             # -> count deleted
+prune_old_usage(conn, retention_days)               # -> count deleted (children first)
 ```
 
 ## Single source of truth for `Task` columns

@@ -360,9 +360,18 @@ class TestBodiesDoNotContradict:
 class TestLoadBudget:
     """Goal 5: the split grows what a coding task loads, so the ceiling is
     stated rather than assumed. Parity with the pre-split single file is not
-    achievable — `developer` sheds ~52 lines and gains more than that back."""
+    achievable — `developer` sheds ~52 lines and gains more than that back.
 
-    BUDGET_LINES = 675
+    The ceiling is 700 because that is the figure `.claude/rules/skills.md`
+    already documents as the contract ("held under a 700-line budget"). It sat
+    at 675 here, below the number the rules file states, and four fixes to the
+    recipes landing in one week (ISSUE-264, -267, -268, -269) ran it out. Fitting
+    them meant deleting reviewed content from a recipe the model executes, so
+    the test moved to the documented number rather than the recipes shrinking to
+    an undocumented one. Raise this again only by changing the rules file first.
+    """
+
+    BUDGET_LINES = 700
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
@@ -418,20 +427,42 @@ def _extract(marker: str, stop: str) -> str:
     return "\n".join(body[start:end + 1])
 
 
-def _run_fragment(fragment: str, bare: Path) -> str:
+def _run_fragment(fragment: str, bare: Path, **env: str) -> str:
     proc = subprocess.run(
         ["bash", "-c", fragment],
         capture_output=True, text=True,
-        env={**os.environ, **GIT_ISOLATION, "BARE_DIR": str(bare)},
+        env={**os.environ, **GIT_ISOLATION, "BARE_DIR": str(bare), **env},
     )
     assert proc.returncode == 0, f"fragment failed:\n{fragment}\n{proc.stderr}"
     return proc.stdout
 
 
+# The always-run block that brings any clone to the invariant: origin/HEAD
+# resolves, HEAD is a refs/heads/ ref that does not. Extracted as one piece
+# because its three steps depend on each other's variables.
+_INVARIANT_BLOCK = ("rev-parse -q --verify origin/HEAD", "done")
+
+
+def _drop_origin_head(bare: Path) -> None:
+    """Remove `refs/remotes/origin/HEAD` if this git created one on fetch.
+
+    Git 2.48 learned to write it during `fetch`; the devbox runs git 2.39,
+    which does not. Normalising to *absent* is what makes these tests say the
+    same thing on both, rather than passing on the developer's machine because
+    a newer git quietly did the recipe's job for it.
+    """
+    subprocess.run(
+        ["git", "-C", str(bare), "symbolic-ref", "-d", "refs/remotes/origin/HEAD"],
+        capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+    )
+
+
 @pytest.fixture
 def bare_clone(tmp_path) -> Path:
-    """A bare clone in the shape `developer/skill.md` documents: remote-tracking
-    refspec configured, fetched, HEAD repointed at `refs/remotes/origin/*`."""
+    """A bare clone in the shape clones made before ISSUE-269 are still in:
+    remote-tracking refspec configured, fetched, HEAD pointed into
+    `refs/remotes/origin/*`. The clone block overwrites HEAD when a test runs
+    it; the repair path is what has to cope with a clone left like this."""
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     _git(upstream, "init", "-q", "-b", "main", ".")
@@ -452,27 +483,45 @@ class TestBareCloneRecipe:
 
     def test_fossil_deletion_survives_the_repointed_head(self, bare_clone):
         """ISSUE-125 deletes the clone-day `refs/heads/*` fossils, but the step
-        before it points HEAD at `refs/remotes/origin/main`. Every `git branch`
-        subcommand then fails with `fatal: HEAD not found below refs/heads!`
-        before deleting anything, so the fossils the loop exists to remove
-        survived every clone."""
+        before it used to point HEAD at `refs/remotes/origin/main`. Every `git
+        branch` subcommand then failed with `fatal: HEAD not found below
+        refs/heads!` before deleting anything, so the fossils the loop exists to
+        remove survived every clone."""
         assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
 
-        _run_fragment(_extract("CHECKED_OUT=$(git -C", "done"), bare_clone)
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
 
         refs = _git(bare_clone, "for-each-ref", "--format=%(refname)")
         assert "refs/heads/main" not in refs, f"clone-day fossil survived: {refs}"
         assert "refs/remotes/origin/main" in refs, "the remote-tracking ref must remain"
 
-    def test_branch_d_would_not_have_worked(self, bare_clone):
-        """The test above passes trivially if someone swaps the delete back to
-        `branch -D`, so pin the reason: `branch -D` really does fail here."""
-        proc = subprocess.run(
-            ["git", "-C", str(bare_clone), "branch", "-D", "main"],
-            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
-        )
-        assert proc.returncode != 0
-        assert "HEAD not found below refs/heads" in proc.stderr
+    def test_the_loop_deletes_the_head_that_head_names(self, bare_clone):
+        """The block points HEAD at `refs/heads/$DEFAULT` *before* the loop
+        runs, so the ref the loop must drop is the one HEAD names. Deleting it
+        is the step that leaves HEAD unborn; a delete that refused here would
+        put the fossil back within reach of `git show`."""
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
+
+        assert "refs/heads/main" not in _git(bare_clone, "for-each-ref", "--format=%(refname)")
+        assert _git(bare_clone, "symbolic-ref", "HEAD").strip() == "refs/heads/main"
+
+    def test_a_task_branch_survives_the_loop_on_an_existing_clone(self, bare_clone, tmp_path):
+        """On a clone that already exists, `refs/heads/` holds the branch of
+        every worktree ever made in it — including one whose worktree was
+        pruned, which may be the only copy of that work. Only the ref HEAD
+        names is a fossil there, and a live worktree's branch is skipped on
+        both paths."""
+        live = tmp_path / "live-worktree"
+        _git(bare_clone, "symbolic-ref", "HEAD", "refs/heads/main")
+        _git(bare_clone, "worktree", "add", "-q", "-b", "istota/9-live", str(live), "origin/main")
+        _git(bare_clone, "branch", "istota/8-pruned", "origin/main")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        refs = _git(bare_clone, "for-each-ref", "--format=%(refname)", "refs/heads/")
+        assert "refs/heads/istota/8-pruned" in refs, f"unpushed task branch deleted: {refs}"
+        assert "refs/heads/istota/9-live" in refs, f"live worktree branch deleted: {refs}"
+        assert "refs/heads/main" not in refs, f"the fossil HEAD names survived: {refs}"
 
     def test_default_branch_falls_back_when_origin_head_is_absent(self, bare_clone):
         """`symbolic-ref ... | sed ... || echo "main"` takes the *pipeline's*
@@ -481,7 +530,7 @@ class TestBareCloneRecipe:
         created from `origin/`, an unknown revision. `refs/remotes/origin/HEAD`
         is absent on any clone made before git 2.48, so this was the ordinary
         path rather than an edge case."""
-        _git(bare_clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+        _drop_origin_head(bare_clone)
 
         fragment = _extract(
             "symbolic-ref --short refs/remotes/origin/HEAD", "DEFAULT_BRANCH:-main"
@@ -504,6 +553,96 @@ class TestBareCloneRecipe:
 
         assert out.strip() == "master", f"origin/HEAD ignored, got {out.strip()!r}"
 
+    def _assert_invariant(self, bare: Path, branch: str = "main") -> None:
+        """Both halves, stated once: origin/HEAD resolves, HEAD is a
+        `refs/heads/` ref that does not."""
+        assert _git(bare, "rev-parse", "--verify", "origin/HEAD").strip()
+        assert _git(bare, "symbolic-ref", "HEAD").strip() == f"refs/heads/{branch}"
+        proc = subprocess.run(
+            ["git", "-C", str(bare), "rev-parse", "--verify", branch],
+            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+        )
+        assert proc.returncode != 0, f"a local `{branch}` resolved; the fossil is readable"
+
+    def test_worktree_add_survives_the_block(self, bare_clone, tmp_path):
+        """ISSUE-269. `worktree add -b` writes a new local head and resolves
+        HEAD while doing it, so a HEAD under `refs/remotes/` aborts it with
+        `fatal: HEAD not found below refs/heads!` and no worktree is created —
+        the very next step of the lifecycle has nothing to work in."""
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
+
+        work = tmp_path / "project--task"
+        proc = subprocess.run(
+            ["git", "-C", str(bare_clone), "worktree", "add", "-b", "istota/1-slug",
+             str(work), "origin/main"],
+            capture_output=True, text=True, env={**os.environ, **GIT_ISOLATION},
+        )
+        assert proc.returncode == 0, f"worktree add failed:\n{proc.stderr}"
+        assert (work / ".git").exists(), "worktree directory was not created"
+
+    def test_a_fresh_clone_reaches_the_invariant(self, bare_clone):
+        """Both halves at once. Moving HEAD back below `refs/heads/` must not
+        resurrect a *readable* fossil — it stays unborn, so naming a local
+        branch still errors instead of returning clone-day bytes (ISSUE-125),
+        and `origin/HEAD` is established because `clone --bare` never writes
+        it and git only started doing so on fetch in 2.48."""
+        _drop_origin_head(bare_clone)
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone, FRESH="1")
+
+        self._assert_invariant(bare_clone)
+
+    def test_an_existing_clone_reaches_the_invariant(self, bare_clone, tmp_path):
+        """The clone step sits inside `if [ ! -d "$BARE_DIR" ]`, so a clone that
+        already exists — the production one did — is never revisited by it. The
+        block runs on every pass for that reason, and has to land the same
+        invariant from the broken shape, fossil included."""
+        _drop_origin_head(bare_clone)
+        assert _git(bare_clone, "symbolic-ref", "HEAD").strip() == "refs/remotes/origin/main"
+        assert "refs/heads/main" in _git(bare_clone, "for-each-ref", "--format=%(refname)")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        self._assert_invariant(bare_clone)
+        work = tmp_path / "project--task"
+        _git(bare_clone, "worktree", "add", "-b", "istota/1-slug", str(work), "origin/main")
+
+    def test_a_dangling_origin_head_is_refreshed(self, bare_clone):
+        """`origin/HEAD` survives the upstream default branch being renamed, so
+        it can name a ref that no longer exists — `code_review`'s `_default_base`
+        carries the same note. A presence check reads that as healthy, and the
+        block would then point HEAD at a branch nothing can resolve and hand the
+        worktree step a base that does not exist."""
+        _git(bare_clone, "update-ref", "refs/remotes/origin/gone", "refs/remotes/origin/main")
+        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
+        _git(bare_clone, "update-ref", "-d", "refs/remotes/origin/gone")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        self._assert_invariant(bare_clone)
+
+    def test_a_detached_head_is_repaired_quietly(self, bare_clone):
+        """A bare HEAD holding a raw sha is a state to repair. `symbolic-ref`
+        without `-q` prints `fatal: ref HEAD is not a symbolic ref` while doing
+        it, and the lifecycle tells the model to stop on failure output."""
+        _git(bare_clone, "update-ref", "--no-deref", "HEAD", "refs/remotes/origin/main")
+
+        out = _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+
+        self._assert_invariant(bare_clone)
+        assert "fatal:" not in out
+
+    def test_the_block_is_idempotent_and_respects_master(self, bare_clone):
+        """It runs on every pass, so a second pass over a healthy clone has to
+        change nothing — and must read the default branch rather than assume
+        `main` on a repository using `master`."""
+        _git(bare_clone, "update-ref", "refs/remotes/origin/master", "refs/remotes/origin/main")
+        _git(bare_clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+        self._assert_invariant(bare_clone, branch="master")
+        _run_fragment(_extract(*_INVARIANT_BLOCK), bare_clone)
+        self._assert_invariant(bare_clone, branch="master")
 
 def _fenced_block(body: str, marker: str) -> str:
     """The whole ``` block containing `marker`.
@@ -758,3 +897,107 @@ class TestGlabFieldReads:
         assert proc.returncode != 0, (
             "an unset MR_IID did not stop the fence that merges on it"
         )
+
+
+class TestCredentialFreeConfigs:
+    """ISSUE-270. A credential in a git config routes around the credential
+    helper the skill registers, and every worktree cut from the clone inherits
+    it. `git remote -v` and `git config --list` then print it into the model's
+    context as a matter of routine. The daemon strips these on the way in
+    (`istota.git_remote_scrub`); the body has to state the invariant and give
+    the model a check too, because the daemon's sweep runs at setup and the
+    model can be handed a repository at any point after that."""
+
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def _preflight(self) -> str:
+        return _extract("git config --list --includes | awk", "# end of the credential check")
+
+    def test_the_invariant_is_stated(self):
+        assert "**A remote URL never carries a credential.**" in self._body(), (
+            "the clone/push recipes are the step that would otherwise bake one in"
+        )
+
+    def test_the_body_never_shows_a_credentialed_url(self):
+        """The cheapest way to teach the model the wrong thing is an example.
+        No line of the body may carry a `scheme://user:secret@host` shape."""
+        for i, line in enumerate(self._body().splitlines(), 1):
+            assert not re.search(r"://[^/@\s]+:[^/@\s]+@", line), (
+                f"developer/skill.md:{i} shows a credentialed URL: {line!r}"
+            )
+
+    def test_flags_a_credentialed_remote_by_name_only(self, bare_clone):
+        """The fragment is *run*, not restated. It must print the setting's
+        name and never the value — echoing the value is the leak it looks for."""
+        _git(bare_clone, "remote", "add", "leaky",
+             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.leaky.url"]
+        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out
+
+    def test_is_silent_on_credential_free_remotes(self, bare_clone):
+        """A bare-username https remote and an scp-style ssh remote both
+        contain an `@` and neither carries a secret. Flagging them would make
+        the check noise the model learns to skip."""
+        _git(bare_clone, "remote", "add", "ssh", "git@github.com:ns/p.git")
+        _git(bare_clone, "remote", "add", "user", "https://oauth2@gitlab.com/ns/p.git")
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.strip() == "", f"false positive: {out!r}"
+
+    def test_catches_a_pushurl(self, bare_clone):
+        """`git remote -v` prints the pushurl on its own line, so a credential
+        there leaks exactly the same way."""
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com/ns/p.git")
+        _git(bare_clone, "config", "remote.origin.pushurl",
+             "https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@gitlab.com/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.origin.pushurl"]
+
+    def test_catches_an_empty_username(self, bare_clone):
+        """`https://:tok@host/x` is a credential the daemon strips. A check
+        that misses it disagrees with the sweep it is documented to back up,
+        and the model-facing one is the weaker of the two."""
+        _git(bare_clone, "remote", "add", "leaky", "https://:glpat-xxxxxxxxxxxxxxxxxxxx@h/x.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["remote.leaky.url"]
+
+    def test_catches_a_credential_riding_in_a_key(self, bare_clone):
+        """`url.<base>.insteadOf` puts the secret in the key, so `remote -v`
+        shows something clean while every fetch is rewritten through it."""
+        _git(bare_clone, "config",
+             "url.https://oauth2:glpat-xxxxxxxxxxxxxxxxxxxx@example.com/.insteadOf",
+             "https://example.com/")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert "credential embedded in a config key" in out
+        assert "glpat-xxxxxxxxxxxxxxxxxxxx" not in out, "the check printed the secret"
+
+    def test_catches_an_extraheader(self, bare_clone):
+        """An Authorization header never appears in a URL at all."""
+        _git(bare_clone, "config", "http.https://gitlab.com/.extraheader",
+             "AUTHORIZATION: basic eHh4eHh4eHh4")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.split() == ["http.https://gitlab.com/.extraheader"]
+        assert "eHh4eHh4eHh4" not in out
+
+    def test_does_not_print_a_port_as_a_credential(self, bare_clone):
+        """`https://gitlab.com:8443/ns/p.git` has a colon before no `@` of its
+        own — a naive pattern reads the port as a password."""
+        _git(bare_clone, "remote", "set-url", "origin", "https://gitlab.com:8443/ns/p.git")
+
+        out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
+
+        assert out.strip() == "", f"false positive on a port: {out!r}"

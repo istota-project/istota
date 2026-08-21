@@ -93,6 +93,24 @@ The `health` skill exposes `istota-skill health <subcommand>`. Key subcommands:
 
 Attaching takes a `TYPE:ID` token: `istota-skill health attach-document --path ~/inbox/card.jpg --to immunization:5`. Types are `encounter`, `diagnosis`, `immunization`. The agent attaches files the user supplied; deleting a document stays a web-UI action behind a confirmation, since it removes the file from every record it is attached to.
 
+## Immunization coverage status
+
+`coverage` resolves each vaccine in the registry to one of seven states, from its schedule kind and the doses on record:
+
+| Status | Meaning |
+|---|---|
+| `up_to_date` | Covered, with nothing due inside the 30-day window |
+| `due_soon` | Next dose falls inside the 30-day window (`annual`, `every_10y`) |
+| `overdue` | Next dose has passed (`annual`, `every_10y`) |
+| `series_incomplete` | The series was started and has doses left |
+| `never_recorded` | No dose of this vaccine has been recorded |
+| `expired` | A `travel_pre_trip` vaccine whose interval has run out |
+| `risk_based` | Recommended on risk factors rather than a schedule, with no dose recorded — never auto-flagged as missing |
+
+`series_incomplete` means what it says: you started the series and have doses left. A series vaccine with zero recorded doses is `never_recorded`. It used to read part-done from the start, so an empty immunizations page opened on ten vaccines that looked half-finished, and the health summary the model reads listed all ten as needing action.
+
+A schedule kind the code does not recognise falls back to `never_recorded` with no dose and `up_to_date` with one.
+
 All mutating operations are deferred under sandbox (written to `task_<id>_health_ops.json`, replayed post-task by the scheduler).
 
 ## Privacy

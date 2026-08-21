@@ -121,6 +121,7 @@ When `skill_proxy_enabled = true`, every env var declared with `sensitive: true`
 - `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`
 - `TUMBLR_API_KEY`
+- `ISTOTA_BRAIN_NATIVE_API_KEY` — declared by `code_review`, which calls a model itself
 - `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses, hard-blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED`
 
 The proxy injects each credential only into the skill CLIs whose manifest declared it (`derive_skill_credential_map`). Authorization is based on credential presence in the task env — not skill selection — so any skill whose credentials the user has configured can request them at runtime. See [security: credential proxy](../deployment/security.md#credential-proxy) for the authorization model and rejection logging. See [credentials](../configuration/credentials.md) for the full two-tier credential inventory and provisioning guide.
