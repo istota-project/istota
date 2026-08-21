@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import host_pressure, scheduler
+from istota import db, host_pressure, scheduler
 from istota.config import Config, SchedulerConfig
 from istota.scheduler import WorkerPool, _check_host_pressure
 
@@ -289,6 +289,72 @@ class TestEscalatedWording:
 
         assert "no istota worker" not in alert.call_args.args[-1].lower()
 
+    def test_a_held_backlog_is_not_reported_as_someone_elses_problem(self, config):
+        """The regression for keying the escalation on worker count.
+
+        Gating the claim paths drains the pool within `worker_idle_timeout`
+        (10s), far inside the cooldown window the duration arm compares against
+        (900s), so `active_count == 0` became true of *every* sustained squeeze
+        rather than only the ones istota is innocent of. Keyed on workers, this
+        alert would tell the operator to look off-box during exactly the
+        2026-08-20 shape — istota's own task allocated the memory, finished, and
+        left the residue. A queued backlog is the signal the gate does not
+        itself destroy.
+        """
+        import time as _time
+
+        pool = WorkerPool(config)
+        pool.update_pressure(STARVED)
+        pool.dispatch()
+        with pool._pressure_lock:
+            pool._gate_closed_since = _time.monotonic() - 1200.0
+
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, prompt="queued", user_id="alice")
+
+        with patch.object(host_pressure, "read_sample", return_value=STARVED), \
+             patch.object(host_pressure, "read_tmpfs_usage", return_value=[]), \
+             patch.object(host_pressure, "snapshot", return_value="host_pressure_snapshot"), \
+             patch.object(scheduler, "_send_operator_alert") as alert:
+            _check(config, pool, last_alert=0.0, now=1000.0)
+
+        message = alert.call_args.args[-1]
+        assert "not causing it" not in message
+        assert "queued and waiting for the gate" in message
+
+    def test_the_alert_does_not_consume_the_closed_since_clock(self, config):
+        """The wording path must ask the *pure* predicate.
+
+        `_admission_open()` stamps `_gate_closed_since` when it is None, so
+        asking it here would reset the clock read a few lines later and
+        suppress the escalation on any pass where the snapshot asked first.
+        """
+        pool = WorkerPool(config)
+        pool.update_pressure(STARVED)
+
+        with patch.object(host_pressure, "read_sample", return_value=STARVED), \
+             patch.object(host_pressure, "read_tmpfs_usage", return_value=[]), \
+             patch.object(host_pressure, "snapshot", return_value="host_pressure_snapshot"), \
+             patch.object(scheduler, "_send_operator_alert"):
+            _check(config, pool, last_alert=0.0, now=1000.0)
+
+        # Nothing on the alert path started the clock; only dispatch() does.
+        assert pool.gate_closed_seconds() == 0.0
+
+    def test_the_held_wording_covers_task_starts_not_just_workers(self, config):
+        """"New workers are held" was the same thread-vs-start conflation the
+        claim-path gate exists to fix."""
+        pool = WorkerPool(config)
+        with patch.object(host_pressure, "read_sample", return_value=STARVED), \
+             patch.object(host_pressure, "read_tmpfs_usage", return_value=[]), \
+             patch.object(host_pressure, "snapshot", return_value="host_pressure_snapshot"), \
+             patch.object(scheduler, "_send_operator_alert") as alert:
+            _check(config, pool, last_alert=0.0, now=1000.0)
+
+        message = alert.call_args.args[-1]
+        assert "No new task starts" in message
+        assert "New workers are held" not in message
+
     def test_ordinary_wording_when_the_gate_just_closed(self, config):
         pool = WorkerPool(config)
         with patch.object(host_pressure, "read_sample", return_value=STARVED), \
@@ -388,7 +454,7 @@ class TestAlertBodyMatchesReality:
              patch.object(scheduler, "_send_operator_alert") as alert:
             _check(config, pool, last_alert=0.0, now=1000.0)
 
-        assert "held" in self._message(alert).lower()
+        assert "no new task starts" in self._message(alert).lower()
 
     def test_a_failed_snapshot_is_not_advertised_as_present(self, config):
         """Goal 2 of the spec is that an incident is attributable from the logs.

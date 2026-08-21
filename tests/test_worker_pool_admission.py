@@ -22,6 +22,7 @@ covered against fixture ``/proc`` trees in ``test_host_pressure.py``.
 from __future__ import annotations
 
 import logging
+import time
 from unittest.mock import patch
 
 from istota import db, host_pressure
@@ -388,5 +389,203 @@ class TestGateClosedDuration:
         pool.update_pressure(HEALTHY)
         pool.dispatch()
         assert pool.gate_closed_seconds() == 0.0
+
+        pool.shutdown()
+
+
+class TestPublicPredicateIsSideEffectFree:
+    """`admission_open()` is what a *worker* consults before each claim.
+
+    It has to answer the same question as the dispatch-side check without
+    touching the closed-since clock or the cooldown-limited log line. Workers
+    poll it on the idle cadence — several times a second, per worker — so a
+    version that logged or stamped would flood the log and would keep
+    re-arming state that belongs to dispatch's once-per-tick view.
+    """
+
+    def test_it_agrees_with_the_dispatch_side_check(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        pool = WorkerPool(config)
+
+        pool.update_pressure(HEALTHY)
+        assert pool.admission_open() is True
+
+        pool.update_pressure(STARVED)
+        assert pool.admission_open() is False
+
+    def test_it_does_not_stamp_the_closed_since_clock(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        pool = WorkerPool(config)
+        pool.update_pressure(STARVED)
+
+        for _ in range(5):
+            assert pool.admission_open() is False
+
+        # Only dispatch() starts that clock; the worker's poll must not.
+        assert pool.gate_closed_seconds() == 0.0
+
+    def test_it_does_not_log(self, db_path, tmp_path, caplog):
+        config = _config(db_path, tmp_path)
+        pool = WorkerPool(config)
+        pool.update_pressure(STARVED)
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            for _ in range(20):
+                pool.admission_open()
+
+        assert [
+            r for r in caplog.records
+            if r.message.startswith("dispatch_admission_closed")
+        ] == []
+
+    def test_it_fails_open_with_no_reading(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        pool = WorkerPool(config)
+        assert pool.admission_open() is True
+
+
+class TestLingeringWorkerRespectsTheGate:
+    """The gap the staging exercise would have found.
+
+    `dispatch()` bounds new worker *threads*. A worker already alive claims
+    follow-up tasks on its own, consulting nothing, so before this change a
+    squeezed host kept starting work in whatever slots existed — and both the
+    spec's C2 text and `.claude/rules/scheduler.md` said the task would stay
+    `pending`. This drives the real worker loop against a real DB, which is the
+    only layer where that divergence is visible.
+    """
+
+    def _pending_ids(self, db_path):
+        with db.get_db(db_path) as conn:
+            return [
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM tasks WHERE status = 'pending' ORDER BY id"
+                ).fetchall()
+            ]
+
+    def _claiming_stub(self, db_path):
+        """A `process_one_task` that really claims a row.
+
+        Patching `process_one_task` wholesale — the pattern the dispatch tests
+        above use — makes a worker-level test vacuous: the worker never touches
+        the DB, so pending rows are trivially unchanged whether or not the gate
+        works. This stub does the one thing under test, an actual claim, and
+        marks the row done.
+        """
+
+        def _run(config, user_id=None, queue=None):
+            with db.get_db(db_path) as conn:
+                task = db.claim_task(
+                    conn, worker_id="test", user_id=user_id, queue=queue
+                )
+                if task is None:
+                    return None
+                conn.execute(
+                    "UPDATE tasks SET status = 'completed' WHERE id = ?", (task.id,)
+                )
+                conn.commit()
+                return (task.id, True)
+
+        return _run
+
+    def test_a_parked_worker_does_not_claim_while_the_gate_is_shut(
+        self, db_path, tmp_path
+    ):
+        config = _config(
+            db_path, tmp_path, worker_idle_poll_interval=0.02, worker_idle_timeout=5
+        )
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="first", user_id="alice")
+
+        pool = WorkerPool(config)
+        pool.update_pressure(HEALTHY)
+        with patch("istota.scheduler.process_one_task", self._claiming_stub(db_path)):
+            pool.dispatch()
+            assert pool.active_count >= 1
+
+            # Let it drain the first task and settle into the idle wait.
+            deadline = time.monotonic() + 5
+            while self._pending_ids(db_path) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert self._pending_ids(db_path) == []
+
+            # Shut the gate *before* the new task exists, so the worker is
+            # already refusing rather than racing the insert.
+            pool.update_pressure(STARVED)
+            time.sleep(0.1)
+            assert pool.active_count >= 1, "worker should still be lingering"
+
+            with db.get_db(db_path) as conn:
+                db.create_task(conn, prompt="second", user_id="alice")
+            queued = self._pending_ids(db_path)
+            assert queued, "the new task should be pending"
+
+            # Several idle polls' worth. The worker is alive and the queue is
+            # non-empty; nothing but the gate is stopping it.
+            time.sleep(0.3)
+            assert self._pending_ids(db_path) == queued
+
+        pool.shutdown()
+
+    def test_it_claims_again_once_the_gate_reopens(self, db_path, tmp_path):
+        """The hold is transient here too — otherwise it is a drop, not a gate."""
+        config = _config(
+            db_path, tmp_path, worker_idle_poll_interval=0.02, worker_idle_timeout=30
+        )
+        pool = WorkerPool(config)
+        pool.update_pressure(HEALTHY)
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="first", user_id="alice")
+
+        with patch("istota.scheduler.process_one_task", self._claiming_stub(db_path)):
+            pool.dispatch()
+            deadline = time.monotonic() + 5
+            while self._pending_ids(db_path) and time.monotonic() < deadline:
+                time.sleep(0.02)
+
+            pool.update_pressure(STARVED)
+            time.sleep(0.1)
+            with db.get_db(db_path) as conn:
+                db.create_task(conn, prompt="second", user_id="alice")
+            time.sleep(0.2)
+            assert self._pending_ids(db_path), "held while shut"
+
+            pool.update_pressure(HEALTHY)
+            deadline = time.monotonic() + 5
+            while self._pending_ids(db_path) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert self._pending_ids(db_path) == []
+
+        pool.shutdown()
+
+    def test_the_worker_drains_rather_than_parking_forever(self, db_path, tmp_path):
+        """Sustained pressure empties the pool instead of holding idle threads."""
+        config = _config(
+            db_path, tmp_path, worker_idle_poll_interval=0.02, worker_idle_timeout=0.2
+        )
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="first", user_id="alice")
+
+        pool = WorkerPool(config)
+        pool.update_pressure(HEALTHY)
+        # Bounded rather than `return_value`: the fast path claims and loops
+        # while the gate is open, so an unbounded mock would accumulate a
+        # `call` object per iteration (each holding a config reference) for
+        # however long this thread is descheduled before the line below. A
+        # runaway allocation inside the memory-pressure suite would be a poor
+        # joke.
+        with patch(
+            "istota.scheduler.process_one_task",
+            side_effect=[(1, True), (1, True)] + [None] * 10_000,
+        ):
+            pool.dispatch()
+            assert pool.active_count >= 1
+
+            pool.update_pressure(STARVED)
+            deadline = time.monotonic() + 5
+            while pool.active_count and time.monotonic() < deadline:
+                time.sleep(0.02)
+
+            assert pool.active_count == 0
 
         pool.shutdown()
