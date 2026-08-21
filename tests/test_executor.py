@@ -763,6 +763,45 @@ class TestDeveloperEnvVars:
         assert policy["gitlab"]["real_bin"] == "/opt/glab"
         assert policy["gitlab"]["url"] == "https://gitlab.example.com"
 
+    def test_unconfigured_bin_path_resolves_from_the_daemon_path(self, tmp_path, monkeypatch):
+        """The binary and the config key ship separately: Ansible installs gh
+        into /usr/bin, but only a full play run rewrites config.toml, and the
+        auto-update cron pulls code without running Ansible. In that window the
+        key is absent, the code default stands, and nothing exists at it."""
+        import shutil as _shutil
+
+        from istota.skills import developer as _dev
+
+        monkeypatch.setattr(_dev.os.path, "exists", lambda p: False)
+        monkeypatch.setattr(
+            _shutil, "which", lambda name: f"/usr/bin/{name}",
+        )
+        config = self._make_config(tmp_path, github=True)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        assert policy["github"]["real_bin"] == "/usr/bin/gh"
+        assert policy["gitlab"]["real_bin"] == "/usr/bin/glab"
+
+    def test_explicit_bin_path_is_never_second_guessed(self, tmp_path, monkeypatch):
+        """An operator who named a path gets that path even when it is missing.
+        Silently exec'ing a different binary found on PATH is the wrong
+        surprise; the start-up warning is how a bad path gets reported."""
+        import shutil as _shutil
+
+        monkeypatch.setattr(_shutil, "which", lambda name: f"/usr/bin/{name}")
+        config = self._make_config(
+            tmp_path, github=True,
+            gh_bin_path="/opt/nonexistent/gh", glab_bin_path="/opt/nonexistent/glab",
+        )
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        assert policy["github"]["real_bin"] == "/opt/nonexistent/gh"
+        assert policy["gitlab"]["real_bin"] == "/opt/nonexistent/glab"
+
     def test_policy_grants_direct_tokens_only_with_the_proxy_off(self, tmp_path):
         """The permission lives in the policy file because that is the one
         input the model cannot redirect. An env flag would let it opt itself

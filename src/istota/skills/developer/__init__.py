@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
@@ -39,6 +40,40 @@ logger = logging.getLogger("istota.skills.developer")
 
 # Where the canonical wrapper lives, for copying into the task's .developer.
 _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
+
+
+# Last-resort defaults, used only when nothing is configured and the binary is
+# not on the daemon's PATH either. They are the conventional manual-install
+# location; the Ansible role installs from the Debian archive into /usr/bin and
+# renders that path into config.toml.
+_FALLBACK_BIN = {"gh": "/usr/local/bin/gh", "glab": "/usr/local/bin/glab"}
+
+
+def _resolve_real_bin(configured: str, name: str) -> str:
+    """Absolute path to the real forge binary the wrapper should exec.
+
+    An operator's explicit path is returned as given, existing or not: exec'ing
+    something *else* because the chosen one is missing would be the wrong
+    surprise, and ``_validate_forge_clis`` already warns at start-up. Only the
+    unchosen case falls back — an unset key, or the code default still standing
+    — and then to what the *daemon's own* PATH resolves. That lookup runs
+    host-side and never sees the model's environment, and the result is still
+    an absolute path baked into the policy file, so the wrapper's exec stays as
+    pinned as before.
+
+    The fallback exists because the two halves of this setting ship
+    separately. The Ansible role installs the binaries into ``/usr/bin``, but
+    only a full play run rewrites ``config.toml``, and the auto-update cron
+    pulls code without running Ansible at all. In that window ``gh_bin_path``
+    is absent from the file, the dataclass default stands, and every forge
+    command would otherwise exec a path that does not exist.
+    """
+    default = _FALLBACK_BIN[name]
+    if configured and configured != default:
+        return configured
+    if os.path.exists(default):
+        return default
+    return shutil.which(name) or default
 
 
 def _atomic_write(dest: Path, data: str, mode: int) -> Path:
@@ -234,12 +269,12 @@ def setup_env(ctx) -> dict[str, str]:
             FORGE_GITHUB: _section(
                 FORGE_GITHUB,
                 dev.github_url,
-                getattr(dev, "gh_bin_path", "") or "/usr/local/bin/gh",
+                _resolve_real_bin(getattr(dev, "gh_bin_path", ""), "gh"),
             ),
             FORGE_GITLAB: _section(
                 FORGE_GITLAB,
                 dev.gitlab_url,
-                getattr(dev, "glab_bin_path", "") or "/usr/local/bin/glab",
+                _resolve_real_bin(getattr(dev, "glab_bin_path", ""), "glab"),
             ),
         }
         _atomic_write(

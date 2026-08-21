@@ -76,7 +76,7 @@ Credential authorization is **decoupled from skill selection**. A skill is autho
 
 This avoids the failure mode where a keyword miss locks a skill out: e.g. a user has a Karakeep resource configured, the prompt didn't say "bookmark", `bookmarks` wasn't selected — under the old model the proxy would refuse to inject `KARAKEEP_API_KEY` and the CLI invocation would fail mysteriously. Under the new model the credential is injectable as soon as Claude decides it needs the bookmarks skill, regardless of selection.
 
-Doc-only skills (no CLI module) are eligible too: the `developer` skill consumes `GITLAB_TOKEN`/`GITHUB_TOKEN` via `credential-fetch` from the git credential helper and the `gitlab-api`/`github-api` wrappers its `setup_env` hook bind-mounts into the sandbox. Gating authorization on `cli=true` (the prior heuristic) would lock it out.
+Doc-only skills (no CLI module) are eligible too: the `developer` skill consumes `GITLAB_TOKEN`/`GITHUB_TOKEN` via `credential-fetch` from the git credential helper and the `gh` / `glab` wrappers its `setup_env` hook writes into the task's `.developer` directory. Gating authorization on `cli=true` (the prior heuristic) would lock it out.
 
 Auto-authorization uses `_resolve_env_spec(spec, ctx, fallbacks_disabled=True)` so an instance-wide `EnvironmentFile` fallback for an operator-set value cannot fan out and auto-authorize every user — preserving the per-user privacy posture.
 

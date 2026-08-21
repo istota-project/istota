@@ -622,9 +622,16 @@ class DeveloperConfig:
     # forge_cli_extra_denied entry is warned about at startup: a hatch that
     # silently stopped matching reads exactly like one that is still open.
     forge_cli_permit: list[str] = field(default_factory=list)
+    # Where the wrapper execs the real binary. The Ansible role renders these
+    # from what it installed (the Debian archive puts both in /usr/bin); these
+    # defaults are the conventional manual-install location for everything
+    # else. Neither is authoritative — `developer._resolve_real_bin` falls back
+    # to the daemon's own PATH when the configured path does not exist, so a
+    # host whose code and config.toml are out of step still works. The docker
+    # image (`docker/istota/`) installs neither binary, so the developer skill
+    # needs a host or Ansible deployment.
     gh_bin_path: str = "/usr/local/bin/gh"
     glab_bin_path: str = "/usr/local/bin/glab"
-    api_timeout_seconds: int = 30
     # Devbox credential proxy. See src/istota/devbox_proxy.py + the
     # `devbox-credential-proxy` spec for the design. It answers two things
     # for the container: a git credential (injected server-side, so git
@@ -2695,16 +2702,23 @@ def load_config(config_path: Path | None = None) -> Config:
     if "developer" in data:
         dev = data["developer"]
         extra = {}
-        # `gitlab_api_allowlist` / `github_api_allowlist` were read here
-        # until the devbox proxy stopped making REST calls of its own. They
-        # are deliberately not warned about: the loader ignores unknown keys
-        # by design (below), so a config.toml still carrying them loads clean
-        # and inert. Note that is not a transient state — `config.toml.j2`
-        # still renders both keys on every Ansible run, so they persist until
-        # that template drops them.
+        # `gitlab_api_allowlist`, `github_api_allowlist` and
+        # `api_timeout_seconds` were read here until the devbox proxy stopped
+        # making REST calls of its own. `config.toml.j2` no longer renders
+        # them, but a host keeps its last-rendered file until Ansible runs
+        # again, and a hand-written config.toml may carry them for years. They
+        # are deliberately not warned about: the loader ignores unknown keys by
+        # design (below), so such a file loads clean and inert.
         for _key in ("forge_cli_extra_denied", "forge_cli_permit"):
             if _key in dev:
-                extra[_key] = list(dev[_key])
+                _val = dev[_key]
+                # A bare string is the plausible hand-edit, and `list("gh pr
+                # merge")` turns it into eighteen one-character rules that
+                # match nothing and warn about nothing. Read it as the single
+                # entry it was meant to be.
+                if isinstance(_val, str):
+                    _val = [_val] if _val else []
+                extra[_key] = [str(_entry) for _entry in _val]
         for _key in ("gh_bin_path", "glab_bin_path"):
             if _key in dev:
                 extra[_key] = dev[_key]
@@ -2748,7 +2762,6 @@ def load_config(config_path: Path | None = None) -> Config:
             # "" and DEVELOPER_AUTHOR_CREDIT never got set. The `commit` skill
             # makes that variable the one permitted commit trailer.
             author_credit=dev.get("author_credit", ""),
-            api_timeout_seconds=dev.get("api_timeout_seconds", 30),
             devbox_proxy_enabled=dev.get("devbox_proxy_enabled", True),
             devbox_proxy_socket_dir=dev.get("devbox_proxy_socket_dir", "/var/run/istota"),
             devbox_proxy_audit_log=dev.get("devbox_proxy_audit_log", ""),
@@ -2990,18 +3003,22 @@ def _validate_forge_clis(config: "Config") -> None:
                     label, path, label,
                 )
         if not config.security.skill_proxy_enabled:
-            # The wrapper gets its token from a credential proxy and never
-            # from an ambient GH_TOKEN — an ambient one would mean something
-            # upstream failed to strip it. With the proxy off there is no
-            # socket, so every forge command exits 4. The retired curl
-            # wrappers had a direct-token branch, so this is a behaviour
-            # change for that configuration and worth naming rather than
-            # leaving to be discovered.
+            # Forge commands still work in this shape: `setup_env` writes
+            # `direct_token` into the policy file and the wrapper reads the
+            # ambient GH_TOKEN / GITLAB_TOKEN (forge_cli.fetch_token). What
+            # changes is where the token sits. With the proxy on it is
+            # stripped from the task environment and injected server-side per
+            # call; with it off it is in the environment the model's own shell
+            # inherits, so anything the task runs can read it. That is a
+            # posture worth naming at start-up rather than leaving to be
+            # discovered from a config file.
             _logger.warning(
                 "[developer] forge tokens are configured but "
-                "[security] skill_proxy_enabled = false; gh and glab have no "
-                "credential proxy to ask and every forge command will fail. "
-                "Enable the skill proxy, or clear the developer tokens.",
+                "[security] skill_proxy_enabled = false. gh and glab will work "
+                "— the policy grants them the ambient token — but that token "
+                "is readable by anything else the task runs, instead of being "
+                "injected per call. Enable the skill proxy to keep it out of "
+                "the task environment.",
             )
 
     try:

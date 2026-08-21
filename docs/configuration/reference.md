@@ -345,16 +345,17 @@ output = "talk"
 | `gitlab_token` | `""` | API token |
 | `gitlab_username` | `""` | GitLab username for HTTPS auth |
 | `gitlab_default_namespace` | `""` | Default namespace for short repo names |
-| `gitlab_reviewer_id` | `""` | User ID for MR reviewer |
+| `gitlab_reviewer_id` | `""` | GitLab **username** for MR reviewer (`glab mr create --reviewer` takes a username, not the numeric ID the name suggests) |
 | `github_url` | `"https://github.com"` | GitHub instance URL |
 | `github_token` | `""` | Personal access token |
 | `github_username` | `""` | GitHub username |
 | `github_default_owner` | `""` | Default org/user for short repo names |
 | `github_reviewer` | `""` | PR reviewer username |
 | `author_credit` | `""` | Name credited as author on commits the bot makes |
-| `gitlab_api_allowlist` | (GitLab API paths) | API paths the GitLab wrapper may call |
-| `github_api_allowlist` | (GitHub API paths) | API paths the GitHub wrapper may call |
-| `api_timeout_seconds` | `30` | Timeout for GitLab/GitHub API calls |
+| `forge_cli_extra_denied` | `[]` | Extra verbs the `gh` / `glab` wrapper refuses, written as typed (`"gh repo delete"`); no binary name applies to both |
+| `forge_cli_permit` | `[]` | Baseline deny entries to turn off — each one removes a guard |
+| `gh_bin_path` | `"/usr/local/bin/gh"` | Real `gh` the wrapper execs (Ansible renders the installed path) |
+| `glab_bin_path` | `"/usr/local/bin/glab"` | Real `glab` the wrapper execs |
 | `devbox_proxy_enabled` | `true` | Keep tokens host-side behind the devbox proxy |
 | `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
 | `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |
