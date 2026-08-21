@@ -148,6 +148,10 @@ The manifest asks for a portrait orientation. The layout is a single column with
 
 **Admin**: read-only system health (task counts by source, worker pool, per-module DB stats, models pane showing the active brain and its resolved role tiers). A banner surfaces a degraded primary brain — when the availability breaker is open, automatic work is being skipped or routed to the fallback. Gated by the `/etc/istota/admins` allowlist, which fails closed when empty.
 
+A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, and average initial and peak context, then breaks the 30-day window down by model, by brain and by origin. Per-user tokens and cost sit on the Users rows beside that user's task counts rather than being repeated here, so the two copies cannot disagree. Cost is shown as currency only where it is real charged spend; a plan-equivalent or a catalog estimate renders as a dash naming the basis. The card renders on its own — a database that has not yet been upgraded with the usage table takes out that section alone rather than blanking the dashboard. See [token usage and cost](usage.md).
+
+"Last active" in the user list counts only interactive tasks. Scheduled jobs, briefings and module pollers do not move it, so someone whose only traffic is automated shows a dash. Their task total still counts everything.
+
 **Health**: body stats grid with sparklines, bloodwork matrix (dates × markers with flag-colored cells, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers. Garmin Connect (daily-summary sync) is on the general Settings → Connected services page, shared with Location. Requires the `health` module to be enabled (on by default).
 
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.

@@ -56,7 +56,25 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `developer` | git, gitlab, repo, commit, branch, MR, PR | doc-only (env setup via hook) |
+| `developer` | git, gitlab, github, repo, commit, branch, MR, PR, worktree, clone | doc-only (env setup via hook) |
+| `commit` | commit, commit message, changelog, git commit, staging | doc-only |
+| `code_review` | review, code review, review the diff, review before merge | yes -- `run --worktree PATH [--base REF] [--range RANGE] [--intent TEXT] [--agents both\|conformance\|bughunt]`. Admin-only |
+
+`developer` is the entry point and declares `commit` and `code_review` as `companion_skills`, so all three load together on any task that reaches for git. The split is about what each one owns: `developer` covers repository work and the merge-request and pull-request lifecycle, `commit` covers message format, what gets staged and what must never be committed, and `code_review` covers running a review and acting on its findings.
+
+### Forge commands
+
+Git work uses the real `gh` and `glab` binaries, not hand-written REST wrappers. Both run behind `forge_cli.py`, which decides which forge it is from `argv[0]`, checks the argv against a code-owned deny policy, fetches the token from whichever credential socket is present, and execs the real binary with the token in its own environment. `[developer] forge_cli_extra_denied` extends the policy and `forge_cli_permit` punctures it — each entry there removes an accident guard.
+
+The CLIs need wider token scopes than the old wrappers did: GitLab `api` plus `write_repository`, GitHub `repo`. A token scoped for the previous path fails on every forge command.
+
+The two binaries are not interchangeable in their flags. `gh` filters output with `--jq`; the `glab` a standard server install ships does not have it, and reads a field with `-F json` instead. The skill's recipes are written per forge for that reason, and a read whose value feeds a later command aborts rather than passing an empty string on.
+
+### Review before merge
+
+A change large enough to be more than a one-or-two-file edit is reviewed before the merge request opens. A reviewer reads the branch diff against a one-line statement of what the change was meant to do, and the bot fixes what comes back before pushing, reporting anything it disagreed with as a decision rather than dropping it silently.
+
+Two reviewers run on a diff at or above `both_agents_threshold_lines` (150), and on any diff touching a boundary path — credentials, money, migrations, the sandbox, deploy. Smaller diffs get the conformance reviewer alone. A reviewer may ask once for files it was not given, up to `max_need_files`. Where review cannot run at all — the budget is spent, the model is unreachable — the merge request still opens and says it is unreviewed. Caps and models are under [`[developer.review]`](../configuration/reference.md#developerreview).
 
 ## Accounting
 

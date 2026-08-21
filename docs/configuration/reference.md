@@ -183,6 +183,15 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{nextcloud_mount_path}/istota-db-backups`. Use `db_backup_enabled = false` to disable |
 | `db_backup_retention` | `7` | Keep this many snapshot dirs |
 
+### Host memory breadcrumb
+
+| Setting | Default | Description |
+|---|---|---|
+| `host_pressure_enabled` | `true` | Master switch for host-memory sampling |
+| `host_pressure_breadcrumb_interval` | `300` | Seconds between `host_pressure` lines (0 = disabled) |
+
+One line per interval carrying `MemAvailable` / `Shmem` / `SwapFree` / PSI / per-tmpfs usage / `shmem_unaccounted`, written whether or not the host is under pressure — 288 lines a day at the default. See [host memory breadcrumb](../architecture/scheduler.md#host-memory-breadcrumb) for why it is unconditional and what `shmem_unaccounted` answers.
+
 ## `[security]`
 
 | Setting | Default | Description |
@@ -361,6 +370,27 @@ output = "talk"
 | `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
 | `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |
 
+### `[developer.review]`
+
+The `code_review` skill's models, caps and budget. There is no separate feature flag — the skill is already gated by `developer.enabled` and an admin check, so `enabled = false` here is the off switch.
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Run a review before opening a merge request |
+| `conformance_model` | `"general"` | Role alias for the spec-conformance reviewer. A `:effort` modifier is honoured |
+| `bughunt_model` | `"smart:high"` | Role alias for the second, skeptical reviewer |
+| `both_agents_threshold_lines` | `150` | Diffs at or above this get both reviewers |
+| `boundary_patterns` | auth, secret, credential, token, password, migration, schema.sql, billing, payment, money, crypto, sandbox, proxy, deploy, ansible | Case-insensitive substrings matched against changed paths. A hit puts both reviewers on the diff however small it is |
+| `max_diff_chars` | `200000` | Cap on the diff handed to a reviewer |
+| `max_context_chars` | `60000` | Cap on the assembled surrounding context |
+| `max_file_chars` | `20000` | Per changed file, for whole-body inclusion; over it that file falls back to its own hunks |
+| `max_callers_per_symbol` | `8` | Cap on caller sites gathered per changed symbol |
+| `max_need_files` | `6` | Files a reviewer may request on its one re-invocation. `0` disables the round trip, and the offer is then kept out of the prompt rather than made and refused |
+| `timeout_seconds` | `120` | Per agent. Both run concurrently, so this is wall time |
+| `max_calls_per_task` | `8` | Review rounds per task |
+
+`max_calls_per_task` counts *waves* of model calls, not `code_review run` invocations. One run charges 1, or 2 when a reviewer took its `max_need_files` round trip; a wave is up to four invocations, since each of two agents may retry a malformed answer once. Guard refusals and breaker skips are free. At the cap the review degrades to `skipped` rather than erroring — a blocking cap would stop a task that had already finished its work from landing it. `0` or less permits no reviews at all rather than reading as "unlimited"; use `enabled = false` to switch the feature off.
+
 ## ntfy push notifications
 
 ntfy is a **per-user connected service** — there is no `[ntfy]` config block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table (see [credentials](credentials.md) for the full per-user credential inventory):
@@ -498,6 +528,8 @@ A persistent per-user Linux container — the escape hatch for work the bwrap sa
 | `api_proxy_audit_log` | `""` | Optional path for a proxy audit log |
 
 The raw Docker socket is root-equivalent, so it is never bound into the sandbox. The allowlist proxy permits only exec/cp/inspect/restart against the user's own container.
+
+The devbox runs the same real `gh` and `glab` behind the same wrapper the sandbox uses. `docker/devbox/lib/istota_forge_cli.py` is a byte-identical copy of `src/istota/forge_cli.py`, kept in sync by `scripts/sync-devbox-lib.sh`. The wrapper locates its policy beside whichever copy of itself is executing, and takes `real_bin`, the forge URL and the config dirs from that file rather than from `os.environ` — it runs as a child of the model's own shell, so the environment is not a trust anchor. With no URL resolvable it refuses rather than falling back to a public host. The token comes from the [devbox credential proxy](#developer), which injects it server-side.
 
 ## `[playbooks]`
 
