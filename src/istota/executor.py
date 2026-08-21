@@ -988,6 +988,13 @@ def build_stripped_env() -> dict[str, str]:
 _PROXY_LOOKUP_BLOCKED = frozenset({"ISTOTA_SECRET_KEY"})
 
 
+# Reserved key a setup_env hook may return to prepend entries to the *model's*
+# PATH. os.pathsep-separated. Consumed and dropped by execute_task; never
+# merged into ``env`` and never handed to the skill proxy — see the
+# application site for why that distinction is load-bearing.
+HOOK_PATH_PREPEND_KEY = "ISTOTA_PATH_PREPEND"
+
+
 # --- Network proxy allowlist ---
 
 _DEFAULT_NETWORK_HOSTS = frozenset({
@@ -1036,6 +1043,25 @@ def _build_network_allowlist(
             parsed = urlparse(config.developer.github_url)
             if parsed.hostname and "github.com" in parsed.hostname:
                 hosts.add("api.github.com:443")
+                # `gh run view --log-failed` — the CI feedback loop — fetches
+                # job logs from a second host. Measured against gh 2.98 through
+                # a logging CONNECT proxy: one stable hostname, the same across
+                # independent runs, so an exact entry is enough and the proxy
+                # needs no wildcard support.
+                #
+                # `gh run download` is deliberately NOT covered. Artifacts come
+                # from productionresultssa<N>.blob.core.windows.net, where the
+                # shard varies (4 and 7 observed for one repository), and the
+                # only entry that would cover it is *.blob.core.windows.net —
+                # all of Azure Blob Storage, a general-purpose exfiltration
+                # channel. Logs are what the feedback loop needs; artifacts
+                # are not worth that.
+                hosts.add("results-receiver.actions.githubusercontent.com:443")
+            elif parsed.hostname:
+                # GitHub Enterprise Server: the API is a path on the same host
+                # (<host>/api/v3), so no separate entry — but the web host
+                # itself was already added above and is what gh talks to.
+                pass
 
     # Nextcloud skill: the instance host. Only reachable when the skill proxy
     # is off — with it on, the skill CLI runs server-side in the daemon's netns
@@ -1769,8 +1795,10 @@ def native_fs_roots(
     user_resources: list[db.UserResource],
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
-) -> tuple[list[Path], list[Path]]:
-    """The file-access roots for a native-brain task: ``(read_roots, write_roots)``.
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """File-access roots for a native-brain task.
+
+    Returns ``(read_roots, write_roots, write_denied_roots)``.
 
     Mirrors ``build_bwrap_cmd``'s user-data binds (not the system/venv binds,
     which are irrelevant to the file tools) so the native file tools reach
@@ -1778,9 +1806,27 @@ def native_fs_roots(
     Writable roots are the RW binds; read roots additionally include the RO
     binds (Talk attachments, read-only resources). No database root of any
     kind — build_bwrap_cmd masks those, and these tools have no masks.
+
+    The third element carries the RO carve-outs bwrap gets by re-binding a
+    subdirectory read-only *after* its parent's RW bind. Containment alone
+    cannot express those, so they are returned separately and threaded onto
+    ``ToolEnv.write_denied_roots``. Today that is ``.developer`` — the
+    credential-fetch helper and the git credential helpers — which the
+    claude_code path has protected since the RO re-bind was added and which
+    this function silently left writable until it grew this return value.
+
+    Carve-outs here deny *writes* only. bwrap's other nested override, the
+    tmpfs masks over ``db_path.parent`` and ``module_db_root()``, is a total
+    mask this cannot express — what holds that property on the native side is
+    that neither path is under a returned root, which in turn rests on
+    ``Config.module_db_root`` refusing a module dir under the Nextcloud mount
+    and on ``_validate_workspace_dir`` refusing a workspace that would bind one
+    back in. Those two guards, not this function, are what to check if a
+    deployment ever puts a database under ``temp_dir`` or ``repos_dir``.
     """
     write: list[Path] = []
     read_only: list[Path] = []
+    write_denied: list[Path] = []
 
     def _add(target: list[Path], p: Path | None) -> None:
         if p is None:
@@ -1791,6 +1837,18 @@ def native_fs_roots(
 
     # User workspace (RW) — always present (mkdir'd by the caller).
     _add(write, user_temp_dir)
+
+    # .developer/ (RO carve-out inside the workspace above). Mirrors the
+    # _ro_bind in build_bwrap_cmd: the scripts in here hold the credential
+    # helpers, so a writable copy is a credential-interception path.
+    #
+    # Appended directly rather than through _add, which skips a path that does
+    # not exist yet. build_bwrap_cmd re-checks `dev_dir.is_dir()` on every Bash
+    # invocation, while this list is built once per task — so an existence gate
+    # here would leave a window where a .developer created mid-run is read-only
+    # for Bash and writable for the file tools. A deny root that never comes
+    # into existence costs one failed comparison.
+    write_denied.append(user_temp_dir.resolve() / ".developer")
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:
@@ -1834,22 +1892,7 @@ def native_fs_roots(
             _add(write if r.permissions == "readwrite" else read_only, rpath)
 
     read_roots = list(dict.fromkeys(write + read_only))
-    return read_roots, write
-
-
-def _allowlist_pattern_to_case(pattern: str) -> str:
-    """Convert an allowlist pattern like 'GET /api/v4/projects/*' to a shell case glob.
-
-    Each literal segment is quoted, wildcards become unquoted * for shell globbing.
-    Examples:
-        'GET /api/v4/projects/*' → '"GET /api/v4/projects/"*'
-        'POST /api/v4/projects/*/merge_requests' → '"POST /api/v4/projects/"*"/merge_requests"'
-    """
-    parts = pattern.split("*")
-    result = "*".join(f'"{p}"' for p in parts if p)
-    if pattern.endswith("*"):
-        result += "*"
-    return result
+    return read_roots, write, write_denied
 
 
 def _detect_notification_reply(
@@ -3664,6 +3707,9 @@ def execute_task(
             if k not in env:
                 env[k] = v
         for k, v in hook_env.items():
+            if k == HOOK_PATH_PREPEND_KEY:
+                # Never merged into ``env``: see the application site below.
+                continue
             if k not in env:
                 env[k] = v
 
@@ -3754,6 +3800,34 @@ def execute_task(
             and _bwrap_available()
         ):
             env["ISTOTA_SANDBOXED"] = "1"
+
+        # PATH entries contributed by setup_env hooks — today the developer
+        # skill's .developer dir, so the model can type `gh` and reach the
+        # wrapper rather than the real binary.
+        #
+        # Applied *here*, after the proxy's base env was snapshotted above, and
+        # never merged into ``env`` by the hook loop. That ordering is the
+        # whole point and must not be tidied away:
+        #
+        #   ``proxy_base_env`` is what SkillProxy hands every host-side skill
+        #   CLI, which runs outside bwrap as the daemon user. Some of those
+        #   resolve a binary by bare name — google_workspace does
+        #   ``os.execvp("gws", …)``, devbox does ``shutil.which("docker")``.
+        #   A task-temp directory on that PATH would therefore be a host-side
+        #   code-execution path, wide open to whatever the model can write
+        #   into it. The sandbox re-binds .developer read-only precisely to
+        #   stop that, but relying on a bind to contain a PATH entry that
+        #   never needed to be there is the wrong way round.
+        #
+        # ``build_claude_env`` already set PATH, so a hook returning "PATH"
+        # would be silently dropped by the ``if k not in env`` merge; this
+        # reserved key is the explicit alternative. It is consumed here and
+        # never reaches the model.
+        _path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY, "")
+        if _path_prepend:
+            _entries = [p for p in _path_prepend.split(os.pathsep) if p]
+            if _entries:
+                env["PATH"] = os.pathsep.join([*_entries, env["PATH"]])
 
         # Network isolation via CONNECT proxy: outbound traffic restricted
         # to an allowlist of host:port pairs via --unshare-net + proxy.
@@ -4106,8 +4180,9 @@ def execute_task(
         # cwd choice below uses. Other brains ignore these fields.
         _fs_read_roots: "list[Path] | None" = None
         _fs_write_roots: "list[Path] | None" = None
+        _fs_write_denied_roots: "list[Path]" = []
         if native_fs_confinement_active(config):
-            _fs_read_roots, _fs_write_roots = native_fs_roots(
+            _fs_read_roots, _fs_write_roots, _fs_write_denied_roots = native_fs_roots(
                 config,
                 task,
                 is_admin,
@@ -4167,6 +4242,7 @@ def execute_task(
             # brains ignore these (bwrap already confines their tools).
             fs_read_roots=_fs_read_roots,
             fs_write_roots=_fs_write_roots,
+            fs_write_denied_roots=_fs_write_denied_roots,
             result_file=result_file,
             # Task-derived tmux session label (no-op for other brains): threads
             # the task id into the session name, structured log line, and

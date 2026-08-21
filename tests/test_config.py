@@ -1155,8 +1155,15 @@ class TestDeveloperConfig:
         assert dev.github_username == ""
         assert dev.github_default_owner == ""
         assert dev.github_reviewer == ""
-        assert isinstance(dev.github_api_allowlist, list)
-        assert len(dev.github_api_allowlist) > 0
+        # The two REST endpoint allowlists are gone with the devbox proxy's
+        # API actions — the real gh/glab run behind forge_cli.py instead.
+        assert not hasattr(dev, "github_api_allowlist")
+        assert not hasattr(dev, "gitlab_api_allowlist")
+        # Forge CLI wrapper defaults.
+        assert dev.forge_cli_extra_denied == []
+        assert dev.forge_cli_permit == []
+        assert dev.gh_bin_path == "/usr/local/bin/gh"
+        assert dev.glab_bin_path == "/usr/local/bin/glab"
         # Devbox proxy defaults.
         assert dev.api_timeout_seconds == 30
         assert dev.devbox_proxy_enabled is True
@@ -1220,16 +1227,153 @@ github_reviewer = "reviewer-user"
         assert cfg.developer.github_default_owner == "myorg"
         assert cfg.developer.github_reviewer == "reviewer-user"
 
-    def test_load_github_custom_allowlist(self, tmp_path):
+    def test_retired_allowlist_keys_load_clean_and_inert(self, tmp_path):
+        """Every deployed host has these two keys in its config.toml, and
+        will keep having them: config.toml.j2 still renders both on every
+        Ansible run. The loader ignores unknown keys by design, so they must
+        load without raising and without reaching the DeveloperConfig
+        constructor — a TypeError here would take the whole daemon down on
+        upgrade, on every host at once."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [developer]
 enabled = true
 repos_dir = "/srv/repos"
 github_api_allowlist = ["GET /repos/*"]
+gitlab_api_allowlist = ["GET /projects/*"]
 """)
         cfg = load_config(config_file)
-        assert cfg.developer.github_api_allowlist == ["GET /repos/*"]
+        assert cfg.developer.enabled is True
+        assert cfg.developer.repos_dir == "/srv/repos"
+        assert not hasattr(cfg.developer, "github_api_allowlist")
+        assert not hasattr(cfg.developer, "gitlab_api_allowlist")
+
+    def test_load_forge_cli_knobs(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+forge_cli_extra_denied = ["gh pr merge", "repo view"]
+forge_cli_permit = ["gh repo delete"]
+gh_bin_path = "/opt/gh"
+glab_bin_path = "/opt/glab"
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.forge_cli_extra_denied == ["gh pr merge", "repo view"]
+        assert cfg.developer.forge_cli_permit == ["gh repo delete"]
+        assert cfg.developer.gh_bin_path == "/opt/gh"
+        assert cfg.developer.glab_bin_path == "/opt/glab"
+
+    def test_dead_forge_cli_permit_is_warned_about(self, tmp_path, caplog):
+        """A permit matching no rule is turning nothing off. Silence there
+        reads exactly like a hatch that is still open."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+gitlab_token = "glpat-x"
+forge_cli_permit = ["gh repo delete-repo"]
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert any("forge_cli_permit" in r.getMessage() for r in caplog.records)
+
+    def test_live_forge_cli_permit_is_not_warned_about(self, tmp_path, caplog):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+gitlab_token = "glpat-x"
+forge_cli_permit = ["gh repo delete"]
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert not any("forge_cli_permit" in r.getMessage() for r in caplog.records)
+
+    def test_permit_cancelling_an_operator_addition_is_not_warned_about(
+        self, tmp_path, caplog,
+    ):
+        """Cancelling your own extra_denied entry is a legitimate thing to
+        write; warning about it is how a real warning gets ignored."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+gitlab_token = "glpat-x"
+forge_cli_extra_denied = ["gh pr merge"]
+forge_cli_permit = ["gh pr merge"]
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert not any("forge_cli_permit" in r.getMessage() for r in caplog.records)
+
+    def test_missing_forge_binary_is_warned_about(self, tmp_path, caplog):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(f"""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_token = "ghp-x"
+gh_bin_path = "{tmp_path / 'no-such-gh'}"
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert any("gh not found" in r.getMessage() for r in caplog.records)
+
+    def test_no_binary_warning_without_a_token(self, tmp_path, caplog):
+        """No token means no forge calls, so a missing binary is not yet a
+        problem worth a line at every startup."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(f"""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+gh_bin_path = "{tmp_path / 'no-such-gh'}"
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert not any("not found at" in r.getMessage() for r in caplog.records)
+
+    def test_forge_tokens_without_the_skill_proxy_are_warned_about(
+        self, tmp_path, caplog,
+    ):
+        """The wrapper asks a credential proxy for the token and never falls
+        back to an ambient one. With the proxy off there is no socket, so
+        every forge command exits 4 — a behaviour change from the retired
+        curl wrappers, which had a direct-token branch."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_token = "ghp-x"
+
+[security]
+skill_proxy_enabled = false
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert any(
+            "no credential proxy to ask" in r.getMessage() for r in caplog.records
+        )
+
+    def test_no_proxy_warning_when_the_proxy_is_on(self, tmp_path, caplog):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_token = "ghp-x"
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert not any(
+            "no credential proxy to ask" in r.getMessage() for r in caplog.records
+        )
 
     def test_github_env_var_override(self, tmp_path, monkeypatch):
         config_file = tmp_path / "config.toml"

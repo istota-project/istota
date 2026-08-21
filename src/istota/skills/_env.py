@@ -231,7 +231,20 @@ def dispatch_setup_env_hooks(
     The ``selected_skills`` argument is retained for signature
     compatibility with older callers; it is no longer consulted.
 
-    Returns merged env vars from all hooks.
+    Returns merged env vars from all hooks. Merging is ``env.update``, so if
+    two hooks ever return the same key the last one dispatched wins — the
+    iteration order is ``skill_index``'s, which is not something to rely on.
+    Today no key is returned by more than one hook.
+
+    One reserved key: ``executor.HOOK_PATH_PREPEND_KEY``
+    (``ISTOTA_PATH_PREPEND``), an os.pathsep-separated list of directories to
+    prepend to the model's PATH. A hook cannot simply return ``PATH`` —
+    ``build_claude_env`` has already set it, and the executor's merge keeps
+    the existing value — so this is the explicit way to ask. The executor
+    consumes it, applies it to the model's environment only, and drops it;
+    it is deliberately kept out of the environment handed to host-side skill
+    CLIs, which is a security property rather than tidiness. See the
+    application site in ``execute_task``.
     """
     import importlib
 

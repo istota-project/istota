@@ -1,15 +1,17 @@
-"""Tests for the in-container devbox proxy shim scripts (Stage 4).
+"""Tests for the in-container devbox scripts and the image's static content.
 
-The scripts under ``docker/devbox/scripts/`` are intended to run inside
-the devbox container, talking to a Unix socket bind-mounted from the
-host. These tests run them as subprocesses against a real istota daemon
-listening on a tmpdir socket, with ``ISTOTA_CRED_SOCK`` and
-``ISTOTA_DEVBOX_LIB`` env vars pointed at the test fixtures.
+``docker/devbox/scripts/git-credential-istota`` runs inside the devbox
+container, talking to a Unix socket bind-mounted from the host. It runs
+here as a subprocess against a real istota daemon on a tmpdir socket,
+with ``ISTOTA_CRED_SOCK`` and ``ISTOTA_DEVBOX_LIB`` pointed at the test
+fixtures.
 
-Each subcommand of the curated ``gh`` / ``glab`` shim set gets one
-routing test; one test confirms unrouted subcommands exit 2 with the
-expected message; the credential helper and ``gitlab-api``/``github-api``
-get happy-path + error-path coverage.
+The curated ``gh`` / ``glab`` shims and the ``github-api`` /
+``gitlab-api`` REST wrappers are gone — the container runs the real
+binaries behind ``forge_cli.py``, whose own tests are in
+``test_forge_cli.py`` and ``test_forge_cli_exec.py``. What remains here
+is the credential helper, the build-time policy seeding, and the
+image-content checks that keep the Dockerfile's COPY paths honest.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import httpx
 import pytest
 
 from istota.devbox_proxy import DevboxProxyContext, handle_connection
@@ -32,6 +33,7 @@ from istota.devbox_proxy import DevboxProxyContext, handle_connection
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO / "docker" / "devbox" / "scripts"
 LIB_DIR = REPO / "docker" / "devbox" / "lib"
+DOCKERFILE = REPO / "docker" / "devbox" / "Dockerfile"
 
 
 # ---- Fixtures --------------------------------------------------------------
@@ -54,42 +56,13 @@ def _ctx(
     github_token: str = "GH-TOKEN",
     gitlab_url: str = "https://gitlab.com",
     github_url: str = "https://github.com",
-    gitlab_allowlist: tuple[str, ...] = (
-        "GET /projects/*",
-        "POST /projects/*/merge_requests",
-        "GET /projects/*/merge_requests",
-        "PUT /projects/*/merge_requests/*",
-        "GET /projects/*/issues",
-        "POST /projects/*/issues",
-        "GET /user",
-    ),
-    github_allowlist: tuple[str, ...] = (
-        "GET /repos/*",
-        "POST /repos/*/pulls",
-        "GET /repos/*/pulls",
-        "PATCH /repos/*/pulls/*",
-        "GET /repos/*/issues",
-        "POST /repos/*/issues",
-        "GET /user",
-    ),
-    api_timeout: float = 5.0,
-    http_handler=None,
 ) -> DevboxProxyContext:
-    if http_handler is None:
-        def http_handler(request):
-            return httpx.Response(200, text="")
-    transport = httpx.MockTransport(http_handler)
-    client = httpx.AsyncClient(transport=transport, timeout=api_timeout)
     return DevboxProxyContext(
         user_id=user_id,
         gitlab_token=gitlab_token,
         github_token=github_token,
         gitlab_url=gitlab_url,
         github_url=github_url,
-        gitlab_allowlist=gitlab_allowlist,
-        github_allowlist=github_allowlist,
-        api_timeout=api_timeout,
-        http_client=client,
     )
 
 
@@ -255,486 +228,97 @@ class TestGitCredentialHelper:
         assert "unreachable" in result.stderr.lower()
 
 
-# ---- gitlab-api / github-api ----------------------------------------------
+# ---- The wrapper against the real daemon -----------------------------------
 
 
-class TestApiWrappers:
-    def test_gitlab_api_happy_get_prints_body(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
+class TestWrapperAgainstRealDaemon:
+    """The one place both ends of `forge_token` run for real.
 
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text='{"id":42}')
+    Everywhere else the daemon's reply and the wrapper's expectation are two
+    independently hand-written literals, so a rename on either side passes its
+    own tests. Here the vendored wrapper talks to the actual
+    `handle_connection` over a socket.
+    """
 
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_script(
-            "gitlab-api",
-            ["--method", "GET", "--endpoint", "/projects/42"],
-            sock_path=sock_path,
+    def _install_wrapper(self, tmp_path, name, real_stub, url):
+        import json as _json
+
+        from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        wrapper = bin_dir / name
+        shutil.copy(LIB_DIR / "istota_forge_cli.py", wrapper)
+        wrapper.chmod(0o700)
+
+        real = tmp_path / f"real-{name}"
+        real.write_text(real_stub)
+        real.chmod(0o700)
+
+        cfg = tmp_path / f"{name}-config"
+        cfg.mkdir(exist_ok=True)
+
+        # The devbox shape: no `url` in the policy, so the daemon's answer is
+        # the only source for it.
+        policy = {}
+        for forge in (FORGE_GITHUB, FORGE_GITLAB):
+            section = build_policy(forge)
+            section["real_bin"] = str(real)
+            section["config_dir"] = str(cfg)
+            policy[forge] = section
+        (bin_dir / "forge-policy.json").write_text(_json.dumps(policy))
+        return wrapper
+
+    def test_forge_token_round_trips_through_the_real_daemon(
+        self, tmp_path, sock_path, daemon_factory,
+    ):
+        daemon_factory(_ctx(github_url="https://ghe.example.com"))
+        stub = (
+            "#!/bin/sh\n"
+            'echo "GH_TOKEN:${GH_TOKEN-<unset>}"\n'
+            'echo "GH_ENTERPRISE_TOKEN:${GH_ENTERPRISE_TOKEN-<unset>}"\n'
+            'echo "GH_HOST:${GH_HOST-<unset>}"\n'
+        )
+        wrapper = self._install_wrapper(tmp_path, "gh", stub, None)
+        result = subprocess.run(
+            [str(wrapper), "pr", "list"],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                 "ISTOTA_CRED_SOCK": str(sock_path)},
+            capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, result.stderr
-        assert '{"id":42}' in result.stdout
-        # Sanity check upstream was actually hit.
-        assert len(seen) == 1
-        assert str(seen[0].url) == "https://gitlab.com/api/v4/projects/42"
+        fields = dict(
+            line.split(":", 1) for line in result.stdout.splitlines() if ":" in line
+        )
+        # The token the daemon actually holds, not one the test wrote.
+        assert fields["GH_ENTERPRISE_TOKEN"] == "GH-TOKEN"
+        # And the URL the daemon actually holds, which is the field that only
+        # exists because a shared image cannot bake a per-user one.
+        assert fields["GH_HOST"] == "ghe.example.com"
 
-    def test_gitlab_api_post_with_body_inline(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"iid":1}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_script(
-            "gitlab-api",
-            [
-                "--method", "POST",
-                "--endpoint", "/projects/42/merge_requests",
-                "--body", '{"title":"x","source_branch":"f","target_branch":"main"}',
-            ],
-            sock_path=sock_path,
+    def test_glab_gets_the_gitlab_url_from_the_daemon(
+        self, tmp_path, sock_path, daemon_factory,
+    ):
+        daemon_factory(_ctx(gitlab_url="https://git.example.com:8443/gitlab"))
+        stub = (
+            "#!/bin/sh\n"
+            'echo "GITLAB_TOKEN:${GITLAB_TOKEN-<unset>}"\n'
+            'echo "GITLAB_HOST:${GITLAB_HOST-<unset>}"\n'
+        )
+        wrapper = self._install_wrapper(tmp_path, "glab", stub, None)
+        result = subprocess.run(
+            [str(wrapper), "mr", "list"],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                 "ISTOTA_CRED_SOCK": str(sock_path)},
+            capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, result.stderr
-        assert '"iid":1' in result.stdout
-        assert seen[0].content.decode("utf-8") == '{"title":"x","source_branch":"f","target_branch":"main"}'
-
-    def test_gitlab_api_post_with_body_stdin(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        body = '{"title":"from stdin"}'
-        result = _run_script(
-            "gitlab-api",
-            [
-                "--method", "POST",
-                "--endpoint", "/projects/42/merge_requests",
-                "--body-stdin",
-            ],
-            sock_path=sock_path, stdin=body,
+        fields = dict(
+            line.split(":", 1) for line in result.stdout.splitlines() if ":" in line
         )
-        assert result.returncode == 0, result.stderr
-        assert seen[0].content.decode("utf-8") == body
-
-    def test_gitlab_api_repeatable_header(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_script(
-            "gitlab-api",
-            [
-                "--method", "GET", "--endpoint", "/projects/42",
-                "--header", "X-Trace=abc",
-                "--header", "X-Foo=bar",
-            ],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 0
-        assert seen[0].headers["X-Trace"] == "abc"
-        assert seen[0].headers["X-Foo"] == "bar"
-
-    def test_gitlab_api_upstream_4xx_exits_1_and_prints_body(self, sock_path, daemon_factory):
-        def handler(request):
-            return httpx.Response(422, text='{"error":"invalid"}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_script(
-            "gitlab-api",
-            ["--method", "POST", "--endpoint", "/projects/42/merge_requests",
-             "--body", '{"title":""}'],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 1
-        # Body still printed on stdout so callers can inspect.
-        assert '"error":"invalid"' in result.stdout
-        # Human message goes to stderr.
-        assert "upstream" in result.stderr.lower() or "422" in result.stderr
-
-    def test_gitlab_api_not_allowed_endpoint_exits_1(self, sock_path, daemon_factory):
-        called = []
-
-        def handler(request):
-            called.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(
-            _ctx(
-                gitlab_allowlist=("GET /projects/*",),
-                http_handler=handler,
-            )
-        )
-        result = _run_script(
-            "gitlab-api",
-            ["--method", "DELETE", "--endpoint", "/projects/42"],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 1
-        assert called == []
-        assert "not in allowlist" in result.stderr or "not_allowed" in result.stderr.lower() or "allowlist" in result.stderr
-
-    def test_github_api_happy_post(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"number":99,"html_url":"https://x"}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_script(
-            "github-api",
-            [
-                "--method", "POST",
-                "--endpoint", "/repos/foo/bar/pulls",
-                "--body", '{"title":"x","head":"f","base":"main"}',
-            ],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 0, result.stderr
-        assert '"number":99' in result.stdout
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar/pulls"
-        assert seen[0].headers["Authorization"] == "token GH-TOKEN"
-
-    def test_github_api_missing_endpoint_arg_exits_nonzero(self, sock_path, daemon_factory):
-        daemon_factory(_ctx())
-        result = _run_script(
-            "github-api", ["--method", "GET"],
-            sock_path=sock_path,
-        )
-        assert result.returncode != 0
-        assert "endpoint" in result.stderr.lower()
-
-
-# ---- gh shim --------------------------------------------------------------
-
-
-def _run_gh(args, *, sock_path, slug="foo/bar", **kwargs):
-    return _run_script(
-        "gh", args, sock_path=sock_path,
-        env_extra={"ISTOTA_DEVBOX_REPO_SLUG": slug, **kwargs.pop("env_extra", {})},
-        **kwargs,
-    )
-
-
-class TestGhShim:
-    def test_auth_status_routes_to_user_endpoint(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text='{"login":"alice"}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(["auth", "status"], sock_path=sock_path)
-        assert result.returncode == 0, result.stderr
-        assert '"login":"alice"' in result.stdout
-        assert str(seen[0].url) == "https://api.github.com/user"
-
-    def test_repo_view_routes_to_repos_owner_repo(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text='{"name":"bar"}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(["repo", "view"], sock_path=sock_path, slug="foo/bar")
-        assert result.returncode == 0, result.stderr
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar"
-
-    def test_pr_create_posts_to_pulls_with_body(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"number":42,"html_url":"https://x"}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(
-            [
-                "pr", "create",
-                "--title", "Add foo",
-                "--body", "see desc",
-                "--base", "main",
-                "--head", "feature/x",
-            ],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 0, result.stderr
-        assert '"number":42' in result.stdout
-        sent = seen[0]
-        assert sent.method == "POST"
-        assert str(sent.url) == "https://api.github.com/repos/foo/bar/pulls"
-        body = json.loads(sent.content.decode("utf-8"))
-        assert body == {
-            "title": "Add foo",
-            "body": "see desc",
-            "base": "main",
-            "head": "feature/x",
-        }
-
-    def test_pr_view_routes_with_number(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(["pr", "view", "7"], sock_path=sock_path)
-        assert result.returncode == 0, result.stderr
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar/pulls/7"
-
-    def test_pr_list_carries_state_query(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="[]")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(
-            ["pr", "list", "--state", "all"], sock_path=sock_path,
-        )
-        assert result.returncode == 0, result.stderr
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar/pulls?state=all"
-
-    def test_pr_close_patches_with_closed_state(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(["pr", "close", "9"], sock_path=sock_path)
-        assert result.returncode == 0, result.stderr
-        assert seen[0].method == "PATCH"
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar/pulls/9"
-        assert json.loads(seen[0].content.decode("utf-8")) == {"state": "closed"}
-
-    def test_issue_create_routes_to_issues(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"number":3}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(
-            ["issue", "create", "--title", "Bug X", "--body", "details"],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 0, result.stderr
-        assert seen[0].method == "POST"
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar/issues"
-        assert json.loads(seen[0].content.decode("utf-8")) == {
-            "title": "Bug X", "body": "details",
-        }
-
-    def test_issue_view_routes_with_number(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(["issue", "view", "12"], sock_path=sock_path)
-        assert result.returncode == 0
-        assert str(seen[0].url) == "https://api.github.com/repos/foo/bar/issues/12"
-
-    def test_issue_list_carries_state(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="[]")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_gh(["issue", "list"], sock_path=sock_path)
-        assert result.returncode == 0
-        assert "state=open" in str(seen[0].url)
-
-    def test_unrouted_subcommand_exits_2(self, sock_path, daemon_factory):
-        daemon_factory(_ctx())
-        result = _run_gh(["release", "create"], sock_path=sock_path)
-        assert result.returncode == 2
-        assert "not yet routed" in result.stderr
-        assert "github-api" in result.stderr
-
-    def test_unrouted_pr_subcommand_exits_2(self, sock_path, daemon_factory):
-        daemon_factory(_ctx())
-        result = _run_gh(["pr", "merge"], sock_path=sock_path)
-        assert result.returncode == 2
-        assert "not yet routed" in result.stderr
-
-    def test_missing_repo_slug_exits_1_with_clear_message(self, sock_path, daemon_factory):
-        daemon_factory(_ctx())
-        # No ISTOTA_DEVBOX_REPO_SLUG, and pytest's cwd is a real git repo
-        # whose origin doesn't match foo/bar — call repo view explicitly
-        # in a tmp dir so git remote get-url fails.
-        with tempfile.TemporaryDirectory(prefix="dvbx_norepo_", dir="/tmp") as td:
-            env = os.environ.copy()
-            env["ISTOTA_CRED_SOCK"] = str(sock_path)
-            env["ISTOTA_DEVBOX_LIB"] = str(LIB_DIR)
-            result = subprocess.run(
-                [sys.executable, str(SCRIPTS_DIR / "gh"), "repo", "view"],
-                cwd=td, env=env,
-                capture_output=True, text=True, timeout=10,
-            )
-        assert result.returncode == 1
-        assert "remote" in result.stderr.lower() or "repo" in result.stderr.lower()
-
-
-# ---- glab shim ------------------------------------------------------------
-
-
-def _run_glab(args, *, sock_path, slug="ns/path", **kwargs):
-    return _run_script(
-        "glab", args, sock_path=sock_path,
-        env_extra={"ISTOTA_DEVBOX_REPO_SLUG": slug, **kwargs.pop("env_extra", {})},
-        **kwargs,
-    )
-
-
-class TestGlabShim:
-    def test_auth_status_routes_to_user(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text='{"username":"alice"}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(["auth", "status"], sock_path=sock_path)
-        assert result.returncode == 0, result.stderr
-        assert str(seen[0].url) == "https://gitlab.com/api/v4/user"
-
-    def test_repo_view_routes_with_urlencoded_slug(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text='{"id":42}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(["repo", "view"], sock_path=sock_path, slug="myns/myrepo")
-        assert result.returncode == 0, result.stderr
-        # GitLab API takes URL-encoded namespace/path.
-        assert str(seen[0].url) == "https://gitlab.com/api/v4/projects/myns%2Fmyrepo"
-
-    def test_mr_create_posts_with_body(self, sock_path, daemon_factory):
-        seen: list[httpx.Request] = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"iid":3}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(
-            [
-                "mr", "create",
-                "--title", "Add foo",
-                "--description", "desc",
-                "--source-branch", "feature/x",
-                "--target-branch", "main",
-            ],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 0, result.stderr
-        assert '"iid":3' in result.stdout
-        sent = seen[0]
-        assert sent.method == "POST"
-        assert str(sent.url) == "https://gitlab.com/api/v4/projects/ns%2Fpath/merge_requests"
-        body = json.loads(sent.content.decode("utf-8"))
-        assert body == {
-            "title": "Add foo",
-            "description": "desc",
-            "source_branch": "feature/x",
-            "target_branch": "main",
-        }
-
-    def test_mr_view_routes_with_iid(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(["mr", "view", "9"], sock_path=sock_path)
-        assert result.returncode == 0
-        assert str(seen[0].url) == "https://gitlab.com/api/v4/projects/ns%2Fpath/merge_requests/9"
-
-    def test_mr_list_default_state(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="[]")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(["mr", "list"], sock_path=sock_path)
-        assert result.returncode == 0
-        assert "state=opened" in str(seen[0].url)
-
-    def test_mr_close_puts_with_state_event(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="{}")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(["mr", "close", "9"], sock_path=sock_path)
-        assert result.returncode == 0, result.stderr
-        assert seen[0].method == "PUT"
-        assert str(seen[0].url) == "https://gitlab.com/api/v4/projects/ns%2Fpath/merge_requests/9"
-        assert json.loads(seen[0].content.decode("utf-8")) == {"state_event": "close"}
-
-    def test_issue_create_posts_with_description(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(201, text='{"iid":7}')
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(
-            ["issue", "create", "--title", "Bug", "--description", "details"],
-            sock_path=sock_path,
-        )
-        assert result.returncode == 0, result.stderr
-        assert json.loads(seen[0].content.decode("utf-8")) == {
-            "title": "Bug", "description": "details",
-        }
-
-    def test_issue_list_default_state(self, sock_path, daemon_factory):
-        seen = []
-
-        def handler(request):
-            seen.append(request)
-            return httpx.Response(200, text="[]")
-
-        daemon_factory(_ctx(http_handler=handler))
-        result = _run_glab(["issue", "list"], sock_path=sock_path)
-        assert result.returncode == 0
-        assert "state=opened" in str(seen[0].url)
-
-    def test_unrouted_command_exits_2(self, sock_path, daemon_factory):
-        daemon_factory(_ctx())
-        result = _run_glab(["release", "create"], sock_path=sock_path)
-        assert result.returncode == 2
-        assert "not yet routed" in result.stderr
-        assert "gitlab-api" in result.stderr
+        assert fields["GITLAB_TOKEN"] == "GL-TOKEN"
+        # Port and subpath both survive — a hostname-only value loses them.
+        assert fields["GITLAB_HOST"] == "https://git.example.com:8443/gitlab"
 
 
 # ---- Image content smoke checks -------------------------------------------
@@ -743,18 +327,36 @@ class TestGlabShim:
 class TestImageStaticContent:
     """No `docker build` here — that's a CI/integration concern. Instead we
     verify the COPY paths in the Dockerfile point at files that actually
-    exist, and that the static gitconfig wires the helper correctly."""
+    exist, that the static gitconfig wires the helper correctly, and that
+    the retired shims are really gone."""
 
-    def test_all_script_paths_exist_and_are_executable(self):
-        for name in (
-            "git-credential-istota", "gitlab-api", "github-api", "gh", "glab",
-        ):
+    def test_remaining_script_paths_exist_and_are_executable(self):
+        for name in ("git-credential-istota", "seed-forge-policy"):
             path = SCRIPTS_DIR / name
-            assert path.exists(), f"missing shim script: {path}"
-            assert os.access(path, os.X_OK), f"shim not executable: {path}"
+            assert path.exists(), f"missing script: {path}"
+            assert os.access(path, os.X_OK), f"not executable: {path}"
 
-    def test_lib_module_path_exists(self):
+    def test_retired_shims_are_gone(self):
+        """The curated gh/glab shims and the REST wrappers were deleted with
+        the proxy's API actions. A file reappearing here would shadow the
+        wrapper at /usr/local/bin and route around the policy entirely."""
+        for name in ("gh", "glab", "github-api", "gitlab-api"):
+            assert not (SCRIPTS_DIR / name).exists(), (
+                f"docker/devbox/scripts/{name} is back — the container gets "
+                f"the real binary behind forge_cli.py, not a shim"
+            )
+
+    def test_lib_module_paths_exist(self):
         assert (LIB_DIR / "istota_devbox_client.py").exists()
+        assert (LIB_DIR / "istota_forge_cli.py").exists()
+
+    def test_client_lib_no_longer_carries_the_api_wrapper_plumbing(self):
+        src = (LIB_DIR / "istota_devbox_client.py").read_text()
+        for gone in ("api_wrapper_main", "get_repo_slug", "emit_response"):
+            assert gone not in src, f"{gone} should have gone with the shims"
+        # What git-credential-istota imports must survive.
+        for kept in ("def call(", "def die(", "class ProxyUnreachable"):
+            assert kept in src
 
     def test_gitconfig_wires_credential_helper(self):
         gc = (REPO / "docker" / "devbox" / "etc" / "gitconfig").read_text()
@@ -764,19 +366,135 @@ class TestImageStaticContent:
         assert "[user]" in gc
 
     def test_dockerfile_copies_lib_scripts_and_gitconfig(self):
-        dockerfile = (REPO / "docker" / "devbox" / "Dockerfile").read_text()
-        # Each shim and the lib are COPIed.
+        dockerfile = DOCKERFILE.read_text()
         for line in (
             "COPY lib/istota_devbox_client.py /usr/local/lib/istota_devbox/istota_devbox_client.py",
+            "COPY lib/istota_forge_cli.py /usr/local/lib/istota_forge/istota_forge_cli.py",
             "COPY scripts/git-credential-istota /usr/local/bin/git-credential-istota",
-            "COPY scripts/gitlab-api /usr/local/bin/gitlab-api",
-            "COPY scripts/github-api /usr/local/bin/github-api",
-            "COPY scripts/gh /usr/local/bin/gh",
-            "COPY scripts/glab /usr/local/bin/glab",
+            "COPY scripts/seed-forge-policy /usr/local/lib/istota_forge/seed-forge-policy",
             "COPY etc/gitconfig /etc/gitconfig",
         ):
             assert line in dockerfile, f"missing Dockerfile line: {line}"
-        # ENV defaults that the developer skill's prompt language depends on.
-        assert "GITLAB_API_CMD=/usr/local/bin/gitlab-api" in dockerfile
-        assert "GITHUB_API_CMD=/usr/local/bin/github-api" in dockerfile
+
+    def test_dockerfile_installs_the_wrapper_under_all_four_names(self):
+        dockerfile = DOCKERFILE.read_text()
+        assert "for name in gh glab github-api gitlab-api" in dockerfile, (
+            "the retired names carry the one-line explanation; without them a "
+            "cached habit gets 'command not found' and reaches for something else"
+        )
+
+    def test_dockerfile_keeps_the_real_binaries_off_path(self):
+        """The real gh/glab live under /usr/local/lib/istota_forge/. Installing
+        the .deb instead would put a second, real gh at /usr/bin/gh."""
+        dockerfile = DOCKERFILE.read_text()
+        assert "/usr/local/lib/istota_forge/gh" in dockerfile
+        assert "/usr/local/lib/istota_forge/glab" in dockerfile
+        assert "dpkg-deb --fsys-tarfile" in dockerfile
+        assert "dpkg -i" not in dockerfile
+
+    def test_dockerfile_pins_and_verifies_the_forge_cli_downloads(self):
+        """A pinned version with no checksum is a version pin, not a supply
+        chain control — the vendor can re-cut a tag."""
+        dockerfile = DOCKERFILE.read_text()
+        assert "ARG GH_VERSION=" in dockerfile
+        assert "ARG GLAB_VERSION=" in dockerfile
+        assert dockerfile.count("sha256sum -c -") == 2
+        for name in ("GH_DEB_SHA256", "GLAB_DEB_SHA256"):
+            line = next(ln for ln in dockerfile.splitlines() if f"ARG {name}=" in ln)
+            digest = line.split("=", 1)[1].strip()
+            assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest), (
+                f"{name} is not a sha256 hex digest: {digest!r}"
+            )
+
+    def test_dockerfile_forge_versions_clear_the_documented_floors(self):
+        """The skill document's verbs need gh >= 2.40 and glab >= 1.36. The
+        host install asserts this in Ansible; the image has no equivalent
+        runtime assert, so it is pinned here."""
+        dockerfile = DOCKERFILE.read_text()
+        floors = {"GH_VERSION": (2, 40), "GLAB_VERSION": (1, 36)}
+        for name, floor in floors.items():
+            line = next(ln for ln in dockerfile.splitlines() if f"ARG {name}=" in ln)
+            version = tuple(int(p) for p in line.split("=", 1)[1].strip().split("."))
+            assert version >= floor, f"{name} {version} is below the floor {floor}"
+
+    def test_dockerfile_drops_the_retired_env_vars(self):
+        dockerfile = DOCKERFILE.read_text()
+        for gone in ("GITLAB_API_CMD", "GITHUB_API_CMD", "GH_PATH=", "GLAB_PATH="):
+            assert gone not in dockerfile, f"{gone} should be gone from the image"
         assert "ISTOTA_CRED_SOCK=/run/istota-cred/sock" in dockerfile
+
+
+# ---- Build-time policy seeding ---------------------------------------------
+
+
+class TestSeedForgePolicy:
+    """The build-time script that generates /etc/istota-forge/policy.json.
+
+    It runs against a tmpdir here rather than the image paths — that is what
+    the two argv overrides are for."""
+
+    def _seed(self, tmp_path):
+        lib = tmp_path / "lib"
+        etc = tmp_path / "etc"
+        lib.mkdir()
+        etc.mkdir()
+        shutil.copy(LIB_DIR / "istota_forge_cli.py", lib / "istota_forge_cli.py")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "seed-forge-policy"),
+             "--forge-lib", str(lib), "--etc", str(etc)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return result, lib, etc
+
+    def test_writes_a_policy_the_wrapper_loads(self, tmp_path):
+        result, lib, etc = self._seed(tmp_path)
+        assert result.returncode == 0, result.stderr
+
+        from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, load_policy
+
+        out = str(etc / "policy.json")
+        for forge, binary in ((FORGE_GITHUB, "gh"), (FORGE_GITLAB, "glab")):
+            loaded = load_policy(out, forge)
+            # real_bin is absent from the baseline, so its presence proves the
+            # file was read rather than fallen back from.
+            assert loaded["real_bin"] == str(lib / binary)
+            assert loaded["config_dir"] == str(etc / binary)
+            assert loaded["path_rules"]
+
+    def test_seeded_policy_denies_the_baseline(self, tmp_path):
+        """The container and the sandbox must not disagree about what is
+        denied, which is why this is generated from build_policy rather than
+        written out by hand."""
+        result, lib, etc = self._seed(tmp_path)
+        assert result.returncode == 0, result.stderr
+
+        from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
+
+        policy = load_policy(str(etc / "policy.json"), FORGE_GITHUB)
+        for args in (["repo", "delete", "o/r"], ["auth", "status"],
+                     ["api", "graphql"], ["gist", "create", "-"]):
+            assert denied_reason(FORGE_GITHUB, args, policy) is not None, args
+        assert denied_reason(FORGE_GITHUB, ["pr", "list"], policy) is None
+
+    def test_container_policy_never_grants_a_direct_token(self, tmp_path):
+        """direct_token lets the wrapper read an ambient GITHUB_TOKEN. The
+        container always has the credential socket, so an ambient token there
+        would mean something upstream failed to strip it."""
+        result, lib, etc = self._seed(tmp_path)
+        assert result.returncode == 0, result.stderr
+        policy = json.loads((etc / "policy.json").read_text())
+        for section in policy.values():
+            assert section["direct_token"] is False
+
+    def test_no_url_is_baked_in(self, tmp_path):
+        """One image serves every user. A baked gitlab.com would make a
+        self-hosted deployment look configured while sending its token to the
+        wrong host; the per-user URL rides in with the token instead."""
+        result, lib, etc = self._seed(tmp_path)
+        assert result.returncode == 0, result.stderr
+        policy = json.loads((etc / "policy.json").read_text())
+        for name, section in policy.items():
+            assert "url" not in section, (
+                f"{name} baked a URL into a shared image; the per-user value "
+                f"arrives with the token from the devbox proxy"
+            )

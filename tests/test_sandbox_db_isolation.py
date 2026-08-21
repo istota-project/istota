@@ -661,7 +661,7 @@ class TestNativeFsRootsExcludeDb:
     def test_db_not_in_read_roots(self, iso_config, iso_task, is_admin):
         user_temp = iso_config.temp_dir / "alice"
         user_temp.mkdir(parents=True, exist_ok=True)
-        read_roots, write_roots = native_fs_roots(
+        read_roots, write_roots, _ = native_fs_roots(
             iso_config, iso_task, is_admin, [], user_temp,
         )
         assert iso_config.db_path.resolve() not in read_roots

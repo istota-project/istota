@@ -9,8 +9,10 @@ client-to-daemon; responses are daemon-to-client. Each connection carries
 exactly one request and one response, then closes — same shape as the
 existing skill proxy.
 
-Action and error-code names are stable: the audit log keys on them and
-the container-side helper scripts switch on them as plain strings.
+Action and error-code names are stable: the audit log keys on them, the
+container-side credential helper switches on them as plain strings, and
+``forge_cli.py`` carries its own copy of ``forge_token`` because it cannot
+import ``istota``.
 """
 
 from __future__ import annotations
@@ -23,14 +25,17 @@ from typing import Any
 
 ACTION_PING = "ping"
 ACTION_GIT_CREDENTIAL = "git_credential"
-ACTION_GL_API = "gitlab_api"
-ACTION_GH_API = "github_api"
+# Hands the forge token to the in-container `gh` / `glab` wrapper, which then
+# execs the real binary. Replaced the `gitlab_api` / `github_api` actions: the
+# proxy used to make the REST call itself against an endpoint allowlist, which
+# could not describe what a real `gh` invocation does — `gh pr create` is
+# several calls and `gh pr checks` paginates.
+ACTION_FORGE_TOKEN = "forge_token"
 
 ALL_ACTIONS: frozenset[str] = frozenset({
     ACTION_PING,
     ACTION_GIT_CREDENTIAL,
-    ACTION_GL_API,
-    ACTION_GH_API,
+    ACTION_FORGE_TOKEN,
 })
 
 # ---- Error codes -----------------------------------------------------------
@@ -38,8 +43,7 @@ ALL_ACTIONS: frozenset[str] = frozenset({
 ERR_NO_TOKEN = "no_token"
 ERR_UNKNOWN_ACTION = "unknown_action"
 ERR_BAD_REQUEST = "bad_request"
-ERR_NOT_ALLOWED = "not_allowed"
-ERR_UPSTREAM = "upstream_error"
+ERR_UNKNOWN_PROVIDER = "unknown_provider"
 ERR_INTERNAL = "internal"
 
 # ---- Size cap --------------------------------------------------------------
@@ -83,7 +87,7 @@ def encode_error(code: str, message: str, **extra: Any) -> str:
 
     ``code`` is one of the stable ``ERR_*`` constants; ``message`` is a
     human-readable explanation; ``extra`` becomes additional response
-    fields (e.g. ``status``, ``body`` for upstream errors).
+    fields (e.g. ``provider`` on an unknown-provider rejection).
     """
     payload: dict[str, Any] = {"ok": False, "error": code, "message": message}
     payload.update(extra)

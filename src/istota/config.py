@@ -599,51 +599,38 @@ class DeveloperConfig:
     gitlab_token: str = ""        # API token (read_api + write_repository scope recommended)
     gitlab_username: str = ""     # GitLab username for HTTPS auth
     gitlab_default_namespace: str = ""  # Default namespace for resolving short repo names (e.g., "myorg")
-    gitlab_reviewer_id: str = ""       # GitLab user ID to assign as MR reviewer
-    # Patterns are matched against the bare path the shim emits — the
-    # devbox proxy strips ``/api/v4`` into the upstream ``base_url``
-    # (devbox_proxy.py:handle_gitlab_api) before matching. Don't add the
-    # ``/api/v4`` prefix here or every GitLab call will reject as
-    # not_allowed. The legacy host-side gitlab-api wrapper used the
-    # prefixed form; this codepath is different.
-    gitlab_api_allowlist: list[str] = field(default_factory=lambda: [
-        "GET /user",
-        "GET /projects/*",
-        "GET /groups/*",
-        "GET /users*",
-        "POST /projects/*/merge_requests",
-        "POST /projects/*/merge_requests/*/notes",
-        "POST /projects/*/issues",
-        "POST /projects/*/issues/*/notes",
-        "PUT /projects/*/merge_requests/*/merge",
-    ])
+    # A *username*, despite the name: `glab mr create --reviewer` takes
+    # usernames, not numeric IDs. The name predates the CLI wrapper and
+    # renaming it means touching the env spec, the Ansible var and the
+    # rendered config; the comment carries the truth until then.
+    gitlab_reviewer_id: str = ""       # GitLab reviewer username for new MRs
     github_url: str = "https://github.com"
     github_token: str = ""        # Personal access token (repo scope recommended)
     github_username: str = ""     # GitHub username for HTTPS auth (defaults to x-access-token if empty)
     github_default_owner: str = ""  # Default org/user for resolving short repo names
     github_reviewer: str = ""     # GitHub username to request as PR reviewer
     author_credit: str = ""       # Appended to every commit message (e.g., "Co-Authored-By: Name <email>")
-    github_api_allowlist: list[str] = field(default_factory=lambda: [
-        "GET /user",
-        "GET /repos/*",
-        "GET /orgs/*",
-        "GET /users/*",
-        "GET /search/*",
-        "POST /repos/*/pulls",
-        "POST /repos/*/pulls/*/reviews",
-        "POST /repos/*/issues",
-        "POST /repos/*/issues/*/comments",
-        "POST /repos/*/pulls/*/comments",
-        "PUT /repos/*/pulls/*/merge",
-        "PATCH /repos/*/pulls/*",
-        "PATCH /repos/*/issues/*",
-    ])
-    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
-    # `devbox-credential-proxy` spec for the design. The proxy injects
-    # tokens server-side for the in-container `git`, `gitlab-api`,
-    # `github-api`, `gh`, and `glab` wrappers — the container never sees
-    # the token.
+    # Forge CLI wrapper (src/istota/forge_cli.py). The real `gh` and `glab`
+    # run behind a wrapper that injects the token and checks the argv against
+    # a policy. The policy is code-owned rather than config-owned because it
+    # is a safety default, not a preference; these two knobs extend and
+    # puncture it. Entries are written as they would be typed —
+    # "gh repo view" — and an entry with no binary name applies to both.
+    forge_cli_extra_denied: list[str] = field(default_factory=list)
+    # Removes a baseline entry. Documented as turning off an accident guard,
+    # because that is what it does. An entry matching no baseline rule and no
+    # forge_cli_extra_denied entry is warned about at startup: a hatch that
+    # silently stopped matching reads exactly like one that is still open.
+    forge_cli_permit: list[str] = field(default_factory=list)
+    gh_bin_path: str = "/usr/local/bin/gh"
+    glab_bin_path: str = "/usr/local/bin/glab"
     api_timeout_seconds: int = 30
+    # Devbox credential proxy. See src/istota/devbox_proxy.py + the
+    # `devbox-credential-proxy` spec for the design. It answers two things
+    # for the container: a git credential (injected server-side, so git
+    # never holds the token) and, for `gh` / `glab`, the forge token itself
+    # — those run the real binaries behind forge_cli.py and need it in
+    # their own environment.
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
@@ -2708,10 +2695,19 @@ def load_config(config_path: Path | None = None) -> Config:
     if "developer" in data:
         dev = data["developer"]
         extra = {}
-        if "gitlab_api_allowlist" in dev:
-            extra["gitlab_api_allowlist"] = dev["gitlab_api_allowlist"]
-        if "github_api_allowlist" in dev:
-            extra["github_api_allowlist"] = dev["github_api_allowlist"]
+        # `gitlab_api_allowlist` / `github_api_allowlist` were read here
+        # until the devbox proxy stopped making REST calls of its own. They
+        # are deliberately not warned about: the loader ignores unknown keys
+        # by design (below), so a config.toml still carrying them loads clean
+        # and inert. Note that is not a transient state — `config.toml.j2`
+        # still renders both keys on every Ansible run, so they persist until
+        # that template drops them.
+        for _key in ("forge_cli_extra_denied", "forge_cli_permit"):
+            if _key in dev:
+                extra[_key] = list(dev[_key])
+        for _key in ("gh_bin_path", "glab_bin_path"):
+            if _key in dev:
+                extra[_key] = dev[_key]
         # Unknown keys are ignored rather than fatal, matching the rest of the
         # loader: only the fields named here are read off the block.
         rev = dev.get("review", {})
@@ -2960,8 +2956,72 @@ def load_config(config_path: Path | None = None) -> Config:
 
     _validate_brain_fallback(config)
     _validate_advisor_model(config)
+    _validate_forge_clis(config)
 
     return config
+
+
+def _validate_forge_clis(config: "Config") -> None:
+    """Warn about a forge CLI setup that will only fail later, and worse.
+
+    Both checks are warnings rather than errors: the developer skill is one of
+    many, and a deployment that has not finished wiring it should still start.
+
+    A missing binary otherwise surfaces as a forge command exiting 6 partway
+    through somebody's task. A ``forge_cli_permit`` entry matching nothing
+    otherwise surfaces as nothing at all — which is the problem, since a hatch
+    that silently stopped matching after a baseline rewording looks exactly
+    like one that is still open.
+    """
+    import os
+
+    dev = getattr(config, "developer", None)
+    if dev is None or not dev.enabled or not dev.repos_dir:
+        return
+    _logger = logging.getLogger("istota.config")
+
+    if dev.gitlab_token or dev.github_token:
+        for label, path in (("gh", dev.gh_bin_path), ("glab", dev.glab_bin_path)):
+            if path and not os.path.exists(path):
+                _logger.warning(
+                    "[developer] %s not found at %s; forge commands using it "
+                    "will fail at run time. Install it (the Ansible role does) "
+                    "or point %s_bin_path at the real one.",
+                    label, path, label,
+                )
+        if not config.security.skill_proxy_enabled:
+            # The wrapper gets its token from a credential proxy and never
+            # from an ambient GH_TOKEN — an ambient one would mean something
+            # upstream failed to strip it. With the proxy off there is no
+            # socket, so every forge command exits 4. The retired curl
+            # wrappers had a direct-token branch, so this is a behaviour
+            # change for that configuration and worth naming rather than
+            # leaving to be discovered.
+            _logger.warning(
+                "[developer] forge tokens are configured but "
+                "[security] skill_proxy_enabled = false; gh and glab have no "
+                "credential proxy to ask and every forge command will fail. "
+                "Enable the skill proxy, or clear the developer tokens.",
+            )
+
+    try:
+        from .forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
+
+        dead = unmatched_permits(
+            [FORGE_GITHUB, FORGE_GITLAB],
+            list(dev.forge_cli_permit),
+            list(dev.forge_cli_extra_denied),
+        )
+        for entry in dead:
+            _logger.warning(
+                "[developer] forge_cli_permit entry %r matches no rule this "
+                "deployment has. It is turning nothing off — check the "
+                "spelling against the baseline before assuming the verb is "
+                "permitted.",
+                entry,
+            )
+    except Exception:  # pragma: no cover - never fail config load over a warning
+        _logger.warning("forge_cli_permit validation failed", exc_info=True)
 
 
 # Anthropic-namespace brain kinds — the only ones the advisor tool can ever
