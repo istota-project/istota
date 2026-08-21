@@ -43,6 +43,25 @@ from istota.config import Config, UserConfig
 
 
 @pytest.fixture(autouse=True)
+def _skip_dac_tests_as_root(request):
+    """Root bypasses the permission bits these tests are made of.
+
+    A `chmod 0o500` directory is still writable by uid 0, and a `chmod 0o000`
+    file is still readable, so a test asserting "this fails" asserts nothing
+    and reports a failure that says nothing about the code. The developer host
+    runs as a normal user and never notices; `scripts/test-linux.sh` runs as
+    root in a container and does.
+
+    `geteuid` via `getattr`: it does not exist on Windows, and an autouse
+    fixture that raised `AttributeError` would error every test in the suite
+    rather than skip two. -1 is nobody, so nothing skips.
+    """
+    if request.node.get_closest_marker("requires_dac"):
+        if getattr(os, "geteuid", lambda: -1)() == 0:
+            pytest.skip("running as root: POSIX permission bits do not constrain this process")
+
+
+@pytest.fixture(autouse=True)
 def _no_network_symbol_lookups(monkeypatch):
     """Portfolio auto-classification's default fetch is a live yfinance
     lookup, and an import triggers it — so any test that reaches a portfolio

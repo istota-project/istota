@@ -28,8 +28,8 @@ import re
 from dataclasses import fields
 from pathlib import Path
 
+from istota import forge_bin
 from istota.config import DeveloperConfig
-from istota.skills import developer
 from istota.skills.developer import _resolve_real_bin
 
 REPO = Path(__file__).resolve().parent.parent
@@ -222,9 +222,9 @@ class TestTheResolvedBinaryIsTheOneTheImageShips:
         # gh_bin_path. The dataclass default stands, /usr/local/bin/gh does not
         # exist, and the binaries are off PATH — so without the probe below
         # this resolves to the same broken path as before the fix.
-        monkeypatch.setattr(developer.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(forge_bin.shutil, "which", lambda _name: None)
         monkeypatch.setattr(
-            developer.os.path, "exists", lambda p: p.startswith(FORGE_LIB)
+            forge_bin.os.path, "exists", lambda p: p.startswith(FORGE_LIB)
         )
         assert _resolve_real_bin(DeveloperConfig().gh_bin_path, "gh") == f"{FORGE_LIB}/gh"
         assert (
@@ -238,15 +238,15 @@ class TestTheResolvedBinaryIsTheOneTheImageShips:
         # The pre-fix container, pinned so the probe cannot mask a total
         # absence: nothing on disk, nothing on PATH, and the caller gets the
         # documented default rather than a silent empty string.
-        monkeypatch.setattr(developer.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(developer.os.path, "exists", lambda _p: False)
+        monkeypatch.setattr(forge_bin.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(forge_bin.os.path, "exists", lambda _p: False)
         assert _resolve_real_bin("", "gh") == "/usr/local/bin/gh"
 
     def test_an_operator_path_still_wins_over_the_shipped_one(self, monkeypatch):
         # The probe must not outrank an explicit choice — `_resolve_real_bin`
         # returns a configured path as given, existing or not.
-        monkeypatch.setattr(developer.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(developer.os.path, "exists", lambda _p: True)
+        monkeypatch.setattr(forge_bin.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(forge_bin.os.path, "exists", lambda _p: True)
         assert _resolve_real_bin("/opt/mine/gh", "gh") == "/opt/mine/gh"
 
 

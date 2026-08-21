@@ -1420,12 +1420,26 @@ class TestValidateModel:
 
     def test_operator_custom_alias_passes_silently(self, caplog):
         set_alias_overrides({"deep": "opus:max"})
+        # The override itself logs at INFO, and it happens before `at_level`
+        # raises the capture handler's threshold — so without this the
+        # assertion below sees a record the call under test never emitted.
+        # Whether it does depends on what configured logging earlier in the
+        # worker, which is why it showed up under one test distribution and
+        # not another rather than reliably.
+        caplog.clear()
         with caplog.at_level("WARNING"):
             _validate_model("job", "alice", "deep")
         assert not caplog.records
 
     def test_operator_custom_alias_with_effort_modifier_passes_silently(self, caplog):
         set_alias_overrides({"deep": "opus:max"})
+        # The override itself logs at INFO, and it happens before `at_level`
+        # raises the capture handler's threshold — so without this the
+        # assertion below sees a record the call under test never emitted.
+        # Whether it does depends on what configured logging earlier in the
+        # worker, which is why it showed up under one test distribution and
+        # not another rather than reliably.
+        caplog.clear()
         with caplog.at_level("WARNING"):
             _validate_model("job", "alice", "deep:high")
         assert not caplog.records

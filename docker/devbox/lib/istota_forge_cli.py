@@ -31,6 +31,14 @@ import socket
 import sys
 from urllib.parse import urlsplit
 
+# A deliberate identity marker, near the top of the file so it lands in the
+# first few KB. `doctor.check_forge_wrapper_shadowing` has to tell a copy of
+# this wrapper from a real `gh` / `glab` when it finds one by name on PATH, and
+# it reads only the file's head. Matching on documentation prose would mean a
+# reworded docstring silently flips a correct install to a failure — so the
+# thing being matched is this line, whose only purpose is to be matched.
+ISTOTA_FORGE_WRAPPER = True
+
 FORGE_GITHUB = "github"
 FORGE_GITLAB = "gitlab"
 RETIRED = "retired"
@@ -44,6 +52,16 @@ _ARGV0_MAP = {
 }
 
 _TOKEN_VAR = {FORGE_GITHUB: "GITHUB_TOKEN", FORGE_GITLAB: "GITLAB_TOKEN"}
+
+# The versions this deployment has actually been exercised against — the pins in
+# docker/istota/Dockerfile and docker/devbox/Dockerfile. Not a floor: no floor has
+# ever been derived from the verbs the developer skill uses, and deriving one
+# would mean changelog archaeology across ~25 verbs that goes stale on the next
+# skill.md edit. Below these, `istota doctor` WARNs and names both numbers; a
+# genuinely too-old CLI announces itself as a command error within one task
+# anyway. Bump when the Dockerfile pins move.
+GH_KNOWN_GOOD = (2, 98)
+GLAB_KNOWN_GOOD = (1, 114)
 
 # The devbox-proxy action the ISTOTA_CRED_SOCK branch sends. Duplicated from
 # devbox_proxy_protocol.ALL_ACTIONS because this module cannot import istota;
