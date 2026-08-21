@@ -116,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A private email exchange with the bot is no longer copied into the room the conversation started from. Replying from your own address only needs an answer by mail — you are already reading the thread — but every message and every reply was also written into that room as an ordinary turn, quoted chain and all, so a four-message exchange left several copies of itself there. Mail from an outside contact still appears in the room, which is the case the copy exists for. Answering such a reply with a question of your own now comes back by mail rather than waiting for you in the room.
 
+- A reviewer that asks to see a file it was not given now has time to read it. The budget a deploy wrote covered about one call to the model, so the second call — the one that reads the requested file — was started, charged, and then cut off before it could answer; the review still stood on its first answer and said so, but the extra round was paid for and thrown away. A deploy now writes a budget large enough for both rounds, sitting just under the ceiling the review would otherwise be clamped to.
+
 ## [0.40.1] - 2026-08-12
 
 ### Fixed
