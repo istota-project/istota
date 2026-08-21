@@ -325,6 +325,12 @@ db_backup_retention = {{ istota_scheduler_db_backup_retention }}
 scheduler_stats_interval = {{ istota_scheduler_stats_interval }}
 host_pressure_enabled = {{ istota_scheduler_host_pressure_enabled | lower }}
 host_pressure_breadcrumb_interval_seconds = {{ istota_scheduler_host_pressure_breadcrumb_interval }}
+host_pressure_sample_interval_seconds = {{ istota_scheduler_host_pressure_sample_interval }}
+host_pressure_psi_threshold = {{ istota_scheduler_host_pressure_psi_threshold }}
+host_pressure_alert_cooldown_seconds = {{ istota_scheduler_host_pressure_alert_cooldown }}
+host_pressure_shmem_unaccounted_alert_mb = {{ istota_scheduler_host_pressure_shmem_alert_mb }}
+host_pressure_docker_socket = "{{ istota_scheduler_host_pressure_docker_socket }}"
+min_available_memory_mb = {{ istota_scheduler_min_available_memory_mb }}
 
 # Progress / event streaming
 progress_updates = {{ istota_scheduler_progress_updates | lower }}

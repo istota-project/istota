@@ -23,6 +23,11 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
+# Top-level rather than imported where used: the admission gate consults it on
+# every dispatch tick (~0.5s), and it is a stdlib-only leaf with no import of
+# its own back into the package, so there is no cycle to avoid.
+from . import host_pressure as host_pressure_mod
+
 logger = logging.getLogger("istota.scheduler")
 # Dedicated logger so operators can isolate the periodic health line from the
 # noisy general scheduler logger (`journalctl … | grep scheduler_stats`).
@@ -1016,6 +1021,122 @@ class WorkerPool:
         self.config = config
         self._workers: dict[tuple[str, str, int], UserWorker] = {}
         self._lock = threading.Lock()
+        # Latest host memory reading, pushed in by the main loop's sampler.
+        # ``None`` — the startup state, and the state on any host where
+        # /proc/meminfo does not parse — means no information, which the gate
+        # reads as open. See _admission_open.
+        self._pressure_sample: host_pressure_mod.PressureSample | None = None
+        self._pressure_lock = threading.Lock()
+        # Monotonic clock of the first tick of the current closed stretch, and
+        # of the last line logged about it. Both reset when the gate reopens,
+        # so a fresh squeeze is reported as a new event rather than being
+        # swallowed by the previous one's cooldown.
+        self._gate_closed_since: float | None = None
+        self._last_gate_log = 0.0
+
+    def update_pressure(
+        self, sample: "host_pressure_mod.PressureSample | None"
+    ) -> None:
+        """Hand the pool the latest host reading (main loop → gate).
+
+        ``None`` clears rather than preserves. A sampler that starts failing
+        must not leave the last bad reading latched: the gate would then stay
+        shut on evidence that is no longer being refreshed, which is the
+        indefinite-outage failure this whole spec exists to prevent.
+        """
+        with self._pressure_lock:
+            self._pressure_sample = sample
+
+    def gate_closed_seconds(self) -> float:
+        """How long admission has been continuously closed. ``0.0`` when open.
+
+        Read by the alerting path to decide how to word a notification: a gate
+        that has been shut for longer than the cooldown while istota itself is
+        running nothing means the pressure is coming from elsewhere on the box,
+        and istota is the victim rather than the cause.
+
+        Takes no ``now``. ``_gate_closed_since`` is a ``time.monotonic()``
+        stamp while every other ``now`` in this file is ``time.time()``, so a
+        parameter here would exist mainly to be handed the wrong clock — and
+        the failure is silent, since a wall-clock value yields a difference of
+        about 1.7e9 and makes every alert claim istota is a bystander.
+        """
+        with self._pressure_lock:
+            closed_since = self._gate_closed_since
+        if closed_since is None:
+            return 0.0
+        return max(0.0, time.monotonic() - closed_since)
+
+    def _admission_open(self) -> bool:
+        """Is there room on this host to *start* more work?
+
+        Never about stopping work. Already-running tasks are not consulted, not
+        counted and not touched; the gate refuses a spawn and the pending row
+        waits for a later tick, exactly as it does when a cap is full.
+
+        Fails open in every uncertain case — feature disabled, floor set to
+        zero, no sample yet, sample unreadable. A broken sampler must not be
+        able to halt dispatch: an unexplained total outage is a far worse
+        failure than a spawn admitted onto a busy box, and it is the failure
+        this instrumentation was added to explain rather than to cause.
+        """
+        if not self.config.scheduler.host_pressure_enabled:
+            return True
+
+        # The lock is released before calling either _note_gate_* helper, which
+        # take it themselves. `threading.Lock` is not reentrant, so folding
+        # these calls into the `with` block — the obvious tidy-up — deadlocks
+        # the loop thread outright. Kept separate deliberately.
+        with self._pressure_lock:
+            sample = self._pressure_sample
+        if sample is None:
+            self._note_gate_open()
+            return True
+
+        psi_threshold = self.config.scheduler.host_pressure_psi_threshold
+        min_available_mb = self.config.scheduler.min_available_memory_mb
+        # A zero floor with no PSI threshold would make the gate unreachable;
+        # keep the switch explicit rather than implied by the arithmetic.
+        if min_available_mb <= 0 and psi_threshold <= 0:
+            self._note_gate_open()
+            return True
+
+        under = host_pressure_mod.is_under_pressure(
+            sample,
+            psi_threshold=psi_threshold if psi_threshold > 0 else float("inf"),
+            min_available_mb=min_available_mb,
+        )
+        if not under:
+            self._note_gate_open()
+            return True
+
+        self._note_gate_closed(sample)
+        return False
+
+    def _note_gate_open(self) -> None:
+        with self._pressure_lock:
+            self._gate_closed_since = None
+
+    def _note_gate_closed(self, sample: "host_pressure_mod.PressureSample") -> None:
+        """Mark the gate shut and log at most one line per cooldown window."""
+        now = time.monotonic()
+        with self._pressure_lock:
+            first_closed_tick = self._gate_closed_since is None
+            if first_closed_tick:
+                self._gate_closed_since = now
+            cooldown = self.config.scheduler.host_pressure_alert_cooldown_seconds
+            due = first_closed_tick or (now - self._last_gate_log >= cooldown)
+            if due:
+                self._last_gate_log = now
+        if not due:
+            return
+        logger.warning(
+            "dispatch_admission_closed mem_available_mb=%d psi_mem_some_avg10=%s "
+            "swap_total_kb=%d — holding pending tasks, nothing running is affected",
+            sample.mem_available_kb // 1024,
+            "?" if sample.psi_mem_some_avg10 is None else f"{sample.psi_mem_some_avg10:.2f}",
+            sample.swap_total_kb,
+        )
 
     def dispatch(self) -> None:
         """Spawn workers for users with pending tasks, prioritizing foreground.
@@ -1024,7 +1145,14 @@ class WorkerPool:
         1. Instance-level fg cap: max_foreground_workers
         2. Instance-level bg cap: max_background_workers
         3. Per-user caps: effective_user_max_fg_workers / effective_user_max_bg_workers
+
+        Ahead of all three sits the memory admission gate (C2): below the floor,
+        this tick spawns nothing at all and the pending rows wait. The check is
+        first so a squeezed host does not even pay for the DB scan.
         """
+        if not self._admission_open():
+            return
+
         # Short busy_timeout: this scan is pure reads, so a DB locked past the
         # budget means "skip this dispatch tick" (dispatch runs again in ~0.5s)
         # rather than blocking the main loop for 30s and tripping the watchdog.
@@ -4066,11 +4194,262 @@ def _emit_host_pressure_breadcrumb() -> None:
             return
 
         tmpfs = host_pressure.read_tmpfs_usage()
-        _HOST_PRESSURE_LOGGER.info(host_pressure.breadcrumb(sample, tmpfs))
+        # memory.events for the daemon's own cgroup. Stage 2 shipped
+        # MemoryHigh=5G but nothing read the counter it moves, so a throttled
+        # daemon looked exactly like a hung one: memory.high does not kill, it
+        # applies an allocation-time sleep to every process in the cgroup —
+        # the dispatch loop included. `high` rising across the series is what
+        # separates "we are being slowed by our own limit" from "the host is
+        # thrashing", and no other field on this line can tell them apart.
+        events = host_pressure.read_memory_events()
+        _HOST_PRESSURE_LOGGER.info(host_pressure.breadcrumb(sample, tmpfs, events))
     except Exception as exc:  # noqa: BLE001  -- instrumentation must never crash the loop
         _HOST_PRESSURE_LOGGER.warning(
             "host_pressure_error breadcrumb failed: %s", exc, exc_info=True,
         )
+
+
+def _check_host_pressure(
+    config: Config,
+    pool: "WorkerPool",
+    *,
+    last_alert: float,
+    alert_clocks: dict[str, float],
+    background_checks: dict[str, threading.Thread],
+    now: float,
+) -> float:
+    """Sample host memory, feed the admission gate, and snapshot on a crossing.
+
+    Two jobs off one reading, and they are deliberately not the same test.
+    The gate asks "is there room to start more work" and consults
+    :func:`host_pressure.is_under_pressure`. The snapshot asks "is something
+    happening we will want the evidence for" and consults
+    :func:`host_pressure.snapshot_trigger`, which additionally fires on a large
+    unaccounted-shmem residue. The production series is what forced the split:
+    on 2026-08-21 the host took 1.52 GB of shmem in under five minutes with PSI
+    at 0.07 and 2.9 GB still available. zram handled it, so refusing work would
+    have been wrong — but that burst is the one event in 24 hours whose
+    attribution anyone would want, and a single shared predicate can only get
+    one of those two answers right.
+
+    Returns the new ``last_alert`` clock and mutates ``alert_clocks``, which
+    holds one cooldown window per trigger class. Both are unchanged on a tick
+    that fired nothing, so a quiet stretch cannot push a window forward and
+    silence a squeeze that starts later.
+
+    Wrapped whole and never raises — the body lives in
+    :func:`_check_host_pressure_inner` and this function is the net around it.
+    That matters because it runs on the main loop thread and the call site is
+    bare: an instrument that can take the daemon down is worse than no
+    instrument, since it would produce exactly the unexplained outage this spec
+    was written to prevent. The sample is handed to the pool before anything
+    else is attempted, so a failure in the attribution half never costs the
+    admission half its input.
+    """
+    try:
+        return _check_host_pressure_inner(
+            config,
+            pool,
+            last_alert=last_alert,
+            alert_clocks=alert_clocks,
+            background_checks=background_checks,
+            now=now,
+        )
+    except Exception as exc:  # noqa: BLE001  -- instrumentation must never crash the loop
+        # The outer net. The inner blocks catch each reader at its own boundary
+        # so one failure does not cost the others their result; this catches
+        # everything between them — the config reads, the cooldown arithmetic,
+        # anything a later edit adds outside a try. The main loop calls this
+        # bare, on the strength of the promise above.
+        logger.warning("host_pressure_error check failed: %s", exc, exc_info=True)
+        return last_alert
+
+
+def _check_host_pressure_inner(
+    config: Config,
+    pool: "WorkerPool",
+    *,
+    last_alert: float,
+    alert_clocks: dict[str, float],
+    background_checks: dict[str, threading.Thread],
+    now: float,
+) -> float:
+    """The body of :func:`_check_host_pressure`. May raise; its caller catches."""
+    if not config.scheduler.host_pressure_enabled:
+        return last_alert
+
+    try:
+        sample = host_pressure_mod.read_sample()
+    except Exception as exc:  # noqa: BLE001
+        # Clear the reading before returning. Returning early here without
+        # doing so would leave the *last* sample latched in the pool, and if
+        # that sample was a starved one the gate stays shut for the life of
+        # the process — dispatch spawning nothing, one WARNING per cooldown as
+        # the only symptom. A sampler that has started throwing is exactly the
+        # case the fail-open rule exists for, so it must clear like a `None`
+        # return does rather than freeze the last thing it managed to read.
+        logger.warning("host_pressure_error sample failed: %s", exc, exc_info=True)
+        pool.update_pressure(None)
+        return last_alert
+
+    # Push the reading to the gate first, and push ``None`` through as well,
+    # on the same reasoning as the except branch above.
+    pool.update_pressure(sample)
+    if sample is None:
+        return last_alert
+
+    tmpfs_read_ok = True
+    try:
+        tmpfs = host_pressure_mod.read_tmpfs_usage()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error tmpfs read failed: %s", exc, exc_info=True)
+        tmpfs = []
+        tmpfs_read_ok = False
+
+    try:
+        # The residue arm is disarmed when the tmpfs read failed. Its
+        # arithmetic is `Shmem - Σ tmpfs`, so the empty list the failure path
+        # leaves behind makes the subtrahend zero and reports the *whole* of
+        # Shmem as unaccounted — a false burst on any host with more than the
+        # threshold in perfectly ordinary, perfectly accounted tmpfs. An empty
+        # list here means "the read failed", not "there are none", and this
+        # module is careful about that distinction everywhere else.
+        reason = host_pressure_mod.snapshot_trigger(
+            sample,
+            tmpfs,
+            psi_threshold=config.scheduler.host_pressure_psi_threshold,
+            min_available_mb=config.scheduler.min_available_memory_mb,
+            shmem_unaccounted_mb=(
+                config.scheduler.host_pressure_shmem_unaccounted_alert_mb
+                if tmpfs_read_ok
+                else 0
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error trigger failed: %s", exc, exc_info=True)
+        return last_alert
+
+    if reason is None:
+        return last_alert
+
+    # One cooldown per trigger class, not one for all three. The residue arm is
+    # the one that fires while the host is healthy, so a single shared window
+    # would let the cheapest alert suppress the most urgent: a residue notice
+    # at t=0 would silence a MemAvailable collapse at t=60 for the rest of the
+    # window, and that collapse is the one that halts dispatch.
+    trigger_class = reason.split("=", 1)[0]
+    cooldown = config.scheduler.host_pressure_alert_cooldown_seconds
+    previous = alert_clocks.get(trigger_class, 0.0)
+    # `now` is wall clock, so a backward NTP step can make this negative. Clamp
+    # rather than compare raw: a negative delta is not "inside the window", and
+    # reading it as one would mute every alert for the size of the step.
+    if previous and 0 <= now - previous < cooldown:
+        return last_alert
+
+    alert_clocks[trigger_class] = now
+    # Off the loop thread. The snapshot is the most expensive thing the daemon
+    # does — a Docker round-trip per container at 2s apiece, the whole process
+    # table, and a walk of every /proc/*/fd when the residue is large — and it
+    # runs at exactly the moment I/O is slowest. Then the operator alert joins
+    # for up to 30s on top. Inline, that is a minute of dispatch starvation
+    # during an incident, and the spec's own Track B constraint says this must
+    # never block the main loop. `_spawn_background_check` is the established
+    # answer here and its in-flight guard also stops two snapshots stacking.
+    # The sampling above stays inline: it is three file reads, and the gate
+    # needs the reading this tick rather than whenever a thread gets to it.
+    _spawn_background_check(
+        "host_pressure_snapshot",
+        lambda: _emit_host_pressure_snapshot(config, pool, sample, tmpfs, reason),
+        background_checks,
+    )
+    return now
+
+
+def _emit_host_pressure_snapshot(
+    config: Config,
+    pool: "WorkerPool",
+    sample: "host_pressure_mod.PressureSample",
+    tmpfs: "list[host_pressure_mod.TmpfsUsage]",
+    reason: str,
+) -> None:
+    """Write the structured snapshot and send one operator alert. Never raises.
+
+    The snapshot goes to the log at WARNING because it is the artefact someone
+    will go looking for after the fact, and the log is the only surface that
+    survives the host it describes. The notification is the operator's live
+    signal — learning about this from a user asking "are we back?" is the
+    failure mode being closed — and is best-effort on top: a wedged Talk must
+    not stop the evidence being recorded.
+    """
+    snapshot_written = False
+    try:
+        # An empty socket path is the operator switching container lookup off,
+        # so pass an explicit empty container list rather than a path that
+        # cannot connect: the two produce the same snapshot but only one of
+        # them says which it meant.
+        socket_path = config.scheduler.host_pressure_docker_socket
+        extra = (
+            {"docker_socket": Path(socket_path)} if socket_path else {"containers": []}
+        )
+        block = host_pressure_mod.snapshot(sample=sample, tmpfs=tmpfs, **extra)
+        logger.warning("%s\n  trigger=%s", block, reason)
+        snapshot_written = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error snapshot failed: %s", exc, exc_info=True)
+
+    try:
+        user = _operator_alert_user(config)
+        if not user:
+            return
+
+        # Say what is actually happening to the queue, not what usually
+        # happens when a snapshot fires. The residue arm of snapshot_trigger
+        # deliberately leaves admission open, so on the 2026-08-21 burst — the
+        # event that arm exists for — an unconditional "workers are held" would
+        # tell the operator the queue is stalled when it is running normally.
+        gate_shut = not pool._admission_open()
+        if gate_shut:
+            queue_state = (
+                "New workers are held while this lasts; running tasks are untouched."
+            )
+        else:
+            queue_state = (
+                "Admission is still open and the queue is unaffected — this is a "
+                "record for attribution, not a stall."
+            )
+
+        # istota as victim rather than cause. If admission has been shut longer
+        # than a cooldown window and we are running nothing, the memory is
+        # being taken by something else on the box — a different remedy, and
+        # one the operator cannot guess from a generic pressure alert.
+        if (
+            gate_shut
+            and pool.active_count == 0
+            and pool.gate_closed_seconds()
+            >= config.scheduler.host_pressure_alert_cooldown_seconds
+        ):
+            queue_state += (
+                "\nNo istota worker is running, so the memory is being held by "
+                "something else on the host — istota is queuing behind it, not "
+                "causing it."
+            )
+
+        evidence = (
+            "A host_pressure_snapshot naming the holders is in the log."
+            if snapshot_written
+            else "The snapshot could not be gathered; see host_pressure_error in the log."
+        )
+        message = (
+            f"⚠️ Host memory pressure — {reason}\n"
+            f"MemAvailable {sample.mem_available_kb // 1024} MB, "
+            f"Shmem {sample.shmem_kb // 1024} MB, "
+            f"swap {(sample.swap_total_kb - sample.swap_free_kb) // 1024}"
+            f"/{sample.swap_total_kb // 1024} MB used.\n"
+            f"{queue_state} {evidence}"
+        )
+        _send_operator_alert(config, user, message)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host_pressure_error alert failed: %s", exc, exc_info=True)
 
 
 def _effective_processed_email_retention(sched: SchedulerConfig) -> int:
@@ -5298,6 +5677,15 @@ def run_daemon(
         and config.scheduler.host_pressure_breadcrumb_interval_seconds
         else "disabled",
     )
+    logger.info(
+        "STARTUP Memory admission gate: %s",
+        f"below {config.scheduler.min_available_memory_mb} MB available "
+        f"or PSI some avg10 > {config.scheduler.host_pressure_psi_threshold:g} "
+        f"(sampled every {config.scheduler.host_pressure_sample_interval_seconds}s)"
+        if config.scheduler.host_pressure_enabled
+        and config.scheduler.host_pressure_sample_interval_seconds
+        else "disabled",
+    )
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
@@ -5499,6 +5887,17 @@ def run_daemon(
     # the 2026-08-20 analysis turned on knowing the host idles at 85 MB of
     # Shmem. Waiting a full interval throws that sample away.
     last_pressure_breadcrumb = 0.0
+    # The gate/snapshot sampler runs on its own, faster cadence: the breadcrumb
+    # is a series and wants a slow regular beat, while the gate wants a reading
+    # recent enough to act on. Inits to 0.0 for the same reason — the gate
+    # should have a real reading on the first tick rather than failing open for
+    # a full interval after every restart.
+    last_pressure_sample = 0.0
+    # Cooldown clocks for the threshold snapshot + admin notification, one per
+    # trigger class so a residue notice cannot mute a MemAvailable collapse.
+    # Loop-local so a re-entered daemon and each test start clean.
+    last_pressure_alert = 0.0
+    pressure_alert_clocks: dict[str, float] = {}
     # In-flight registry for the slow periodic checks that run off this thread
     # (ISSUE-144). Loop-local rather than process-global so tests and a
     # re-entered daemon each get a clean slate.
@@ -5720,6 +6119,26 @@ def run_daemon(
         ):
             _emit_host_pressure_breadcrumb()
             last_pressure_breadcrumb = now
+
+        # Sample for the admission gate and the threshold snapshot. Separate
+        # cadence from the breadcrumb above, and separate purpose: this one
+        # feeds a decision, that one feeds a series. Never raises — see
+        # _check_host_pressure.
+        if (
+            config.scheduler.host_pressure_enabled
+            and config.scheduler.host_pressure_sample_interval_seconds
+            and now - last_pressure_sample
+            >= config.scheduler.host_pressure_sample_interval_seconds
+        ):
+            last_pressure_alert = _check_host_pressure(
+                config,
+                pool,
+                last_alert=last_pressure_alert,
+                alert_clocks=pressure_alert_clocks,
+                background_checks=background_checks,
+                now=now,
+            )
+            last_pressure_sample = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:
