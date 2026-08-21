@@ -2025,6 +2025,12 @@ def run_review(
         "truncated": bundle.truncated,
         "truncated_files": bundle.truncated_files,
         "rounds": 0,
+        # The budget each agent was actually given, which is not always the one
+        # the operator configured — the caller clamps it to fit under the skill
+        # proxy's own ceiling. Set here rather than by the caller so that every
+        # return path below carries it, including the empty-range one that
+        # returns before a reviewer is ever sized.
+        "agent_timeout_seconds": timeout_seconds,
         "agents": [],
         "sizing_reason": "",
         "counts": _counts([]),

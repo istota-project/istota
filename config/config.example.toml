@@ -830,6 +830,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # default). Below that, the sandboxed model calls the CLI through its own Bash
 # tool, whose limit is 120s — so the model must invoke the command with an
 # explicit extended timeout, which `code_review/skill.md` tells it to do.
+#
+# A `timeout_seconds` that does not fit under the proxy ceiling is clamped down
+# rather than honoured, since the alternative is a review killed half-finished
+# having already paid for its agents. The clamp warns into the daemon log and
+# reports itself in the envelope as `agent_timeout_clamped`, alongside the
+# `agent_timeout_seconds` each reviewer actually got.
 
 # [developer.review]
 # enabled = true                      # false disables the CLI; the workflow then
