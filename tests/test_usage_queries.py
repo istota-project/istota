@@ -30,7 +30,14 @@ def _sql_datetime(dt):
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# A fixed anchor for the query and grouping tests, which are self-consistent
+# because both the seeded rows and the bounds under test derive from it.
 NOW = datetime(2026, 8, 20, 9, 0, 0, tzinfo=timezone.utc)
+
+# `prune_old_usage` computes its cutoff from the real clock, so the retention
+# tests must stamp rows against the real clock too. Mixing the frozen anchor
+# with a real-clock function gives a test that passes today and fails tomorrow.
+REAL_NOW = datetime.now(timezone.utc)
 
 
 def _usage(**kw):
@@ -110,6 +117,13 @@ def _insert(conn, *, days_ago=0, at=None, **kw):
     return row_id
 
 
+def _orphan_count(conn):
+    return conn.execute(
+        "SELECT COUNT(*) FROM task_usage_models m"
+        " WHERE NOT EXISTS (SELECT 1 FROM task_usage p WHERE p.id = m.task_usage_id)"
+    ).fetchone()[0]
+
+
 @pytest.fixture
 def seeded(db_conn):
     """Three users, three models, two brains, three bases, two origins, 40 days."""
@@ -119,7 +133,10 @@ def seeded(db_conn):
     _insert(c, days_ago=2, user_id="alice", model="model-b", source_type="talk")
     # alice: a non-task row, so usage rows can exceed her task count.
     _insert(c, days_ago=1, user_id="alice", origin="sleep_cycle", model="model-a")
-    # bob: a native row — derived totals, NULL context, estimated cost.
+    # bob: a native row. Derived totals, NULL context, estimated cost, and —
+    # the part that matters for `--by model` — NO per-model children, because
+    # the native brain reports one total with no breakdown. A fixture that
+    # synthesized a child here would hide a grouping that drops native spend.
     _insert(
         c,
         days_ago=3,
@@ -128,6 +145,7 @@ def seeded(db_conn):
         model="model-c",
         cost_basis="estimated",
         totals_source="derived",
+        models=[],
         initial_context_tokens=None,
         peak_context_tokens=None,
         context_window=None,
@@ -178,6 +196,35 @@ class TestSchema:
         ).fetchone()
         assert stored["task_id"] is None
         assert stored["origin"] == "sleep_cycle"
+
+    def test_an_existing_database_picks_the_tables_up(self, db_path):
+        """There is no migration script. The claim that none is needed rests on
+        `init_db` running `executescript(schema.sql)` unconditionally on every
+        open, and at Full tier a schema change should prove its own upgrade path
+        rather than only its fresh-install one."""
+        with db.get_db(db_path) as conn:
+            conn.execute("DROP TABLE task_usage_models")
+            conn.execute("DROP TABLE task_usage")
+
+        db.init_db(db_path)
+
+        with db.get_db(db_path) as conn:
+            names = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','index')"
+                )
+            }
+        assert {"task_usage", "task_usage_models"} <= names
+        assert {
+            "idx_task_usage_created",
+            "idx_task_usage_user",
+            "idx_task_usage_task",
+            "idx_task_usage_origin",
+            "idx_task_usage_attempt",
+            "idx_task_usage_models_parent",
+            "idx_task_usage_models_model",
+        } <= names
 
     def test_created_at_default_is_iso_z(self, db_conn):
         """The whole module's date handling rests on this format."""
@@ -313,6 +360,58 @@ class TestInsert:
             db_conn.execute("SELECT COUNT(*) FROM task_usage_models").fetchone()[0] == 0
         )
 
+    def test_a_write_conflict_is_retried_once(self, db_conn):
+        """The losing worker of a concurrent write re-reads MAX(attempt_seq) and
+        takes the next one. The retry catches `sqlite3.Error` rather than
+        `IntegrityError` alone because the observed concurrent failure is an
+        `OperationalError` — a locked database, or a stale read snapshot the
+        busy handler does not retry."""
+        db.insert_task_usage(
+            db_conn, usage=_usage(), task_id=5, user_id="alice",
+            brain_kind="claude_code",
+        )
+
+        class FailsOnce:
+            def __init__(self, conn):
+                self._conn = conn
+                self.failed = False
+
+            def execute(self, sql, params=()):
+                if "INTO task_usage (" in sql and not self.failed:
+                    self.failed = True
+                    raise db.sqlite3.OperationalError("database is locked")
+                return self._conn.execute(sql, params)
+
+        proxy = FailsOnce(db_conn)
+        row_id = db.insert_task_usage(
+            proxy, usage=_usage(), task_id=5, user_id="alice", brain_kind="native"
+        )
+        db_conn.commit()
+
+        assert proxy.failed
+        seq = db_conn.execute(
+            "SELECT attempt_seq FROM task_usage WHERE id = ?", (row_id,)
+        ).fetchone()[0]
+        assert seq == 2
+
+    def test_a_second_failure_is_raised_not_swallowed(self, db_conn):
+        """Real spend disappearing deserves more than a silent return."""
+
+        class AlwaysFails:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, params=()):
+                if "INTO task_usage (" in sql:
+                    raise db.sqlite3.OperationalError("database is locked")
+                return self._conn.execute(sql, params)
+
+        with pytest.raises(db.sqlite3.OperationalError):
+            db.insert_task_usage(
+                AlwaysFails(db_conn), usage=_usage(), task_id=5,
+                user_id="alice", brain_kind="native",
+            )
+
     def test_a_successful_insert_survives_the_savepoint_release(self, db_conn):
         """The other half: RELEASE must not discard the work it wrapped."""
         row_id = db.insert_task_usage(
@@ -407,15 +506,30 @@ class TestUsageSummary:
         assert "cost_usd" not in summary
 
     def test_no_field_sums_across_cost_basis(self, seeded):
-        """Guard against a later 'convenience total'."""
+        """Guard against a later 'convenience total'. Asserted as an allowlist
+        of keys rather than by hunting for a float that happens to equal the
+        sum — the latter passes or fails on the fixture's cost values, which is
+        not the invariant."""
         summary = db.usage_summary(seeded, since=_iso(NOW - timedelta(days=7)))
-        total = sum(summary["cost_by_basis"].values())
 
-        assert not any(
-            isinstance(v, float) and v == pytest.approx(total) and k != "unreachable"
-            for k, v in summary.items()
-            if k != "cost_by_basis"
-        )
+        assert set(summary) == {
+            "rows",
+            "measured_rows",
+            "billed_input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "turns",
+            "model_requests",
+            "context_rows",
+            "avg_initial_context_tokens",
+            "avg_peak_context_tokens",
+            "avg_context_window",
+            "total_prompt_tokens",
+            "total_tokens",
+            "cache_hit_rate",
+            "cost_by_basis",
+        }
 
 
 class TestGrouping:
@@ -457,6 +571,73 @@ class TestGrouping:
         assert sum(g["rows"] for g in groups) == ungrouped["measured_rows"]
         assert sum(g["rows"] for g in groups) < ungrouped["rows"]
 
+    def test_by_model_keeps_rows_that_have_no_per_model_split(self, seeded):
+        """The native brain reports one total and no breakdown. Reading only the
+        child table would drop its whole spend from this grouping while leaving
+        it in the ungrouped totals — a silent disagreement between two numbers
+        on the same screen. bob's native row is childless and carries
+        `model = 'model-c'`."""
+        groups = db.usage_summary(
+            seeded, since=_iso(NOW - timedelta(days=7)), group_by="model"
+        )
+        by_key = {g["key"]: g for g in groups}
+
+        assert "model-c" in by_key
+        assert by_key["model-c"]["billed_input_tokens"] == 100
+        assert by_key["model-c"]["cost_by_basis"] == {"estimated": pytest.approx(0.01)}
+
+    def test_by_model_buckets_a_childless_row_with_no_model_name(self, db_conn):
+        _insert(db_conn, days_ago=1, user_id="alice", model="", models=[])
+        db_conn.commit()
+
+        groups = db.usage_summary(
+            db_conn, since=_iso(NOW - timedelta(days=7)), group_by="model"
+        )
+        assert [g["key"] for g in groups] == [db.UNATTRIBUTED_MODEL]
+
+    def test_by_model_excludes_unmeasured_rows(self, db_conn):
+        """`has_totals` is filtered here as it is everywhere else. Seeded with
+        children so the assertion is not satisfied by their absence."""
+        _insert(
+            db_conn, days_ago=1, user_id="alice", model="model-a", has_totals=False,
+        )
+        db_conn.commit()
+
+        groups = db.usage_summary(
+            db_conn, since=_iso(NOW - timedelta(days=7)), group_by="model"
+        )
+        assert groups == []
+
+    def test_by_model_filter_combines_with_a_grouping(self, seeded):
+        """Two filters nothing else exercises together. Assembling the clause
+        text in one order and its bound parameters in another binds the group
+        key to the model predicate — which raises nothing, because both are
+        strings, and simply reports zero cost beside correct token counts."""
+        since = _iso(NOW - timedelta(days=7))
+        groups = db.usage_summary(
+            seeded, since=since, group_by="user", model="model-a"
+        )
+
+        assert groups, "the model filter matched nothing"
+        for group in groups:
+            assert group["cost_by_basis"], (
+                f"empty cost map for {group['key']} beside "
+                f"{group['billed_input_tokens']} tokens"
+            )
+            assert sum(group["cost_by_basis"].values()) > 0
+
+    @pytest.mark.parametrize(
+        "by", ["day", "user", "model", "source", "brain", "origin"]
+    )
+    def test_model_filter_is_consistent_across_groupings(self, seeded, by):
+        since = _iso(NOW - timedelta(days=7))
+        groups = db.usage_summary(seeded, since=since, group_by=by, model="model-a")
+        ungrouped = db.usage_summary(seeded, since=since, model="model-a")
+
+        assert sum(g["billed_input_tokens"] for g in groups) == (
+            ungrouped["billed_input_tokens"]
+        )
+
     def test_by_model_reports_no_context_averages(self, seeded):
         """A run's peak belongs to the run. Averaging it once per model the run
         used would count one measurement several times."""
@@ -470,17 +651,38 @@ class TestGrouping:
             db.usage_summary(seeded, since=_iso(NOW), group_by="nonsense")
 
     def test_by_day_sorts_chronologically(self, seeded):
+        """Seeded out of order so the assertion is not satisfied by SQLite's
+        own GROUP BY ordering, which already returns days ascending."""
+        _insert(seeded, at=NOW - timedelta(days=3, hours=1), user_id="zoe")
+        _insert(seeded, at=NOW - timedelta(days=6), user_id="zoe")
+        seeded.commit()
+
         groups = db.usage_summary(
             seeded, since=_iso(NOW - timedelta(days=7)), group_by="day"
         )
-        assert [g["key"] for g in groups] == sorted(g["key"] for g in groups)
+        keys = [g["key"] for g in groups]
+        assert keys == sorted(keys)
+        assert len(keys) > 1
 
     def test_other_groupings_sort_by_tokens_descending(self, seeded):
+        """A user whose key sorts first but whose tokens are smallest. Without
+        this the assertion passes against no sort at all: alice/bob/carol
+        already come back in descending-token order by coincidence."""
+        _insert(seeded, days_ago=1, user_id="aaa", billed_input_tokens=1,
+                output_tokens=1, cache_read_tokens=1, cache_write_tokens=1)
+        seeded.commit()
+
         groups = db.usage_summary(
             seeded, since=_iso(NOW - timedelta(days=7)), group_by="user"
         )
+        keys = [g["key"] for g in groups]
         totals = [g["total_tokens"] for g in groups]
+
         assert totals == sorted(totals, reverse=True)
+        # "aaa" sorts first alphabetically and is the smallest by tokens, so a
+        # result that merely echoed SQLite's GROUP BY order would lead with it.
+        assert keys[0] != "aaa"
+        assert keys != sorted(keys)
 
     def test_by_user_partitions_correctly(self, seeded):
         groups = db.usage_summary(
@@ -591,8 +793,8 @@ class TestRetention:
         assert after["billed_input_tokens"] == 100
 
     def test_prune_removes_old_rows_and_their_children(self, db_conn):
-        old = _insert(db_conn, days_ago=200, user_id="alice")
-        keep = _insert(db_conn, days_ago=10, user_id="alice")
+        old = _insert(db_conn, at=REAL_NOW - timedelta(days=200), user_id="alice")
+        keep = _insert(db_conn, at=REAL_NOW - timedelta(days=10), user_id="alice")
         db_conn.commit()
 
         pruned = db.prune_old_usage(db_conn, 180)
@@ -606,36 +808,55 @@ class TestRetention:
         assert orphans == 0
 
     def test_prune_leaves_no_orphans_at_all(self, db_conn):
-        _insert(db_conn, days_ago=200, user_id="alice")
-        _insert(db_conn, days_ago=1, user_id="alice")
+        _insert(db_conn, at=REAL_NOW - timedelta(days=200), user_id="alice")
+        _insert(db_conn, at=REAL_NOW - timedelta(days=1), user_id="alice")
         db_conn.commit()
 
         db.prune_old_usage(db_conn, 180)
 
-        orphans = db_conn.execute(
-            "SELECT COUNT(*) FROM task_usage_models m"
-            " WHERE NOT EXISTS (SELECT 1 FROM task_usage p WHERE p.id = m.task_usage_id)"
-        ).fetchone()[0]
-        assert orphans == 0
+        assert _orphan_count(db_conn) == 0
 
-    def test_prune_disabled_at_zero(self, db_conn):
-        _insert(db_conn, days_ago=500, user_id="alice")
+    def test_prune_collects_pre_existing_orphans(self, db_conn):
+        """A child whose parent went away by some other route is invisible to a
+        delete scoped through `task_usage` — its date is never read, so it would
+        never age out."""
+        row_id = _insert(db_conn, at=REAL_NOW, user_id="alice")
+        db_conn.execute("DELETE FROM task_usage WHERE id = ?", (row_id,))
+        db_conn.commit()
+        assert _orphan_count(db_conn) == 1
+
+        db.prune_old_usage(db_conn, 180)
+
+        assert _orphan_count(db_conn) == 0
+
+    @pytest.mark.parametrize("retention", [0, -1])
+    def test_prune_disabled_at_or_below_zero(self, db_conn, retention):
+        _insert(db_conn, at=REAL_NOW - timedelta(days=500), user_id="alice")
         db_conn.commit()
 
-        assert db.prune_old_usage(db_conn, 0) == 0
+        assert db.prune_old_usage(db_conn, retention) == 0
         assert db_conn.execute("SELECT COUNT(*) FROM task_usage").fetchone()[0] == 1
 
-    def test_prune_uses_iso_z_bounds(self, db_conn):
+    def test_prune_keeps_rows_inside_the_window(self, db_conn):
         """`cleanup_old_tasks` uses `datetime('now', '-N days')`. Copying that
         idiom here compares a space-separated bound against ISO-Z values and
-        inverts same-day comparisons."""
-        recent = _insert(db_conn, days_ago=0, user_id="alice")
+        inverts same-day comparisons — a row minutes old would be pruned."""
+        recent = _insert(db_conn, at=REAL_NOW, user_id="alice")
         db_conn.commit()
 
         assert db.prune_old_usage(db_conn, 1) == 0
         assert db_conn.execute(
             "SELECT COUNT(*) FROM task_usage WHERE id = ?", (recent,)
         ).fetchone()[0] == 1
+
+    def test_prune_boundary_is_the_retention_window(self, db_conn):
+        just_inside = _insert(db_conn, at=REAL_NOW - timedelta(days=179), user_id="a")
+        _insert(db_conn, at=REAL_NOW - timedelta(days=181), user_id="a")
+        db_conn.commit()
+
+        assert db.prune_old_usage(db_conn, 180) == 1
+        ids = {r[0] for r in db_conn.execute("SELECT id FROM task_usage")}
+        assert ids == {just_inside}
 
 
 class TestConfig:

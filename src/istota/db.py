@@ -8282,8 +8282,15 @@ def insert_task_usage(
     transaction and takes no write lock, and nothing in this codebase issues
     `BEGIN IMMEDIATE`. Two workers really can run one task — the
     duplicate-execution guard in the scheduler is post-hoc, running after
-    `execute_task` returns. The `INSERT ... SELECT` below closes that window;
-    the caller retries once on `IntegrityError`.
+    `execute_task` returns. The `INSERT ... SELECT` below closes that window,
+    and the whole insert is retried once on a write conflict: the losing worker
+    re-reads `MAX(attempt_seq)` and takes the next one. The retry catches
+    `sqlite3.Error` rather than `IntegrityError` alone because the observed
+    concurrent failure is an `OperationalError` ("database is locked", or
+    SQLITE_BUSY_SNAPSHOT against a pinned stale read snapshot, which the busy
+    handler does not retry). A second failure is raised rather than swallowed —
+    real spend disappearing deserves more than a debug line, and the caller
+    logs it as a warning.
 
     **Parent and children land together, or not at all.** A failure at child 3
     of 5 would otherwise commit a parent whose totals do not equal the sum of
@@ -8291,8 +8298,45 @@ def insert_task_usage(
     SAVEPOINT means the bare `except` in the best-effort caller swallows a
     complete failure, never a partial split.
 
-    Does not commit — the caller owns the transaction.
+    **On committing.** A `SAVEPOINT` statement is not DML, so pysqlite issues no
+    implicit `BEGIN` for it and the savepoint itself opens the transaction. When
+    this is the first write on a connection the savepoint is therefore the
+    outermost one, and SQLite commits on its `RELEASE`. Called inside a
+    caller's open transaction it nests properly and commits nothing. Both are
+    fine for best-effort telemetry, but a caller that means to roll its own work
+    back must not assume this row goes with it.
     """
+    try:
+        return _insert_task_usage_once(
+            conn, usage=usage, task_id=task_id, origin=origin, user_id=user_id,
+            source_type=source_type, brain_kind=brain_kind,
+            is_fallback=is_fallback, effort=effort, stop_reason=stop_reason,
+            success=success,
+        )
+    except sqlite3.Error:
+        return _insert_task_usage_once(
+            conn, usage=usage, task_id=task_id, origin=origin, user_id=user_id,
+            source_type=source_type, brain_kind=brain_kind,
+            is_fallback=is_fallback, effort=effort, stop_reason=stop_reason,
+            success=success,
+        )
+
+
+def _insert_task_usage_once(
+    conn: sqlite3.Connection,
+    *,
+    usage: Any,
+    task_id: int | None,
+    origin: str,
+    user_id: str,
+    source_type: str,
+    brain_kind: str,
+    is_fallback: bool,
+    effort: str,
+    stop_reason: str,
+    success: bool,
+) -> int:
+    """One attempt at the write. See `insert_task_usage` for the reasoning."""
     savepoint = f"usage_{uuid.uuid4().hex[:12]}"
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
@@ -8356,8 +8400,16 @@ def insert_task_usage(
                 ),
             )
     except Exception:
-        conn.execute(f"ROLLBACK TO {savepoint}")
-        conn.execute(f"RELEASE {savepoint}")
+        # The recovery is itself best-effort. SQLite cancels every savepoint
+        # when a statement error forces an automatic rollback (disk full, I/O
+        # error) — exactly the class this guard exists for — and `ROLLBACK TO`
+        # then raises "no such savepoint", replacing the real cause. The caller
+        # would log a disk-full incident as a savepoint-naming problem.
+        try:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        except Exception:
+            pass
         raise
     conn.execute(f"RELEASE {savepoint}")
     return row_id
@@ -8372,7 +8424,11 @@ def _rate_limit_field(usage: Any, key: str, *, numeric: bool = False):
     if value is None:
         return None
     if numeric:
-        return value if isinstance(value, (int, float)) else None
+        # `bool` is an `int` subclass, so an unguarded isinstance would store a
+        # `resetsAt: true` frame as the timestamp 1. Same rule as `usage._int`.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return int(value)
     return str(value)
 
 
@@ -8438,7 +8494,7 @@ def query_usage(
         where = f"{where} AND {clause}" if where else f" WHERE {clause}"
         params.append(model)
     sql = f"SELECT u.* FROM task_usage u{where} ORDER BY u.created_at DESC"
-    if limit:
+    if limit is not None and limit > 0:
         sql += " LIMIT ?"
         params.append(int(limit))
     return list(conn.execute(sql, params).fetchall())
@@ -8518,7 +8574,9 @@ def usage_summary(
             where = " WHERE 1=1"
 
     if group_by == "model":
-        return _usage_summary_by_model(conn, where, params + model_params, model_clause)
+        return _usage_summary_by_model(
+            conn, where, params, model_clause, model_params
+        )
 
     if group_by:
         expr = USAGE_GROUP_BY.get(group_by)
@@ -8533,7 +8591,7 @@ def usage_summary(
         groups = [_usage_row_to_dict(r) for r in rows]
         for group in groups:
             group["cost_by_basis"] = _cost_by_basis(
-                conn, where, params + model_params, model_clause,
+                conn, where, params, model_clause, model_params,
                 extra=f"{expr} IS ?", extra_params=[group["key"]],
             )
         if group_by == "day":
@@ -8548,7 +8606,7 @@ def usage_summary(
     ).fetchone()
     summary = _usage_row_to_dict(row)
     summary["cost_by_basis"] = _cost_by_basis(
-        conn, where, params + model_params, model_clause
+        conn, where, params, model_clause, model_params
     )
     return summary
 
@@ -8556,18 +8614,30 @@ def usage_summary(
 def _cost_by_basis(
     conn: sqlite3.Connection,
     where: str,
-    params: list,
+    where_params: list,
     model_clause: str = "",
+    model_params: list | None = None,
     *,
     extra: str = "",
     extra_params: list | None = None,
 ) -> dict:
-    """Cost totalled per `cost_basis`. Never collapsed into one figure."""
+    """Cost totalled per `cost_basis`. Never collapsed into one figure.
+
+    The three clause fragments are taken with their own parameter lists rather
+    than pre-concatenated. Assembling the text in one order and the parameters
+    in another binds the group key to the model predicate and vice versa, and
+    because both are strings SQLite raises nothing — the query simply matches
+    no rows and every group reports zero cost beside correct token counts.
+    Keeping each fragment next to its own parameters is what makes the two
+    orders impossible to get out of step.
+    """
     clause = where
-    all_params = list(params)
+    all_params = list(where_params)
     if extra:
         clause = f"{clause} AND {extra}" if clause else f" WHERE {extra}"
-        all_params = all_params + list(extra_params or [])
+        all_params += list(extra_params or [])
+    # Appended last because `model_clause` is interpolated last.
+    all_params += list(model_params or [])
     rows = conn.execute(
         f"SELECT u.cost_basis, COALESCE(SUM(u.cost_usd), 0.0) AS cost"
         f" FROM task_usage u{clause}{model_clause}"
@@ -8577,50 +8647,93 @@ def _cost_by_basis(
     return {r["cost_basis"]: float(r["cost"]) for r in rows}
 
 
+UNATTRIBUTED_MODEL = "(unattributed)"
+
+
 def _usage_summary_by_model(
-    conn: sqlite3.Connection, where: str, params: list, model_clause: str
+    conn: sqlite3.Connection,
+    where: str,
+    params: list,
+    model_clause: str,
+    model_params: list | None = None,
 ) -> list[dict]:
-    """Per-model grouping reads the child table.
+    """Per-model grouping, over the child table plus the rows that have none.
 
     The parent row carries only the run's largest cost share, so grouping on it
-    would attribute a whole multi-model run to one model. Context measures
-    belong to the run rather than to a model and are reported as NULL here —
-    averaging a run's peak once per model it used would double-count it.
+    would attribute a whole multi-model run to one model. But reading the child
+    table *alone* loses every measured row that produced no per-model split,
+    and that is not a hypothetical: the native brain reports one total with no
+    breakdown, so its whole spend would vanish from this grouping while still
+    appearing in the ungrouped totals. Those rows are attributed to the parent's
+    own `model`, or to `(unattributed)` when even that is empty, so the token
+    columns partition the same population at every grouping.
+
+    Context measures belong to the run rather than to a model and are NULL
+    here — averaging a run's peak once per model it used would count one
+    measurement several times. `has_totals` is filtered for the same reason
+    every other aggregate filters it: a run killed before its result frame has
+    meaningless zero tokens.
     """
+    mparams = list(model_params or [])
+    child_where = f"{where} AND u.has_totals = 1" if where else " WHERE u.has_totals = 1"
     rows = conn.execute(
         f"""
-        SELECT m.model AS key,
-               COUNT(*) AS row_count,
-               COUNT(*) AS measured_rows,
-               COALESCE(SUM(m.billed_input_tokens), 0) AS billed_input_tokens,
-               COALESCE(SUM(m.output_tokens), 0) AS output_tokens,
-               COALESCE(SUM(m.cache_read_tokens), 0) AS cache_read_tokens,
-               COALESCE(SUM(m.cache_write_tokens), 0) AS cache_write_tokens,
-               0 AS turns,
-               0 AS model_requests,
-               0 AS context_rows,
+        SELECT key, COUNT(*) AS row_count, COUNT(*) AS measured_rows,
+               COALESCE(SUM(billed_input_tokens), 0) AS billed_input_tokens,
+               COALESCE(SUM(output_tokens), 0) AS output_tokens,
+               COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+               COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+               0 AS turns, 0 AS model_requests, 0 AS context_rows,
                NULL AS avg_initial_context_tokens,
                NULL AS avg_peak_context_tokens,
-               MAX(m.context_window) AS avg_context_window
-        FROM task_usage_models m
-        JOIN task_usage u ON u.id = m.task_usage_id
-        {where}{model_clause}
-        GROUP BY m.model
+               NULL AS avg_context_window
+        FROM (
+            SELECT m.model AS key, m.billed_input_tokens, m.output_tokens,
+                   m.cache_read_tokens, m.cache_write_tokens
+            FROM task_usage_models m
+            JOIN task_usage u ON u.id = m.task_usage_id
+            {child_where}{model_clause}
+
+            UNION ALL
+
+            SELECT CASE WHEN u.model = '' THEN ? ELSE u.model END AS key,
+                   u.billed_input_tokens, u.output_tokens,
+                   u.cache_read_tokens, u.cache_write_tokens
+            FROM task_usage u
+            {child_where}{model_clause}
+              AND NOT EXISTS (
+                  SELECT 1 FROM task_usage_models m WHERE m.task_usage_id = u.id
+              )
+        )
+        GROUP BY key
         """,
-        params,
+        params + mparams + [UNATTRIBUTED_MODEL] + params + mparams,
     ).fetchall()
     groups = [_usage_row_to_dict(r) for r in rows]
     for group in groups:
-        joined_where = where if where else " WHERE 1=1"
         basis_rows = conn.execute(
             f"""
-            SELECT u.cost_basis, COALESCE(SUM(m.cost_usd), 0.0) AS cost
-            FROM task_usage_models m
-            JOIN task_usage u ON u.id = m.task_usage_id
-            {joined_where}{model_clause} AND m.model = ?
-            GROUP BY u.cost_basis
+            SELECT cost_basis, COALESCE(SUM(cost_usd), 0.0) AS cost FROM (
+                SELECT u.cost_basis, m.cost_usd
+                FROM task_usage_models m
+                JOIN task_usage u ON u.id = m.task_usage_id
+                {child_where}{model_clause} AND m.model = ?
+
+                UNION ALL
+
+                SELECT u.cost_basis, u.cost_usd
+                FROM task_usage u
+                {child_where}{model_clause}
+                  AND (CASE WHEN u.model = '' THEN ? ELSE u.model END) = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task_usage_models m
+                      WHERE m.task_usage_id = u.id
+                  )
+            )
+            GROUP BY cost_basis
             """,
-            params + [group["key"]],
+            params + mparams + [group["key"]]
+            + params + mparams + [UNATTRIBUTED_MODEL, group["key"]],
         ).fetchall()
         group["cost_by_basis"] = {
             r["cost_basis"]: float(r["cost"]) for r in basis_rows
@@ -8690,4 +8803,16 @@ def prune_old_usage(conn: sqlite3.Connection, retention_days: int) -> int:
         (cutoff,),
     )
     cursor = conn.execute("DELETE FROM task_usage WHERE created_at < ?", (cutoff,))
+    # Sweep any child whose parent is already gone. The delete above is scoped
+    # through `task_usage`, so an orphan from an earlier partial delete would be
+    # invisible to it forever — the row would never age out because nothing
+    # reads its date.
+    conn.execute(
+        """
+        DELETE FROM task_usage_models
+        WHERE NOT EXISTS (
+            SELECT 1 FROM task_usage p WHERE p.id = task_usage_models.task_usage_id
+        )
+        """
+    )
     return cursor.rowcount
