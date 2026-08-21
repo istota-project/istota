@@ -48,7 +48,7 @@ class TestEmitSchedulerStats:
         assert len(lines) == 1
         assert re.match(
             r"^scheduler_stats threads=\d+ fds=\d+ rss_mb=\d+ "
-            r"tasks_running=\d+ workers_active=\d+$",
+            r"tasks_running=\d+ workers_active=\d+ admission_closed_s=\d+$",
             lines[0],
         ), lines[0]
 
@@ -73,7 +73,8 @@ class TestEmitSchedulerStats:
         lines = _stats_lines(caplog)
         assert len(lines) == 1
         assert re.match(
-            r"^scheduler_stats threads=\d+ tasks_running=\d+ workers_active=\d+$",
+            r"^scheduler_stats threads=\d+ tasks_running=\d+ workers_active=\d+"
+            r" admission_closed_s=\d+$",
             lines[0],
         ), lines[0]
         warnings = [

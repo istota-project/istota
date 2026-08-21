@@ -870,6 +870,7 @@ def _worker_idle_wait(
     should_stop: Callable[[], bool],
     run_one: Callable[[], "tuple[int, bool] | None"],
     pending_count: Callable[[], int],
+    admission_open: Callable[[], bool] = lambda: True,
 ) -> "tuple[int, bool] | None":
     """Park an idle worker, re-checking for work on a fine cadence.
 
@@ -892,6 +893,18 @@ def _worker_idle_wait(
     race (``run_one`` returns ``None`` after a positive ``pending_count``) does
     not reset it, so two idle workers ping-ponging empty queues cannot keep each
     other alive forever.
+
+    ``admission_open`` is the memory gate. On the fine-cadence path a closed
+    gate skips the claim and keeps polling against the *same* deadline, so a
+    worker parked on a squeezed host ages out at ``worker_idle_timeout`` and
+    exits rather than holding a slot open indefinitely — under sustained
+    pressure the pool drains, and ``dispatch`` declines to refill it. Checked
+    ahead of ``pending_count`` because a closed gate should cost nothing at all,
+    not even the indexed read. On the legacy branch below there is no polling to
+    continue, so a closed gate returns ``None`` and the worker exits after that
+    single recheck; that is the same exit this branch already takes when
+    ``run_one`` finds nothing, so parity is preserved. Defaults to open, leaving
+    every existing caller unchanged.
     """
     idle_poll = config.scheduler.worker_idle_poll_interval
     idle_timeout = config.scheduler.worker_idle_timeout
@@ -906,6 +919,8 @@ def _worker_idle_wait(
             return None  # per-worker stop / global shutdown
         if should_stop():
             return None
+        if not admission_open():
+            return None
         return run_one()
 
     deadline = time.monotonic() + idle_timeout
@@ -916,6 +931,11 @@ def _worker_idle_wait(
         time.sleep(min(idle_poll, remaining))
         if should_stop() or stop_event.is_set():
             return None
+        # Memory gate first: a closed gate must cost nothing, not even the
+        # indexed read below. Keeps the same deadline, so a worker parked on a
+        # squeezed host ages out instead of holding its slot open.
+        if not admission_open():
+            continue
         # Cheap pre-check before the expensive claim. pending_count is a
         # claimability-aware indexed read (the same count dispatch() uses);
         # process_one_task -> claim_task additionally executes stale-lock /
@@ -957,23 +977,32 @@ class UserWorker(threading.Thread):
         logger.info("Worker started for user %s (%s)", self.user_id, self.queue_type)
         try:
             while not _shutdown_requested and not self._stop_event.is_set():
-                try:
-                    result = process_one_task(
-                        self.config, user_id=self.user_id, queue=self.queue_type,
-                    )
-                except Exception as e:
-                    logger.error("Worker %s/%s error: %s", self.user_id, self.queue_type, e)
-                    result = None
+                # The memory gate covers this fast path too, not just
+                # dispatch(). A worker that has already claimed one task loops
+                # straight back here, so gating only the spawn would let a
+                # squeezed host keep starting work in the slots it already has
+                # — and the incident's trigger was one task running a test
+                # suite, which is exactly what that lets through. When the gate
+                # is shut we fall through to the idle wait, which parks cheaply
+                # and eventually exits, so the pool drains under pressure.
+                if self.pool.admission_open():
+                    try:
+                        result = process_one_task(
+                            self.config, user_id=self.user_id, queue=self.queue_type,
+                        )
+                    except Exception as e:
+                        logger.error("Worker %s/%s error: %s", self.user_id, self.queue_type, e)
+                        result = None
 
-                if result is not None:
-                    task_id, success = result
-                    status = "completed" if success else "failed"
-                    logger.info(
-                        "Worker %s/%s: task %d %s",
-                        self.user_id, self.queue_type, task_id, status,
-                    )
-                    # Processed a task — immediately check for more
-                    continue
+                    if result is not None:
+                        task_id, success = result
+                        status = "completed" if success else "failed"
+                        logger.info(
+                            "Worker %s/%s: task %d %s",
+                            self.user_id, self.queue_type, task_id, status,
+                        )
+                        # Processed a task — immediately check for more
+                        continue
 
                 # No tasks available — linger, re-checking on a fine cadence
                 # until a new task arrives (claimed within ~one idle poll) or the
@@ -990,6 +1019,7 @@ class UserWorker(threading.Thread):
                     pending_count=lambda: _count_pending(
                         self.config, self.user_id, self.queue_type,
                     ),
+                    admission_open=self.pool.admission_open,
                 )
                 if idle_result is not None:
                     task_id, success = idle_result
@@ -1068,49 +1098,78 @@ class WorkerPool:
             return 0.0
         return max(0.0, time.monotonic() - closed_since)
 
-    def _admission_open(self) -> bool:
-        """Is there room on this host to *start* more work?
+    def _admission_decision(
+        self,
+    ) -> "tuple[bool, host_pressure_mod.PressureSample | None]":
+        """Is there room on this host to *start* more work, and on what reading?
 
         Never about stopping work. Already-running tasks are not consulted, not
-        counted and not touched; the gate refuses a spawn and the pending row
-        waits for a later tick, exactly as it does when a cap is full.
+        counted and not touched; the gate refuses a *start* and the pending row
+        waits, exactly as it does when a cap is full.
 
-        Fails open in every uncertain case — feature disabled, floor set to
+        Fails open in every uncertain case — feature disabled, both thresholds
         zero, no sample yet, sample unreadable. A broken sampler must not be
-        able to halt dispatch: an unexplained total outage is a far worse
-        failure than a spawn admitted onto a busy box, and it is the failure
-        this instrumentation was added to explain rather than to cause.
+        able to halt work: an unexplained total outage is a far worse failure
+        than one task admitted onto a busy box, and it is the failure this
+        instrumentation was added to explain rather than to cause.
+
+        Pure. The sample comes back so the dispatch-side caller can log what it
+        decided on, without this having to know whether anyone wants that.
         """
         if not self.config.scheduler.host_pressure_enabled:
-            return True
+            return True, None
 
-        # The lock is released before calling either _note_gate_* helper, which
-        # take it themselves. `threading.Lock` is not reentrant, so folding
-        # these calls into the `with` block — the obvious tidy-up — deadlocks
-        # the loop thread outright. Kept separate deliberately.
         with self._pressure_lock:
             sample = self._pressure_sample
         if sample is None:
-            self._note_gate_open()
-            return True
+            return True, None
 
         psi_threshold = self.config.scheduler.host_pressure_psi_threshold
         min_available_mb = self.config.scheduler.min_available_memory_mb
         # A zero floor with no PSI threshold would make the gate unreachable;
         # keep the switch explicit rather than implied by the arithmetic.
         if min_available_mb <= 0 and psi_threshold <= 0:
-            self._note_gate_open()
-            return True
+            return True, sample
 
         under = host_pressure_mod.is_under_pressure(
             sample,
             psi_threshold=psi_threshold if psi_threshold > 0 else float("inf"),
             min_available_mb=min_available_mb,
         )
-        if not under:
+        return (not under), sample
+
+    def admission_open(self) -> bool:
+        """The gate, with no bookkeeping. What a *worker* asks before claiming.
+
+        Gating :meth:`dispatch` alone bounds new worker *threads*, not new task
+        *starts*. A worker already alive re-claims on its own — the fast path in
+        ``UserWorker.run`` and the poll inside ``_worker_idle_wait`` — so before
+        this existed a squeezed host kept starting work in whatever slots it
+        already had, while both this spec's C2 text and the scheduler rules said
+        the task would stay ``pending``. The incident's own trigger was a single
+        task running a test suite, so one claim into a lingering worker is the
+        whole failure; bounding concurrency growth was never enough on its own.
+
+        Deliberately free of the closed-since clock and the cooldown-limited log
+        line that :meth:`_admission_open` maintains. Workers poll this on the
+        idle cadence — several times a second, per worker — and a version that
+        stamped or logged would flood the log and keep re-arming state that
+        belongs to dispatch's once-per-tick view.
+        """
+        return self._admission_decision()[0]
+
+    def _admission_open(self) -> bool:
+        """:meth:`admission_open` plus the closed-since clock and the log line.
+
+        Dispatch's form, called once per tick. The lock is released before
+        either _note_gate_* helper, which take it themselves: ``threading.Lock``
+        is not reentrant, so folding those calls into a ``with`` block — the
+        obvious tidy-up — deadlocks the loop thread outright.
+        """
+        is_open, sample = self._admission_decision()
+        if is_open or sample is None:
             self._note_gate_open()
             return True
-
         self._note_gate_closed(sample)
         return False
 
@@ -4161,6 +4220,15 @@ def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
         workers_active = pool.active_count if pool is not None else 0
         parts.append(f"workers_active={workers_active}")
 
+        # How long admission has been shut, 0 when open. Without this the health
+        # line cannot tell a quiet daemon from a held one: gating the claim
+        # paths means a shut gate drains the pool, so a squeeze with a full
+        # backlog now reports workers_active=0 and tasks_running=0 — identical
+        # to an idle night. The one WARNING per cooldown from dispatch() is the
+        # only other signal, and it is far too sparse to read a squeeze off.
+        if pool is not None:
+            parts.append(f"admission_closed_s={int(pool.gate_closed_seconds())}")
+
         _SCHEDULER_STATS_LOGGER.info("scheduler_stats " + " ".join(parts))
     except Exception as exc:  # noqa: BLE001  -- stats must never crash the loop
         # Route to the stats logger so a consumer filtering by logger name (not
@@ -4226,6 +4294,36 @@ def _emit_host_pressure_breadcrumb() -> None:
         _HOST_PRESSURE_LOGGER.warning(
             "host_pressure_error breadcrumb failed: %s", exc, exc_info=True,
         )
+
+
+def _claimable_backlog(config: Config) -> int:
+    """Total claimable tasks across both queues, or 0 if it cannot be read.
+
+    The signal that survives the admission gate. `active_count` does not: a shut
+    gate drains the pool within `worker_idle_timeout`, so "no workers" stops
+    meaning "no work to do" the moment the gate closes. Whether anything is
+    *queued* is independent of the gate, which is what makes it usable for
+    telling "istota is waiting behind someone else" from "istota is the cause".
+
+    Best-effort, like everything on this path: a locked DB reads as no backlog
+    rather than raising into the alert.
+    """
+    timeout_ms = config.scheduler.main_loop_read_timeout_ms or None
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=timeout_ms) as conn:
+            total = 0
+            for users, queue in (
+                (db.get_users_with_pending_fg_queue_tasks(conn), "foreground"),
+                (db.get_users_with_pending_bg_queue_tasks(conn), "background"),
+            ):
+                for user_id in users:
+                    total += db.count_claimable_tasks_for_user_queue(
+                        conn, user_id, queue
+                    )
+            return total
+    except Exception as exc:  # noqa: BLE001  -- alerting must never raise
+        logger.warning("host_pressure_error backlog read failed: %s", exc)
+        return 0
 
 
 def _check_host_pressure(
@@ -4426,10 +4524,16 @@ def _emit_host_pressure_snapshot(
         # deliberately leaves admission open, so on the 2026-08-21 burst — the
         # event that arm exists for — an unconditional "workers are held" would
         # tell the operator the queue is stalled when it is running normally.
-        gate_shut = not pool._admission_open()
+        # The pure predicate, not `_admission_open()`. The bookkeeping variant
+        # stamps `_gate_closed_since` when it is None, so asking it here would
+        # reset the clock that `gate_closed_seconds()` is read from a few lines
+        # below — the alert would suppress its own escalation on every pass
+        # where the snapshot happened to ask first. It also runs off the loop
+        # thread, where it would spend dispatch's once-per-cooldown log budget.
+        gate_shut = not pool.admission_open()
         if gate_shut:
             queue_state = (
-                "New workers are held while this lasts; running tasks are untouched."
+                "No new task starts while this lasts; running tasks are untouched."
             )
         else:
             queue_state = (
@@ -4437,21 +4541,34 @@ def _emit_host_pressure_snapshot(
                 "record for attribution, not a stall."
             )
 
-        # istota as victim rather than cause. If admission has been shut longer
-        # than a cooldown window and we are running nothing, the memory is
-        # being taken by something else on the box — a different remedy, and
-        # one the operator cannot guess from a generic pressure alert.
+        # istota as victim rather than cause: the memory is being taken by
+        # something else on the box, which is a different remedy and one the
+        # operator cannot guess from a generic pressure alert.
+        #
+        # The discriminator is the *backlog*, not the worker count. Worker count
+        # used to carry that signal — a squeeze with queued work kept lingering
+        # workers claiming, so `active_count > 0` meant "istota is busy". Gating
+        # the claim paths ended that: a shut gate now drains the pool in
+        # `worker_idle_timeout` (10s by default), far inside the cooldown window
+        # this compares against, so `active_count` is 0 by then whatever the
+        # cause. Keying on it would print "istota is a bystander" during exactly
+        # the 2026-08-20 shape, where istota's own task left the residue behind,
+        # and send the operator looking off-box.
+        held = _claimable_backlog(config)
         if (
             gate_shut
             and pool.active_count == 0
+            and held == 0
             and pool.gate_closed_seconds()
             >= config.scheduler.host_pressure_alert_cooldown_seconds
         ):
             queue_state += (
-                "\nNo istota worker is running, so the memory is being held by "
-                "something else on the host — istota is queuing behind it, not "
-                "causing it."
+                "\nNo istota worker is running and nothing is queued, so the "
+                "memory is being held by something else on the host — istota is "
+                "waiting behind it, not causing it."
             )
+        elif gate_shut and held:
+            queue_state += f"\n{held} task(s) are queued and waiting for the gate."
 
         evidence = (
             "A host_pressure_snapshot naming the holders is in the log."
