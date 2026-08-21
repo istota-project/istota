@@ -220,3 +220,28 @@ def _reset_expunge_warning_latch():
     email_skill._expunge_warned_hosts.clear()
     yield
     email_skill._expunge_warned_hosts.clear()
+
+
+def pytest_addoption(parser):
+    """`--platform` for the image tier.
+
+    Lives here rather than in ``tests/image/conftest.py`` because pytest only
+    honours ``pytest_addoption`` in an *initial* conftest — the rootdir's and
+    the testpaths' — and a subdirectory conftest is loaded after argument
+    parsing has already happened.
+
+    The development machine is arm64 and production is amd64. A native build is
+    fast and an emulated one is not, so native is the default and amd64 is an
+    explicit opt-in taken before a release. ``ISTOTA_TEST_PLATFORM`` is the
+    environment-variable form, for the shell drivers.
+    """
+    parser.addoption(
+        "--platform",
+        action="store",
+        default=None,
+        metavar="PLATFORM",
+        help=(
+            "Docker platform for the image tier, e.g. amd64 or linux/amd64. "
+            "Defaults to native, or to $ISTOTA_TEST_PLATFORM."
+        ),
+    )
