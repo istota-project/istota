@@ -68,6 +68,8 @@ Git work uses the real `gh` and `glab` binaries, not hand-written REST wrappers.
 
 The CLIs need wider token scopes than the old wrappers did: GitLab `api` plus `write_repository`, GitHub `repo`. A token scoped for the previous path fails on every forge command.
 
+The two binaries are not interchangeable in their flags. `gh` filters output with `--jq`; the `glab` a standard server install ships does not have it, and reads a field with `-F json` instead. The skill's recipes are written per forge for that reason, and a read whose value feeds a later command aborts rather than passing an empty string on.
+
 ### Review before merge
 
 A change large enough to be more than a one-or-two-file edit is reviewed before the merge request opens. A reviewer reads the branch diff against a one-line statement of what the change was meant to do, and the bot fixes what comes back before pushing, reporting anything it disagreed with as a decision rather than dropping it silently.

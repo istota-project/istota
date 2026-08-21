@@ -50,6 +50,8 @@ A currency figure is shown only where it is real money. `cost_basis` records whi
 | `estimated` | Derived from the model catalog's per-mtok prices. The catalog prices an unknown model at zero, so a 0.0 here is not a claim of zero spend. |
 | `unknown` | No basis could be determined. |
 
+`unknown` is not only a fallback. `claude_code` infers the basis from the `apiKeySource` on the CLI's init frame, and the single-object envelope newer CLI versions emit under `--output-format json` carries no init frame. Token totals survive — they come from `modelUsage` — but the basis does not, and inferring it from config instead would risk labelling a subscription's list-price equivalent as real spend. That spend is therefore counted and reported, in a bucket the read surfaces never sum into either the metered or the subscription figure.
+
 Both the CLI and the dashboard render anything other than `api` as a dash with the basis named beside it, and never sum across bases. A group holding rows of two kinds shows the real figure plus the names of the others, not one added-up number. Usage in those groups is read through the token counts instead.
 
 Sub-cent figures render at four decimals. A 24-hour per-user cost is routinely below a cent, and `$0.00` cannot be told apart from a genuine zero.
