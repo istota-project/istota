@@ -7,6 +7,8 @@ the daemon passes (`--output-format stream-json --verbose
 because the point of most of these tests is which field the implementation read.
 """
 
+import json
+
 import pytest
 
 from istota.session.usage import TaskUsage
@@ -134,6 +136,15 @@ def test_parent_totals_equal_sum_of_children():
     assert u.cache_write_tokens == sum(m.cache_write_tokens for m in u.models)
 
 
+def test_parent_cost_equals_sum_of_child_costs():
+    """The parent reads `total_cost_usd` and the children read per-model
+    `costUSD` — two different fields for the same quantity. This whole spec
+    exists because two such fields disagreed, so the invariant is asserted
+    rather than assumed. `--by model` is a cost breakdown that must add up."""
+    u = from_cli_result(CAPTURED_RESULT, CAPTURED_REQUESTS, "ANTHROPIC_API_KEY")
+    assert sum(m.cost_usd for m in u.models) == pytest.approx(u.cost_usd, abs=1e-9)
+
+
 def test_parent_totals_equal_sum_of_children_multi_model():
     frame = {
         "total_cost_usd": 0.5,
@@ -163,9 +174,26 @@ def test_parent_totals_equal_sum_of_children_multi_model():
     assert u.cache_read_tokens == 1020
     assert u.cache_write_tokens == 55
     assert u.billed_input_tokens == sum(m.billed_input_tokens for m in u.models)
+    assert sum(m.cost_usd for m in u.models) == pytest.approx(u.cost_usd, abs=1e-9)
     # Parent model is the largest cost share, not the largest token count.
     assert u.model == "model-b"
     # And the window is the largest any participating model offered.
+    assert u.context_window == 1000000
+
+
+def test_context_window_is_the_widest_not_the_dominant_models():
+    """These name different models on a multi-model run, deliberately: the spec
+    specifies `max(contextWindow)`. Asserted so the choice is visible rather
+    than incidental — headroom against it is a guide, not a limit reading."""
+    frame = {
+        "modelUsage": {
+            "small-window": {"outputTokens": 1, "costUSD": 9.0, "contextWindow": 200000},
+            "big-window": {"outputTokens": 1, "costUSD": 0.1, "contextWindow": 1000000},
+        }
+    }
+    u = from_cli_result(frame, [])
+
+    assert u.model == "small-window"
     assert u.context_window == 1000000
 
 
@@ -186,6 +214,29 @@ def test_context_measures_from_request_frames():
     assert u.peak_context_tokens == 14573
     assert u.model_requests == 2
     assert u.context_window == 200000
+
+
+def test_initial_is_the_first_and_peak_is_the_max_not_the_last():
+    """The captured pair ascends, so max == last and min == first coincide on it.
+
+    A real run is non-monotonic — a compaction drops the prompt size — so this
+    fixture is the one that separates `initial` from `min` and `peak` from
+    `last`. Both are mistakes a later refactor would plausibly make: the CLI's
+    own `result.usage.iterations` holds only the last request, which makes
+    "just take the last one" look reasonable.
+    """
+    reqs = [
+        RequestUsage(prompt_tokens=12000, output_tokens=10),
+        RequestUsage(prompt_tokens=30000, output_tokens=20),
+        RequestUsage(prompt_tokens=9000, output_tokens=30),
+    ]
+    u = from_cli_result(CAPTURED_RESULT, reqs, "ANTHROPIC_API_KEY")
+
+    # first, and not min (9000) — a compaction makes a later prompt smaller.
+    assert u.initial_context_tokens == 12000
+    # max, and not last (9000).
+    assert u.peak_context_tokens == 30000
+    assert u.model_requests == 3
 
 
 def test_sum_and_peak_are_different_quantities():
@@ -233,6 +284,45 @@ def test_absent_model_usage_leaves_has_totals_false():
     assert u.initial_context_tokens == 14434
 
 
+def test_model_hint_fills_in_only_when_there_are_no_children():
+    """The init frame's model is the fallback the per-model rows can't supply."""
+    u = from_cli_result({"num_turns": 1}, [], model_hint="claude-sonnet-4-5")
+    assert u.model == "claude-sonnet-4-5"
+
+    # With children present the dominant model wins; the hint is ignored.
+    u = from_cli_result(CAPTURED_RESULT, [], model_hint="claude-sonnet-4-5")
+    assert u.model == "claude-haiku-4-5-20251001"
+
+
+def test_skip_counts_and_rate_limit_arrive_as_arguments():
+    """Finished on return: the brain does not assign over the dataclass."""
+    info = {"status": "allowed", "rateLimitType": "five_hour"}
+    u = from_cli_result(
+        CAPTURED_RESULT,
+        CAPTURED_REQUESTS,
+        "none",
+        subagent_requests=2,
+        compacted_requests=1,
+        rate_limit=info,
+    )
+
+    assert u.subagent_requests == 2
+    assert u.compacted_requests == 1
+    assert u.rate_limit == info
+    # A non-dict rate limit is dropped rather than stored.
+    assert from_cli_result(CAPTURED_RESULT, [], rate_limit="allowed").rate_limit is None
+
+
+def test_cost_is_read_even_when_totals_are_unusable():
+    """`has_totals` gates the token columns only — real spend is not dropped."""
+    u = from_cli_result({"total_cost_usd": 0.03, "num_turns": 2}, [])
+
+    assert u.has_totals is False
+    assert u.billed_input_tokens == 0
+    assert u.cost_usd == pytest.approx(0.03)
+    assert u.turns == 2
+
+
 def test_empty_model_usage_leaves_has_totals_false():
     u = from_cli_result({"modelUsage": {}}, [])
 
@@ -273,6 +363,59 @@ def test_malformed_model_entry_yields_zeros_not_an_exception():
 def test_bools_are_not_counted_as_ints():
     u = from_cli_result({"modelUsage": {"m": {"inputTokens": True}}}, [])
     assert u.billed_input_tokens == 0
+
+
+def test_bools_are_not_counted_as_money():
+    """`isinstance(True, float)` is False but `isinstance(True, (int, float))` is
+    True, so this guard is what stops a fabricated dollar."""
+    u = from_cli_result({"modelUsage": {"m": {"costUSD": True}}}, [])
+    assert u.models[0].cost_usd == 0.0
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_numbers_from_the_real_json_path_do_not_raise(literal):
+    """`json.loads` accepts these bare tokens and the stream parser passes no
+    `parse_constant`, so they reach here. `int(float("nan"))` raises, and a NaN
+    cost would poison every later SUM over the column."""
+    frame = json.loads(
+        '{"total_cost_usd": %s, "modelUsage": {"m": {"inputTokens": %s,'
+        ' "costUSD": %s}}}' % (literal, literal, literal)
+    )
+
+    u = from_cli_result(frame, [])
+
+    assert u.billed_input_tokens == 0
+    assert u.cost_usd == 0.0
+    assert u.models[0].cost_usd == 0.0
+
+
+def test_out_of_range_integers_are_dropped_not_stored():
+    """SQLite raises OverflowError binding anything wider than signed 64-bit,
+    and the writer downstream is best-effort — a swallowed row loses the lot."""
+    u = from_cli_result({"modelUsage": {"m": {"inputTokens": 2**64}}}, [])
+    assert u.billed_input_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "requests",
+    [
+        [RequestUsage(prompt_tokens=None)],  # type: ignore[arg-type]
+        [RequestUsage(prompt_tokens="9")],  # type: ignore[arg-type]
+        [{"prompt_tokens": 3}],
+        [None],
+        "not-a-list",
+        (RequestUsage(prompt_tokens=5) for _ in range(1)),
+    ],
+)
+def test_hostile_requests_list_does_not_raise(requests):
+    """The guarantee covers both arguments. The parser builds `RequestUsage`
+    from CLI frames that today get no numeric coercion at all, so a `null`
+    token count on one frame must not escape the brain's return path."""
+    u = from_cli_result(CAPTURED_RESULT, requests, "none")
+
+    assert isinstance(u, BrainUsage)
+    # Totals still land; only the context measures degrade.
+    assert u.billed_input_tokens == 550
 
 
 class TestFromTaskUsage:
@@ -327,6 +470,26 @@ class TestFromTaskUsage:
         u = from_task_usage(None)
         assert u.has_totals is False
         assert u.billed_input_tokens == 0
+
+    def test_an_empty_task_usage_is_unmeasured_not_a_measured_zero(self):
+        """An attempt that died before its first turn accumulates nothing. The
+        native loop only folds usage in on a non-empty payload, so all-zero
+        means unmeasured — and claiming totals there would drag every native
+        average toward zero, while the same CLI case counts as unmeasured."""
+        u = from_task_usage(TaskUsage())
+
+        assert u.has_totals is False
+
+    def test_a_single_measured_turn_has_totals(self):
+        assert from_task_usage(TaskUsage(output_tokens=1, turns=1)).has_totals is True
+
+    def test_raises_nothing_for_a_structurally_different_object(self):
+        """The guarantee covers both adapters. Nothing would fail today if a
+        later edit swapped the `getattr` defaults for attribute access."""
+        u = from_task_usage(object())  # type: ignore[arg-type]
+
+        assert u.billed_input_tokens == 0
+        assert u.has_totals is False
 
 
 @pytest.mark.parametrize(

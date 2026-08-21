@@ -10,10 +10,11 @@ surfaces never learn which brain produced a row.
 Two groups of measures live here and they are deliberately not comparable:
 
 * **Totals** sum across every request in the run — ``billed_input_tokens``,
-  ``cache_read_tokens``, ``cache_write_tokens``, ``output_tokens``, ``cost_usd``.
-  For the CLI these come from ``modelUsage``, which is the billing basis:
-  ``result.usage`` covers only the main agent's conversation and under-reports
-  spend by the CLI's own out-of-band calls.
+  ``cache_read_tokens``, ``cache_write_tokens``, ``output_tokens``. For the CLI
+  these come from ``modelUsage``, which is the billing basis: ``result.usage``
+  covers only the main agent's conversation and under-reports spend by the CLI's
+  own out-of-band calls. ``cost_usd`` comes from the frame's ``total_cost_usd``,
+  which the per-model ``costUSD`` figures reproduce exactly.
 * **Context measures** do not sum — ``initial_context_tokens`` and
   ``peak_context_tokens`` are a first and a max over per-request prompt sizes.
 
@@ -29,6 +30,7 @@ AGENTS.md uses for modules a skill subprocess imports — no skill imports it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -39,8 +41,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # What the CLI's init frame calls the credential it authenticated with, mapped
 # to what the number it later reports actually means. A new CLI spelling is a
 # one-line change here rather than a hunt through the surfaces.
+#
+# Two caveats on the subscription set. "none" was measured; the managed-login
+# spelling is not confirmed against a capture, and an unrecognized value falls
+# to "unknown" rather than being guessed, so a wrong spelling suppresses a
+# label and never invents one. And "none" means "no Anthropic API key", which
+# is also true of a Bedrock or Vertex deployment, where the reported figure IS
+# real money — this mapping assumes first-party auth, which is the only shape
+# this deployment runs.
 API_KEY_SOURCES = frozenset({"ANTHROPIC_API_KEY", "apiKeyHelper"})
 SUBSCRIPTION_KEY_SOURCES = frozenset({"none", "/login managed key"})
+
+# SQLite stores INTEGER as signed 64-bit and raises OverflowError on bind for
+# anything wider. Clamping here keeps a nonsense frame from costing the whole
+# row in the best-effort writer downstream.
+_SQLITE_INT_MIN = -(2**63)
+_SQLITE_INT_MAX = 2**63 - 1
 
 COST_BASIS_API = "api"
 COST_BASIS_SUBSCRIPTION = "subscription"
@@ -56,22 +72,41 @@ def _int(value: Any, default: int = 0) -> int:
     """Coerce a JSON value to int, returning ``default`` for anything else.
 
     The CLI's frames are not a contract we control; a field that changes type
-    must not raise out of the brain's return path.
+    must not raise out of the brain's return path. ``bool`` is excluded because
+    it is an ``int`` subclass in Python and ``True`` would otherwise become a
+    token count of 1.
+
+    Non-finite floats are rejected rather than converted: ``json.loads`` accepts
+    the bare tokens ``NaN`` and ``Infinity`` by default and the stream parser
+    calls it without a ``parse_constant`` hook, so those values do reach here,
+    and ``int(float("nan"))`` raises. Out-of-range integers are rejected for the
+    same reason one layer down — see ``_SQLITE_INT_MAX``.
     """
     if isinstance(value, bool):
         return default
     if isinstance(value, int):
-        return value
+        return value if _SQLITE_INT_MIN <= value <= _SQLITE_INT_MAX else default
     if isinstance(value, float):
-        return int(value)
+        if not math.isfinite(value):
+            return default
+        as_int = int(value)
+        return as_int if _SQLITE_INT_MIN <= as_int <= _SQLITE_INT_MAX else default
     return default
 
 
 def _float(value: Any, default: float = 0.0) -> float:
+    """Coerce a JSON value to float, returning ``default`` for anything else.
+
+    Non-finite values are rejected: a ``NaN`` reaching ``cost_usd`` poisons
+    every later ``SUM`` and ``AVG`` over the column silently, which is worse
+    than reporting nothing. ``openai_compat`` drops them on its own path for
+    the same reason.
+    """
     if isinstance(value, bool):
         return default
     if isinstance(value, (int, float)):
-        return float(value)
+        as_float = float(value)
+        return as_float if math.isfinite(as_float) else default
     return default
 
 
@@ -147,7 +182,11 @@ def total_prompt_tokens(usage: BrainUsage) -> int:
 
 
 def cache_hit_rate(usage: BrainUsage) -> float:
-    """Share of prompt tokens served from cache, in ``[0, 1]``.
+    """Share of prompt tokens served from cache, clamped to ``[0, 1]``.
+
+    The clamp is not decoration: surfaces render this as a percentage, and only
+    ``from_task_usage`` floors its subtraction at zero, so a frame reporting a
+    negative count would otherwise print a rate above 100%.
 
     Note this denominator differs from ``native._log_cache_telemetry``'s, which
     divides by an inclusive ``input_tokens``. That function runs before
@@ -156,7 +195,7 @@ def cache_hit_rate(usage: BrainUsage) -> float:
     total = total_prompt_tokens(usage)
     if total <= 0:
         return 0.0
-    return usage.cache_read_tokens / total
+    return min(1.0, max(0.0, usage.cache_read_tokens / total))
 
 
 def context_headroom_pct(usage: BrainUsage) -> float | None:
@@ -190,8 +229,10 @@ def cost_basis_from_api_key_source(value: str | None) -> str:
 def _dominant_model(models: list[ModelUsage]) -> str:
     """The model carrying the largest cost share.
 
-    Ties break on output tokens, then lexicographically, so the parent row's
-    ``model`` is deterministic for a given set of children.
+    Ties break on output tokens, then on the lexicographically **greatest**
+    name, so the parent row's ``model`` is deterministic for a given set of
+    children. The direction is stated because a surface re-deriving the same
+    ranking with an ascending sort would disagree with the stored row.
     """
     if not models:
         return ""
@@ -203,6 +244,11 @@ def from_cli_result(
     result_frame: dict | None,
     requests: list[RequestUsage] | None = None,
     api_key_source: str | None = None,
+    *,
+    model_hint: str = "",
+    subagent_requests: int = 0,
+    compacted_requests: int = 0,
+    rate_limit: dict | None = None,
 ) -> BrainUsage:
     """Build a ``BrainUsage`` from the CLI's terminal frame and per-request frames.
 
@@ -212,15 +258,35 @@ def from_cli_result(
     only the main agent's conversation and not the CLI's out-of-band calls.
 
     ``requests`` should already have sub-agent and compacted frames filtered out
-    by the caller; this function reads them as-is.
+    by the caller — the counts it skipped come back in as ``subagent_requests``
+    and ``compacted_requests``. Those, ``rate_limit`` and ``model_hint`` are
+    arguments rather than fields the caller assigns afterwards, so the returned
+    dataclass is finished and this module keeps ownership of its invariants.
 
-    Pure and total: takes dicts, does no I/O, raises nothing.
+    ``model_hint`` is the model sniffed off the ``init`` frame. It is used only
+    when ``modelUsage`` yielded no children, which is the one case the dominant
+    model cannot be computed from.
+
+    ``has_totals`` gates the four **token** columns and nothing else.
+    ``cost_usd``, ``turns`` and the durations are read whenever the frame
+    carries them, because a run can report a cost with no usable token
+    breakdown, and dropping the figure would lose real spend.
+
+    Pure and total: takes dicts, does no I/O, raises nothing — for any
+    ``result_frame`` and for any ``requests`` list, well-formed or not.
     """
     frame = result_frame if isinstance(result_frame, dict) else {}
-    reqs = requests or []
+    try:
+        reqs = list(requests) if requests is not None else []
+    except TypeError:
+        reqs = []
+    prompt_sizes = [_int(getattr(r, "prompt_tokens", 0)) for r in reqs]
 
     usage = BrainUsage()
     usage.cost_basis = cost_basis_from_api_key_source(api_key_source)
+    usage.subagent_requests = _int(subagent_requests)
+    usage.compacted_requests = _int(compacted_requests)
+    usage.rate_limit = rate_limit if isinstance(rate_limit, dict) else None
 
     model_usage = frame.get("modelUsage")
     if isinstance(model_usage, dict) and model_usage:
@@ -249,9 +315,14 @@ def from_cli_result(
             usage.cache_read_tokens += row.cache_read_tokens
             usage.cache_write_tokens += row.cache_write_tokens
         usage.model = _dominant_model(usage.models)
+        # The widest window any participating model offered, per spec. Note this
+        # can name a different model than `model` does on a multi-model run, so
+        # `context_headroom_pct` is a guide rather than a hard limit reading.
         windows = [r.context_window for r in usage.models if r.context_window > 0]
         if windows:
             usage.context_window = max(windows)
+    else:
+        usage.model = model_hint if isinstance(model_hint, str) else ""
 
     usage.cost_usd = _float(frame.get("total_cost_usd"))
     usage.turns = _int(frame.get("num_turns"))
@@ -265,10 +336,10 @@ def from_cli_result(
         tier = raw_usage.get("service_tier")
         usage.service_tier = tier if isinstance(tier, str) else ""
 
-    if reqs:
-        usage.model_requests = len(reqs)
-        usage.initial_context_tokens = reqs[0].prompt_tokens
-        usage.peak_context_tokens = max(r.prompt_tokens for r in reqs)
+    if prompt_sizes:
+        usage.model_requests = len(prompt_sizes)
+        usage.initial_context_tokens = prompt_sizes[0]
+        usage.peak_context_tokens = max(prompt_sizes)
 
     return usage
 
@@ -303,6 +374,12 @@ def from_task_usage(
     caller owns the signal because ``TaskUsage`` does not record it and this
     change does not alter that type.
 
+    ``TaskUsage.add`` makes that choice **per turn**, so the caller must pass
+    the conservative reading: ``cost_reported=True`` only when *every*
+    accumulated turn reported a cost. One catalog-priced turn among several
+    degrades the whole row to ``estimated``, because a total that is partly
+    invented is not an ``api`` figure.
+
     Context columns stay ``None``: the native loop does not track per-request
     prompt sizes, and adding that is a separate change.
     """
@@ -318,7 +395,18 @@ def from_task_usage(
     usage.output_tokens = _int(getattr(task_usage, "output_tokens", 0))
     usage.cost_usd = _float(getattr(task_usage, "cost_usd", 0.0))
     usage.turns = _int(getattr(task_usage, "turns", 0))
-    usage.has_totals = True
+    # An attempt that died before its first turn accumulates nothing — the
+    # native loop only folds usage in on a non-empty payload — so an all-zero
+    # TaskUsage means "unmeasured", not "measured zero". Claiming totals there
+    # would drag every native average toward zero, while the identical CLI case
+    # (no result frame) is correctly counted as unmeasured.
+    usage.has_totals = bool(
+        usage.turns
+        or usage.billed_input_tokens
+        or usage.output_tokens
+        or usage.cache_read_tokens
+        or usage.cache_write_tokens
+    )
     usage.totals_source = TOTALS_SOURCE_DERIVED
     usage.cost_basis = COST_BASIS_API if cost_reported else COST_BASIS_ESTIMATED
     return usage
