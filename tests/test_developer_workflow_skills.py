@@ -296,6 +296,47 @@ class TestBodiesDoNotContradict:
             "the refused-verb list must not be described as a boundary"
         )
 
+    def test_no_recipe_runs_a_command_under_a_near_ceiling_timeout(self):
+        """D3. `timeout 590` inside a 600-second tool cap is the pattern the
+        2026-08-20 incident kept hitting: it guarantees a kill at the moment a
+        long run might have finished, and discards everything the run produced.
+        Four such attempts in forty minutes yielded no coverage at all. The
+        body now prescribes a detached run instead, and this is what keeps the
+        old pattern from being written back in as an obvious-looking fix.
+
+        Scoped to fenced code, because the prose has to be free to *name* the
+        pattern it forbids — a check over the whole body would fail on the
+        rule's own explanation of itself."""
+        import re
+
+        fences = re.findall(r"^```.*?^```", self._body("developer"), re.S | re.M)
+        assert fences, "no fenced recipes found — the extraction is wrong"
+        near_ceiling = [
+            m.group(0)
+            for fence in fences
+            for m in re.finditer(r"\btimeout\s+(\d{3,})\b", fence)
+            if int(m.group(1)) >= 300
+        ]
+        assert near_ceiling == [], (
+            f"a recipe wraps a command in a near-ceiling timeout: {near_ceiling}"
+        )
+
+    def test_the_worker_cap_names_the_variable_xdist_actually_reads(self):
+        """D2. The cap is only worth stating if it takes effect, and an env var
+        the runner does not read fails silently — the suite claims every core
+        exactly as before and nothing says so. Asserted against the installed
+        xdist rather than against the string, so a rename upstream fails here
+        instead of on a shared host under load."""
+        import inspect
+
+        from xdist import plugin
+
+        source = inspect.getsource(plugin)
+        assert "PYTEST_XDIST_AUTO_NUM_WORKERS" in source, (
+            "xdist no longer reads this variable; the skill's worker cap is inert"
+        )
+        assert "PYTEST_XDIST_AUTO_NUM_WORKERS" in self._body("developer")
+
     def test_commit_precedes_review_in_the_lifecycle(self):
         """The review resolves a commit range, so a lifecycle that numbers the
         review before the commit reviews an empty diff and comes back clean."""
@@ -376,9 +417,16 @@ class TestLoadBudget:
     reasoning applies — a fifth recipe fix in the same week says the figure was
     set below what the recipes cost, not that this fix is too expensive. Raise
     it again the same way, and only that way.
+
+    715 → 730 for Track D of the host-robustness spec, by the same procedure:
+    the rules file first, then this. Three rules the 2026-08-20 outage paid
+    for and the recipe had no equivalent of — cap the runner's worker count on
+    a shared host, run anything that might outlast the 600-second tool call
+    detached rather than under `timeout 590`, and never re-run a full suite a
+    timeout killed. Twelve net lines, the same order as ISSUE-264's.
     """
 
-    BUDGET_LINES = 715
+    BUDGET_LINES = 730
 
     def test_three_bodies_fit_the_budget(self):
         total = 0

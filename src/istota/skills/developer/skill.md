@@ -238,6 +238,7 @@ The tier decides how much process the rest of the change gets. Pick it before wr
 Test and lint output is the largest single source of wasted context. Spend it deliberately.
 
 - **Failure-only output.** Use the runner's own quiet flags: `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast`.
+- **Cap the worker count to 2 before you run anything.** `pytest -n auto` and vitest's default size their pool from `cpu_count()`, so each suite claims the whole box — and you are sharing it with other tasks and the daemon itself. Two at once ask for more than exists, and the result is timeouts that have nothing to do with the code. Set `PYTEST_XDIST_AUTO_NUM_WORKERS=2` (honoured by `-n auto`) in the same call as the run, since shell state does not carry between calls; vitest takes `--maxWorkers=2`, `make` takes `-j2`. Use the environment, not the repository's `pyproject.toml`: `-n auto` is correct on a laptop and in CI, and this host is the special case.
 - **The exit status is the result, and a pipe throws it away.** A pipeline reports the status of its *last* command, so `pytest … | tail` exits 0 on a suite that just failed. Every other bullet here pushes toward trimming output, which is what makes this the place to say it:
 
   ```bash
@@ -253,11 +254,22 @@ Test and lint output is the largest single source of wasted context. Spend it de
   exit "$STATUS"                                # last statement of the call
   ```
 
+- **A run that might outlast the tool call goes detached, not up against the ceiling.** A bash call is capped at 600 seconds, and the reflex fix — `timeout 590 uv run pytest …` — is the worst of both: it guarantees a kill at the moment a long suite might have finished, and throws away what the run had produced. Start it in the background writing to a file, then poll in separate cheap calls until it is done and read the log:
+
+  ```bash
+  cd "$WORK_DIR" && nohup uv run pytest -q --no-header > .check.log 2>&1 & echo $! > .check.pid
+  # then, per poll:  kill -0 "$(cat .check.pid)" 2>/dev/null && echo running || echo done
+  ```
+
+  A detached run also survives the call being interrupted, so a poll that times out costs one poll rather than the whole suite, and the log on disk is the full output either way.
+
 - **Bail on the first failure while iterating** (`-x`, `--bail=1`). One real failure beats forty cascading ones. Drop the flag for the final full run.
 - **One command, one output.** Chain lint, typecheck and tests into a single invocation rather than three.
 - **Affected tests during the loop, the full suite once at the end of the work.** Not after every fix and not before every commit.
 - **For the full pass, use the project's own entry point** — `npm run check`, `make check`, `just check`, `tox`, whatever the repository already has. Read the `package.json` scripts or the Makefile once and use what is there. If there is no single command, chain the linters, the type checker and the tests yourself. Do not write a wrapper script to avoid doing that; a second entry point drifts from the real one and hides which step failed.
 - **In a multi-stack repository, cover the stacks the branch touched.** Untouched code cannot break, with one exception: anything crossing between the stacks — an API payload shape, a serialized schema, a shared fixture — is a boundary surface and pulls the other stack's tests into scope whether or not you edited its files. Say which stacks the pass covered, so a partial run never reads as a whole one.
+- **Never re-run a full suite that a timeout killed.** Not with a longer timeout, not with the same command again — one job spent forty minutes on four identical attempts and produced no coverage at all while holding the host down. The next run is a *different, smaller* command: narrow to the paths the branch touched (`uv run pytest tests/foo tests/bar`), and narrow again if that is still too slow. Then say so — the report names the paths actually covered and states plainly that the full suite did not complete. Partial coverage honestly labelled is usable; "tests pass" on the strength of a suite that never ran is not. If every attempt dies at the same point and unrelated tests fail on time, the machine is the finding: stop and report that rather than narrowing further.
+
 - **Never re-read a file you just wrote.** The edit would have failed loudly if it had not applied.
 
 ### 8. Commit
