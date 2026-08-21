@@ -131,7 +131,7 @@ class TestCostRendering:
         # key, so the lookup has to name which block it means.
         totals = _totals_block(out)
         lines = {ln.split()[0]: ln for ln in totals.splitlines() if ln[:1].isalpha()}
-        assert "$9.0000" in lines["alice"]
+        assert "$9.00" in lines["alice"]
         assert "$" not in lines["bob"]
         assert "subscription" in lines["bob"]
         assert "$" not in lines["carol"]
@@ -168,9 +168,67 @@ class TestCostRendering:
         line = next(
             ln for ln in _totals_block(out).splitlines() if ln.startswith("alice")
         )
-        assert "$9.0000" in line
+        assert "$9.00" in line
         assert "estimated" in line or "subscription" in line
         assert "108" not in line
+
+
+class TestMoneyPrecision:
+    def test_a_sub_cent_figure_is_not_rounded_to_a_flat_zero(self, seeded, capsys):
+        """A 24h per-user cost is routinely sub-cent. At two decimals it renders
+        `$0.00` — indistinguishable from a genuine zero, which is the one thing
+        a cost column must not be ambiguous about."""
+        with db.get_db(seeded.db_path) as conn:
+            conn.execute(
+                "UPDATE task_usage SET cost_usd = 0.0004 WHERE cost_basis = 'api'"
+            )
+
+        _, out = _run(capsys, by="user")
+
+        line = next(ln for ln in _totals_block(out).splitlines() if ln.startswith("alice"))
+        assert "$0.0004" in line
+        assert "$0.00 " not in line
+
+    def test_an_ordinary_figure_keeps_two_decimals(self, seeded, capsys):
+        _, out = _run(capsys, by="user")
+
+        line = next(ln for ln in _totals_block(out).splitlines() if ln.startswith("alice"))
+        assert "$9.00" in line
+
+    def test_a_genuine_zero_of_real_money_still_renders_as_currency(
+        self, seeded, capsys
+    ):
+        with db.get_db(seeded.db_path) as conn:
+            conn.execute(
+                "UPDATE task_usage SET cost_usd = 0.0 WHERE cost_basis = 'api'"
+            )
+
+        _, out = _run(capsys, by="user")
+
+        line = next(ln for ln in _totals_block(out).splitlines() if ln.startswith("alice"))
+        assert "$0.00" in line
+
+
+class TestExitCode:
+    def test_a_failing_run_exits_non_zero_through_main(self, seeded, monkeypatch):
+        """`cmd_usage` returning 1 is worth nothing if `main` throws it away —
+        a script cannot see a message on stdout."""
+        monkeypatch.setattr(
+            "sys.argv", ["istota", "usage", "--since", "not-a-date"]
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 1
+
+    def test_a_successful_run_exits_zero(self, seeded, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["istota", "usage", "--json"])
+
+        try:
+            cli.main()
+        except SystemExit as exc:  # pragma: no cover - only on a regression
+            assert exc.code in (None, 0)
 
 
 class TestJson:
@@ -244,6 +302,58 @@ class TestFiltersAndWindow:
 
         assert code == 1
         assert "YYYY-MM-DD" in out
+
+    @pytest.mark.parametrize("days", [0, -5])
+    def test_a_non_positive_days_is_rejected(self, seeded, capsys, days):
+        """`--days 0` reads as "no limit" and does the opposite — it puts the
+        bound at now and reports nothing, which looks like a real answer."""
+        code, out = _run(capsys, days=days)
+
+        assert code == 1
+        assert "--days" in out
+
+    def test_an_inverted_window_is_rejected(self, seeded, capsys):
+        code, out = _run(capsys, since="2026-08-20", until="2026-01-01")
+
+        assert code == 1
+        assert "--until" in out
+
+    def test_the_unmeasured_counter_uses_the_window_the_table_describes(
+        self, seeded, capsys
+    ):
+        """The trailer says "in this window". It has to mean the same window.
+
+        The counter reads `tasks`, whose dates are in the other format, so it
+        used to be derived separately from `--days` alone — which made it
+        ignore `--since` and `--until` and describe the last 30 days while the
+        table above it described something else.
+        """
+        with db.get_db(seeded.db_path) as conn:
+            old_task = db.create_task(conn, prompt="p", user_id="alice")
+            new_task = db.create_task(conn, prompt="p", user_id="alice")
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ((NOW - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S"), old_task),
+            )
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ((NOW - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"), new_task),
+            )
+
+        # Default 30-day window sees only the recent one.
+        _, out = _run(capsys, json=True)
+        assert json.loads(out)["unmeasured_tasks"] == 1
+
+        # A window reaching back past both sees both.
+        _, out = _run(capsys, since="2020-01-01", json=True)
+        assert json.loads(out)["unmeasured_tasks"] == 2
+
+        # And `--until` bounds it from the other side.
+        _, out = _run(
+            capsys, since="2020-01-01",
+            until=(NOW - timedelta(days=30)).strftime("%Y-%m-%d"), json=True,
+        )
+        assert json.loads(out)["unmeasured_tasks"] == 1
 
     @pytest.mark.parametrize(
         "flag,value,expected",

@@ -544,7 +544,14 @@
         </div>
 
         {#if (stats.usage.by_model_30d ?? []).length > 0}
-          <h3 class="usage-sub">By model (30d)</h3>
+          <h3 class="usage-sub">
+            By model (30d){#if (stats.usage.by_model_30d_omitted ?? 0) > 0}<span
+                class="usage-omitted"
+              >
+                — top 5 of {(stats.usage.by_model_30d ?? []).length +
+                  (stats.usage.by_model_30d_omitted ?? 0)}</span
+              >{/if}
+          </h3>
           <div class="usage-rows">
             {#each stats.usage.by_model_30d ?? [] as g (g.key)}
               <div class="usage-row">
@@ -980,7 +987,11 @@
 
   /* Per-user 24h breakdown — stacked bar + tag list. */
   .users-grid {
-    min-width: 680px;
+    /* Raised by the two usage columns' 14rem. The sized columns must not add up
+		   to the whole table, or `col-24h` — the one deliberately left auto, since
+		   it carries the stacked bar and the per-source chips — is squeezed to
+		   nothing at the declared minimum. */
+    min-width: 904px;
   }
 
   /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
@@ -1015,7 +1026,7 @@
 
   .usage-sub {
     margin: var(--space-2) 0 var(--space-1);
-    font-size: 0.8125rem;
+    font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text-muted);
   }
@@ -1031,7 +1042,7 @@
     grid-template-columns: 1fr auto auto;
     gap: var(--space-2);
     align-items: baseline;
-    font-size: 0.875rem;
+    font-size: var(--text-sm);
   }
 
   .usage-key {
@@ -1051,9 +1062,15 @@
     color: var(--text-muted);
   }
 
+  .usage-omitted {
+    font-weight: 400;
+    text-transform: none;
+    color: var(--text-dim);
+  }
+
   .usage-note {
     margin-top: var(--space-2);
-    font-size: 0.8125rem;
+    font-size: var(--text-xs);
     color: var(--text-muted);
   }
 
@@ -1311,6 +1328,12 @@
     }
     .users-grid .col-avg {
       width: 4rem;
+    }
+    .users-grid .col-tokens {
+      width: 5rem;
+    }
+    .users-grid .col-cost {
+      width: 5.5rem;
     }
     /* The user column is too narrow to hold name + chip on one line, and the
 		   wrap leaves the chip stranded under an off-centre name. Admin status

@@ -52,6 +52,19 @@ describe('formatCost', () => {
     // An api row that cost nothing is still a measured figure.
     expect(formatCost({ api: 0 })).toBe('$0.00');
   });
+
+  it('does not round a sub-cent figure to a flat zero', () => {
+    // A 24h per-user cost is routinely sub-cent, and `$0.00` there is
+    // indistinguishable from a genuine zero — the one thing a cost column
+    // must not be ambiguous about. `cli._fmt_money` states the same rule.
+    expect(formatCost({ api: 0.0004 })).toBe('$0.0004');
+    expect(formatCost({ api: 0.009 })).toBe('$0.0090');
+  });
+
+  it('keeps two decimals from a cent upwards', () => {
+    expect(formatCost({ api: 0.01 })).toBe('$0.01');
+    expect(formatCost({ api: 1234.5 })).toBe('$1234.50');
+  });
 });
 
 describe('formatContext', () => {

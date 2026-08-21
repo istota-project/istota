@@ -8514,7 +8514,7 @@ def query_usage(
 # before its result frame has real context and meaningless zero tokens.
 _USAGE_TOKEN_AGGREGATES = """
     COUNT(*) AS row_count,
-    SUM(CASE WHEN u.has_totals = 1 THEN 1 ELSE 0 END) AS measured_rows,
+    COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN 1 ELSE 0 END), 0) AS measured_rows,
     COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.billed_input_tokens ELSE 0 END), 0)
         AS billed_input_tokens,
     COALESCE(SUM(CASE WHEN u.has_totals = 1 THEN u.output_tokens ELSE 0 END), 0)

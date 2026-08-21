@@ -135,6 +135,8 @@ export interface AdminStatsUsage {
   totals_24h?: AdminUsageTotals;
   totals_30d?: AdminUsageTotals;
   by_model_30d?: AdminUsageGroup[];
+  // The model list is capped at five; this is how many it left out.
+  by_model_30d_omitted?: number;
   by_brain_30d?: AdminUsageGroup[];
   by_origin_24h?: AdminUsageGroup[];
   unmeasured_tasks_24h?: number;

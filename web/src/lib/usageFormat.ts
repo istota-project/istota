@@ -39,10 +39,23 @@ export function formatCost(byBasis: Record<string, number> | undefined): string 
   const other = Object.keys(bases)
     .filter((b) => b !== 'api')
     .sort();
-  if (real !== undefined && other.length === 0) return `$${real.toFixed(2)}`;
-  if (real !== undefined) return `$${real.toFixed(2)} +${other.join('+')}`;
+  if (real !== undefined && other.length === 0) return `$${formatMoney(real)}`;
+  if (real !== undefined) return `$${formatMoney(real)} +${other.join('+')}`;
   if (other.length > 0) return `${COST_PLACEHOLDER} (${other.join('+')})`;
   return COST_PLACEHOLDER;
+}
+
+/**
+ * Two decimals, or four when that would round a real figure to nothing.
+ *
+ * A 24h per-user figure is routinely sub-cent, and at two decimals it renders
+ * `$0.00` — indistinguishable from a genuine zero, which is the one thing a
+ * cost column must not be ambiguous about. `cli._fmt_money` states the same
+ * rule; the two are separate implementations of one rule and must not disagree.
+ */
+function formatMoney(value: number): string {
+  if (value !== 0 && Math.abs(value) < 0.01) return value.toFixed(4);
+  return value.toFixed(2);
 }
 
 /** Null, never zero, when unmeasured — a zero would be a measurement. */

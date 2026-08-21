@@ -54,6 +54,7 @@ from . import user_profiles
 from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
+from .usage import SYSTEM_USER_ID
 from .location_logic import (
     _location_discover_places,
     _location_dismiss_cluster,
@@ -1207,7 +1208,11 @@ def _iso_z(dt: datetime) -> str:
 
     Named apart from the space-separated `strftime` the `tasks` queries use, so
     a caller needing both has to choose between two named things rather than
-    reuse one in the wrong place. Mixing them loses boundary-day rows silently.
+    reuse one in the wrong place. Mixing them fails in *both* directions and neither raises: `' '` (0x20)
+    sorts below `'T'` (0x54), so a space-separated bound against the ISO-Z
+    column **over-includes** (a 24h window silently widens to ~36h), while an
+    ISO-Z bound against the space-separated column **drops** every row on the
+    boundary day. Both report a plausible number.
     """
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
@@ -1626,13 +1631,28 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
             ),
         }
 
-    usage_by_user = _admin_user_usage(conn, cutoff_24h_iso, cutoff_30d_iso)
-    # Deliberately the space-separated bound: this one reads `tasks`.
-    unmeasured_by_user = _admin_unmeasured_by_user(conn, cutoff_24h)
+    # Guarded on its own rather than riding the caller's: `_gather_admin_stats`
+    # wraps Users, Scheduler and Tasks in one try, so before this stage a
+    # failure here could only come from `tasks` — a table that always exists.
+    # These queries read `task_usage`, which a web process upgraded ahead of its
+    # database does not have (`get_db` does not run `init_db`), and one missing
+    # table would take out three sections that have nothing to do with usage.
+    try:
+        usage_by_user = _admin_user_usage(conn, cutoff_24h_iso, cutoff_30d_iso)
+        # Deliberately the space-separated bound: this one reads `tasks`.
+        unmeasured_by_user = _admin_unmeasured_by_user(conn, cutoff_24h)
+    except Exception:
+        logger.exception("admin per-user usage failed; rendering task counts only")
+        usage_by_user = {}
+        unmeasured_by_user = {}
 
     out = []
     user_ids = set(_config.users.keys()) | set(by_user.keys()) if _config else set(by_user.keys())
-    user_ids |= set(usage_by_user)
+    # Ownerless spend (the channel sleep-cycle pass, shared briefing blocks) is
+    # recorded against a sentinel, which is not a person and must not appear in
+    # a table of people. It stays in the fleet pane's per-origin split, where it
+    # is legible as what it is.
+    user_ids |= set(usage_by_user) - {SYSTEM_USER_ID}
     for user_id in sorted(user_ids):
         uc = _config.users.get(user_id) if _config else None
         row = by_user.get(user_id)
@@ -1664,25 +1684,35 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
             # is this user costing" is answered where "how much is this user
             # running" already is. A user in config with no rows gets zeros and
             # None contexts through the same `.get` fallback as above.
-            **usage_by_user.get(user_id, _EMPTY_USER_USAGE),
+            **(usage_by_user.get(user_id) or _empty_user_usage()),
             "usage_unmeasured_24h": unmeasured_by_user.get(user_id, 0),
         })
     return out
 
 
-# The shape a user with no usage rows gets. `None` for the context averages
-# rather than 0, matching the column semantics: a zero would be a measurement.
-_EMPTY_USER_USAGE = {
-    "usage_tokens_24h": 0,
-    "usage_tokens_30d": 0,
-    "usage_cost_24h": {},
-    "usage_cost_30d": {},
-    "usage_by_origin_24h": {},
-    "usage_avg_initial_context": None,
-    "usage_avg_peak_context": None,
-    "usage_cache_hit_rate_24h": 0.0,
-    "usage_rows_24h": 0,
-}
+def _empty_user_usage() -> dict:
+    """The shape a user with no usage rows gets.
+
+    `None` for the context averages rather than 0, matching the column
+    semantics: a zero would be a measurement.
+
+    A factory rather than a module constant because the caller spreads it with
+    `**`, which copies the top level only — every empty row would otherwise
+    share one `usage_cost_24h` dict with every other and with the constant.
+    Nothing mutates them today; the cost of not having to remember that is one
+    function call per empty row.
+    """
+    return {
+        "usage_tokens_24h": 0,
+        "usage_tokens_30d": 0,
+        "usage_cost_24h": {},
+        "usage_cost_30d": {},
+        "usage_by_origin_24h": {},
+        "usage_avg_initial_context": None,
+        "usage_avg_peak_context": None,
+        "usage_cache_hit_rate_24h": 0.0,
+        "usage_rows_24h": 0,
+    }
 
 
 def _admin_user_usage(
@@ -1810,7 +1840,10 @@ def _admin_cost_by_user(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, 
     ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
-        out.setdefault(r["user_id"], {})[r["cost_basis"]] = round(float(r["cost"]), 6)
+        # Not rounded, matching `db._cost_by_basis`. Two paths over one column
+        # rounding differently is the "two chances to disagree" this section
+        # argues against everywhere else.
+        out.setdefault(r["user_id"], {})[r["cost_basis"]] = float(r["cost"])
     return out
 
 
@@ -1820,8 +1853,9 @@ def _admin_unmeasured_by_user(
     """Tasks per user in the window with no usage row.
 
     Takes the **space-separated** bound, because it reads `tasks`. Passing the
-    ISO-Z one here excludes every task on the boundary day and reports a
-    plausible smaller number rather than raising.
+    ISO-Z one here drops every task on the boundary day — `' '` sorts below
+    `'T'`, so a task stamped `2026-08-19 12:30:00` fails `>= '2026-08-19T…'` —
+    and reports a plausible smaller number rather than raising.
     """
     rows = conn.execute(
         """
@@ -1847,7 +1881,9 @@ def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
     Two cutoff formats again, and for the same reason: the token aggregates read
     `task_usage.created_at` (ISO-Z) while `unmeasured_tasks` reads
     `tasks.created_at` (space-separated). Passing one where the other belongs
-    excludes every row on the boundary day without raising.
+    is wrong in opposite directions and neither raises: a space bound against
+    the ISO-Z column over-includes, an ISO bound against the space column drops
+    the boundary day.
     """
     from . import db as _db
 
@@ -1878,6 +1914,8 @@ def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
         out = [{"key": g["key"], **_shape(g)} for g in rows]
         return out[:limit] if limit else out
 
+    by_model = _groups("model", since_30d)
+
     totals_24h = _db.usage_summary(conn, since=since_24h)
     totals_30d = _db.usage_summary(conn, since=since_30d)
 
@@ -1890,7 +1928,11 @@ def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
     return {
         "totals_24h": _shape(totals_24h),
         "totals_30d": _shape(totals_30d),
-        "by_model_30d": _groups("model", since_30d, limit=5),
+        "by_model_30d": by_model[:5],
+        # The list is capped at five, so its rows do not sum to the totals
+        # above them. Said out loud rather than left to be noticed, on the same
+        # reasoning as the two counters below.
+        "by_model_30d_omitted": max(0, len(by_model) - 5),
         "by_brain_30d": _groups("brain", since_30d),
         "by_origin_24h": _groups("origin", since_24h),
         # Two honesty counters. A tmux-brain task spends real tokens and writes

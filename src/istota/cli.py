@@ -273,12 +273,26 @@ def _render_cost(cost_by_basis: dict) -> str:
     real = bases.get("api")
     other = sorted(b for b in bases if b != "api")
     if real is not None and not other:
-        return f"${real:.4f}"
+        return f"${_fmt_money(real)}"
     if real is not None:
-        return f"${real:.4f} +{'+'.join(other)}"
+        return f"${_fmt_money(real)} +{'+'.join(other)}"
     if other:
         return f"{COST_PLACEHOLDER} ({'+'.join(other)})"
     return COST_PLACEHOLDER
+
+
+def _fmt_money(value: float) -> str:
+    """Two decimals, or four when that would round a real figure to nothing.
+
+    A 24h per-user figure is routinely sub-cent, and at two decimals it renders
+    `$0.00` — indistinguishable from a genuine zero, which is the one thing a
+    cost column must not be ambiguous about. `web/src/lib/usageFormat.ts` states
+    the same rule for the dashboard; the two are separate implementations of
+    one rule and must not disagree.
+    """
+    if value != 0 and abs(value) < 0.01:
+        return f"{value:.4f}"
+    return f"{value:.2f}"
 
 
 def _fmt_int(value) -> str:
@@ -291,30 +305,53 @@ def _fmt_context(value) -> str:
     return f"{int(round(value)):,}"
 
 
-def _usage_window(args) -> tuple[str, str | None]:
-    """Resolve the CLI's date arguments into ISO-Z bounds, half-open.
+def _usage_window(args):
+    """Resolve the CLI's date arguments into one window, in both formats.
+
+    Returns `(since_iso, until_iso, since_sql, until_sql)`. Both formats come
+    back together because the window has two readers whose tables store dates
+    differently — `task_usage` in ISO-Z, `tasks` in `datetime('now')` — and
+    deriving one and forgetting the other is what makes the unmeasured-task
+    counter describe a different window than the table above it.
 
     A bare `--until D` is expanded to D+1 at midnight. Without that,
     `--since 2026-08-01 --until 2026-08-20` silently loses the whole of 20 Aug,
     which is the kind of wrong number nobody notices.
+
+    Raises `ValueError` on an unparseable or inverted window, so the caller can
+    refuse rather than print an empty table that looks like an answer.
     """
     from datetime import datetime, timedelta, timezone
 
     def _iso(dt):
         return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
+    def _sql(dt):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
     def _parse_day(value):
         return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
     if args.since:
-        since = _iso(_parse_day(args.since))
+        since_dt = _parse_day(args.since)
     else:
-        since = db.iso_utc_days_ago(args.days)
+        if args.days < 1:
+            # `--days 0` reads as "no limit" and does the opposite: it puts the
+            # bound at now and reports nothing. A negative one puts it in the
+            # future. Both print a table that looks like an answer.
+            raise ValueError("--days must be at least 1")
+        since_dt = datetime.now(timezone.utc) - timedelta(days=args.days)
 
-    until = None
-    if args.until:
-        until = _iso(_parse_day(args.until) + timedelta(days=1))
-    return since, until
+    until_dt = _parse_day(args.until) + timedelta(days=1) if args.until else None
+    if until_dt is not None and until_dt <= since_dt:
+        raise ValueError("--until must be after --since")
+
+    return (
+        _iso(since_dt),
+        _iso(until_dt) if until_dt else None,
+        _sql(since_dt),
+        _sql(until_dt) if until_dt else None,
+    )
 
 
 def cmd_usage(args):
@@ -324,9 +361,9 @@ def cmd_usage(args):
     config = load_config(Path(args.config) if args.config else None)
 
     try:
-        since, until = _usage_window(args)
-    except ValueError:
-        print("Dates must be YYYY-MM-DD")
+        since, until, since_sql, until_sql = _usage_window(args)
+    except ValueError as e:
+        print(str(e) if str(e).startswith("--") else "Dates must be YYYY-MM-DD")
         return 1
 
     filters = dict(
@@ -341,10 +378,11 @@ def cmd_usage(args):
             else:
                 groups = [db.usage_summary(conn, **filters)]
                 groups[0]["key"] = "all"
+            # The same window the table above describes, in the format `tasks`
+            # stores. Deriving it separately is how the trailer came to say
+            # "in this window" about a different one.
             unmeasured = db.unmeasured_task_count(
-                conn,
-                since=db.sql_datetime_days_ago(args.days),
-                user_id=args.user,
+                conn, since=since_sql, until=until_sql, user_id=args.user,
             )
     except db.sqlite3.OperationalError as e:
         if "no such table" in str(e):
@@ -378,18 +416,21 @@ def cmd_usage(args):
     # are not comparable: the first sums across requests, the second is a first
     # and a max over per-request prompt sizes.
     header = (
-        f"{label or 'Totals':<22} {'Rows':>6} {'Billed in':>12} {'Cache rd':>12} "
-        f"{'Cache wr':>12} {'Output':>10} {'Hit%':>6} {'Cost':>16}"
+        # Wide enough for a 30-day fleet total with separators — 15 columns
+        # holds 999,999,999,999, where 12 overflowed at a billion and shifted
+        # every column after it.
+        f"{label or 'Totals':<22} {'Rows':>6} {'Billed in':>15} {'Cache rd':>15} "
+        f"{'Cache wr':>15} {'Output':>12} {'Hit%':>6} {'Cost':>16}"
     )
     print(header)
     print("-" * len(header))
     for g in groups:
         key = str(g.get("key") or "")[:22]
         print(
-            f"{key:<22} {g['rows']:>6} {_fmt_int(g['billed_input_tokens']):>12} "
-            f"{_fmt_int(g['cache_read_tokens']):>12} "
-            f"{_fmt_int(g['cache_write_tokens']):>12} "
-            f"{_fmt_int(g['output_tokens']):>10} "
+            f"{key:<22} {g['rows']:>6} {_fmt_int(g['billed_input_tokens']):>15} "
+            f"{_fmt_int(g['cache_read_tokens']):>15} "
+            f"{_fmt_int(g['cache_write_tokens']):>15} "
+            f"{_fmt_int(g['output_tokens']):>12} "
             f"{g['cache_hit_rate'] * 100:>5.1f}% {_render_cost(g['cost_by_basis']):>16}"
         )
 
@@ -404,7 +445,14 @@ def cmd_usage(args):
         key = str(g.get("key") or "")[:22]
         window = g.get("avg_context_window")
         peak = g.get("avg_peak_context_tokens")
-        pct = f"{peak / window * 100:.1f}%" if window and peak else COST_PLACEHOLDER
+        # `peak is not None`, not truthiness: a measured peak of 0 is a real
+        # 0.0%, and the whole point of the nullable columns is that only NULL
+        # means unmeasured.
+        pct = (
+            f"{peak / window * 100:.1f}%"
+            if window and peak is not None
+            else COST_PLACEHOLDER
+        )
         print(
             f"{key:<22} {g['context_rows']:>9} "
             f"{_fmt_context(g.get('avg_initial_context_tokens')):>13} "
@@ -2326,7 +2374,13 @@ def main():
         }
         experimental_commands[args.experimental_action](args)
     else:
-        commands[args.command](args)
+        # A handler that returns a non-zero code means it. Most return None, so
+        # this is a no-op for them — but without it a handler's `return 1` is
+        # thrown away and the process exits 0, which is a failure a script
+        # cannot see. Mirrors the `money` branch above.
+        rc = commands[args.command](args)
+        if rc:
+            sys.exit(rc)
 
 
 if __name__ == "__main__":

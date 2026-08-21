@@ -8,8 +8,9 @@ Two date formats meet in this module and confusing them is the failure this
 change is most likely to ship. `task_usage.created_at` is ISO-Z
 (`2026-08-20T09:00:00.000Z`); `tasks.created_at` is `datetime('now')`
 (`2026-08-20 09:00:00`). `' '` (0x20) sorts below `'T'` (0x54), so a bound in
-the wrong format silently drops every row on the boundary day rather than
-raising.
+the wrong format is silently wrong rather than raising — over-including when
+a space bound meets the ISO-Z column, dropping the boundary day when an ISO
+bound meets the space-separated one.
 """
 
 from datetime import datetime, timedelta, timezone

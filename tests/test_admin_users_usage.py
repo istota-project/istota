@@ -2,9 +2,17 @@
 
 This is where the two date formats meet. `tasks.created_at` is
 `2026-08-20 09:00:00`; `task_usage.created_at` is ISO-Z. `' '` (0x20) sorts
-below `'T'` (0x54), so a bound in the wrong format drops every row on the
-boundary day and reports a plausible smaller number instead of raising. The
-boundary-day test below is the one that catches it.
+below `'T'` (0x54), so a bound in the wrong format is wrong in whichever
+direction it is wrong, and neither raises:
+
+* a **space** bound against the ISO-Z `task_usage` column **over-includes** —
+  `'2026-08-19T00:30…' >= '2026-08-19 12:00:00'` is true, so a 24h window
+  silently widens to about 36h;
+* an **ISO** bound against the space-separated `tasks` column **drops** the
+  boundary day — `'2026-08-19 12:30:00' >= '2026-08-19T12:00…'` is false.
+
+Both report a plausible number. `TestBoundaryDay` covers the first direction
+and `test_unmeasured_uses_the_space_separated_bound` the second.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -80,12 +88,9 @@ def _row(conn, user):
 
 
 class TestBoundaryDay:
-    def test_a_task_and_a_usage_row_on_the_boundary_are_both_counted(self, conn):
-        """The single most likely mistake in this change, and the one that
-        produces plausible-looking numbers rather than an error. Seeds one task
-        and one usage row both stamped 00:30 on the `since` day, each in its own
-        format. This fails if the usage query reuses the task cutoff."""
-        at = NOW - timedelta(hours=23, minutes=30)  # inside the 24h window
+    def test_a_task_and_a_usage_row_just_inside_are_both_counted(self, conn):
+        """Both queries see their own boundary-day row, each in its own format."""
+        at = NOW - timedelta(hours=23, minutes=30)
         tid = _add_task(conn, user="alice", at=at)
         _add_usage(conn, user="alice", at=at, task_id=tid)
         conn.commit()
@@ -95,6 +100,29 @@ class TestBoundaryDay:
         assert row["tasks_last_24h"] == 1
         assert row["usage_rows_24h"] == 1
         assert row["usage_tokens_24h"] == 1350
+
+    def test_a_row_earlier_on_the_boundary_day_is_excluded(self, conn):
+        """The assertion that actually catches the reused cutoff.
+
+        Seeds a usage row 30h back — earlier on the same calendar day as the
+        24h cutoff, so it is only excluded if the bound is compared in the
+        column's own format. A space-separated bound sorts *below* every ISO-Z
+        value on that day (`' '` 0x20 < `'T'` 0x54), so reusing the task cutoff
+        here silently widens a 24h window to about 36h and this row is counted.
+
+        The over-include is why the sibling above cannot catch it: a wrong bound
+        never drops a row on the usage side, only admits extra ones.
+        """
+        _add_usage(conn, user="alice", at=NOW - timedelta(hours=2))
+        _add_usage(conn, user="alice", at=NOW - timedelta(hours=30))
+        conn.commit()
+
+        row = _row(conn, "alice")
+
+        assert row["usage_rows_24h"] == 1
+        assert row["usage_tokens_24h"] == 1350
+        # Both are inside the month.
+        assert row["usage_tokens_30d"] == 2700
 
     def test_a_row_outside_the_window_is_excluded(self, conn):
         _add_usage(conn, user="alice", at=NOW - timedelta(hours=25))
@@ -209,6 +237,21 @@ class TestEmptyUser:
 
         assert row["usage_unmeasured_24h"] == 1
 
+    def test_the_unmeasured_counter_uses_the_space_separated_bound(self, conn):
+        """The per-user counter reads `tasks`, so it needs the other format.
+
+        A task on the boundary day is where the two diverge: an ISO-Z bound
+        sorts *above* every space-separated value that day, so the comparison
+        fails and the task is dropped. A task two hours old is caught by either
+        bound, which is why the sibling above cannot see this.
+        """
+        _add_task(conn, user="alice", at=NOW - timedelta(hours=23, minutes=30))
+        conn.commit()
+
+        row = _row(conn, "alice")
+
+        assert row["usage_unmeasured_24h"] == 1
+
 
 class TestFleetSection:
     def test_it_carries_totals_and_the_three_groupings(self, conn):
@@ -245,6 +288,33 @@ class TestFleetSection:
             for group in section[grouping]:
                 assert "cost_by_basis" in group
 
+    def test_measured_rows_is_zero_not_null_on_an_empty_window(self, conn):
+        """`AdminUsageTotals.measured_rows` is typed non-nullable, and SUM over
+        zero rows returns NULL without a COALESCE."""
+        section = web_app._admin_usage_section(conn, NOW)
+
+        assert section["totals_24h"]["measured_rows"] == 0
+        assert section["totals_30d"]["measured_rows"] == 0
+
+    def test_a_truncated_model_list_says_how_many_it_left_out(self, conn):
+        """The list is capped at five, so its rows do not sum to the totals
+        above them. The pane carries counters for exactly this class of gap."""
+        at = NOW - timedelta(hours=2)
+        for i in range(7):
+            _add_usage(conn, user="alice", at=at, model=f"model-{i}")
+        conn.commit()
+
+        section = web_app._admin_usage_section(conn, NOW)
+
+        assert len(section["by_model_30d"]) == 5
+        assert section["by_model_30d_omitted"] == 2
+
+    def test_an_untruncated_model_list_reports_none_omitted(self, conn):
+        _add_usage(conn, user="alice", at=NOW - timedelta(hours=2))
+        conn.commit()
+
+        assert web_app._admin_usage_section(conn, NOW)["by_model_30d_omitted"] == 0
+
     def test_the_honesty_counters_are_present(self, conn):
         _add_task(conn, user="alice", at=NOW - timedelta(hours=2))
         _add_usage(
@@ -267,6 +337,77 @@ class TestFleetSection:
         section = web_app._admin_usage_section(conn, NOW)
 
         assert section["unmeasured_tasks_24h"] == 1
+
+
+class TestSystemSpend:
+    def test_the_ownerless_sentinel_is_not_a_row_in_the_users_table(self, conn):
+        """A shared briefing block records against a sentinel, which is not a
+        person. It belongs in the fleet pane's per-origin split, not beside
+        real users in a table of people."""
+        from istota.usage import SYSTEM_USER_ID
+
+        _add_usage(
+            conn, user=SYSTEM_USER_ID, at=NOW - timedelta(hours=2),
+            origin="shared_blocks",
+        )
+        _add_usage(conn, user="alice", at=NOW - timedelta(hours=2))
+        conn.commit()
+
+        usernames = {r["username"] for r in web_app._admin_users_section(conn, NOW)}
+
+        assert SYSTEM_USER_ID not in usernames
+        assert "alice" in usernames
+
+    def test_it_is_still_in_the_fleet_totals(self, conn):
+        from istota.usage import SYSTEM_USER_ID
+
+        _add_usage(
+            conn, user=SYSTEM_USER_ID, at=NOW - timedelta(hours=2),
+            origin="shared_blocks",
+        )
+        conn.commit()
+
+        section = web_app._admin_usage_section(conn, NOW)
+
+        assert section["totals_24h"]["rows"] == 1
+        assert {g["key"] for g in section["by_origin_24h"]} == {"shared_blocks"}
+
+
+class TestDegradation:
+    def test_a_missing_usage_table_leaves_the_task_columns_intact(self, tmp_path):
+        """The per-user queries read `task_usage`, which a web process upgraded
+        ahead of its database does not have — `get_db` does not run `init_db`.
+        One missing table must not take out Users, Scheduler and Tasks, none of
+        which has anything to do with usage."""
+        dbp = tmp_path / "istota.db"
+        db.init_db(dbp)
+        with db.get_db(dbp) as c:
+            _add_task(c, user="alice", at=NOW - timedelta(hours=2))
+            c.execute("DROP TABLE task_usage_models")
+            c.execute("DROP TABLE task_usage")
+            c.commit()
+
+            rows = web_app._admin_users_section(c, NOW)
+
+        row = next(r for r in rows if r["username"] == "alice")
+        assert row["tasks_last_24h"] == 1
+        assert row["usage_tokens_24h"] == 0
+        assert row["usage_cost_24h"] == {}
+
+    def test_empty_user_rows_do_not_share_one_dict(self, conn):
+        """`**` copies the top level only, so a module-level constant would hand
+        every empty row the same nested maps — and the constant itself."""
+        _add_task(conn, user="alice", at=NOW - timedelta(hours=2))
+        _add_task(conn, user="bob", at=NOW - timedelta(hours=2))
+        conn.commit()
+
+        rows = {r["username"]: r for r in web_app._admin_users_section(conn, NOW)}
+
+        assert rows["alice"]["usage_cost_24h"] is not rows["bob"]["usage_cost_24h"]
+        assert (
+            rows["alice"]["usage_by_origin_24h"]
+            is not rows["bob"]["usage_by_origin_24h"]
+        )
 
 
 class TestPayloadDegradation:
