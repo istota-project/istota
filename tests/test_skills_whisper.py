@@ -427,6 +427,52 @@ class TestCmdModels:
         assert len(result["models"]) == 1
 
 
+class TestNoSegments:
+    """ISSUE-273: `segments` carries one dict per word, so a long recording is
+    megabytes of JSON that a caller wanting only the transcript still has to
+    buffer, decode and drop — in the daemon, on the allocator this whole change
+    exists to keep quiet."""
+
+    def _args(self, tmp_path, output, no_segments):
+        args = MagicMock()
+        args.audio_path = str(tmp_path / "test.wav")
+        args.model = "auto"
+        args.language = None
+        args.output = output
+        args.save = False
+        args.no_segments = no_segments
+        return args
+
+    @patch("istota.skills.whisper.cli.transcribe_audio")
+    def test_it_drops_segments_from_json_and_keeps_the_text(self, mock_transcribe, tmp_path):
+        mock_transcribe.return_value = {
+            "status": "ok",
+            "text": "Hello",
+            "segments": [{"start": 0.0, "end": 2.0, "text": "Hello", "words": []}],
+        }
+        result = cmd_transcribe(self._args(tmp_path, "json", True))
+        assert "segments" not in result
+        assert result["text"] == "Hello"
+
+    @patch("istota.skills.whisper.cli.transcribe_audio")
+    def test_it_drops_segments_from_text_output_too(self, mock_transcribe, tmp_path):
+        """The `text` format returns the whole result dict, segments included —
+        so the flag has to apply there as well or it silently does nothing."""
+        mock_transcribe.return_value = {"status": "ok", "text": "Hello", "segments": [{}]}
+        result = cmd_transcribe(self._args(tmp_path, "text", True))
+        assert "segments" not in result
+
+    @patch("istota.skills.whisper.cli.transcribe_audio")
+    def test_the_default_still_carries_segments(self, mock_transcribe, tmp_path):
+        mock_transcribe.return_value = {"status": "ok", "text": "Hello", "segments": [{}]}
+        result = cmd_transcribe(self._args(tmp_path, "json", False))
+        assert "segments" in result
+
+    def test_the_parser_defaults_it_off(self):
+        args = build_parser().parse_args(["transcribe", "/x.wav"])
+        assert args.no_segments is False
+
+
 class TestCmdTranscribe:
     @patch("istota.skills.whisper.cli.transcribe_audio")
     def test_json_output(self, mock_transcribe, tmp_path):
@@ -446,6 +492,7 @@ class TestCmdTranscribe:
         args.language = None
         args.output = "json"
         args.save = False
+        args.no_segments = False
         result = cmd_transcribe(args)
         assert result["status"] == "ok"
         assert "segments" in result
@@ -463,6 +510,7 @@ class TestCmdTranscribe:
         args.language = None
         args.output = "text"
         args.save = False
+        args.no_segments = False
         result = cmd_transcribe(args)
         assert result["status"] == "ok"
 
@@ -480,6 +528,7 @@ class TestCmdTranscribe:
         args.language = None
         args.output = "srt"
         args.save = False
+        args.no_segments = False
         result = cmd_transcribe(args)
         assert result["status"] == "ok"
         assert "formatted_output" in result
@@ -500,6 +549,7 @@ class TestCmdTranscribe:
         args.language = None
         args.output = "text"
         args.save = True
+        args.no_segments = False
         result = cmd_transcribe(args)
         assert result["saved_to"] == str(tmp_path / "test.txt")
         assert (tmp_path / "test.txt").read_text() == "Hello world"
@@ -513,6 +563,7 @@ class TestCmdTranscribe:
         args.language = None
         args.output = "json"
         args.save = False
+        args.no_segments = False
         result = cmd_transcribe(args)
         assert result["status"] == "error"
 
