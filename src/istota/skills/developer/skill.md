@@ -231,7 +231,7 @@ Unless the change is Fast tier, run a review after the work's full pass and afte
 
 The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
 
-If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached — that is a state of the environment, not of the diff. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself: report it and do not open the MR.
+If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached, no reviewer returned a usable answer — that is a state of the environment, not of the diff. It comes back `skipped`. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself — a bad range, a path outside the allowed roots — and it is yours to correct: report it and do not open the MR.
 
 ### 10. Land
 

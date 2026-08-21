@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reviewer that fails no longer blocks the bot from publishing the branch it reviewed. When every reviewer's call failed, or every reviewer answered in something that would not parse, the result was reported the same way as a bad request — and the rule for a bad request is to stop and open nothing, so one broken reviewer could block every merge request on an install for a reason no branch could do anything about. Those cases now land the work unreviewed and say why, as already happens when the reviewer cannot be reached at all. A review that called the model and came back with nothing also writes a warning to the log, which it previously did at no level; without it, a reviewer broken this way would now be invisible rather than merely obstructive.
+
 - The docker image now ships the `gh` and `glab` the developer skill needs. Its git half worked — clone, branch, commit, push — but every command that would publish the work failed with "cannot run /usr/local/bin/gh", because neither binary was in the image; anyone who had set a repository directory and a forge token hit it, and a stock install with neither set was unaffected. Upgrading an existing container is enough to fix it, with no config change needed.
 
 - The GitLab reviewer setting takes a username, and every place it was documented asked for a numeric user ID — including the example value, which was a number. The setting is handed to `glab mr create --reviewer`, which wants a username, so an operator who followed the example got merge requests with no reviewer on them and a note about the misconfiguration on each one. The setting itself is unchanged; check yours if it holds a number.

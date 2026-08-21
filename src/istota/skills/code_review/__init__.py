@@ -93,6 +93,10 @@ def _skip(reason: str, message: str, **extra):
     these, because none of them resolves by refusing to push — and a review that
     errors *does* block, so misfiling one here would strand finished work on a
     branch nobody is watching. A skipped review still counts as unreviewed.
+
+    Not the only producer of `skipped`: the engine returns it too, when every
+    reviewer failed (`review_failed` / `malformed_output`). Same reasoning,
+    reached after the run rather than before it.
     """
     logger.info(
         "code_review skipped (task=%s, reason=%s): %s",
@@ -374,6 +378,29 @@ def cmd_run(args):
             )
     envelope["calls_used"] = calls_used
     envelope["max_calls"] = cap
+    if envelope["status"] != "ok":
+        # The guard refusals above each log through `_fail` / `_skip`; a run that
+        # got as far as calling models and came back with nothing had no line at
+        # any level, because the engine does not log and `invoke` logs only a
+        # call that failed — a reviewer answering unparseably is `success=True`.
+        # That silence is the expensive part. A broken adapter makes *every*
+        # review on the deployment come back this way (ISSUE-271), and since
+        # this status no longer blocks the push, nothing else would show it: the
+        # branch lands unreviewed, the breaker sees a healthy call, and a
+        # scheduled review exits 0 and never trips the auto-disable counter.
+        # WARNING because one of these is a bad day and a run of them is an
+        # outage, and the reason slug is what tells them apart.
+        logger.warning(
+            "code_review returned no findings (task=%s, status=%s, reason=%s, "
+            "rounds=%s): %s",
+            os.environ.get("ISTOTA_TASK_ID", "-"), envelope["status"],
+            envelope.get("reason", "-"), rounds,
+            str(envelope.get("error", ""))[:200],
+        )
+    # Kept on the envelope rather than popped with the charge: it is what
+    # separates a skip that spent model calls from one that refused before
+    # spending any, and those two read identically otherwise.
+    envelope["rounds"] = rounds
     _emit(envelope, 1 if envelope["status"] == "error" else 0)
 
 
