@@ -568,6 +568,11 @@ glab_bin_path = "{{ istota_developer_glab_bin_path }}"
 devbox_proxy_enabled = {{ istota_devbox_proxy_enabled | ternary('true', 'false') }}
 devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
 devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
+
+# Subsection, so it has to stay last in the [developer] block: every key after
+# this header belongs to it.
+[developer.review]
+timeout_seconds = {{ istota_developer_review_timeout_seconds }}
 {% endif %}
 
 # User profiles, folder mounts, and briefing schedule/delivery live in the DB

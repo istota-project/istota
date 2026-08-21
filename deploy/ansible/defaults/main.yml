@@ -1084,6 +1084,19 @@ istota_developer_forge_cli_permit: []             # Baseline entries to turn off
 istota_developer_gh_bin_path: "/usr/bin/gh"
 istota_developer_glab_bin_path: "/usr/bin/glab"
 
+# Wall-clock budget for one code-review agent. Both agents run concurrently, so
+# this is the whole review's clock and not half of it, and it covers the entire
+# round: a `need_files` re-invocation and a malformed-output retry come out of
+# this budget rather than out of a fresh one. The code default of 120s fits one
+# reviewer call on a `smart` model and leaves too little for a second, so the
+# round trip gets charged and then times out.
+#
+# The skill clamps this down to istota_security_skill_proxy_timeout minus 60s
+# of assembly allowance, because the proxy kills the whole command at the
+# ceiling. At the default 300s ceiling that puts the largest unclamped value at
+# 240. Raise the ceiling first if you want more than that here.
+istota_developer_review_timeout_seconds: 240
+
 # Public hostname for nginx (web UI, webhooks)
 istota_hostname: "{{ istota_namespace }}.example.com"
 
