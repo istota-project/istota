@@ -224,6 +224,26 @@ istota_scheduler_stats_interval: 60              # scheduler_stats health line i
 istota_scheduler_host_pressure_enabled: true     # Master switch for host-pressure sampling
 istota_scheduler_host_pressure_breadcrumb_interval: 300  # Breadcrumb cadence in seconds (0 = disabled)
 
+# Memory admission gate + threshold snapshot (Track B alerting, Track C2).
+# Below the floor, dispatch spawns no new worker and pending tasks wait for a
+# later tick; nothing running is ever stopped, preempted or failed.
+istota_scheduler_host_pressure_sample_interval: 30   # Gate/snapshot sample cadence in seconds (0 = disabled)
+istota_scheduler_host_pressure_psi_threshold: 40.0   # `memory some avg10` above this counts as pressure
+istota_scheduler_host_pressure_alert_cooldown: 900   # Min seconds between snapshots + admin notifications
+istota_scheduler_min_available_memory_mb: 768        # Admission floor
+# Third snapshot trigger, from the production series rather than from theory.
+# A production host took 1.52 GB of shmem in under five minutes with PSI
+# peaking at 0.07 and 2.9 GB still available — zram absorbed it, so the two
+# thresholds above were right not to fire, but that burst is the one event in
+# 24 hours whose attribution anyone would want. Not wired into the gate: a
+# residue is a reason to collect evidence, not a reason to refuse work.
+# Baseline residue on that host is ~80 MB. 0 disables.
+istota_scheduler_host_pressure_shmem_alert_mb: 1024
+# Read-only GET handle, used only to ask Docker which pid a container has so
+# its tmpfs can be read through /proc/<pid>/root — container mounts are
+# invisible in the host mount table. Empty string disables container lookup.
+istota_scheduler_host_pressure_docker_socket: /var/run/docker.sock
+
 # ---------------------------------------------------------------------------
 # Host memory headroom (host-and-scheduler-robustness spec, Track A)
 # ---------------------------------------------------------------------------

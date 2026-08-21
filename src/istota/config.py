@@ -231,6 +231,32 @@ class SchedulerConfig:
     # an accumulation started). 288 lines a day at the default interval.
     host_pressure_enabled: bool = True  # master switch for host-pressure sampling
     host_pressure_breadcrumb_interval_seconds: int = 300  # cadence of the breadcrumb line (0 = disabled)
+    # Sampling for the admission gate and the threshold snapshot. Separate from
+    # the breadcrumb: the breadcrumb is a series and wants a slow, regular
+    # cadence, while the gate wants a reading recent enough to act on.
+    host_pressure_sample_interval_seconds: int = 30  # cadence of the gate/snapshot sample (0 = disabled)
+    host_pressure_psi_threshold: float = 40.0  # `memory some avg10` above this counts as pressure
+    host_pressure_alert_cooldown_seconds: int = 900  # min gap between snapshots + admin notifications
+    # Third snapshot trigger, from the production series rather than from
+    # theory. On 2026-08-21 the host took 1.52 GB of shmem in under five
+    # minutes with `memory some avg10` peaking at 0.07 and MemAvailable never
+    # below 2.9 GB — zram absorbed it exactly as intended, and both of the
+    # triggers above were right not to fire. But that burst is the one event in
+    # 24 hours whose attribution anyone would want, and without this key the
+    # snapshot could never fire on it. Deliberately not wired into the
+    # admission gate: a residue is a reason to collect evidence, not a reason
+    # to refuse work. 0 disables. Baseline residue on that host is ~80 MB.
+    host_pressure_shmem_unaccounted_alert_mb: int = 1024
+    # Read-only GET handle, used only to ask Docker which pid a container has
+    # so its tmpfs can be read through /proc/<pid>/root. Named here rather than
+    # borrowed from [devbox] because the browser container matters to this
+    # module whether or not devbox is enabled. Empty disables container lookup.
+    host_pressure_docker_socket: str = "/var/run/docker.sock"
+    # Admission gate (C2). Below this, dispatch spawns no new worker and pending
+    # tasks stay pending until the next tick. A floor, not a predictor: it makes
+    # no estimate of what the new task would need. Running tasks are never
+    # touched — the gate is on admission only, never on eviction.
+    min_available_memory_mb: int = 768
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
@@ -2209,6 +2235,27 @@ def load_config(config_path: Path | None = None) -> Config:
             scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
             loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
             host_pressure_enabled=sched.get("host_pressure_enabled", True),
+            # Coerced rather than passed through. These feed the admission
+            # gate, and a TOML string or float reaches `min_available_mb * 1024`
+            # inside the comparison — either raising TypeError from dispatch or
+            # comparing wrongly and silently. The neighbouring keys get away
+            # with a bare get(); the gate is a boundary they are not.
+            host_pressure_sample_interval_seconds=int(
+                sched.get("host_pressure_sample_interval_seconds", 30)
+            ),
+            host_pressure_psi_threshold=float(
+                sched.get("host_pressure_psi_threshold", 40.0)
+            ),
+            host_pressure_alert_cooldown_seconds=int(
+                sched.get("host_pressure_alert_cooldown_seconds", 900)
+            ),
+            host_pressure_shmem_unaccounted_alert_mb=int(
+                sched.get("host_pressure_shmem_unaccounted_alert_mb", 1024)
+            ),
+            host_pressure_docker_socket=sched.get(
+                "host_pressure_docker_socket", "/var/run/docker.sock"
+            ),
+            min_available_memory_mb=int(sched.get("min_available_memory_mb", 768)),
             host_pressure_breadcrumb_interval_seconds=sched.get(
                 "host_pressure_breadcrumb_interval_seconds", 300
             ),
