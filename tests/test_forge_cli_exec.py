@@ -11,7 +11,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -19,9 +18,11 @@ from pathlib import Path
 import pytest
 
 from istota.forge_cli import (
+    ACTION_FORGE_TOKEN,
     EXIT_CREDENTIAL,
     EXIT_DENIED,
     EXIT_EXEC,
+    EXIT_MISCONFIGURED,
     EXIT_NO_PROXY,
     EXIT_USAGE,
     FORGE_GITHUB,
@@ -49,11 +50,18 @@ exit 0
 
 
 class FakeCredentialProxy:
-    """A one-shot-per-connection Unix socket speaking the skill-proxy shape."""
+    """A one-shot-per-connection Unix socket speaking the skill-proxy shape.
 
-    def __init__(self, path, reply):
+    ``known_actions`` makes the devbox branch testable against reality: a
+    request naming an action the real proxy would not recognise gets the real
+    proxy's ``unknown_action`` envelope, not the canned reply. Without that,
+    the test asserts the wrapper against the test's own assumption.
+    """
+
+    def __init__(self, path, reply, known_actions=None):
         self.path = str(path)
         self.reply = reply
+        self.known_actions = known_actions
         self.requests = []
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(self.path)
@@ -68,6 +76,9 @@ class FakeCredentialProxy:
                 conn, _ = self._sock.accept()
             except OSError:
                 return
+            if self._stop:
+                conn.close()   # the waker from close(), not a real client
+                return
             with conn:
                 data = b""
                 while b"\n" not in data:
@@ -75,19 +86,45 @@ class FakeCredentialProxy:
                     if not got:
                         break
                     data += got
+                request = None
                 if data.strip():
                     try:
-                        self.requests.append(json.loads(data.split(b"\n", 1)[0]))
+                        request = json.loads(data.split(b"\n", 1)[0])
+                        self.requests.append(request)
                     except ValueError:
                         pass
-                conn.sendall(json.dumps(self.reply).encode() + b"\n")
+                reply = self.reply
+                if (
+                    self.known_actions is not None
+                    and isinstance(request, dict)
+                    and request.get("action") not in self.known_actions
+                ):
+                    reply = {
+                        "ok": False, "error": "unknown_action",
+                        "message": f"unknown action: {request.get('action')!r}",
+                    }
+                try:
+                    conn.sendall(json.dumps(reply).encode() + b"\n")
+                except OSError:
+                    pass   # client already gone; nothing to report
 
     def close(self):
+        # accept() is blocking and only reads _stop between connections, so
+        # closing the fd is not enough to wake it on Linux. Connect once to
+        # push it round the loop, then join.
         self._stop = True
+        try:
+            waker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            waker.settimeout(1)
+            waker.connect(self.path)
+            waker.close()
+        except OSError:
+            pass
         try:
             self._sock.close()
         except OSError:
             pass
+        self._thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -122,10 +159,18 @@ def deployed(tmp_path):
 
 
 def _run(wrapper, args, env):
+    """Exec the wrapper file itself, not `python3 wrapper`.
+
+    The deployed shape is a copy of the module at /usr/local/bin/gh with the
+    executable bit set, which the kernel execs directly. Going through
+    sys.executable hides a missing shebang: the kernel returns ENOEXEC, the
+    shell retries the file as /bin/sh, and sh parses the docstring as commands
+    and exits 2 — colliding with EXIT_USAGE.
+    """
     base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
     base.update(env)
     return subprocess.run(
-        [sys.executable, str(wrapper), *args],
+        [str(wrapper), *args],
         capture_output=True, text=True, env=base, timeout=30,
     )
 
@@ -260,6 +305,25 @@ class TestRefusals:
         assert r.returncode == EXIT_NO_PROXY
         assert "no credential proxy" in r.stderr
 
+    def test_missing_config_dir_refuses_rather_than_falling_back(
+        self, deployed, tmp_path, sock_path,
+    ):
+        """An empty GH_CONFIG_DIR is read as unset, and gh then falls back to
+        $HOME/.config/gh - writable, and gh expands `aliases` from it before
+        dispatch, so the deny list stops applying. Fail loudly instead."""
+        wrapper, real, _ = deployed
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            r = _run(wrapper, ["pr", "list"], {
+                "ISTOTA_GH_REAL": str(real),
+                "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert r.returncode == EXIT_MISCONFIGURED
+        assert "config directory" in r.stderr
+        assert proxy.requests == []   # no token fetched either
+
     def test_credential_error_exits_five_without_the_token(self, deployed, tmp_path, sock_path):
         wrapper, real, cfg = deployed
         proxy = FakeCredentialProxy(sock_path, {"error": "not_authorized_credential"},
@@ -274,6 +338,9 @@ class TestRefusals:
             proxy.close()
         assert r.returncode == EXIT_CREDENTIAL
         assert "not_authorized_credential" in r.stderr
+        # Regression net, not a real leakage assertion: this path fails before
+        # a token is ever fetched, so the sentinel is not in the wrapper's
+        # process to leak. The exit-6 test below is the load-bearing one.
         assert SENTINEL not in r.stderr
 
     def test_missing_real_binary_exits_six_without_the_token(self, deployed, tmp_path, sock_path):
@@ -362,8 +429,34 @@ class TestDevboxBackend:
         assert r.returncode == 0, r.stderr
         assert _fields(r.stdout)["GH_TOKEN"] == SENTINEL
         assert proxy.requests == [
-            {"action": "forge_token", "provider": "github"},
+            {"action": ACTION_FORGE_TOKEN, "provider": "github"},
         ]
+
+    def test_devbox_action_is_not_yet_a_real_proxy_action(self, deployed, tmp_path, sock_path):
+        """Stage 4 adds forge_token to the devbox proxy. Until it does, this
+        branch reaches a proxy that answers unknown_action - asserted against
+        the proxy's own ALL_ACTIONS rather than a canned reply, so the test
+        flips to red the moment Stage 4 lands and the branch goes live."""
+        from istota.devbox_proxy_protocol import ALL_ACTIONS
+
+        assert ACTION_FORGE_TOKEN not in ALL_ACTIONS, (
+            "forge_token is now a real devbox action - drop this test and "
+            "assert the happy path against ALL_ACTIONS instead"
+        )
+        wrapper, real, cfg = deployed
+        proxy = FakeCredentialProxy(
+            sock_path, {"ok": True, "token": SENTINEL}, known_actions=ALL_ACTIONS,
+        )
+        try:
+            r = _run(wrapper, ["pr", "list"], {
+                "ISTOTA_GH_REAL": str(real),
+                "ISTOTA_GH_CONFIG_DIR": str(cfg),
+                "ISTOTA_CRED_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert r.returncode == EXIT_CREDENTIAL
+        assert "unknown action" in r.stderr
 
     def test_devbox_error_envelope_exits_five(self, deployed, tmp_path, sock_path):
         wrapper, real, cfg = deployed
@@ -380,3 +473,21 @@ class TestDevboxBackend:
             proxy.close()
         assert r.returncode == EXIT_CREDENTIAL
         assert "no token configured" in r.stderr
+
+
+@pytest.mark.integration
+class TestAgainstRealBinary:
+    """The one seam the fakes cannot cover: the real CLI's own argv and env
+    handling. Skipped wherever gh is not installed."""
+
+    def test_version_through_the_wrapper(self, deployed, tmp_path):
+        gh = shutil.which("gh")
+        if gh is None:
+            pytest.skip("gh not installed")
+        wrapper, _, cfg = deployed
+        r = _run(wrapper, ["--version"], {
+            "ISTOTA_GH_REAL": gh,
+            "ISTOTA_GH_CONFIG_DIR": str(cfg),
+        })
+        assert r.returncode == 0, r.stderr
+        assert "gh version" in r.stdout

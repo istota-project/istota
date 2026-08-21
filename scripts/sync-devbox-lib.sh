@@ -28,6 +28,13 @@ for pair in "${sync_pairs[@]}"; do
         echo "sync-devbox-lib: missing source ${src}" >&2
         exit 1
     fi
+    # A symlink here is the one failure this whole script exists to prevent:
+    # every check below follows it and reports "in sync", while `docker build`
+    # fails with "COPY failed: ... outside the build context".
+    if [ -L "${dest}" ]; then
+        echo "sync-devbox-lib: ${dest} is a symlink; it must be a real copy" >&2
+        exit 1
+    fi
     if [ -f "${dest}" ] && cmp -s "${src}" "${dest}"; then
         continue
     fi

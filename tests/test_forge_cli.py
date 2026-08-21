@@ -6,13 +6,22 @@ round-trip live in test_forge_cli_exec.py, which drives real subprocesses.
 
 import ast
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from istota.forge_cli import (
+    _BASELINE_PATH_RULES,
+    _CARRY_EXACT,
+    _CARRY_GIT,
+    _CARRY_GIT_PREFIX,
+    _CARRY_PREFIX,
+    _SCRUB,
     EXIT_CREDENTIAL,
     EXIT_DENIED,
+    EXIT_EXEC,
+    EXIT_MISCONFIGURED,
     EXIT_NO_PROXY,
     EXIT_USAGE,
     FORGE_GITHUB,
@@ -75,54 +84,75 @@ class TestMetaInvocation:
 # --------------------------------------------------------------------------- #
 
 
+def _paths(args):
+    """Both candidate readings, as a list of lists."""
+    return normalize_args(args)[0]
+
+
+def _flags(args):
+    return normalize_args(args)[1]
+
+
 class TestNormalizeArgs:
     def test_plain_subcommand_path(self):
-        path, flags = normalize_args(["pr", "create"])
-        assert path == ["pr", "create"]
+        paths, flags = normalize_args(["pr", "create"])
+        assert paths == [["pr", "create"], ["pr", "create"]]
         assert flags == {}
 
     def test_long_flag_with_separate_value(self):
-        path, flags = normalize_args(["api", "--method", "DELETE", "/x"])
-        assert path == ["api"]
+        paths, flags = normalize_args(["api", "--method", "DELETE", "/x"])
+        # Swallowed reading drops the value; unswallowed keeps it as a path
+        # candidate, because --method's arity is not knowable here.
+        assert paths == [["api", "/x"], ["api", "DELETE", "/x"]]
         assert flags["method"] == ["DELETE"]
 
     def test_long_flag_with_equals_value(self):
-        _, flags = normalize_args(["api", "--method=DELETE", "/x"])
+        flags = _flags(["api", "--method=DELETE", "/x"])
         assert flags["method"] == ["DELETE"]
 
     def test_short_flag_with_separate_value(self):
-        _, flags = normalize_args(["api", "-X", "DELETE", "/x"])
+        flags = _flags(["api", "-X", "DELETE", "/x"])
         assert flags["X"] == ["DELETE"]
 
     def test_short_flag_with_attached_value(self):
-        _, flags = normalize_args(["api", "-XDELETE", "/x"])
+        flags = _flags(["api", "-XDELETE", "/x"])
         assert "DELETE" in flags["X"]
 
     def test_clustered_short_flags(self):
-        _, flags = normalize_args(["pr", "list", "-abc"])
+        flags = _flags(["pr", "list", "-abc"])
         # Both readings recorded: the attached-value one and the cluster one.
         assert "bc" in flags["a"]
         assert "" in flags["b"]
         assert "" in flags["c"]
 
     def test_valueless_long_flag(self):
-        _, flags = normalize_args(["pr", "create", "--draft"])
+        flags = _flags(["pr", "create", "--draft"])
         assert flags["draft"] == [""]
 
     def test_double_dash_terminates(self):
-        path, flags = normalize_args(["api", "--", "--method", "DELETE"])
-        assert path == ["api"]
+        paths, flags = normalize_args(["api", "--", "--method", "DELETE"])
+        assert paths == [["api"], ["api"]]
         assert flags == {}
 
-    def test_operand_after_flag_does_not_join_path(self):
-        path, _ = normalize_args(["issue", "create", "--label", "config"])
-        assert path == ["issue", "create"]
+    def test_flag_value_stays_out_of_the_swallowed_reading(self):
+        assert _paths(["issue", "create", "--label", "config"]) == [
+            ["issue", "create"], ["issue", "create", "config"],
+        ]
 
-    def test_flag_before_subcommand_stops_the_path(self):
-        # A flag first means nothing after it is a subcommand as far as we
-        # can tell, so the path stays empty rather than guessing.
-        path, _ = normalize_args(["--repo", "x", "repo", "delete"])
-        assert path == []
+    def test_flag_before_subcommand_keeps_the_subcommand(self):
+        """`gh -R o/r repo delete` must still resolve to `repo delete`.
+
+        The swallowed reading is the one that gets there; the unswallowed one
+        carries the repo slug at index 0 and matches nothing."""
+        assert _paths(["-R", "o/r", "repo", "delete"]) == [
+            ["repo", "delete"], ["o/r", "repo", "delete"],
+        ]
+
+    def test_empty_argv_entries_dropped(self):
+        """cobra's stripFlags drops them; left in, one shifts every rule index."""
+        assert _paths(["", "repo", "delete"]) == [
+            ["repo", "delete"], ["repo", "delete"],
+        ]
 
 
 # --------------------------------------------------------------------------- #
@@ -171,6 +201,15 @@ class TestDeniedReason:
     def test_baseline_glab_allowed(self, args):
         policy = self._policy(FORGE_GITLAB)
         assert denied_reason(FORGE_GITLAB, args, policy) is None
+
+    @pytest.mark.parametrize("forge", [FORGE_GITHUB, FORGE_GITLAB])
+    def test_every_baseline_rule_denies_its_own_verb(self, forge):
+        """Derived from the table rather than transcribed from it, so a new
+        entry cannot be added without coverage and a typo cannot hide."""
+        policy = self._policy(forge)
+        for rule in _BASELINE_PATH_RULES[forge]:
+            args = [*rule, "some-operand"]
+            assert denied_reason(forge, args, policy) == " ".join(rule), rule
 
     @pytest.mark.parametrize("args", [
         ["pr", "create", "--title", "t", "--head", "b"],
@@ -266,7 +305,25 @@ class TestLoadPolicy:
         policy = load_policy(str(path), FORGE_GITHUB)
         assert denied_reason(FORGE_GITHUB, ["pr", "merge", "1"], policy) is not None
 
-    @pytest.mark.parametrize("content", ["", "not json", "{}", '{"github": []}', "null"])
+    @pytest.mark.parametrize("content", [
+        "", "not json", "{}", '{"github": []}', "null",
+        # An empty section reads as "deny nothing" and is the shape a
+        # half-written generator produces.
+        '{"github": {}}',
+        '{"github": {"path_rules": []}}',
+        # The natural hand-written spelling: strings instead of word lists.
+        # list("repo delete") makes this parse and then match nothing.
+        '{"github": {"path_rules": ["repo delete"]}}',
+        '{"github": {"path_rules": [["repo", "delete"], "auth"]}}',
+        '{"github": {"path_rules": [[]]}}',
+        '{"github": {"path_rules": [["repo", 3]]}}',
+        # A flag rule whose path is a string never matches: _path_matches
+        # compares a list slice against it.
+        '{"github": {"path_rules": [["repo", "delete"]],'
+        ' "flag_value_rules": [{"path": "api", "flag": "X", "in": ["delete"]}]}}',
+        '{"github": {"path_rules": [["repo", "delete"]],'
+        ' "body_flag_rules": [{"path": "api", "flags": ["f"]}]}}',
+    ])
     def test_unusable_file_falls_back_to_baseline_not_empty(self, tmp_path, content):
         path = tmp_path / "policy.json"
         path.write_text(content)
@@ -415,6 +472,21 @@ class TestVendoredCopy:
             "have drifted — run scripts/sync-devbox-lib.sh"
         )
 
+    def test_devbox_copy_is_a_real_file(self):
+        """A symlink would pass a byte comparison and fail `docker build`,
+        which is the exact failure the copy exists to avoid."""
+        _, vendored = _module_paths()
+        assert not vendored.is_symlink()
+
+    def test_wrapper_has_a_shebang_and_is_executable(self):
+        """Both copies are exec'd directly by the kernel under the names they
+        are installed as. Without a shebang that is ENOEXEC, and the shell's
+        retry under /bin/sh exits 2 — colliding with EXIT_USAGE."""
+        for path in _module_paths():
+            first = path.read_bytes().split(b"\n", 1)[0]
+            assert first == b"#!/usr/bin/env python3", f"{path}: {first!r}"
+            assert os.access(path, os.X_OK), f"{path} is not executable"
+
 
 class TestImportHygiene:
     """The container copy runs under a bare python3 with no istota package.
@@ -437,6 +509,71 @@ class TestImportHygiene:
 
 class TestExitCodes:
     def test_codes_are_distinct_and_above_one(self):
-        codes = [EXIT_USAGE, EXIT_DENIED, EXIT_NO_PROXY, EXIT_CREDENTIAL]
+        codes = [
+            EXIT_USAGE, EXIT_DENIED, EXIT_NO_PROXY,
+            EXIT_CREDENTIAL, EXIT_EXEC, EXIT_MISCONFIGURED,
+        ]
         assert len(set(codes)) == len(codes)
         assert all(c > 1 for c in codes)
+
+
+class TestScrubIsRedundantByConstruction:
+    """_SCRUB cannot fire today, and that is the invariant, not an accident.
+
+    build_invocation builds the child env by allowlist, so nothing in _SCRUB
+    reaches it anyway — which is exactly why the three "scrubbed" tests below
+    would pass with the scrub deleted. Pin the relationship instead: if a later
+    change widens the carry set over a scrub entry, this fails and the scrub
+    becomes load-bearing rather than silently letting the entry through.
+    """
+
+    def test_no_scrub_entry_is_in_the_carry_set(self):
+        carried = [
+            key for key in _SCRUB
+            if key in _CARRY_EXACT
+            or key in _CARRY_GIT
+            or key.startswith(_CARRY_PREFIX)
+            or key.startswith(_CARRY_GIT_PREFIX)
+        ]
+        assert carried == []
+
+    def test_git_is_carried_by_name_not_by_prefix(self):
+        """A blanket GIT_ prefix would admit GIT_TRACE_CURL, which prints
+        Authorization headers into the task log, and GIT_SSH_COMMAND /
+        GIT_ASKPASS, which run a chosen command inside a token-holding
+        process."""
+        assert "GIT_" not in _CARRY_PREFIX
+        for dangerous in ("GIT_TRACE_CURL", "GIT_SSH_COMMAND", "GIT_ASKPASS",
+                          "GIT_EXTERNAL_DIFF", "GIT_PAGER"):
+            assert dangerous not in _CARRY_GIT
+            assert not dangerous.startswith(_CARRY_GIT_PREFIX)
+
+
+class TestHostname:
+    @pytest.mark.parametrize("url,expected", [
+        ("https://github.com", "github.com"),
+        ("https://github.com/", "github.com"),
+        ("https://github.com.", "github.com"),          # trailing dot
+        ("https://ghe.example.com", "ghe.example.com"),
+        ("https://git.example.com:8443/gitlab", "git.example.com"),
+        ("https://[::1]:8080/", "::1"),                 # IPv6 literal
+        ("https://a/b@ghe.example.com", "a"),           # path, not userinfo
+        ("https://user:pw@ghe.example.com", "ghe.example.com"),
+        ("github.com", "github.com"),                   # no scheme
+        ("https://", ""),
+        ("", ""),
+    ])
+    def test_hostname(self, url, expected):
+        from istota.forge_cli import _hostname
+        assert _hostname(url) == expected
+
+    def test_empty_host_falls_back_to_github_not_enterprise(self):
+        """A parse failure must not silently route to GH_ENTERPRISE_TOKEN,
+        which authenticates nothing and reads like a scope problem."""
+        _, _, env = build_invocation(
+            FORGE_GITHUB, ["pr", "list"], {"PATH": "/usr/bin"}, SENTINEL,
+            "/usr/local/bin/gh", "/tmp/cfg", "https://",
+        )
+        assert env["GH_HOST"] == "github.com"
+        assert env["GH_TOKEN"] == SENTINEL
+        assert "GH_ENTERPRISE_TOKEN" not in env
