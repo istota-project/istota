@@ -422,6 +422,43 @@ class TestNonStreaming:
         assert result.success is True
         assert result.result_text == "The answer is 42."
 
+    def test_an_error_frame_keeps_its_text_for_classification(self, tmp_path):
+        """An `error_during_execution` frame carries no `result`. Blanking the
+        answer there would skip the caller's `returncode == 0 and output` guard,
+        so the classifiers would never see the text — and a provider failure
+        that used to be read off stdout would come back as "produced no output"
+        with a generic `error`, which is in neither the fallback trigger set nor
+        the breaker's cooldown set."""
+        stdout = json.dumps([
+            json.loads(_init()),
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "error": "API Error: 529 Overloaded",
+                "total_cost_usd": 0.01,
+                "modelUsage": {"m": {"inputTokens": 5, "costUSD": 0.01}},
+            },
+        ])
+
+        result = self._run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.stop_reason == "transient_api_error"
+        assert "529" in result.result_text
+        # And the spend is still recorded.
+        assert result.usage is not None
+        assert result.usage.billed_input_tokens == 5
+
+    def test_a_result_frame_with_no_text_at_all_keeps_raw_stdout(self, tmp_path):
+        stdout = json.dumps([
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.01},
+        ])
+
+        result = self._run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.result_text == stdout
+        assert result.usage is not None
+
     def test_an_array_with_no_result_frame_falls_back(self, tmp_path):
         stdout = json.dumps([json.loads(_init())])
 

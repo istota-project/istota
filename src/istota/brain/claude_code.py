@@ -171,11 +171,24 @@ def _parse_simple_json_output(stdout: str):
     if result_frame is None:
         return None, None
 
-    answer = result_frame.get("result")
     usage = usage_types.from_cli_result(
         result_frame, [], api_key_source, model_hint=model_seen,
     )
-    return (answer if isinstance(answer, str) else ""), usage
+    answer = result_frame.get("result")
+    if not isinstance(answer, str):
+        # An `error_during_execution`-shaped frame carries no `result`. Falling
+        # through to an empty string would blank the answer, and the caller's
+        # `if returncode == 0 and output:` guard would then skip the classifiers
+        # entirely — so a provider failure that used to be read off stdout and
+        # classified would come back as "produced no output" with a generic
+        # `error`, which is in neither the fallback trigger set nor the
+        # breaker's cooldown set.
+        answer = result_frame.get("error")
+    if not isinstance(answer, str):
+        # Nothing textual in the frame at all. `None` tells the caller to keep
+        # raw stdout, so the classifiers still have something to read.
+        return None, usage
+    return answer, usage
 
 
 def parse_api_error(text: str) -> dict | None:
@@ -1091,13 +1104,11 @@ class ClaudeCodeBrain:
         the inner function has several return points and tokens are spent on
         all of them.
         """
+        # A `subprocess.TimeoutExpired` propagates to the caller's own timeout
+        # handling, which builds the result itself. Nothing was parsed by then,
+        # so there is no usage to carry and no handler is needed here.
         accounting: dict = {}
-        try:
-            result = ClaudeCodeBrain._execute_simple_once_inner(cmd, req, accounting)
-        except subprocess.TimeoutExpired:
-            # Propagated to the caller's own timeout handling, which builds the
-            # result. Nothing was parsed, so there is no usage to carry.
-            raise
+        result = ClaudeCodeBrain._execute_simple_once_inner(cmd, req, accounting)
         result.usage = accounting.get("usage")
         return result
 

@@ -280,12 +280,13 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
     # `briefings.generate`, and a top-level import from any of these callers
     # risks closing a cycle back through it.
     from istota.executor import persist_brain_usage
+    from istota.usage import SYSTEM_USER_ID
 
     # One call per shared block per briefing. Shared blocks are operator-level
     # content with no single owner, so the row carries the system identity.
     persist_brain_usage(
         config, None, usage=result.usage, origin="shared_blocks",
-        user_id=SYSTEM_IDENTITY, brain_kind=result.brain_kind,
+        user_id=SYSTEM_USER_ID, brain_kind=result.brain_kind,
         model=result.model_used or req.model,
         stop_reason=result.stop_reason, success=result.success,
     )

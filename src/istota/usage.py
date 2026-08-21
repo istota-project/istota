@@ -58,6 +58,11 @@ SUBSCRIPTION_KEY_SOURCES = frozenset({"none", "/login managed key"})
 _SQLITE_INT_MIN = -(2**63)
 _SQLITE_INT_MAX = 2**63 - 1
 
+# What a usage row records as its owner when the spend has no single user: the
+# channel sleep-cycle pass, shared briefing blocks. One spelling rather than one
+# per caller, so a per-user grouping does not grow two buckets for the same idea.
+SYSTEM_USER_ID = "__system__"
+
 COST_BASIS_API = "api"
 COST_BASIS_SUBSCRIPTION = "subscription"
 COST_BASIS_ESTIMATED = "estimated"
