@@ -19,9 +19,7 @@ istota-skill code_review run --worktree "$WORKTREE" \
   --intent "one line on what this change is meant to do"
 ```
 
-**Give the command an explicit timeout of at least 300 seconds.** Your Bash tool defaults to 120, and a review of a real diff routinely takes longer than that — both reviewers run concurrently, each with its own budget, on top of assembling the diff and its context. At the default the tool call dies while the review runs on and finishes, so you are charged for a result you never see. This is the single most common way this command appears broken.
-
-**That is not the only ceiling, and not necessarily the lower one.** The skill proxy kills the whole command at `security.skill_proxy_timeout`, which is the operator's limit rather than yours, and no Bash timeout can buy time past it. When the configured per-agent budget plus the time to assemble the diff would not fit under it, each agent is given less instead — see `agent_timeout_clamped` below, which is how you find out.
+**Give the command an explicit timeout of at least 300 seconds.** Your Bash tool defaults to 120, and a review of a real diff routinely takes longer than that — both reviewers run concurrently, each with its own budget, on top of assembling the diff and its context. At the default the tool call dies while the review runs on and finishes, so you are charged for a result you never see. This is the single most common way this command appears broken. It is not the only ceiling and not necessarily the lower one: the skill proxy kills the whole command at `security.skill_proxy_timeout`, the operator's limit rather than yours, which no Bash timeout can buy time past. A per-agent budget that would not fit under it is cut to one that does, and `agent_timeout_clamped` below is how you find out.
 
 `--base <ref>` reviews `<ref>...HEAD` — three-dot, so a base that has moved ahead of the branch point does not invert into the range. `--range` takes an explicit range and wins over `--base`; with neither, the range is the merge base against the tracked default branch, which is the right answer almost always and the reason the example above passes neither. Name a base only when you want a different one, and name it as `origin/<branch>`: the `developer` skill's worktrees come from a bare clone with no local branches, so a bare `main` there is not a ref and the review comes back `bad_range`. `--agents both` forces both reviewers; by default the size of the diff decides.
 
@@ -45,18 +43,13 @@ Read the envelope's `status` before its findings:
 - `skipped` — the review could not run for a reason that has nothing to do with your diff: the brain is degraded, the call budget is spent, the deployment has no route to the reviewers. Land the work and report it as unreviewed, naming the reason.
 - `error` — something is wrong with the request itself: a bad range, a path outside the allowed roots, a response that would not parse. Report it and do not open the MR.
 
-A `skipped` review is not a clean review. Never report "no findings" when the review did not run.
-
-Four more fields decide whether an `ok` is actually clean, and all four are easy to miss:
+A `skipped` review is not a clean review. Never report "no findings" when the review did not run. Five more fields decide whether an `ok` is actually clean, and all five are easy to miss:
 
 - `empty: true` — the range held no changes, so nothing was reviewed and no reviewer ran. Not a pass.
 - `partial: true` — a reviewer was lost. `partial_reason` says which and why. Report the review as partial.
 - `dropped_findings` above zero — a reviewer wrote findings that could not be used, usually because they named no file. Whatever it said is gone; say so rather than reporting a clean review.
 - `need_files_note` non-empty — a reviewer asked for files and the round trip did not improve its answer: either nothing could be served, or it was served and the second call failed. `files_served` and `files_refused` say which. The review still stands; the note is what tells you how much weight it carries.
-
-`agent_timeout_seconds` is the budget each reviewer was given for its round — a `need_files` round trip and a malformed-output retry are served out of the same budget rather than getting a fresh one. When `agent_timeout_clamped` is true that budget is smaller than `agent_timeout_configured`, because the operator's proxy ceiling would not fit the configured one. A clamped review is still a review and still `ok`, but it thought for less time than the deployment intended, and it looks exactly like one that did not. Say so when you report it, and quote both numbers — it is the difference between findings you can lean on and findings a reviewer was rushed into.
-
-These three ride on any envelope that reached a reviewer, `empty` ranges included. A `skipped` or `error` envelope from one of the guards never got as far as a budget and carries none of them, so read them only once `status` has told you a review was attempted.
+- `agent_timeout_clamped: true` — the reviewers got less time than the deployment configured, because the proxy ceiling would not fit it. `agent_timeout_seconds` is the budget each one did get for its round (a `need_files` round trip and a malformed-output retry come out of it, not out of a fresh one) and `agent_timeout_configured` is what was asked for. Still `ok`, but it thought for less time than intended and looks exactly like one that did not; say so and quote both numbers. These three ride on any envelope that reached a reviewer; a guard's `skipped` or `error` envelope never got as far as a budget and carries none of them.
 
 ## What to do with findings
 
