@@ -78,7 +78,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # worsens the Ansible shape.
 #
 # The daemon cannot find an off-PATH binary by name, so it is named twice:
-# entrypoint.sh renders gh_bin_path / glab_bin_path into the [developer] block
+# render-config.sh renders gh_bin_path / glab_bin_path into the [developer] block
 # on a first boot, and `_resolve_real_bin` probes this location for containers
 # upgraded past a config.toml that predates it.
 #
@@ -141,8 +141,11 @@ COPY --from=web-builder /app/web/build /app/web/build
 # Data directories (persistent via volume)
 RUN mkdir -p /data/db /data/config /data/tmp
 
-# Entrypoint
+# Entrypoint. render-config.sh must land beside it — the entrypoint resolves it
+# relative to its own directory, and the image tier runs it on its own to render
+# a config in a volume-less container.
 COPY docker/istota/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/istota/render-config.sh /render-config.sh
+RUN chmod +x /entrypoint.sh /render-config.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
