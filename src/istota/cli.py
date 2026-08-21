@@ -36,12 +36,59 @@ from .tasks_file_poller import (
 )
 
 
+def _installed_version() -> str:
+    """The installed distribution's version, or a placeholder.
+
+    `importlib.metadata.version` raises `PackageNotFoundError` when istota is
+    importable but not installed — running straight off a source tree on
+    `PYTHONPATH`, which is what `scripts/test-linux.sh` does. That raise
+    happened while *building the parser*, so it took down every command rather
+    than only `--version`.
+    """
+    try:
+        return importlib.metadata.version("istota")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown (not installed)"
+
+
 def cmd_init(args):
     """Initialize the database."""
     config = load_config(Path(args.config) if args.config else None)
     config.db_path.parent.mkdir(parents=True, exist_ok=True)
     db.init_db(config.db_path)
     print(f"Database initialized at {config.db_path}")
+
+
+def cmd_doctor(args):
+    """Run the runtime self-check and report.
+
+    The operator-facing half of :mod:`istota.doctor`. Always probes: an operator
+    on a host wants the binaries actually executed, unlike the config-load path
+    that the ``probe`` flag exists for.
+
+    Returns 1 if any check failed, so a script can branch on it. Warnings and
+    skips are not failures — a skill that is not wired is not a broken install.
+    """
+    from . import doctor
+
+    config = load_config(Path(args.config) if args.config else None)
+    results = doctor.run_checks(
+        config,
+        only=tuple(args.only or ()),
+        scope=args.scope or "",
+        deep=bool(args.deep),
+        probe=True,
+    )
+    # The renderers redact configured credential values out of `detail` and
+    # `remedy` before anything is printed. `detail` carries observed paths and
+    # raw exception text, and terminal output is where a pasted credential ends
+    # up in a bug report.
+    secrets = doctor.config_secrets(config)
+    if args.json:
+        print(doctor.render_json(results, secrets=secrets))
+    else:
+        print(doctor.render_text(results, secrets=secrets))
+    return doctor.exit_code(results)
 
 
 def cmd_task(args):
@@ -1811,13 +1858,37 @@ def main():
     parser.add_argument("-c", "--config", help="Path to config file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose (DEBUG) logging")
     parser.add_argument(
-        "--version", action="version",
-        version=f"istota {importlib.metadata.version('istota')}",
+        "--version", action="version", version=f"istota {_installed_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init
     subparsers.add_parser("init", help="Initialize database")
+
+    # doctor
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Check the runtime this deployment actually has"
+    )
+    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    doctor_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Include checks that spawn a sandbox namespace (slower)",
+    )
+    doctor_parser.add_argument(
+        "--only",
+        action="append",
+        metavar="PREFIX",
+        help="Run only checks whose name starts with PREFIX (repeatable)",
+    )
+    doctor_parser.add_argument(
+        "--scope",
+        choices=["image", "deployment"],
+        help=(
+            "Narrow to facts about the image (answerable by a bare `docker run`) "
+            "or about the deployment (needs a mount, a database, a network)"
+        ),
+    )
 
     # task
     task_parser = subparsers.add_parser("task", help="Submit a task")
@@ -2307,6 +2378,7 @@ def main():
 
     commands = {
         "init": cmd_init,
+        "doctor": cmd_doctor,
         "task": cmd_task,
         "run": cmd_run,
         "list": cmd_list,

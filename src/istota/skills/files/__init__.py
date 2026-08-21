@@ -131,33 +131,59 @@ def get_local_path(config: "Config", remote_path: str) -> Path | None:
 # =============================================================================
 
 
+def _rclone_run(args: list[str], **kwargs) -> subprocess.CompletedProcess | None:
+    """Run an rclone command, or return None if rclone could not be run at all.
+
+    `subprocess.run` reports a missing binary by raising `FileNotFoundError`,
+    not by returning a non-zero status — so on a deployment with no mount and
+    no rclone installed (the two travel together, since the rclone path *is*
+    the no-mount fallback) that exception escaped every helper below, including
+    the ones documented to return False. The same helper and the same reasoning
+    as `istota.storage._rclone_run`; the two modules are separate copies of
+    this API and neither imports the other.
+
+    The four helpers that raise `RuntimeError` on failure keep raising, and get
+    a `RuntimeError` here too rather than a `FileNotFoundError` — their callers
+    already handle the one and not the other.
+    """
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    try:
+        return subprocess.run(args, **kwargs)
+    except OSError as exc:
+        logger.warning("rclone unavailable (%s); treating %s as a failure", exc, args[1:2])
+        return None
+
+
+def _rclone_run_or_raise(args: list[str], what: str, **kwargs) -> subprocess.CompletedProcess:
+    """`_rclone_run` for the helpers whose contract is to raise."""
+    result = _rclone_run(args, **kwargs)
+    if result is None:
+        raise RuntimeError(f"rclone {what} failed: rclone is not installed")
+    if result.returncode != 0:
+        raise RuntimeError(f"rclone {what} failed: {result.stderr}")
+    return result
+
+
 def rclone_mkdir(remote: str, path: str) -> bool:
     """Create a directory via rclone. Returns True on success."""
-    result = subprocess.run(
-        ["rclone", "mkdir", f"{remote}:{path}"],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+    result = _rclone_run(["rclone", "mkdir", f"{remote}:{path}"])
+    return result is not None and result.returncode == 0
 
 
 def rclone_path_exists(remote: str, path: str) -> bool:
     """Check if a path exists via rclone lsjson."""
-    result = subprocess.run(
-        ["rclone", "lsjson", f"{remote}:{path}"],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+    result = _rclone_run(["rclone", "lsjson", f"{remote}:{path}"])
+    return result is not None and result.returncode == 0
 
 
 def rclone_move(remote: str, src_path: str, dst_path: str) -> bool:
     """Move a file or directory within rclone remote. Returns True on success."""
-    result = subprocess.run(
-        ["rclone", "moveto", f"{remote}:{src_path}", f"{remote}:{dst_path}"],
-        capture_output=True,
-        text=True,
+    result = _rclone_run(
+        ["rclone", "moveto", f"{remote}:{src_path}", f"{remote}:{dst_path}"]
     )
+    if result is None:
+        return False
     if result.returncode != 0:
         logger.error("rclone move failed: %s", result.stderr)
         return False
@@ -169,13 +195,7 @@ def rclone_list(remote: str, path: str) -> list[dict]:
     List files at a path.
     Returns list of dicts with 'name', 'size', 'mod_time', 'is_dir'.
     """
-    result = subprocess.run(
-        ["rclone", "lsjson", f"{remote}:{path}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"rclone list failed: {result.stderr}")
+    result = _rclone_run_or_raise(["rclone", "lsjson", f"{remote}:{path}"], "list")
 
     items = json.loads(result.stdout)
     return [
@@ -192,45 +212,25 @@ def rclone_list(remote: str, path: str) -> list[dict]:
 def rclone_download(remote: str, remote_path: str, local_path: Path) -> None:
     """Download a file from Nextcloud."""
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["rclone", "copy", f"{remote}:{remote_path}", str(local_path.parent)],
-        capture_output=True,
-        text=True,
+    _rclone_run_or_raise(
+        ["rclone", "copy", f"{remote}:{remote_path}", str(local_path.parent)], "download",
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"rclone download failed: {result.stderr}")
 
 
 def rclone_upload(remote: str, local_path: Path, remote_path: str) -> None:
     """Upload a file to Nextcloud."""
-    result = subprocess.run(
-        ["rclone", "copy", str(local_path), f"{remote}:{remote_path}"],
-        capture_output=True,
-        text=True,
+    _rclone_run_or_raise(
+        ["rclone", "copy", str(local_path), f"{remote}:{remote_path}"], "upload",
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"rclone upload failed: {result.stderr}")
 
 
 def rclone_read_text(remote: str, remote_path: str) -> str:
     """Read a text file from Nextcloud directly."""
-    result = subprocess.run(
-        ["rclone", "cat", f"{remote}:{remote_path}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"rclone read failed: {result.stderr}")
-    return result.stdout
+    return _rclone_run_or_raise(["rclone", "cat", f"{remote}:{remote_path}"], "read").stdout
 
 
 def rclone_write_text(remote: str, remote_path: str, content: str) -> None:
     """Write text content to a file on Nextcloud."""
-    result = subprocess.run(
-        ["rclone", "rcat", f"{remote}:{remote_path}"],
-        input=content,
-        capture_output=True,
-        text=True,
+    _rclone_run_or_raise(
+        ["rclone", "rcat", f"{remote}:{remote_path}"], "write", input=content,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"rclone write failed: {result.stderr}")

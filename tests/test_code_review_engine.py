@@ -737,6 +737,33 @@ class TestCollectCallers:
 
         assert len(out) <= 200
 
+    def test_an_option_shaped_revision_is_refused(self, repo):
+        """`git grep` is the one subcommand that rejects `--end-of-options`.
+
+        Debian bookworm's git 2.39 — what `docker/istota/Dockerfile` ships —
+        exits 128 on it, so the flag cannot be the guard here. The substitute
+        is a full object id, and this is the test that it actually refuses.
+        """
+        branch_with_change(repo)
+
+        with pytest.raises(ReviewError, match="not a resolved object id"):
+            collect_callers(
+                repo, ["existing"], Caps(per_symbol=8, total_chars=10_000),
+                "--output=/tmp/pwned",
+            )
+
+    def test_a_bare_ref_is_refused_rather_than_resolved(self, repo):
+        """Stricter than `--end-of-options`, deliberately.
+
+        A ref would be safe to grep, but accepting one would mean the guard is
+        "does it start with a dash", which is the check this replaced. The only
+        caller passes `bundle.head`, already resolved.
+        """
+        branch_with_change(repo)
+
+        with pytest.raises(ReviewError, match="not a resolved object id"):
+            collect_callers(repo, ["existing"], Caps(per_symbol=8, total_chars=10_000), "HEAD")
+
 
 class TestCollectConventions:
     def test_root_agents_and_claude_files_are_included(self, repo):

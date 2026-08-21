@@ -138,13 +138,9 @@
     white-space: nowrap;
   }
 
-  .section-title {
-    margin: 0 0 var(--space-3);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
+  /* `.section-title` lives in the admin layout now — Health uses it too, and a
+     scoped copy here would have been invisible to it (Svelte scopes to the
+     file, and an unmatched class in markup raises no warning). */
 
   .config-grid {
     display: grid;

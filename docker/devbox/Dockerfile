@@ -61,9 +61,11 @@ ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 #
 # Pinned to the exact versions the spec's reconnaissance stage measured against
 # (gh 2.98.0, glab 1.114.0), with the published sha256 verified before the
-# archive is opened. Bookworm's own gh is 2.23 — below the 2.40 floor the
-# skill's verbs need — and ships no glab at all, so these come from the
-# vendors' release artifacts rather than apt.
+# archive is opened. Bookworm's own gh is 2.23 — far behind the 2.98 measured
+# there — and ships no glab at all, so these come from the vendors' release
+# artifacts rather than apt. The pins are a known-good mark, not a floor: none
+# has ever been derived from the verbs the skill uses. `istota doctor` WARNs
+# below them (forge_cli.GH_KNOWN_GOOD / GLAB_KNOWN_GOOD, bumped with these).
 #
 # Extracted from the .deb rather than installed with it: dpkg would put a
 # second, real `gh` at /usr/bin/gh, and the whole point is that the only `gh`

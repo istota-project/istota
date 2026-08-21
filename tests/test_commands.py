@@ -1349,7 +1349,12 @@ class TestCmdCheck:
 
             def run_side_effect(*args, **kwargs):
                 cmd = args[0] if args else kwargs.get("args", [])
-                if cmd and cmd[0] == "claude" and "-p" in cmd:
+                # Anywhere in argv, not at argv[0]: this config leaves the
+                # sandbox enabled, so on a host with a working bwrap the
+                # execution probe is `bwrap … -- claude -p …` and an argv[0]
+                # match never fires. The check then reports a wrong answer
+                # instead of a timeout, and only on Linux.
+                if "claude" in cmd and "-p" in cmd:
                     raise real_subprocess.TimeoutExpired(cmd, 30)
                 return MagicMock(stdout="claude 1.0.0", stderr="", returncode=0)
 

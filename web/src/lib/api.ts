@@ -350,6 +350,38 @@ export async function getAdminConfig(): Promise<AdminConfigView> {
   return apiFetch<AdminConfigView>('/admin/config');
 }
 
+/** One runtime self-check. Same shape as `istota doctor --json` emits. */
+export interface DoctorCheck {
+  /** Stable dotted id, e.g. `developer.forge_binaries.gh`. */
+  name: string;
+  status: 'ok' | 'warn' | 'fail' | 'skip';
+  /** What was observed. Redacted server-side; never carries a credential. */
+  detail: string;
+  /** What to do about it. Always present on `warn` and `fail`. */
+  remedy: string;
+  /** `image` = answerable from the built artifact; `deployment` = needs this install. */
+  scope: 'image' | 'deployment';
+}
+
+export interface DoctorReport {
+  /** Worst status present: `fail` > `warn` > `ok`. Skips don't count. */
+  status: 'ok' | 'warn' | 'fail';
+  summary: { ok: number; warn: number; fail: number; skip: number };
+  deep: boolean;
+  checks: DoctorCheck[];
+}
+
+/**
+ * The runtime self-check.
+ *
+ * `deep` opts into the checks that spawn a sandbox namespace. Only one deep run
+ * happens at a time — a second concurrent request gets a 409 rather than
+ * queueing behind a subprocess.
+ */
+export async function getAdminDoctor(deep = false): Promise<DoctorReport> {
+  return apiFetch<DoctorReport>(`/admin/doctor${deep ? '?deep=1' : ''}`);
+}
+
 export interface FeedCategory {
   id: number;
   title: string;

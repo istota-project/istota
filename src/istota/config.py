@@ -215,6 +215,12 @@ class SchedulerConfig:
     shared_file_check_interval: int = 120  # seconds between shared file organization checks
     heartbeat_check_interval: int = 60  # seconds between heartbeat checks
     db_health_check_interval: int = 86400  # seconds between SQLite quick_check sweeps over per-user DBs
+    # Seconds between `istota doctor` sweeps. Matters more than the boot run:
+    # the drift we actually see happens *after* boot — the auto-update cron
+    # pulls code and restarts services every two minutes without running
+    # Ansible, so what is installed changes under a config the daemon already
+    # loaded. A boot-only check is blind to exactly that. 0 disables the sweep.
+    doctor_check_interval: int = 3600
     db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
     db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
     db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
@@ -2272,6 +2278,7 @@ def load_config(config_path: Path | None = None) -> Config:
             shared_file_check_interval=sched.get("shared_file_check_interval", 120),
             heartbeat_check_interval=sched.get("heartbeat_check_interval", 60),
             db_health_check_interval=sched.get("db_health_check_interval", 86400),
+            doctor_check_interval=sched.get("doctor_check_interval", 3600),
             db_backup_enabled=sched.get("db_backup_enabled", True),
             db_backup_interval=sched.get("db_backup_interval", 86400),
             db_backup_dir=sched.get("db_backup_dir", ""),
@@ -3094,68 +3101,68 @@ def load_config(config_path: Path | None = None) -> Config:
 def _validate_forge_clis(config: "Config") -> None:
     """Warn about a forge CLI setup that will only fail later, and worse.
 
-    Both checks are warnings rather than errors: the developer skill is one of
-    many, and a deployment that has not finished wiring it should still start.
+    Reduced to a call into :mod:`istota.doctor` so there is one implementation
+    of each of these facts. The checks themselves, their gating and their
+    wording all live there; this is the config-load-time delivery of them.
 
-    A missing binary otherwise surfaces as a forge command exiting 6 partway
-    through somebody's task. A ``forge_cli_permit`` entry matching nothing
-    otherwise surfaces as nothing at all — which is the problem, since a hatch
-    that silently stopped matching after a baseline rewording looks exactly
-    like one that is still open.
+    ``probe=False`` is load-bearing and not a tuning knob. This runs inside
+    every ``load_config`` — the daemon, the web app, the webhook receiver, every
+    CLI invocation, and every host-side skill CLI the skill proxy spawns *per
+    call*. The work it replaced was ``os.path.exists``, which is free; five
+    ``--version`` spawns per skill-CLI invocation would not be.
+
+    The selection is today's warning set **minus the stale-path case**, and
+    deliberately no more. The registry has grown four checks this path does not
+    deliver (config drift, wrapper shadowing, version skew, proxy
+    resolvability), because this runs once per process for the daemon but once
+    per *call* for a skill CLI: a warning from here repeats for as long as the
+    condition holds, while the same warning from the boot run and the hourly
+    sweep is said once and alerted on.
+
+    The narrowing that is a real behaviour change, stated plainly: the old code
+    warned whenever the *configured* path did not exist, checking it directly.
+    ``check_forge_binaries`` instead asks ``_resolve_real_bin`` what will
+    actually be exec'd, so a deployment whose ``config.toml`` names a stale path
+    while resolution successfully falls back — the ``30bb7c83`` shape — no
+    longer warns here. It has not stopped being reported: that is precisely what
+    ``developer.forge_config_drift`` says, and drift is a post-boot condition by
+    nature (the auto-update cron changes what is installed under a config the
+    daemon already loaded), so the interval sweep is where it belongs.
+
+    The skill-proxy posture warning and the new resolvability check share one
+    registry entry, so that pair is split by result name rather than by prefix:
+    ``only=`` filters on registry names, and a sub-result's name is not one.
     """
-    import os
+    from .doctor import FAIL, WARN, run_checks
 
-    dev = getattr(config, "developer", None)
-    if dev is None or not dev.enabled or not dev.repos_dir:
-        return
     _logger = logging.getLogger("istota.config")
-
-    if dev.gitlab_token or dev.github_token:
-        for label, path in (("gh", dev.gh_bin_path), ("glab", dev.glab_bin_path)):
-            if path and not os.path.exists(path):
-                _logger.warning(
-                    "[developer] %s not found at %s; forge commands using it "
-                    "will fail at run time. Install it (the Ansible role does) "
-                    "or point %s_bin_path at the real one.",
-                    label, path, label,
-                )
-        if not config.security.skill_proxy_enabled:
-            # Forge commands still work in this shape: `setup_env` writes
-            # `direct_token` into the policy file and the wrapper reads the
-            # ambient GH_TOKEN / GITLAB_TOKEN (forge_cli.fetch_token). What
-            # changes is where the token sits. With the proxy on it is
-            # stripped from the task environment and injected server-side per
-            # call; with it off it is in the environment the model's own shell
-            # inherits, so anything the task runs can read it. That is a
-            # posture worth naming at start-up rather than leaving to be
-            # discovered from a config file.
-            _logger.warning(
-                "[developer] forge tokens are configured but "
-                "[security] skill_proxy_enabled = false. gh and glab will work "
-                "— the policy grants them the ambient token — but that token "
-                "is readable by anything else the task runs, instead of being "
-                "injected per call. Enable the skill proxy to keep it out of "
-                "the task environment.",
-            )
-
     try:
-        from .forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits
-
-        dead = unmatched_permits(
-            [FORGE_GITHUB, FORGE_GITLAB],
-            list(dev.forge_cli_permit),
-            list(dev.forge_cli_extra_denied),
+        results = run_checks(
+            config,
+            only=(
+                "developer.forge_binaries",
+                "developer.forge_policy",
+                "security.skill_proxy",
+            ),
+            probe=False,
         )
-        for entry in dead:
-            _logger.warning(
-                "[developer] forge_cli_permit entry %r matches no rule this "
-                "deployment has. It is turning nothing off — check the "
-                "spelling against the baseline before assuming the verb is "
-                "permitted.",
-                entry,
-            )
     except Exception:  # pragma: no cover - never fail config load over a warning
-        _logger.warning("forge_cli_permit validation failed", exc_info=True)
+        _logger.warning("forge CLI validation failed", exc_info=True)
+        return
+
+    for result in results:
+        if result.name == "security.skill_proxy":
+            continue  # resolvability: boot path and interval sweep only, see above
+        if result.status in (WARN, FAIL):
+            # No literal namespace prefix: `result.name` already carries one,
+            # and not every result reaching here is a `developer.*` one — the
+            # skill-proxy posture warning is a `security.*` check.
+            _logger.warning(
+                "%s: %s%s",
+                result.name,
+                result.detail,
+                f" — {result.remedy}" if result.remedy else "",
+            )
 
 
 # Anthropic-namespace brain kinds — the only ones the advisor tool can ever
