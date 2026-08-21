@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A coding task can create a working tree again in the repositories the bot clones for itself. Setting one up wrote a state that made the next step — creating the tree the task actually edits in — fail outright with "HEAD not found below refs/heads", leaving the task nowhere to work. The state was written once, at clone time, and stayed on disk, so every repository already set up this way was affected too; those are repaired on the next pass rather than needing to be cloned again. The same pass records which branch a repository treats as its default, so a project on `master` is no longer worked against a `main` that does not exist, and a project whose default branch was renamed is picked up rather than pointing at the old name.
+
 - The docker image now ships the `gh` and `glab` the developer skill needs. Its git half worked — clone, branch, commit, push — but every command that would publish the work failed with "cannot run /usr/local/bin/gh", because neither binary was in the image; anyone who had set a repository directory and a forge token hit it, and a stock install with neither set was unaffected. Upgrading an existing container is enough to fix it, with no config change needed.
 
 - The GitLab reviewer setting takes a username, and every place it was documented asked for a numeric user ID — including the example value, which was a number. The setting is handed to `glab mr create --reviewer`, which wants a username, so an operator who followed the example got merge requests with no reviewer on them and a note about the misconfiguration on each one. The setting itself is unchanged; check yours if it holds a number.

@@ -62,55 +62,77 @@ First time — create a bare clone:
 ```bash
 BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
 
+FRESH=""
 if [ ! -d "$BARE_DIR" ]; then
     mkdir -p "$(dirname "$BARE_DIR")"
     # Use $GITLAB_URL or $GITHUB_URL depending on where the repo lives
     git clone --bare "$GITLAB_URL/namespace/project.git" "$BARE_DIR"
-    # Configure fetch to track remote branches under refs/remotes/origin/*
     git -C "$BARE_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-    git -C "$BARE_DIR" fetch origin
-
-    # Delete the clone-day local heads and repoint HEAD at the remote default.
-    # WHY (ISSUE-125): `git clone --bare` populates refs/heads/* once, at clone
-    # time, and the remote-tracking refspec above never updates them again — so
-    # a local `main`/`master` stays frozen at clone day while origin/main moves
-    # on. `git show main:db.py` then silently returns clone-day source. Deleting
-    # the fossils turns that silent-wrong into a loud `unknown revision`: you
-    # can't act on stale bytes you can't read. Worktree creation is unaffected —
-    # it branches from `origin/$DEFAULT_BRANCH` (below), not a local head.
-    DEFAULT_BRANCH=$(git -C "$BARE_DIR" remote show origin | sed -n 's/.*HEAD branch: //p')
-    git -C "$BARE_DIR" symbolic-ref HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
-    # Skip any head currently checked out by a worktree (an istota/<task> branch);
-    # only the unused clone-day main/master get dropped.
-    CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
-    for ref in $(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/); do
-        # `update-ref -d`, not `branch -D`: HEAD was just repointed at a
-        # remote-tracking ref, and every `branch` subcommand then dies with
-        # `fatal: HEAD not found below refs/heads!` before deleting anything.
-        # `branch -D` here silently left the clone-day fossils in place.
-        echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" update-ref -d "refs/heads/$ref"
-    done
+    FRESH=1
 fi
 
 # Always fetch latest
 git -C "$BARE_DIR" fetch origin
+
+# Everything below restores the invariant stated after this block. It runs on
+# every pass, not just at clone time: the shape lives on disk, so a clone made
+# before ISSUE-269 is still broken and the `if` above never runs for it again.
+# `rev-parse`, not `symbolic-ref`: a dangling origin/HEAD survives the upstream
+# default branch being renamed and reads as present to a check that does not
+# resolve it (code_review's `_default_base` guards the same state).
+git -C "$BARE_DIR" rev-parse -q --verify origin/HEAD >/dev/null 2>&1 ||
+    git -C "$BARE_DIR" remote set-head origin -a
+DEFAULT_REF=$(git -C "$BARE_DIR" symbolic-ref -q refs/remotes/origin/HEAD)
+DEFAULT_BRANCH="${DEFAULT_REF#refs/remotes/origin/}"
+[ -n "$DEFAULT_BRANCH" ] || { echo "origin has no default branch"; exit 1; }
+
+# HEAD below refs/heads/ (ISSUE-269): pointed into refs/remotes/ it reads as
+# stale just the same, but `worktree add -b` resolves HEAD while writing its new
+# local head and aborts with `fatal: HEAD not found below refs/heads!`. `-q` so
+# a detached HEAD is a state to repair, not a `fatal:` in the log.
+case "$(git -C "$BARE_DIR" symbolic-ref -q HEAD)" in
+    "refs/heads/$DEFAULT_BRANCH") ;;
+    *) git -C "$BARE_DIR" symbolic-ref HEAD "refs/heads/$DEFAULT_BRANCH" ;;
+esac
+
+# ...and nothing under it (ISSUE-125): `clone --bare` fills refs/heads/* once,
+# at clone time, and the remote-tracking refspec never updates them again, so a
+# local `main` stays frozen at clone day while origin/main moves on and
+# `git show main:db.py` silently returns clone-day source. Deleting the fossils
+# turns that silent-wrong into a loud `invalid object name`. Only on clone day
+# is *every* local head a fossil: later, refs/heads/ also holds the
+# {BOT_DIR}/<task> branch of every worktree ever made here, and one whose
+# worktree was pruned may be the only copy of that work.
+if [ -n "$FRESH" ]; then
+    FOSSILS=$(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/)
+else
+    FOSSILS="$DEFAULT_BRANCH"
+fi
+CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
+for ref in $FOSSILS; do
+    # `update-ref -d`, not `branch -D`: it takes a full refname and consults
+    # neither HEAD nor the worktree list, so CHECKED_OUT is the only thing
+    # deciding what survives.
+    echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" update-ref -d "refs/heads/$ref"
+done
 ```
 
 ### Reading current source from a bare clone
 
-**Invariant: in a bare clone, never name a local branch — always `origin/<branch>`
-or `origin/HEAD`.** A local `main`/`master` is a clone-day fossil (deleted by the
-setup above, but the habit still bites on an older clone). To read the live tree
-in one fetch-then-read step that can't point at a stale ref, use:
+**Invariant: `refs/remotes/origin/HEAD` resolves, `HEAD` is a `refs/heads/` ref
+that does not, and you never name a local branch — always `origin/<branch>` or
+`origin/HEAD`.** The first lets every later step discover the base branch
+instead of assuming `main`; the rest keeps a clone-day fossil unreadable rather
+than silently stale. To read the live tree in one step that can't point at a
+stale ref:
 
 ```bash
 # dev-show <BARE_DIR> <path> — current source from origin/HEAD, always fetched.
 git -C "$BARE_DIR" fetch -q origin && git -C "$BARE_DIR" show origin/HEAD:"$path"
 ```
 
-Use this (or `git -C "$BARE_DIR" log origin/HEAD`, `git -C "$BARE_DIR" show
-origin/main:<path>`) for any hand-rolled verification read. Never `git show
-main:<path>` / `git log master` against a bare clone.
+Use this (or `git -C "$BARE_DIR" log origin/HEAD`) for any hand-rolled
+verification read. Never `git show main:<path>` / `git log master` on a bare clone.
 
 ## Creating a Worktree for Development
 
