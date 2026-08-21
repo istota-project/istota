@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reviewer that fails no longer blocks the bot from publishing the branch it reviewed. When every reviewer's call failed, or every reviewer answered in something that would not parse, the result was reported the same way as a bad request — and the rule for a bad request is to stop and open nothing, so one broken reviewer could block every merge request on an install for a reason no branch could do anything about. Those cases now land the work unreviewed and say why, as already happens when the reviewer cannot be reached at all. A review that called the model and came back with nothing also writes a warning to the log, which it previously did at no level; without it, a reviewer broken this way would now be invisible rather than merely obstructive.
+
 - A code review now reports the budget each reviewer was given, and quotes it when the review ran short. A budget that will not fit under the proxy's own ceiling is cut down to one that does, and nothing said so — the warning went to the server log, so a review with a third of its intended time looked exactly like one that had all of it. The cut itself was wrong in two ways worth knowing if you set these by hand: a budget already under the ceiling could be revised upwards, and a zero or negative one reached the model unchanged, which on one of the two brains means no time limit at all.
 
 - The documented way to run a code review named a branch that does not exist in the repositories the bot works in, so copying the example produced a range error and blocked the merge request it was meant to precede. The example now omits the branch and uses the default, which was already right.
