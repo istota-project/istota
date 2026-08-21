@@ -1,8 +1,35 @@
 #!/bin/bash
 # {{ istota_namespace | capitalize }} backup script - managed by Ansible
+#
+# Scope: the framework DB, and the rclone file syncs. Per-user module DBs
+# (feeds / money / location / health / briefings) are NOT backed up here —
+# `db_backup.py` owns them (ISSUE-262). It derives its list from `config.users`
+# and its paths from `config.module_db_path`, which is why it followed the
+# ISSUE-157 relocation onto local disk while the scan this script used to do
+# kept looking at the retired mount layout and silently matched nothing for 39
+# days. A bash array of module names and a hardcoded path shape cannot be kept
+# in step with the code that decides where those files live.
+#
+# The framework DB is deliberately covered twice: here (gzipped, integrity
+# checked, weekly tier, every 6h, off-host copy) and by `db_backup.py` (dated
+# dirs with a row-count collapse guard, which `db_restore` reads). Different
+# artifacts with different failure modes, on the one DB whose loss loses
+# everything. That overlap is intentional; the module-DB overlap was not.
+#
+# ${LOCAL_DIR}/{daily,weekly} and ${REMOTE_DIR}/db/{daily,weekly} are owned by
+# this script: anything named *.db.gz in them is subject to age-based deletion,
+# whoever wrote it. That is what reclaims the artifacts of a prefix that stopped
+# being produced. Do not park a copy there expecting it to survive.
 set -euo pipefail
 
 DB="{{ istota_home }}/data/istota.db"
+# Framework backups are named "<prefix>-<timestamp>.db.gz"; this is the prefix,
+# and the one the retention floor protects. Not a tunable: the floor is a
+# last-resort guard against a sustained backup failure sweeping away the only
+# copies left, not a second retention policy. Two, so there is still a spare
+# when the newest turns out to be the one that went bad.
+DB_PREFIX="{{ istota_namespace }}"
+KEEP_NEWEST_OWN=2
 LOCAL_DIR="{{ istota_backup_local_dir }}"
 REMOTE_DIR="{{ istota_backup_remote_dir }}"
 MOUNT_PATH="{{ istota_nextcloud_mount_path }}"
@@ -18,10 +45,6 @@ RCLONE_CONFIG="{{ istota_backup_rclone_config }}"
 RCLONE_REMOTE="{{ istota_backup_rclone_remote }}"
 RCLONE_BACKUP_PATH="{{ istota_backup_rclone_remote_path }}"
 
-# Module DBs live per-user at {mount}/Users/<user>/<bot_dir>/<module>/data/<module>.db
-# and need WAL-aware backups too — rclone file-copy is not WAL-safe.
-MODULE_NAMES=(feeds money location health)
-
 TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
 DAY_OF_WEEK=$(date +%u)
 
@@ -31,6 +54,28 @@ log() {
 
 mount_available() {
     mountpoint -q "$MOUNT_PATH" 2>/dev/null
+}
+
+# Refuse to sweep on a retention value that isn't a plain number.
+#
+# These feed `find -mtime +N`, and both bad shapes are destructive in their own
+# way. An inventory key that is missing or misspelled renders empty, and bash
+# arithmetic reads an empty variable as 0 rather than erroring — so
+# `-mtime +$((WEEKLY_RETENTION * 7))` becomes `-mtime +0` and the sweep deletes
+# every weekly backup over a day old, on both sides. A non-numeric value is
+# worse in the other direction: `set -u` treats a bare word in an arithmetic
+# expansion as unbound and exits the shell, which `|| true` does not contain,
+# so the run dies partway through the sweep with no completion line. Checking
+# the four values once up front costs nothing and turns either into a refusal.
+_check_retention_values() {
+    local name value bad=0
+    for name in DAILY_RETENTION WEEKLY_RETENTION DAILY_RETENTION_REMOTE WEEKLY_RETENTION_REMOTE; do
+        value="${!name-}"
+        case "$value" in
+            *[!0-9]*|"") log "ERROR: ${name} is not a whole number (got '${value}')"; bad=1 ;;
+        esac
+    done
+    return "$bad"
 }
 
 # Optional failure-alert hook. Operator wires a command via
@@ -44,17 +89,36 @@ _alert() {
         || log "WARNING: backup alert command failed"
 }
 
-# Backup a single SQLite DB with WAL-aware .backup, integrity check, gzip,
-# remote copy, and per-prefix retention rotation.
+# Copy a finished backup to the mount without ever leaving a half-written file
+# where a finished one is expected. The mount can drop mid-copy — it is the
+# reason the catch-up pass exists — and a truncated file at the destination is
+# indistinguishable from a good one by name, so the next run skips it and the
+# bad copy becomes permanent. Writing to .part and renaming makes the
+# destination appear only when it is complete.
+_copy_to_remote() {
+    local src="$1" dest="$2"
+    if cp "$src" "${dest}.part" && mv "${dest}.part" "$dest"; then
+        return 0
+    fi
+    rm -f "${dest}.part" 2>/dev/null || true
+    return 1
+}
+
+# Backup a single SQLite DB with WAL-aware .backup, integrity check, gzip and
+# a remote copy. Retention is NOT done here — see _rotate_backups.
 #   $1 — source DB path
-#   $2 — backup name prefix (used in filename + rotation glob)
+#   $2 — backup name prefix (used in the filename)
 _backup_one_db() {
     local src_db="$1"
     local prefix="$2"
 
+    # A source that isn't there is a failure, not a shrug. Every DB this script
+    # is asked to back up is one it is supposed to find; the alternative is a
+    # run that covers nothing, logs a skip and exits 0, which is how ISSUE-262
+    # stayed invisible for 39 days.
     if [ ! -f "$src_db" ]; then
-        log "Skipping ${prefix}: source DB not found at ${src_db}"
-        return 0
+        log "ERROR: ${prefix}: source DB not found at ${src_db}"
+        return 1
     fi
 
     log "Backing up ${prefix} (${src_db})"
@@ -109,12 +173,12 @@ _backup_one_db() {
     fi
 
     if mount_available; then
-        cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}" \
+        _copy_to_remote "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}" \
             && log "Remote daily backup copied: ${backup_name}" \
             || log "WARNING: remote daily copy failed for ${prefix}"
 
         if [ "$DAY_OF_WEEK" -eq 7 ]; then
-            cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}" \
+            _copy_to_remote "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}" \
                 && log "Remote weekly backup copied: ${backup_name}" \
                 || log "WARNING: remote weekly copy failed for ${prefix}"
         fi
@@ -122,62 +186,139 @@ _backup_one_db() {
         log "WARNING: Nextcloud mount not available, skipping remote copy for ${prefix}"
     fi
 
-    # Rotate per-prefix so each (user, module) has its own retention window
-    find "${LOCAL_DIR}/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-    find "${LOCAL_DIR}/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
-
-    if mount_available; then
-        find "${REMOTE_DIR}/db/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION_REMOTE} -delete 2>/dev/null || true
-        find "${REMOTE_DIR}/db/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION_REMOTE * 7)) -delete 2>/dev/null || true
-    fi
-
     return 0
 }
 
-# Discover per-user module DBs by scanning {mount}/Users/<user>/*/<module>/data/<module>.db.
-# The bot_dir name is wildcarded so the discovery doesn't depend on namespace
-# config matching the deployed mount layout.
-_discover_module_dbs() {
-    if ! mount_available; then
-        return 0
-    fi
-    local users_root="${MOUNT_PATH}/Users"
-    [ -d "$users_root" ] || return 0
+# Copy up any local backup the mount missed while it was down.
+#
+# The remote copy in _backup_one_db is gated on the mount being available and
+# there was no second chance: a snapshot taken during an outage existed only as
+# the local daily file, so the local window was the entire recovery margin for a
+# mount outage. Runs before rotation so a file about to age out locally still
+# gets its off-host copy. Existing remote files are left alone — the remote is
+# the durable side, and re-copying over it is how a good copy gets replaced by a
+# worse one.
+_catch_up_remote() {
+    mount_available || return 0
 
-    local module
-    local find_args=()
-    for module in "${MODULE_NAMES[@]}"; do
-        find_args+=(-o -path "*/${module}/data/${module}.db")
+    local tier local_file remote_file copied=0 failed=0 untimed=0
+    for tier in daily weekly; do
+        mkdir -p "${REMOTE_DIR}/db/${tier}" 2>/dev/null || true
+        for local_file in "${LOCAL_DIR}/${tier}"/*.db.gz; do
+            # nullglob is not set, so an unmatched glob expands to the pattern.
+            [ -f "$local_file" ] || continue
+            remote_file="${REMOTE_DIR}/db/${tier}/$(basename "$local_file")"
+            [ -e "$remote_file" ] && continue
+            # Don't promote bytes nobody has checked. The primary path integrity
+            # checks the DB before gzipping; this one is picking up a file off
+            # disk, and a run killed mid-gzip leaves a truncated .db.gz that no
+            # later run cleans up. gzip -t is the cheap equivalent.
+            if ! gzip -t "$local_file" 2>/dev/null; then
+                log "WARNING: skipping catch-up of $(basename "$local_file") — not a valid gzip"
+                failed=$((failed + 1))
+                continue
+            fi
+            # The existence check above would treat a half-written file as done
+            # and never correct it, so the copy goes via .part (see
+            # _copy_to_remote) and the name only appears when it is complete.
+            if _copy_to_remote "$local_file" "$remote_file"; then
+                # Carry the original mtime over. Remote retention is by age, so
+                # a plain cp would restart the clock and every catch-up would
+                # extend the off-host window — a leftover copied up long after
+                # it was made would then outlive its window instead of being
+                # pruned on the next sweep. Best-effort, because some backends
+                # refuse to set times, but counted: silence here would hide the
+                # exact behaviour this is meant to prevent.
+                touch -r "$local_file" "$remote_file" 2>/dev/null || untimed=$((untimed + 1))
+                copied=$((copied + 1))
+            else
+                failed=$((failed + 1))
+            fi
+        done
     done
-    # Drop the leading -o
-    find_args=("${find_args[@]:1}")
+    [ "$copied" -gt 0 ] && log "Copied ${copied} backup(s) the mount had missed"
+    [ "$failed" -gt 0 ] && log "WARNING: ${failed} catch-up copy/copies failed"
+    [ "$untimed" -gt 0 ] && log "WARNING: the remote refused to preserve mtime on ${untimed} file(s) — their remote retention is measured from now"
+    return 0
+}
 
-    find "$users_root" -mindepth 5 -maxdepth 5 -type f \( "${find_args[@]}" \) 2>/dev/null
+# Prune everything past its retention window, once per run.
+#
+# This used to sit at the end of _backup_one_db, behind the early return for a
+# missing source, so a prefix that stopped being produced also stopped being
+# pruned and its files were kept forever regardless of retention — 375M of July
+# copies on a root filesystem that had already hit the monit threshold
+# (ISSUE-262). Retention that only prunes what still succeeds is backwards: the
+# reclaim is needed most in exactly the runs that are failing.
+#
+# So the sweep is by age over every *.db.gz whoever wrote it, with one floor:
+# the newest few files of the prefix this script is still writing. Everything
+# the reclaim is aimed at — a retired <user>-<module> prefix — carries a
+# different prefix and is untouched by that floor. What the floor buys is that a
+# framework DB that is missing or unreadable for a couple of weeks no longer
+# ends with every copy of it swept away: rotation now runs on failing runs too,
+# and without a floor a sustained failure would delete the last local artifact
+# after DAILY_RETENTION days and the last remote one shortly after. db_backup.py
+# takes the same position on the same DB ("never prunes a dir holding the newest
+# good copy") and this keeps the two systems' invariants aligned.
+_prune_tier() {
+    local dir="$1" days="$2"
+    [ -d "$dir" ] || return 0
+    local keep_args=() name
+    # -newer on the oldest kept file would be off by a tie; excluding by name is
+    # exact and the floor is a handful of entries.
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        keep_args+=(! -name "$name")
+    done < <(ls -t "$dir" 2>/dev/null | grep "^${DB_PREFIX}-.*\.db\.gz$" | head -n "$KEEP_NEWEST_OWN")
+
+    find "$dir" -maxdepth 1 -name '*.db.gz' "${keep_args[@]+"${keep_args[@]}"}" \
+        -mtime +"$days" -delete 2>/dev/null || true
+}
+
+_rotate_backups() {
+    if ! _check_retention_values; then
+        log "ERROR: refusing to rotate backups with an unusable retention window"
+        return 1
+    fi
+
+    _prune_tier "${LOCAL_DIR}/daily" "${DAILY_RETENTION}"
+    _prune_tier "${LOCAL_DIR}/weekly" "$((WEEKLY_RETENTION * 7))"
+
+    if mount_available; then
+        _prune_tier "${REMOTE_DIR}/db/daily" "${DAILY_RETENTION_REMOTE}"
+        _prune_tier "${REMOTE_DIR}/db/weekly" "$((WEEKLY_RETENTION_REMOTE * 7))"
+    fi
+
+    # Orphaned working files. mktemp writes an uncompressed copy of the source
+    # DB into LOCAL_DIR itself, and every rm of it is on a path where a command
+    # returned an error — a SIGKILL, an OOM kill or a reboot mid-backup leaves a
+    # full-size file that nothing else ever removes. On the disk-pressure issue
+    # that motivated all of this, that is the one leftover worth sweeping.
+    find "${LOCAL_DIR}" -maxdepth 1 -name '*-backup-*.db' -mmin +360 -delete 2>/dev/null || true
+    return 0
 }
 
 backup_db() {
     log "Starting database backup"
     local failed=0
 
-    # Each DB is backed up independently: a single failure is counted and
-    # logged, never fatal, so one bad DB can't skip the remaining users'
-    # backups (the pre-fix set -e behaviour silently torpedoed a whole run).
+    # The framework DB is the whole scope here; per-user module DBs belong to
+    # db_backup.py (see the header). Kept as a loop-shaped counter rather than a
+    # bare call so a second DB can be added without reintroducing the set -e
+    # behaviour that once let one bad DB torpedo the rest of the run.
     if ! _backup_one_db "$DB" "{{ istota_namespace }}"; then
         failed=$((failed + 1))
     fi
 
-    # Per-user module DBs (feeds, money, location, ...)
-    local module_db user_id module
-    while IFS= read -r module_db; do
-        [ -z "$module_db" ] && continue
-        # Path shape: {mount}/Users/<user>/<bot_dir>/<module>/data/<module>.db
-        # Walk up from the file: dirname=data, parent=module, grandparent=bot_dir, then user.
-        module=$(basename "$(dirname "$(dirname "$module_db")")")
-        user_id=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$module_db")")")")")
-        if ! _backup_one_db "$module_db" "${user_id}-${module}"; then
-            failed=$((failed + 1))
-        fi
-    done < <(_discover_module_dbs)
+    # Both run regardless of the above: neither depends on this run's backup
+    # having succeeded, and rotation is the reclaim that a failing run needs.
+    # Rotation refusing (an unusable retention window) is itself a failure —
+    # the disk keeps filling and nobody is told otherwise.
+    _catch_up_remote
+    if ! _rotate_backups; then
+        failed=$((failed + 1))
+    fi
 
     if [ "$failed" -gt 0 ]; then
         log "ERROR: Database backup completed with ${failed} failure(s)"
