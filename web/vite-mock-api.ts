@@ -1,4 +1,5 @@
 import type { Plugin } from 'vite';
+import type { AdminStats } from './src/lib/api';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1210,6 +1211,44 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   return undefined;
 };
 
+/**
+ * One usage aggregate, in the shape `_admin_usage_section` returns
+ * (`src/istota/web_app.py`). The dashboard reads every field, so a fixture has
+ * to carry all of them; the totals and the cache-hit rate are derived here
+ * rather than restated, so a hand-edited row cannot show a total that
+ * disagrees with its own parts.
+ */
+function mockUsageTotals(o: {
+  rows: number;
+  measured?: number;
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  cost: number;
+  initialContext?: number | null;
+  peakContext?: number | null;
+  contextRows?: number;
+}) {
+  const total = o.input + o.cacheRead + o.cacheWrite + o.output;
+  return {
+    rows: o.rows,
+    measured_rows: o.measured ?? o.rows,
+    billed_input_tokens: o.input,
+    cache_read_tokens: o.cacheRead,
+    cache_write_tokens: o.cacheWrite,
+    output_tokens: o.output,
+    total_tokens: total,
+    cache_hit_rate: Math.round((o.cacheRead / total) * 10_000) / 10_000,
+    // Keyed by basis, never a scalar. This deployment bills through the API,
+    // so there is one key.
+    cost_by_basis: { api: o.cost },
+    avg_initial_context_tokens: o.initialContext ?? null,
+    avg_peak_context_tokens: o.peakContext ?? null,
+    context_rows: o.contextRows ?? 0,
+  };
+}
+
 const mockAdminStats = {
   system: {
     version: '0.40.1',
@@ -1224,7 +1263,7 @@ const mockAdminStats = {
       username: 'carol',
       display_name: 'Carol',
       is_admin: true,
-      tasks_total: 11281,
+      tasks_total: 1_284_507,
       tasks_last_24h: 1734,
       tasks_avg_per_day: 373.7,
       tasks_by_source_24h: {
@@ -1237,6 +1276,20 @@ const mockAdminStats = {
       tasks_automated_24h: 1702,
       tasks_failed_24h: 4,
       last_active: new Date(Date.now() - 60_000).toISOString(),
+      usage_tokens_24h: 4_182_663,
+      usage_tokens_30d: 96_405_118,
+      usage_cost_24h: { api: 12.47 },
+      usage_cost_30d: { api: 288.9 },
+      usage_by_origin_24h: {
+        task: { rows: 1734, tokens: 3_901_204 },
+        sleep_cycle: { rows: 1, tokens: 221_459 },
+        health_ocr: { rows: 9, tokens: 60_000 },
+      },
+      usage_avg_initial_context: 41_820,
+      usage_avg_peak_context: 96_140,
+      usage_cache_hit_rate_24h: 0.81,
+      usage_rows_24h: 1744,
+      usage_unmeasured_24h: 3,
     },
     {
       username: 'kasia',
@@ -1253,8 +1306,166 @@ const mockAdminStats = {
       tasks_automated_24h: 73,
       tasks_failed_24h: 0,
       last_active: new Date(Date.now() - 3600_000).toISOString(),
+      usage_tokens_24h: 188_204,
+      usage_tokens_30d: 5_112_880,
+      usage_cost_24h: { api: 0.31 },
+      usage_cost_30d: { api: 7.44 },
+      usage_by_origin_24h: {
+        task: { rows: 77, tokens: 188_204 },
+      },
+      usage_avg_initial_context: 22_410,
+      usage_avg_peak_context: 48_900,
+      usage_cache_hit_rate_24h: 0.64,
+      usage_rows_24h: 77,
+      usage_unmeasured_24h: 0,
     },
   ],
+  usage: {
+    // Sums to the two users above: 4_182_663 + 188_204 tokens over 24h,
+    // 96_405_118 + 5_112_880 over 30 days.
+    totals_24h: mockUsageTotals({
+      rows: 1821,
+      measured: 1818,
+      input: 812_440,
+      cacheRead: 3_101_006,
+      cacheWrite: 218_004,
+      output: 239_417,
+      cost: 12.78,
+      initialContext: 39_120,
+      peakContext: 91_004,
+      contextRows: 1760,
+    }),
+    totals_30d: mockUsageTotals({
+      rows: 52_140,
+      measured: 52_002,
+      input: 18_880_400,
+      cacheRead: 72_004_112,
+      cacheWrite: 5_120_440,
+      output: 5_513_046,
+      cost: 296.34,
+      initialContext: 37_880,
+      peakContext: 88_412,
+      contextRows: 50_990,
+    }),
+    by_model_30d: [
+      {
+        key: 'claude-opus-4-8',
+        ...mockUsageTotals({
+          rows: 21_004,
+          input: 9_440_100,
+          cacheRead: 38_002_006,
+          cacheWrite: 2_610_220,
+          output: 3_014_552,
+          cost: 214.9,
+          initialContext: 44_120,
+          peakContext: 99_408,
+          contextRows: 20_880,
+        }),
+      },
+      {
+        key: 'claude-sonnet-4-6',
+        ...mockUsageTotals({
+          rows: 24_880,
+          input: 7_112_300,
+          cacheRead: 28_440_006,
+          cacheWrite: 2_004_120,
+          output: 2_006_444,
+          cost: 68.2,
+          initialContext: 33_004,
+          peakContext: 79_220,
+          contextRows: 24_440,
+        }),
+      },
+      {
+        key: 'claude-haiku-4-5',
+        ...mockUsageTotals({
+          rows: 6256,
+          input: 2_328_000,
+          cacheRead: 5_562_100,
+          cacheWrite: 506_100,
+          output: 492_050,
+          cost: 13.24,
+          initialContext: 21_440,
+          peakContext: 48_006,
+          contextRows: 5670,
+        }),
+      },
+    ],
+    // Nothing omitted: the pane caps the list at five and there are three.
+    by_model_30d_omitted: 0,
+    by_brain_30d: [
+      {
+        key: 'native',
+        ...mockUsageTotals({
+          rows: 44_120,
+          input: 16_004_400,
+          cacheRead: 61_220_112,
+          cacheWrite: 4_340_440,
+          output: 4_712_046,
+          cost: 251.8,
+          initialContext: 38_440,
+          peakContext: 90_112,
+          contextRows: 43_990,
+        }),
+      },
+      {
+        key: 'claude_code',
+        ...mockUsageTotals({
+          rows: 8020,
+          input: 2_876_000,
+          cacheRead: 10_784_000,
+          cacheWrite: 780_000,
+          output: 801_000,
+          cost: 44.54,
+          // The CLI's non-streaming path emits no context frames.
+          initialContext: null,
+          peakContext: null,
+        }),
+      },
+    ],
+    by_origin_24h: [
+      {
+        key: 'task',
+        ...mockUsageTotals({
+          rows: 1811,
+          input: 780_440,
+          cacheRead: 2_990_006,
+          cacheWrite: 210_004,
+          output: 229_417,
+          cost: 12.11,
+          initialContext: 39_120,
+          peakContext: 91_004,
+          contextRows: 1760,
+        }),
+      },
+      {
+        key: 'sleep_cycle',
+        ...mockUsageTotals({
+          rows: 1,
+          input: 22_000,
+          cacheRead: 88_000,
+          cacheWrite: 6000,
+          output: 6459,
+          cost: 0.41,
+        }),
+      },
+      {
+        key: 'health_ocr',
+        ...mockUsageTotals({
+          rows: 9,
+          input: 10_000,
+          cacheRead: 23_000,
+          cacheWrite: 2000,
+          output: 3541,
+          cost: 0.26,
+        }),
+      },
+    ],
+    // The two honesty counters: tasks that spent tokens and wrote no row, and
+    // task-origin rows that recorded no context size.
+    unmeasured_tasks_24h: 3,
+    context_unmeasured_rows_30d: 1150,
+  },
   scheduler: {
     jobs_total: 5,
     jobs_active: 4,
@@ -1397,7 +1608,7 @@ const mockAdminStats = {
     provider: 'openai_compat',
     source_type_overrides: { scheduled: 'native', heartbeat: 'native' },
   },
-};
+} satisfies AdminStats;
 
 // Mock reader dataset — populated below so the dev UI has scrollable content.
 
