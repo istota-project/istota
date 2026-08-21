@@ -93,6 +93,7 @@ from .executor import (
 )
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
+from .modules import MODULE_NAMES
 from .notifications import effective_log_destinations, send_notification
 from .process_group import kill_process_group
 from .transport import (
@@ -3585,7 +3586,9 @@ def check_db_health(config: Config) -> list[CheckReport]:
     #    missing-mount, and we don't want any of those to skip a *file* that is
     #    actually on disk and might be corrupt.
     for user_id in config.users:
-        for module in ("feeds", "health", "location", "money", "briefings"):
+        # From the registry, not a copy of it: a list written out by hand here
+        # would silently stop covering the next module added (ISSUE-262).
+        for module in sorted(MODULE_NAMES):
             try:
                 db_path = config.module_db_path(user_id, module)
             except Exception as exc:  # noqa: BLE001
@@ -3635,10 +3638,24 @@ def _send_operator_alert(config: Config, user_id: str, message: str, *, timeout:
         logger.error("operator_alert_timed_out after %ss — send still running in background", timeout)
 
 
+def _db_backup_lookback_days() -> int:
+    """The 'vanished' window, read from where it's defined rather than restated.
+    Imported here so the alert text can't drift away from the actual window."""
+    from .db_backup import _VANISHED_LOOKBACK_DAYS
+
+    return _VANISHED_LOOKBACK_DAYS
+
+
 def _alert_backup_problems(config: Config, results: list[dict]) -> None:
-    """Fire one operator alert when a backup run reports any errored or suspect
-    (row-count collapse) DB. Best-effort — never raises into the loop."""
-    problems = [r for r in results if r.get("status") in ("error", "suspect")]
+    """Fire one operator alert when a backup run reports any errored, suspect
+    (row-count collapse) or vanished DB. Best-effort — never raises into the loop.
+
+    ``skip_missing`` is deliberately not a problem: a user who never opened a
+    module has no DB for it and never will. ``vanished`` is the same absence
+    with history behind it — the DB was being snapshotted days ago — which is
+    coverage shrinking rather than a module that was never used (ISSUE-262).
+    """
+    problems = [r for r in results if r.get("status") in ("error", "suspect", "vanished")]
     if not problems:
         return
     user = _operator_alert_user(config)
@@ -3646,10 +3663,12 @@ def _alert_backup_problems(config: Config, results: list[dict]) -> None:
         return
     lines = "\n".join(f"• {r['label']}: {r['status']}" for r in problems)
     message = (
-        f"⚠️ DB backup problem — {len(problems)} database(s) failed or were "
-        f"quarantined on the latest snapshot:\n{lines}\n"
+        f"⚠️ DB backup problem — {len(problems)} database(s) failed, were "
+        f"quarantined, or dropped out of coverage on the latest snapshot:\n{lines}\n"
         "A 'suspect' DB was empty/unreadable vs. the prior good snapshot and was "
-        "kept aside as .suspect; the prior good copy is preserved. Check the live DB."
+        f"kept aside as .suspect; the prior good copy is preserved. A 'vanished' DB "
+        f"had a snapshot within the last {_db_backup_lookback_days()} days and its "
+        "source file is now gone. Check the live DB."
     )
     _send_operator_alert(config, user, message)
 
@@ -3686,7 +3705,7 @@ def _maybe_alert_backup_stale(
 
 
 def _run_db_backup(config: Config) -> None:
-    """Snapshot every local DB, then alert on any errored/suspect result.
+    """Snapshot every local DB, then alert on any errored/suspect/vanished result.
 
     The snapshot and its alert are one unit so the whole thing can be handed to
     a background thread — the alert has to see the results of the run that

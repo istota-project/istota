@@ -1,8 +1,9 @@
 """Snapshot local SQLite DBs to durable (off-host) storage.
 
-The framework ``istota.db`` and the per-user module DBs (feeds / health /
-location / money) now live on local disk (``Config.module_db_path``) so they
-can run WAL without SIGBUSing on the FUSE mount. That took them out of the
+The framework ``istota.db`` and every per-user module DB (the set is
+``modules.MODULE_NAMES``, never a copy of it) now live on local disk
+(``Config.module_db_path``) so they can run WAL without SIGBUSing on the FUSE
+mount. That took them out of the
 Nextcloud-synced workspaces, so this restores off-host durability: on a timer,
 snapshot each live DB to a backup directory on the Nextcloud mount.
 
@@ -40,11 +41,27 @@ import sqlite3
 import sys
 import time
 from datetime import date as _date
+from datetime import timedelta
 from pathlib import Path
+
+from .modules import MODULE_NAMES
 
 logger = logging.getLogger(__name__)
 
-MODULES = ("feeds", "health", "location", "money", "briefings")
+# Straight from the module registry rather than a second copy of the list. The
+# Ansible backup script kept its own hand-maintained bash array of the same
+# names and had already silently lost ``briefings`` (ISSUE-262); this tuple was
+# correct only by coincidence. Sorted because MODULE_NAMES is a frozenset and
+# the snapshot order should be stable across runs.
+MODULES = tuple(sorted(MODULE_NAMES))
+
+# How far back to look for evidence that a now-missing DB used to be covered.
+# Bounded on purpose: ``_prune_old_snapshots`` protects the dir holding the
+# newest good copy of a DB from ever being pruned, so an unbounded lookback
+# would keep finding that copy and alert once per interval forever for a module
+# a user legitimately stopped using. The point is to notice coverage shrinking,
+# which is a thing you notice within days or not at all.
+_VANISHED_LOOKBACK_DAYS = 7
 
 # A dated snapshot directory, e.g. ``2026-07-12``.
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -173,6 +190,33 @@ def _prior_good_snapshot(root: Path, date_str: str, rel: str) -> Path | None:
     return None
 
 
+def _was_recently_covered(root: Path, date_str: str, rel: str) -> bool:
+    """Whether ``rel`` has a good snapshot from the last ``_VANISHED_LOOKBACK_DAYS``.
+
+    Separate from ``_prior_good_snapshot``, which the collapse guard uses and
+    where looking arbitrarily far back is the right behaviour: comparing row
+    counts against the last good copy is worth doing however old it is. Here the
+    question is different — did coverage just shrink — and that only has a
+    useful answer while it is recent.
+    """
+    try:
+        floor = (_date.fromisoformat(date_str) - timedelta(days=_VANISHED_LOOKBACK_DAYS)).isoformat()
+    except ValueError:  # a caller-supplied `today` that isn't a date
+        return False
+    # Today's dir counts: on a same-day rerun (a shortened interval, or a manual
+    # `python -m istota.db_backup` after a scheduled run) the copy that proves
+    # coverage is the one this morning's run wrote. Nothing writes it *this*
+    # run — the source is missing, which is why we're here.
+    if (root / date_str / rel).exists():
+        return True
+    for d in _dated_dirs(root):
+        if d.name >= date_str or d.name < floor:
+            continue
+        if (d / rel).exists():
+            return True
+    return False
+
+
 def _snapshot_one(src: Path, dest: Path, label: str) -> dict:
     result = {"label": label, "src": str(src), "dest": str(dest)}
     if not src.exists():
@@ -275,7 +319,7 @@ def _prune_old_snapshots(root: Path, keep: int) -> None:
 def backup_databases(config, *, today: str | None = None) -> list[dict]:
     """Snapshot the framework DB + every user's module DBs into a dated dir.
     Never raises per DB — one failure doesn't abort the sweep. Returns per-DB
-    status dicts (ok / skip_missing / suspect / error)."""
+    status dicts (ok / skip_missing / vanished / suspect / error)."""
     if not getattr(config.scheduler, "db_backup_enabled", True):
         return []
     root = backup_destination(config)
@@ -305,6 +349,16 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
             res = _snapshot_one(src, dest, label)
             if res["status"] == "ok":
                 res = _apply_collapse_guard(root, date_str, rel, res)
+            elif res["status"] == "skip_missing" and _was_recently_covered(root, date_str, rel):
+                # A DB nobody ever created is a skip; one that was being
+                # snapshotted days ago and now isn't there is coverage
+                # disappearing, which is the failure ISSUE-262 was about.
+                res = {**res, "status": "vanished"}
+                logger.error(
+                    "db_backup_vanished label=%s src=%s — had a snapshot within "
+                    "%d days and the source is now gone",
+                    label, res["src"], _VANISHED_LOOKBACK_DAYS,
+                )
             results.append(res)
         except Exception as exc:  # noqa: BLE001
             logger.error("db_backup_failed label=%s err=%s", label, exc)
@@ -330,6 +384,7 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
     ok = sum(1 for r in results if r["status"] == "ok")
     suspect = sum(1 for r in results if r["status"] == "suspect")
     errored = sum(1 for r in results if r["status"] == "error")
+    vanished = sum(1 for r in results if r["status"] == "vanished")
     # Persist the clock only when at least one DB actually snapshotted OK.
     # A run where every DB errored (or there was nothing to back up) must leave
     # the clock stale so the staleness alert can eventually fire — advancing it
@@ -342,8 +397,8 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
             "clock stale so staleness alerting can fire", errored,
         )
     logger.info(
-        "db_backup complete: %d snapshotted, %d suspect, %d error, root=%s",
-        ok, suspect, errored, dated_root,
+        "db_backup complete: %d snapshotted, %d suspect, %d error, %d vanished, root=%s",
+        ok, suspect, errored, vanished, dated_root,
     )
     return results
 
@@ -366,9 +421,17 @@ def main() -> int:
     ok = sum(1 for r in results if r["status"] == "ok")
     suspect = [r for r in results if r["status"] == "suspect"]
     errored = [r for r in results if r["status"] == "error"]
-    for r in suspect + errored:
+    # A vanished DB is reported but doesn't fail the run: the snapshot of every
+    # DB that is still there worked, and a source that a user deliberately
+    # removed shouldn't give a manual force-run a non-zero exit.
+    vanished = [r for r in results if r["status"] == "vanished"]
+    for r in suspect + errored + vanished:
         print(f"{r['label']}: {r['status']}", file=sys.stderr)
-    print(f"done: {ok} snapshotted, {len(suspect)} suspect, {len(errored)} error", file=sys.stderr)
+    print(
+        f"done: {ok} snapshotted, {len(suspect)} suspect, {len(errored)} error, "
+        f"{len(vanished)} vanished",
+        file=sys.stderr,
+    )
     return 1 if errored else 0
 
 
