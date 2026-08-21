@@ -32,6 +32,8 @@ Git credentials are configured automatically for both platforms — clone and pu
 
 **Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped.
 
+**A remote URL never carries a credential.** `origin` is always a bare `https://host/namespace/project.git` — the helper supplies the username and token at invocation time. This matters because a remote URL is *printed*: `git remote -v`, `git config --list`, `git remote show origin` and several push failures put it in front of you verbatim, and from there it lands in the task result and the transcript. So never construct a URL with credentials in it, never `set-url` one, and never paste a token into a clone command. If you find a remote that already has one — a `:` and a secret before the `@` — stop, report it to the user as a credential to rotate, and do not quote the value back. Do not use it and carry on.
+
 **Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` / `glab api` are refused too — an explicit `-X POST`, and any body flag (`-f`, `-F`, `--field`, `--raw-field`, `--form`, `--input`), which both CLIs treat as an implicit POST. Use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
 
 This is an accident guard, not a security boundary. Hitting it means you are about to do something outside this skill's job, so stop and ask the user — do not look for another route to the same effect.
@@ -148,10 +150,22 @@ cd "$BARE_DIR"
 git rev-parse --is-bare-repository
 git symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main or origin/master
 git fetch origin --prune
+# Credential check. Prints the *name* of any setting that embeds a secret and
+# never the value — echoing the value is the leak this is looking for. Covers
+# the whole config, not just remotes: a credential can ride in an
+# Authorization header (`http.*.extraheader`) or in a key itself
+# (`url.<base>.insteadOf`), where even the name is unsafe to print.
+git config --list --includes | awk -F= '
+    { key = $1 }
+    key ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "a credential is embedded in a config key"; next }
+    /^http\..*extraheader=/       { print key; next }
+    /:\/\/[^\/@]*:[^\/@]+@/       { print key }
+'   # end of the credential check
 ```
 
 - No repository, or the fetch fails: stop and report. Do not clone something else and carry on.
 - The base branch is whatever `symbolic-ref` reports, stripped of `origin/`. Never assume `main` — plenty of repositories are still on `master`, and a worktree branched from a base that does not exist is the single most common way this dies.
+- The credential check printing anything: stop. That setting has a token in it, every worktree you cut will inherit it, and the next `git remote -v` or `git config --list` puts it in your context. Report what it printed to the user as a credential to rotate — that line only, never the value — and do not start work in that repository. The daemon sweeps these at task setup, so seeing one means it appeared afterwards and the user needs to know. Matching a `:secret@` rather than a bare `@` is deliberate: `git@github.com:owner/repo` is a username, not a secret. The check is a tripwire, not a guarantee — it is deliberately simpler than the daemon's sweep, so a clean result is not proof of a clean config.
 
 ### 2. Create the worktree, then read back what was made
 
