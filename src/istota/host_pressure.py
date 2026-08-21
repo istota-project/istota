@@ -491,15 +491,52 @@ def read_memory_events(
                 floor = i + 1
                 break
 
-        events_text = None
+        # **Prefer the unit cgroup outright rather than the nearest ancestor
+        # that happens to have the file.** Those were the same answer until
+        # per-task cgroups shipped, and the difference is invisible off-host.
+        #
+        # `memory.events` appears in a cgroup only when its *parent* enables
+        # the memory controller in `cgroup.subtree_control`. That file was
+        # empty here, so the `supervisor/` leaf had no counters and the walk
+        # landed on the unit. `task_cgroup.enable_controllers` now writes
+        # `+memory` to the unit's `subtree_control` — it must, or a task cgroup
+        # would have no `memory.max` — which gives the leaf its own
+        # `memory.events` and stops the walk one level early.
+        #
+        # That silently kills both readings. `MemoryHigh=` is set on the
+        # *unit*, so the leaf's `memory.high` is `max` and its `high` counter
+        # can never move — the A3 throttle diagnostic this field exists for
+        # reads a permanent zero. And `memory.events` is hierarchical, so the
+        # unit's counter aggregates its descendants while the leaf's covers
+        # only its own subtree; `task-<id>` cgroups are *siblings* of the leaf,
+        # so a task OOM-killed inside its own cgroup — the event Stage 5 exists
+        # to cause — would not be counted at all.
+        #
+        # Observed on the live host, not derived: leaf `memory.high=max`
+        # against unit `memory.high=5368709120`.
+        candidates = []
+        if floor:
+            candidates.append(parts[:floor])
+        # Fall back to the old leaf-upward walk, which the floor still stops at
+        # the unit. Only reached where the unit carries no counters at all.
+        probe = parts[:]
         while True:
-            resolved = parts[:]
-            candidate = base.joinpath(*resolved) / "memory.events"
-            events_text = _read_text(candidate)
-            if events_text is not None or len(parts) <= floor:
+            if probe != parts[:floor]:
+                candidates.append(probe[:])
+            if len(probe) <= floor:
                 break
-            parts.pop()
-        if events_text is None:
+            probe.pop()
+
+        events_text = None
+        resolved = None
+        for candidate_parts in candidates:
+            events_text = _read_text(
+                base.joinpath(*candidate_parts) / "memory.events"
+            )
+            if events_text is not None:
+                resolved = candidate_parts
+                break
+        if events_text is None or resolved is None:
             return None
         source = "/" + "/".join(resolved)
 

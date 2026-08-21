@@ -1466,8 +1466,9 @@ class TestReadMemoryEvents:
         assert events is not None
         assert events.high == 41
 
-    def test_the_nearest_ancestor_wins(self, tmp_path):
-        """Walking up stops at the first hit, not at the root."""
+    def test_the_unit_wins_over_the_cgroup_root(self, tmp_path):
+        """A file above the unit never answers, even when the unit has none
+        below it — the root's counters aggregate every service on the box."""
         selfdir = tmp_path / "proc" / "self"
         selfdir.mkdir(parents=True)
         (selfdir / "cgroup").write_text(CGROUP_LINE)
@@ -1482,6 +1483,43 @@ class TestReadMemoryEvents:
             proc_root=tmp_path / "proc", cgroup_root=root
         )
         assert events.high == 41  # the unit, not the cgroup root
+
+    def test_the_unit_wins_over_a_leaf_that_also_has_counters(self, tmp_path):
+        """The live shape after per-task cgroups shipped, and a real regression.
+
+        `memory.events` exists in a cgroup only when its parent enables the
+        memory controller in `cgroup.subtree_control`. That file was empty on
+        the production host, so the `supervisor/` leaf had no counters and the
+        walk landed on the unit. `task_cgroup.enable_controllers` now writes
+        `+memory` there — it has to, or a task cgroup gets no `memory.max` —
+        which gives the leaf its own counters and stopped the walk one level
+        early.
+
+        Both readings die quietly at the leaf. `MemoryHigh=` is applied to the
+        *unit*, so the leaf's `memory.high` is `max` and its `high` counter can
+        never move. And `memory.events` is hierarchical: the unit aggregates
+        its descendants, while the leaf covers only its own subtree — and
+        `task-<id>` cgroups are *siblings* of the leaf, so the OOM kills that
+        per-task containment exists to cause would not be counted at all.
+        """
+        selfdir = tmp_path / "proc" / "self"
+        selfdir.mkdir(parents=True)
+        (selfdir / "cgroup").write_text(CGROUP_LINE)
+
+        root = tmp_path / "cgroup"
+        unit = root / "system.slice" / "istota-scheduler.service"
+        leaf = unit / "supervisor"
+        leaf.mkdir(parents=True)
+        (unit / "memory.events").write_text(MEMORY_EVENTS)
+        # The leaf's own counters: always zero, because the limit is not here.
+        (leaf / "memory.events").write_text("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")
+
+        events = host_pressure.read_memory_events(
+            proc_root=tmp_path / "proc", cgroup_root=root
+        )
+
+        assert events.high == 41, "read the leaf's permanent zero, not the unit"
+        assert events.source.endswith("istota-scheduler.service")
 
     def test_the_walk_stops_at_our_own_unit(self, tmp_path):
         """Never report another unit's counters as ours.
