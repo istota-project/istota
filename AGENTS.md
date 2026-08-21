@@ -161,7 +161,7 @@ npm --prefix web run test        # vitest run
 npm --prefix web run format:check
 ```
 
-Chain them in one shell invocation rather than one call each, and use `-x` / `--bail=1` while iterating so the first real failure stops the run. Drop those flags for the full run before a commit.
+Chain them in one shell invocation rather than one call each, and use `-x` / `--bail=1` while iterating so the first real failure stops the run. Drop those flags for the full run before a commit. Never read the result through a pipe: a pipeline reports its *last* command's status, so `uv run pytest … | tail` exits 0 on a suite that failed. Set `set -o pipefail` in the same shell, or redirect to a file and check `$?` before reading it.
 
 ## Committing
 
