@@ -198,6 +198,65 @@ class TestBodiesDoNotContradict:
         assert "timeout" in body.lower()
         assert "istota-skill code_review run" in body
 
+    def test_no_retired_api_wrapper_variables(self):
+        """`setup_env` stopped exporting `GITLAB_API_CMD` / `GITHUB_API_CMD`
+        when the forge wrapper landed. A body still naming them tells the model
+        to run `$GITHUB_API_CMD GET ...`, which expands to the empty string and
+        executes `GET` as a command — an unset variable in a shell recipe fails
+        as a typo, not as a missing feature."""
+        body = self._body("developer")
+        for var in ("GITLAB_API_CMD", "GITHUB_API_CMD"):
+            assert var not in body, f"developer still references ${var}"
+
+    def test_forge_verbs_are_the_real_cli(self):
+        """The point of the wrapper: the model types what a person would type,
+        and the full flag surface is reachable."""
+        body = self._body("developer")
+        for verb in ("gh pr create", "glab mr create", "gh pr checks"):
+            assert verb in body, f"developer does not document `{verb}`"
+
+    def test_reviewer_is_requested_not_reviewed(self):
+        """The old recipe posted `{"reviewers": [...]}` to
+        `POST /repos/:o/:r/pulls/:n/reviews`, which creates a *review*.
+        Requesting a reviewer is `.../requested_reviewers`, which the endpoint
+        allowlist did not admit — so the correct call was blocked and the wrong
+        one never requested anybody. `gh pr create --reviewer` replaces both."""
+        body = self._body("developer")
+        assert "--reviewer" in body
+        assert "/reviews" not in body, (
+            "developer still posts to the pull-request reviews endpoint"
+        )
+
+    def test_does_not_advertise_run_download(self):
+        """`gh run download` redirects to a per-request Azure blob shard, and
+        the only allowlist entry covering it is `*.blob.core.windows.net` — all
+        of Azure Blob Storage, reachable from the sandbox. So the verb must not
+        appear in a runnable recipe: it would die at the CONNECT proxy. Naming
+        it in prose is required rather than forbidden — the spec asks for the
+        reason in writing so the next reader does not "fix" the allowlist."""
+        body = self._body("developer")
+        in_fence = False
+        for line in body.splitlines():
+            if line.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                assert "gh run download" not in line, (
+                    f"developer puts `gh run download` in a runnable block: {line!r}"
+                )
+        assert "gh run download" in body, (
+            "developer should say why the verb is unavailable, not stay silent"
+        )
+
+    def test_credential_conduct_rule_describes_the_real_mechanism(self):
+        """Defect 4. The old rule said tokens "are embedded in helper scripts
+        and never exposed as environment variables", then told the model not to
+        read them out. Both halves were wrong — there are no token-bearing
+        helper scripts any more — and a rule that misdescribes its own mechanism
+        teaches the model a false model of the boundary."""
+        body = self._body("developer")
+        assert "embedded in helper scripts" not in body
+
     def test_commit_precedes_review_in_the_lifecycle(self):
         """The review resolves a commit range, so a lifecycle that numbers the
         review before the commit reviews an empty diff and comes back clean."""
@@ -264,7 +323,7 @@ class TestLoadBudget:
     stated rather than assumed. Parity with the pre-split single file is not
     achievable — `developer` sheds ~52 lines and gains more than that back."""
 
-    BUDGET_LINES = 700
+    BUDGET_LINES = 650
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
