@@ -119,12 +119,13 @@ Not covered by any of this: a deployment where bwrap is unavailable (Docker with
 | Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
 | Developer | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` (if enabled + set) |
-| Developer | `GITLAB_API_CMD` | Path to API wrapper script (if enabled + token set) |
+| Developer | `GITLAB_REVIEWER_ID` | `config.developer.gitlab_reviewer_id` (if enabled + set) — a GitLab *username*, despite the name |
 | Developer | `GITHUB_URL` | `config.developer.github_url` (if enabled) |
 | Developer | `GITHUB_DEFAULT_OWNER` | `config.developer.github_default_owner` (if enabled + set) |
 | Developer | `GITHUB_REVIEWER` | `config.developer.github_reviewer` (if enabled + set) |
-| Developer | `GITHUB_API_CMD` | Path to API wrapper script (if enabled + token set) |
+| Developer | `DEVELOPER_AUTHOR_CREDIT` | `config.developer.author_credit` (if enabled + set) |
 | Developer | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth (if enabled + token set) |
+| Developer | `ISTOTA_PATH_PREPEND` | `{user_temp_dir}/.developer`, written by the developer `setup_env` hook when a forge token is configured. The executor folds it onto the brain's `PATH` and **strips the variable**, so `gh` and `glab` resolve to the wrappers (`src/istota/forge_cli.py`) rather than to the real binaries. Deliberately absent from the `proxy_base_env` snapshot: a skill CLI runs host-side and must not pick up the task's wrappers. |
 
 The sandbox RO-binds the host's real `~/.claude/settings.json` back into the
 tmpfs'd `~/.claude` (`build_bwrap_cmd`), and the six direct brain callers
@@ -345,7 +346,7 @@ remains in the source as a dead helper but is no longer called.
 | `derive_proxy_only_set(skill_index)` | Env vars routed to the proxy *without* credential semantics (no auto-authorization, no `credential-fetch` lookup, no per-skill scoping): the manifest `proxy_only: true` vars (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`) plus `_EXECUTOR_PROXY_ONLY_VARS` (`ISTOTA_DB_PATH`, which is in no manifest — the executor sets it imperatively). These aren't secrets, so there is nothing to leak between skills; they are withheld because they name databases. |
 | `derive_authorized_skills(selected_skills, skill_index, ctx, hook_env=None)` | Skills authorized for credential access this task: a skill qualifies if it was **selected**, or if **any** of its sensitive `EnvSpec`s resolves (the user has at least one of its credentials configured). `any`, not `all`, so a multi-provider skill (`developer` — GitLab *or* GitHub) authorizes when one provider is set up. Decoupled from skill selection, so a selection miss doesn't lock out a skill the user has clearly configured; the threat model is unchanged because only credentials the user supplied ever resolve. Replaced `_authorized_skills_from_credentials`. `hook_env` (the merged `dispatch_setup_env_hooks` output, which is why the executor now dispatches hooks *before* deriving authorization) is the auto-auth signal for a `source="setup_env"` credential — `_resolve_env_spec` returns `None` for that source by design, so without it such a skill can never auto-authorize: its var is sensitive, so it is stripped from Claude's env, and it is in no authorized skill's credential map, so the proxy never injects it back and the CLI runs unauthenticated. `google_workspace` was the live case — no eager selector (menu-only since keyword selection was removed), hook-sourced OAuth token, hence never authorized on any path. A hook value is per-user (derived from that user's stored token), unlike an EnvironmentFile `fallback_var`, so it is a sound signal. |
 | `derive_skill_credential_map(authorized_skills, skill_index)` | Per-skill: the sensitive env vars its own manifest declares. The proxy scopes injection with it, so a skill CLI invocation only ever sees its own credentials. Replaced `_build_skill_credential_map`. |
-| `derive_lookup_allowlist(authorized_skills, skill_index)` | Union of the credentials any authorized skill may fetch via `credential-fetch` — the path helper scripts use (the git credential helper, the gitlab-api wrapper). Subtracts `_PROXY_LOOKUP_BLOCKED` as a hard reject (today `ISTOTA_SECRET_KEY`). Replaced `_allowed_credentials_for_skills`. |
+| `derive_lookup_allowlist(authorized_skills, skill_index)` | Union of the credentials any authorized skill may fetch via `credential-fetch` — the path helper scripts use (the git credential helper, the `gh` / `glab` wrapper). Subtracts `_PROXY_LOOKUP_BLOCKED` as a hard reject (today `ISTOTA_SECRET_KEY`). Replaced `_allowed_credentials_for_skills`. |
 
 ## Skill Proxy Authorization Model
 

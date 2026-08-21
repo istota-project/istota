@@ -739,47 +739,65 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # and GitHub pull requests. Uses bare clones + git worktrees for branch isolation.
 # Recommended: use dedicated bot accounts with minimal required permissions.
 
+# The bot drives the real `gh` and `glab`, not a REST client of our own. Both
+# run behind the wrapper in `src/istota/forge_cli.py`: it checks the argv
+# against a deny policy first, and only then fetches the token and puts it in
+# the CLI's own environment — a denied command contacts nothing and fetches no
+# credential. With `[security] skill_proxy_enabled` on, the token comes from
+# the proxy socket per call; with it off, from the task environment. The token
+# needs the scopes those CLIs use, which is more than the old REST allowlist
+# needed:
+# GitLab `api` + `write_repository`, GitHub `repo` (plus `read:org` for an org
+# repo, and `workflow` only if the bot must touch Actions workflow files).
+# Reissue a narrower token before enabling this.
+#
+# One instance per forge. `gitlab_url` and `github_url` are single strings, and
+# everything downstream derives from them: the CONNECT allowlist gets one host
+# per configured URL, the git credential helpers install under a per-host
+# `credential.{host}.helper` key, and the wrapper points `GITLAB_HOST` /
+# `GH_HOST` at that one host. A repository on a *second* GitLab or GitHub
+# instance is therefore unreachable — the CONNECT proxy refuses it before
+# anything authenticates, which is safe but opaque. Adding the second host to
+# `[security.network] extra_hosts` buys reachability and no credential, so the
+# clone still fails. There is no supported way to configure two of either.
+#
+# `git` itself is not wrapped and knows nothing about either forge: public
+# reads work against any allowlisted host, authenticated pushes only against
+# the two configured ones, and no policy gates git at all. Force-push
+# protection belongs to the forge's branch rules, for the same reason
+# `pr merge` is left un-denied here.
+
 # [developer]
 # enabled = false
 # repos_dir = "/srv/repos"                          # base dir for clones + worktrees
 #
 # # GitLab settings
-# gitlab_url = "https://gitlab.com"                 # GitLab instance URL
-# gitlab_token = "glpat-xxxxxxxxxxxxxxxxxxxx"        # API token (read_api + write_repository)
+# gitlab_url = "https://gitlab.com"                 # GitLab instance URL (one instance only — see above)
+# gitlab_token = "glpat-xxxxxxxxxxxxxxxxxxxx"        # API token (api + write_repository)
 # gitlab_username = "botuser"                        # GitLab username for HTTPS auth
 # gitlab_default_namespace = "example"                # default namespace for short repo names
-# gitlab_reviewer_id = "12345"                       # GitLab user ID to assign as MR reviewer
-# gitlab_api_allowlist = [                           # API endpoint allowlist (default below)
-#     "GET /api/v4/projects/*",
-#     "GET /api/v4/groups/*",
-#     "GET /api/v4/users*",
-#     "POST /api/v4/projects/*/merge_requests",
-#     "POST /api/v4/projects/*/merge_requests/*/notes",
-#     "POST /api/v4/projects/*/issues",
-#     "POST /api/v4/projects/*/issues/*/notes",
-#     "PUT /api/v4/projects/*/merge_requests/*/merge",
-# ]
+# gitlab_reviewer_id = "reviewer-user"               # GitLab *username* to assign as MR reviewer
 #
 # # GitHub settings
-# github_url = "https://github.com"                 # GitHub instance URL (or GitHub Enterprise)
+# github_url = "https://github.com"                 # GitHub instance URL, or GitHub Enterprise (one instance only)
 # github_token = "ghp_xxxxxxxxxxxxxxxxxxxx"          # Personal access token (repo scope)
 # github_username = ""                               # GitHub username (defaults to x-access-token)
 # github_default_owner = "myorg"                     # default org/user for short repo names
 # github_reviewer = "reviewer-user"                  # GitHub username to request as PR reviewer
-# github_api_allowlist = [                           # API endpoint allowlist (default below)
-#     "GET /repos/*",
-#     "GET /orgs/*",
-#     "GET /users/*",
-#     "GET /search/*",
-#     "POST /repos/*/pulls",
-#     "POST /repos/*/pulls/*/reviews",
-#     "POST /repos/*/issues",
-#     "POST /repos/*/issues/*/comments",
-#     "POST /repos/*/pulls/*/comments",
-#     "PUT /repos/*/pulls/*/merge",
-#     "PATCH /repos/*/pulls/*",
-#     "PATCH /repos/*/issues/*",
-# ]
+#
+# # Forge CLI policy. The baseline deny list lives in code, not here — it is a
+# # safety default rather than a preference. These two knobs extend and
+# # puncture it. Write an entry as you would type it; one with no binary name
+# # applies to both CLIs. A `forge_cli_permit` entry that matches no baseline
+# # rule is warned about at startup, because a hatch that silently stopped
+# # matching reads exactly like one that is still open.
+# forge_cli_extra_denied = ["gh pr merge"]           # refuse these too
+# forge_cli_permit = ["gh repo delete"]              # turn a baseline guard off
+#
+# # Where the real binaries live. The Ansible role renders these from what it
+# # installed; set them by hand if gh or glab is somewhere else.
+# gh_bin_path = "/usr/local/bin/gh"
+# glab_bin_path = "/usr/local/bin/glab"
 #
 # # Author credit appended to every commit message the bot writes. This is the
 # # only trailer the `commit` skill permits; nothing else is ever appended.

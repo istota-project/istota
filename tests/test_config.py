@@ -1164,8 +1164,10 @@ class TestDeveloperConfig:
         assert dev.forge_cli_permit == []
         assert dev.gh_bin_path == "/usr/local/bin/gh"
         assert dev.glab_bin_path == "/usr/local/bin/glab"
+        # `api_timeout_seconds` went with the devbox proxy's httpx client:
+        # nothing makes a REST call of its own any more.
+        assert not hasattr(dev, "api_timeout_seconds")
         # Devbox proxy defaults.
-        assert dev.api_timeout_seconds == 30
         assert dev.devbox_proxy_enabled is True
         assert dev.devbox_proxy_socket_dir == "/var/run/istota"
         assert dev.devbox_proxy_audit_log == ""
@@ -1176,13 +1178,11 @@ class TestDeveloperConfig:
 [developer]
 enabled = true
 repos_dir = "/srv/repos"
-api_timeout_seconds = 60
 devbox_proxy_enabled = false
 devbox_proxy_socket_dir = "/run/istota"
 devbox_proxy_audit_log = "/var/log/istota/devbox-proxy-audit.log"
 """)
         cfg = load_config(config_file)
-        assert cfg.developer.api_timeout_seconds == 60
         assert cfg.developer.devbox_proxy_enabled is False
         assert cfg.developer.devbox_proxy_socket_dir == "/run/istota"
         assert cfg.developer.devbox_proxy_audit_log == "/var/log/istota/devbox-proxy-audit.log"
@@ -1227,13 +1227,14 @@ github_reviewer = "reviewer-user"
         assert cfg.developer.github_default_owner == "myorg"
         assert cfg.developer.github_reviewer == "reviewer-user"
 
-    def test_retired_allowlist_keys_load_clean_and_inert(self, tmp_path):
-        """Every deployed host has these two keys in its config.toml, and
-        will keep having them: config.toml.j2 still renders both on every
-        Ansible run. The loader ignores unknown keys by design, so they must
-        load without raising and without reaching the DeveloperConfig
-        constructor — a TypeError here would take the whole daemon down on
-        upgrade, on every host at once."""
+    def test_retired_keys_load_clean_and_inert(self, tmp_path):
+        """Every deployed host has these three keys in its config.toml.
+        `config.toml.j2` no longer renders them, but a host keeps its
+        last-rendered file until Ansible runs again, and a hand-written
+        config.toml may carry them for years. The loader ignores unknown keys
+        by design, so they must load without raising and without reaching the
+        DeveloperConfig constructor — a TypeError here would take the whole
+        daemon down on upgrade, on every host at once."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [developer]
@@ -1241,12 +1242,14 @@ enabled = true
 repos_dir = "/srv/repos"
 github_api_allowlist = ["GET /repos/*"]
 gitlab_api_allowlist = ["GET /projects/*"]
+api_timeout_seconds = 60
 """)
         cfg = load_config(config_file)
         assert cfg.developer.enabled is True
         assert cfg.developer.repos_dir == "/srv/repos"
         assert not hasattr(cfg.developer, "github_api_allowlist")
         assert not hasattr(cfg.developer, "gitlab_api_allowlist")
+        assert not hasattr(cfg.developer, "api_timeout_seconds")
 
     def test_load_forge_cli_knobs(self, tmp_path):
         config_file = tmp_path / "config.toml"
@@ -1264,6 +1267,23 @@ glab_bin_path = "/opt/glab"
         assert cfg.developer.forge_cli_permit == ["gh repo delete"]
         assert cfg.developer.gh_bin_path == "/opt/gh"
         assert cfg.developer.glab_bin_path == "/opt/glab"
+
+    def test_forge_cli_knob_given_as_a_bare_string(self, tmp_path):
+        """`list("gh pr merge")` is eighteen one-character deny rules that
+        match nothing, warn about nothing, and read in the config file exactly
+        like a rule that is in force. A bare string is the plausible hand-edit,
+        so take it as the single entry it was meant to be."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+forge_cli_extra_denied = "gh pr merge"
+forge_cli_permit = ""
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.forge_cli_extra_denied == ["gh pr merge"]
+        assert cfg.developer.forge_cli_permit == []
 
     def test_dead_forge_cli_permit_is_warned_about(self, tmp_path, caplog):
         """A permit matching no rule is turning nothing off. Silence there
@@ -1341,10 +1361,14 @@ gh_bin_path = "{tmp_path / 'no-such-gh'}"
     def test_forge_tokens_without_the_skill_proxy_are_warned_about(
         self, tmp_path, caplog,
     ):
-        """The wrapper asks a credential proxy for the token and never falls
-        back to an ambient one. With the proxy off there is no socket, so
-        every forge command exits 4 — a behaviour change from the retired
-        curl wrappers, which had a direct-token branch."""
+        """With the proxy off, `setup_env` grants `direct_token` in the policy
+        file and the wrapper reads the ambient token, so forge commands work
+        (pinned by `test_policy_grants_direct_tokens_only_with_the_proxy_off`).
+        What the warning is about is where the token then sits: in the
+        environment the model's own shell inherits, rather than injected per
+        call. This assertion used to demand the opposite message — that every
+        command would fail — which had stopped being true when the direct-token
+        branch landed."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [developer]
@@ -1357,9 +1381,13 @@ skill_proxy_enabled = false
 """)
         with caplog.at_level("WARNING", logger="istota.config"):
             load_config(config_file)
+        messages = [r.getMessage() for r in caplog.records]
         assert any(
-            "no credential proxy to ask" in r.getMessage() for r in caplog.records
-        )
+            "readable by anything else the task runs" in m for m in messages
+        ), messages
+        # The warning must not claim breakage: an operator told their forge
+        # commands are dead turns the skill off rather than turning the proxy on.
+        assert not any("every forge command will fail" in m for m in messages)
 
     def test_no_proxy_warning_when_the_proxy_is_on(self, tmp_path, caplog):
         config_file = tmp_path / "config.toml"

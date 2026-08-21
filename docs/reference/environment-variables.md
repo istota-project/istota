@@ -97,12 +97,14 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` |
 | `GITLAB_URL` | `config.developer.gitlab_url` |
 | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` |
-| `GITLAB_API_CMD` | Path to API wrapper script |
+| `GITLAB_REVIEWER_ID` | `config.developer.gitlab_reviewer_id` (a username, despite the name) |
 | `GITHUB_URL` | `config.developer.github_url` |
 | `GITHUB_DEFAULT_OWNER` | `config.developer.github_default_owner` |
 | `GITHUB_REVIEWER` | `config.developer.github_reviewer` |
-| `GITHUB_API_CMD` | Path to API wrapper script |
+| `DEVELOPER_AUTHOR_CREDIT` | `config.developer.author_credit` |
 | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth |
+| `GH_HOST`, `GITLAB_HOST` | Written by the forge wrapper into the real CLI's environment, derived from the two URLs |
+| `ISTOTA_PATH_PREPEND` | Internal. The task's `{user_temp_dir}/.developer` directory, which holds the `gh` / `glab` wrappers; the executor folds it onto `PATH` and strips the variable before the model sees it |
 
 ## Credential proxy
 

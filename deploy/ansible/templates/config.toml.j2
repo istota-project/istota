@@ -548,11 +548,6 @@ gitlab_token = "{{ istota_developer_gitlab_token }}"
 gitlab_username = "{{ istota_developer_gitlab_username }}"
 gitlab_default_namespace = "{{ istota_developer_gitlab_default_namespace }}"
 gitlab_reviewer_id = "{{ istota_developer_gitlab_reviewer_id }}"
-gitlab_api_allowlist = [
-{% for pattern in istota_developer_gitlab_api_allowlist %}
-    "{{ pattern }}",
-{% endfor %}
-]
 github_url = "{{ istota_developer_github_url }}"
 {% if not istota_use_environment_file %}
 github_token = "{{ istota_developer_github_token }}"
@@ -560,12 +555,10 @@ github_token = "{{ istota_developer_github_token }}"
 github_username = "{{ istota_developer_github_username }}"
 github_default_owner = "{{ istota_developer_github_default_owner }}"
 github_reviewer = "{{ istota_developer_github_reviewer }}"
-github_api_allowlist = [
-{% for pattern in istota_developer_github_api_allowlist %}
-    "{{ pattern }}",
-{% endfor %}
-]
-api_timeout_seconds = {{ istota_developer_api_timeout_seconds }}
+forge_cli_extra_denied = {{ istota_developer_forge_cli_extra_denied | to_json }}
+forge_cli_permit = {{ istota_developer_forge_cli_permit | to_json }}
+gh_bin_path = "{{ istota_developer_gh_bin_path }}"
+glab_bin_path = "{{ istota_developer_glab_bin_path }}"
 devbox_proxy_enabled = {{ istota_devbox_proxy_enabled | ternary('true', 'false') }}
 devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
 devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"

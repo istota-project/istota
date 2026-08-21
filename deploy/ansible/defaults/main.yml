@@ -831,9 +831,6 @@ istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
 # Empty string → audit lines go to the journal only. Set to an absolute
 # path to also tail audit lines into a file.
 istota_devbox_proxy_audit_log: ""
-# Per-API call timeout, used by both the host-side developer skill and
-# the devbox proxy.
-istota_developer_api_timeout_seconds: 30
 
 # Docker-API allowlist proxy. One systemd unit per devbox user forwards only
 # exec/cp/inspect/restart on the user's own container, refusing
@@ -1039,40 +1036,33 @@ istota_developer_cli_floors:
   glab: "1.36.0"
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
-istota_developer_gitlab_token: ""                 # API token (read_api + write_repository scope)
+istota_developer_gitlab_token: ""                 # API token (api + write_repository scope — glab needs api, not read_api)
 istota_developer_gitlab_username: ""              # GitLab username for HTTPS auth
 istota_developer_gitlab_default_namespace: ""     # Default namespace for short repo names
-istota_developer_gitlab_reviewer_id: ""          # GitLab user ID to assign as MR reviewer
-istota_developer_gitlab_api_allowlist:            # Devbox proxy strips /api/v4 into base_url; match against the bare path
-  - "GET /user"
-  - "GET /projects/*"
-  - "GET /groups/*"
-  - "GET /users*"
-  - "POST /projects/*/merge_requests"
-  - "POST /projects/*/merge_requests/*/notes"
-  - "POST /projects/*/issues"
-  - "POST /projects/*/issues/*/notes"
-  - "PUT /projects/*/merge_requests/*/merge"
+# A GitLab *username*, despite the name: `glab mr create --reviewer` takes
+# usernames, not the numeric user IDs the old REST wrapper wanted.
+istota_developer_gitlab_reviewer_id: ""           # GitLab username to assign as MR reviewer
 # GitHub settings
 istota_developer_github_url: "https://github.com"
 istota_developer_github_token: ""                 # Personal access token (repo scope)
 istota_developer_github_username: ""              # GitHub username for HTTPS auth (defaults to x-access-token)
 istota_developer_github_default_owner: ""         # Default org/user for short repo names
 istota_developer_github_reviewer: ""              # GitHub username to request as PR reviewer
-istota_developer_github_api_allowlist:            # API endpoint allowlist (enforced in wrapper script)
-  - "GET /user"
-  - "GET /repos/*"
-  - "GET /orgs/*"
-  - "GET /users/*"
-  - "GET /search/*"
-  - "POST /repos/*/pulls"
-  - "POST /repos/*/pulls/*/reviews"
-  - "POST /repos/*/issues"
-  - "POST /repos/*/issues/*/comments"
-  - "POST /repos/*/pulls/*/comments"
-  - "PUT /repos/*/pulls/*/merge"
-  - "PATCH /repos/*/pulls/*"
-  - "PATCH /repos/*/issues/*"
+
+# Forge CLI wrapper policy. The real `gh` and `glab` run behind
+# src/istota/forge_cli.py, which checks the argv against a baseline policy the
+# code owns. These two knobs extend and puncture it. Entries are written as
+# they would be typed — "gh repo delete" — and an entry with no binary name
+# applies to both CLIs.
+istota_developer_forge_cli_extra_denied: []       # Additional verbs to refuse
+istota_developer_forge_cli_permit: []             # Baseline entries to turn off — each one removes a guard
+
+# Where the wrapper execs the real binaries. The Debian archive installs both
+# under /usr/bin, which is what the apt task above produces; the code default
+# is /usr/local/bin, for the non-Ansible install shapes. Repoint these if you
+# install gh or glab from the vendors' own repos or by hand.
+istota_developer_gh_bin_path: "/usr/bin/gh"
+istota_developer_glab_bin_path: "/usr/bin/glab"
 
 # Public hostname for nginx (web UI, webhooks)
 istota_hostname: "{{ istota_namespace }}.example.com"
