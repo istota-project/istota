@@ -19,6 +19,7 @@ The same shape as `tests/test_linux_runner.py`, which guards the tier below it.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -84,9 +85,11 @@ class TestTheGuardDoesNotFireOnTheDefaultRun:
         )
         assert "deselected" in result.stdout
 
-    def test_the_guard_fires_when_the_tier_is_selected_under_xdist(self):
-        # The other direction, and the one that matters: N workers racing to
-        # `docker build` the same tag is the failure this exists to prevent.
+    def test_the_collection_hook_rejects_the_collect_only_spelling(self):
+        # `--collect-only -n 2` disables xdist and leaves `numprocesses` set, so
+        # this is the one shape the collection hook can see. Kept because it
+        # gives an error before anything is built — but it is NOT the real
+        # scenario, which the next test covers.
         result = _collect(["-m", "image", "-n", "2"])
 
         assert result.returncode == 4, (
@@ -101,6 +104,48 @@ class TestTheGuardDoesNotFireOnTheDefaultRun:
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "collected" in result.stdout
 
+    def test_a_real_xdist_run_is_refused_before_anything_is_built(self):
+        """The scenario the collection hook structurally cannot see.
+
+        Under a real `-n 2` the controller never calls
+        `pytest_collection_modifyitems` — it holds no items — and xdist clears
+        `numprocesses` and `dist` in the workers so they do not re-fan-out. Every
+        reading available to that hook therefore says "not parallel", and a
+        measured `-m image -n 2` ran the entire tier ungated.
+
+        So the binding check is `_require_no_xdist`, in the image fixtures,
+        keyed on `config.workerinput`. This drives a real parallel session to
+        prove it. It costs a fraction of a second because the refusal happens at
+        fixture setup, before `require_docker()` and before any build — which
+        also means this test needs no Docker daemon.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "-q",
+                "--no-header",
+                "-m",
+                "image",
+                "-n",
+                "2",
+                "tests/image/test_istota_image.py::TestGroupBTheRuntime",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env={**os.environ, "ISTOTA_IMAGE_TAG": "guard-test-should-never-be-pulled"},
+        )
+        output = result.stdout + result.stderr
+
+        assert result.returncode != 0, f"a real xdist run was not refused\n{output}"
+        assert "must run with -n0" in output, output
+        assert "xdist worker" in output, output
+
 
 def _collect(args: list[str]) -> subprocess.CompletedProcess:
     """A nested `--collect-only` pytest, from the repo root.
@@ -110,7 +155,22 @@ def _collect(args: list[str]) -> subprocess.CompletedProcess:
     neither.
     """
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", *args],
+        # `-p no:cacheprovider`: the cacheprovider writes .pytest_cache/v/cache/
+        # nodeids during collection, and three of these run concurrently with an
+        # outer `-n auto` session writing the same file. Benign today (a
+        # clobbered `--lf` set, not a failure), but shared mutable state across
+        # processes is exactly what the order-independence rule in AGENTS.md
+        # rules out.
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "--collect-only",
+            "-q",
+            *args,
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -265,6 +325,44 @@ class TestCredentialScrubbing:
         scrub = _image_conftest().scrub
 
         assert scrub("hello", {"SOME_TOKEN": ""}) == "hello"
+
+    def test_a_credential_is_never_placed_in_the_docker_argv(self):
+        """The leak that scrubbing stdout alone does not close.
+
+        `docker run -e NAME=value` puts the value in argv, where any other user
+        on the host reads it out of `ps` — and pytest renders
+        `CompletedProcess.args` into the assertion message, so it reaches the
+        report too. Credential-shaped names go as a bare `-e NAME` with the
+        value handed to docker through our own environment instead.
+        """
+        conftest = _image_conftest()
+        image = conftest.BuiltImage(tag="x", dockerfile=REPO_ROOT, platform="")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs.get("env") or {}
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        env = {"A_TOKEN": "secret-value", "USER_NAME": "alice"}
+        original_run = conftest.subprocess.run
+        original_docker = conftest.docker_available
+        conftest.subprocess.run = fake_run
+        conftest.docker_available = lambda: True
+        try:
+            result = conftest.run_in(image, ["-c", "true"], env=env)
+        finally:
+            conftest.subprocess.run = original_run
+            conftest.docker_available = original_docker
+
+        assert "secret-value" not in " ".join(captured["cmd"]), captured["cmd"]
+        assert "-e" in captured["cmd"] and "A_TOKEN" in captured["cmd"]
+        # It still has to reach the container, just by the other route.
+        assert captured["env"]["A_TOKEN"] == "secret-value"
+        # A non-credential keeps the inline form, which keeps failures readable.
+        assert "USER_NAME=alice" in captured["cmd"]
+        # And the returned args, which pytest renders, carry nothing either.
+        assert "secret-value" not in " ".join(result.args)
 
 
 class _FakeConfig:

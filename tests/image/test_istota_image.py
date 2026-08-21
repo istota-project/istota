@@ -6,6 +6,12 @@ Three groups, and the split is the design rather than an arrangement:
 every environmental fact istota depends on is written down, so an image test can
 run it instead of hand-writing thirty assertions that drift from the code.
 
+The umbrella is not a superset of Group B, and it is worth knowing where it
+stops. Measured against a control with `/app/web/build` deleted: two failures,
+both from Groups B and C, and *zero* doctor checks failed — there is no
+static-dir check in `--scope image`. So Group A bounds what doctor knows about,
+not what the image needs.
+
 **Group B — independent witnesses.** A self-check cannot be the only witness to
 its own assumptions. The same blind spot that made the code look for
 `/usr/local/bin/gh` would have made a doctor check look there too. So the facts
@@ -85,6 +91,26 @@ KNOWN_STATUSES = {STATUS_OK, STATUS_WARN, STATUS_FAIL, STATUS_SKIP}
 # `src/istota/skills/money/skill.md` documents. Asserted below as itself.
 CONSOLE_SCRIPTS = ("istota", "istota-skill", "istota-scheduler")
 VENV_BIN = "/app/.venv/bin"
+
+# One import per extra the image claims to install, since the Dockerfile syncs
+# `--extra all`. A deliberate list, like Group C's paths: a new extra means an
+# edit here, and an extra dropped from `all` should fail rather than pass
+# unnoticed. `docs` is excluded — mkdocs is a build-time tool the runtime never
+# imports.
+EXTRA_WITNESSES = {
+    "caldav": "calendar",
+    "imap_tools": "email",
+    "yfinance": "markets",
+    "pytesseract": "transcribe",
+    "sqlite_vec": "memory-search",
+    "faster_whisper": "whisper",
+    "geopy": "location",
+    "fastapi": "web",
+    "weasyprint": "money",
+    "feedparser": "feeds",
+    "garminconnect": "garmin",
+    "istota": "the project itself",
+}
 WEB_INDEX = "/app/web/build/index.html"
 RENDER_CONFIG = "/render-config.sh"
 ENTRYPOINT = "/entrypoint.sh"
@@ -144,11 +170,16 @@ ENVIRONMENTS = {
 FORGE_ENVIRONMENTS = ("developer-with-token",)
 
 
-def _render_and_doctor(image, env: dict[str, str]) -> list[dict]:
+def _render_and_doctor(image, env: dict[str, str]) -> tuple[list[dict], int]:
     """Render a config in the container, then run doctor against it.
 
     One `docker run`, not two: the rendered file lives in the container's
     filesystem and a second `--rm` run would not see it.
+
+    Returns the parsed results *and* the exit code. Doctor exits 1 on any FAIL,
+    which the spec asks Group A to assert directly — an earlier version threw
+    the `CompletedProcess` away and left a docstring claiming the exit code was
+    checked somewhere below, where nothing could reach it.
     """
     config = env["CONFIG_FILE"]
     result = sh(
@@ -157,15 +188,12 @@ def _render_and_doctor(image, env: dict[str, str]) -> list[dict]:
         f"{RENDER_CONFIG} >/dev/null && istota -c {config} doctor --json --scope image",
         env=env,
     )
-    # doctor exits 1 on any FAIL, which is a result to inspect rather than a
-    # crash — so the exit code is asserted per-test below, not here. What must
-    # hold is that we got JSON at all.
     assert result.stdout.strip(), (
         f"no doctor output\n--- stdout ---\n{result.stdout}\n"
         f"--- stderr ---\n{result.stderr}"
     )
     try:
-        return json.loads(result.stdout)
+        return json.loads(result.stdout), result.returncode
     except json.JSONDecodeError as exc:  # pragma: no cover - diagnostic path
         pytest.fail(
             f"doctor --json emitted invalid JSON ({exc})\n"
@@ -187,7 +215,7 @@ class TestGroupATheDoctorUmbrella:
         status this file does not know about is a failure rather than a filter
         that silently selects nothing.
         """
-        results = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
 
         observed = {r["status"] for r in results}
         assert observed, "doctor reported no checks at all"
@@ -199,19 +227,24 @@ class TestGroupATheDoctorUmbrella:
 
     @pytest.mark.parametrize("shape", sorted(ENVIRONMENTS))
     def test_no_check_fails(self, istota_image, shape):
-        results = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, exit_code = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
 
         failed = [r for r in results if r["status"] == STATUS_FAIL]
         assert not failed, "\n".join(
             f"{r['name']}: {r['detail']} — {r['remedy']}" for r in failed
         )
+        # The exit code too, not just the payload. They are separate claims: a
+        # doctor that reported every check `ok` and still exited 1 would be a
+        # real defect in the product an operator scripts against, and the
+        # payload assertion alone cannot see it.
+        assert exit_code == 0, f"doctor exited {exit_code} with no failing check"
 
     @pytest.mark.parametrize("shape", sorted(ENVIRONMENTS))
     def test_the_run_produced_checks_at_all(self, istota_image, shape):
         # Guard on the umbrella. A `--scope image` that filtered everything out
         # would make the assertion above vacuously true, and the failure mode
         # looks identical to a healthy image.
-        results = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
 
         assert len(results) >= 5, f"only {len(results)} checks ran: {results}"
 
@@ -224,7 +257,7 @@ class TestGroupATheDoctorUmbrella:
         # Asserted positively — every forge check reported `ok` — rather than as
         # "did not skip". Verified against the negative control: on an image
         # with /usr/local/lib/istota_forge removed, this reports `fail` on both.
-        results = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
         forge = [r for r in results if r["name"].startswith("developer.forge_binaries")]
 
         assert forge, "no developer.forge_binaries check ran at all"
@@ -239,7 +272,7 @@ class TestGroupATheDoctorUmbrella:
     def test_every_warning_carries_a_remedy(self, istota_image, shape):
         # A WARN an operator cannot act on is a line of noise that trains them
         # to ignore the next one.
-        results = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
         mute = [r for r in results if r["status"] == STATUS_WARN and not r["remedy"]]
 
         assert not mute, [r["name"] for r in mute]
@@ -291,19 +324,44 @@ class TestGroupBTheForgeBinaries:
         # binary, so it guards against a *future* regression — someone
         # `apt install`s gh and puts a real one on PATH, where the model's shell
         # would reach it before the per-task policy wrapper.
-        result = sh(istota_image, f"command -v {binary} || true")
+        #
+        # The sentinel is not decoration. `docker run` against a tag that does
+        # not exist returns 125 with empty stdout, and an assertion that only
+        # requires stdout to be *empty* passes on a container that never
+        # started. Measured: four tests in this file passed against a
+        # nonexistent image before the sentinels went in.
+        result = sh(istota_image, f"command -v {binary} || true; echo READY")
+        found = result.stdout.replace("READY", "").strip()
 
-        assert not result.stdout.strip(), (
-            f"{binary} resolves on the default PATH to {result.stdout.strip()!r}; "
+        assert "READY" in result.stdout, (
+            f"the container never ran\n{result.stdout}\n{result.stderr}"
+        )
+        assert not found, (
+            f"{binary} resolves on the default PATH to {found!r}; "
             "the policy wrapper is supposed to be the only one a task can reach"
         )
 
-    def test_neither_is_installed_as_a_package(self, istota_image):
+    @pytest.mark.parametrize("binary", ["gh", "glab"])
+    def test_the_binary_is_not_installed_as_a_package(self, istota_image, binary):
         # Same character and same limitation as the previous test: `dpkg -i`
         # would drop a real binary at /usr/bin, resolvable by name.
-        result = sh(istota_image, "dpkg-query -W gh glab 2>&1 || true")
+        #
+        # One package per call, and asserted on the exit code. The first version
+        # ran `dpkg-query -W gh glab 2>&1` and looked for "no packages found" in
+        # the merged stream — which is present as long as *either* is missing,
+        # so it passed on an image where someone had apt-installed gh. That is
+        # the same vacuity as the lowercase-status bug: a filter matching for a
+        # reason unrelated to the property.
+        result = sh(istota_image, f"dpkg-query -W {binary}; echo EXIT=$?")
 
-        assert "no packages found" in result.stdout.lower(), result.stdout
+        assert "EXIT=" in result.stdout, (
+            f"the container never ran\n{result.stdout}\n{result.stderr}"
+        )
+        assert "EXIT=0" not in result.stdout, (
+            f"{binary} is installed as a Debian package; dpkg would put a real "
+            f"one on PATH and the policy wrapper stops being what a task reaches"
+            f"\n{result.stdout}\n{result.stderr}"
+        )
 
 
 class TestGroupBTheRuntime:
@@ -340,14 +398,23 @@ class TestGroupBTheRuntime:
             f"{script} resolves to {resolved!r}, not the venv the image installs"
         )
 
-    @pytest.mark.parametrize("script", CONSOLE_SCRIPTS)
-    def test_the_console_script_actually_starts(self, istota_image, script):
+    @pytest.mark.parametrize("script", ["istota", "istota-scheduler"])
+    def test_the_console_script_handles_help(self, istota_image, script):
         # Resolution alone would pass on a dangling symlink or a script whose
-        # shebang points at a python that is not there. 127 is "not found";
-        # anything else means the interpreter ran it.
-        result = sh(istota_image, f"{script} --help >/dev/null 2>&1; echo $?")
+        # shebang points at a python that is not there. These two take `--help`
+        # and must exit 0 — the loose "not 127" form was applied to all three
+        # when only `istota-skill` needs it, and would have passed an
+        # import-time crash in istota-scheduler.
+        assert_ok(sh(istota_image, f"{script} --help"), f"{script} --help")
 
-        assert result.stdout.strip() != "127", f"{script} did not start"
+    def test_the_skill_dispatcher_starts_and_prints_usage(self, istota_image):
+        # `istota-skill` takes a skill name, so `--help` is not a valid
+        # invocation and exits 1. What must hold is that it ran at all: a
+        # dangling entry point exits 127 with nothing on stdout.
+        result = sh(istota_image, "istota-skill 2>&1; echo EXIT=$?")
+
+        assert "EXIT=127" not in result.stdout, "istota-skill did not start"
+        assert "Usage: istota-skill" in result.stdout, result.stdout
 
     def test_the_money_cli_is_reachable_through_the_skill_dispatcher(self, istota_image):
         # There is no `money` binary; this is the entry point skill.md documents
@@ -366,9 +433,16 @@ class TestGroupBTheRuntime:
         assert_ok(result, f"{WEB_INDEX} is missing or empty")
         assert int(result.stdout.strip()) > 0
 
-    @pytest.mark.parametrize("module", ["istota", "weasyprint"])
+    @pytest.mark.parametrize("module", sorted(EXTRA_WITNESSES))
     def test_the_module_imports(self, istota_image, module):
-        assert_ok(sh(istota_image, f"python -c 'import {module}'"), f"import {module}")
+        # The Dockerfile runs `uv sync --frozen --no-dev --extra all`, so an
+        # extra that silently stopped resolving surfaces first as a failing
+        # task. One import per extra rather than the two the first version had.
+        extra = EXTRA_WITNESSES[module]
+        assert_ok(
+            sh(istota_image, f"python -c 'import {module}'"),
+            f"import {module} (the [{extra}] extra)",
+        )
 
     @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG])
     def test_the_shell_script_parses(self, istota_image, script):
@@ -385,14 +459,24 @@ class TestGroupBTheRuntime:
 class TestGroupCTheGeneratedConfig:
     """render-config.sh runs in the container and produces a loadable config.
 
-    The path assertions are an explicit list of four, not a sweep. An earlier
+    The path assertions are an explicit short list, not a sweep. An earlier
     draft said "every filesystem path the resulting Config names either exists
     or is created on demand", which has no oracle: Config names a couple of
     dozen paths, almost none exist in a volume-less container, and "created on
     demand" becomes a hand-maintained allowlist unlinked from the code that
     creates them. A path field added later would then land in neither list and
     be silently unchecked, while the test kept passing over a shrinking
-    fraction. Adding a fifth here is a deliberate edit.
+    fraction. Adding one here is a deliberate edit.
+
+    The spec named four: both forge paths, the `claude` binary, and
+    `web/build/index.html`. Only three of those are reachable this way, and the
+    difference is worth recording rather than quietly dropping. The forge pair
+    is genuinely config-named. The static dir is not a config field but is
+    resolved by `resolve_static_dir()`, which is what the web service calls, so
+    it is asserted through that. The `claude` binary is neither — `check_model_cli`
+    resolves it with `shutil.which("claude")` to match `ClaudeCodeBrain`'s own
+    spawn, so there is no config value to read and Group B's `claude --version`
+    is the whole of that coverage.
     """
 
     @pytest.mark.parametrize("shape", sorted(ENVIRONMENTS))
@@ -417,33 +501,57 @@ class TestGroupCTheGeneratedConfig:
         assert "testuser" in result.stdout
 
     def test_the_forge_paths_the_config_names_exist(self, istota_image):
-        # Where ISSUE-263 lived, asserted end to end: the config names a path
-        # and the path is a program. `_resolve_real_bin` is in the loop on
-        # purpose — a config naming the old /usr/local/bin default should still
-        # resolve to the shipped binary, and this is where that is observable.
+        """Where ISSUE-263 lived — and the raw value, not just the resolved one.
+
+        `resolve_real_bin` rewrites the *code default* `/usr/local/bin/gh` to
+        the shipped path (`src/istota/forge_bin.py`), which is deliberate and is
+        what `30bb7c83` added for upgraded containers. It also means an
+        assertion that only checks the resolver's output is blind to exactly one
+        value: `/usr/local/bin/gh`, which is the value ISSUE-263 shipped.
+        Measured — a control image whose render wrote that path passed the whole
+        tier.
+
+        So both are asserted. The raw path is what the config actually says; the
+        resolved path is what a task actually execs.
+        """
         env = ENVIRONMENTS["developer-with-token"]
         script = (
             f"{RENDER_CONFIG} >/dev/null && python -c "
             f"'from pathlib import Path; from istota.config import load_config; "
             f"from istota.forge_bin import resolve_real_bin; "
             f'c = load_config(Path("{env["CONFIG_FILE"]}")).developer; '
-            f'print(resolve_real_bin(c.gh_bin_path, "gh")); '
-            f'print(resolve_real_bin(c.glab_bin_path, "glab"))\''
+            f'print(c.gh_bin_path, resolve_real_bin(c.gh_bin_path, "gh")); '
+            f'print(c.glab_bin_path, resolve_real_bin(c.glab_bin_path, "glab"))\''
         )
         result = sh(istota_image, script, env=env)
         assert_ok(result, "resolving the configured forge paths")
 
-        resolved = result.stdout.split()
-        assert len(resolved) == 2, result.stdout
-        for path in resolved:
-            assert_ok(sh(istota_image, f"test -x {path}"), f"configured path {path}")
+        lines = result.stdout.split()
+        assert len(lines) == 4, result.stdout
+        for raw, resolved in ((lines[0], lines[1]), (lines[2], lines[3])):
+            assert_ok(
+                sh(istota_image, f"test -x {raw}"),
+                f"the path the config names, {raw}, is not an executable. This is "
+                f"the ISSUE-263 shape: resolution would rescue it to {resolved}, "
+                "but the config is still naming something that is not there",
+            )
+            assert_ok(sh(istota_image, f"test -x {resolved}"), f"resolved path {resolved}")
 
-    def test_the_claude_binary_the_brain_shells_out_to_exists(self, istota_image):
-        # The CLI brains exec `claude` by name; an image without it fails at the
-        # first task rather than at boot.
-        assert_ok(sh(istota_image, "command -v claude"), "claude on PATH")
+    def test_the_web_root_the_daemon_would_serve_exists(self, istota_image):
+        # Resolved by `resolve_static_dir()` — the same call the web service
+        # makes — rather than against the literal Group B already checks. A
+        # packaged layout that moved the build output would leave the literal
+        # green and 404 the whole UI.
+        script = (
+            "python -c 'from istota.static_dir import resolve_static_dir; "
+            "print(resolve_static_dir())'"
+        )
+        resolved = assert_ok(
+            sh(istota_image, script), "resolving the web static dir"
+        ).strip()
 
-    def test_the_web_root_the_config_serves_exists(self, istota_image):
-        # `static_dir` is what the web service serves; a config naming a
-        # directory the build never produced 404s the whole UI.
-        assert_ok(sh(istota_image, f"test -s {WEB_INDEX}"), WEB_INDEX)
+        assert resolved, "resolve_static_dir() returned nothing"
+        assert_ok(
+            sh(istota_image, f"test -s {resolved}/index.html"),
+            f"{resolved}/index.html, as resolve_static_dir() names it",
+        )

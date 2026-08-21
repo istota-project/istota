@@ -41,19 +41,47 @@ def _is_amd64(platform_option: str) -> bool:
     """Whether this session will produce an amd64 image.
 
     Either the opt-in flag was passed, or the host is already amd64.
+
+    Matches the architecture *component*, not a suffix. Docker accepts a variant
+    form — `linux/amd64/v2` — and `endswith("amd64")` reads that as "not amd64"
+    and skips the whole module. A silent skip on a platform the operator
+    explicitly asked for is the exact defect this tier exists to end, so an
+    unrecognized platform raises rather than skipping.
     """
-    if platform_option:
-        return platform_option.endswith("amd64")
-    return platform.machine().lower() in ("x86_64", "amd64")
+    if not platform_option:
+        return platform.machine().lower() in ("x86_64", "amd64")
+
+    parts = platform_option.split("/")
+    for known in ("amd64", "arm64", "386", "arm", "riscv64", "ppc64le", "s390x"):
+        if known in parts:
+            return known == "amd64"
+    raise AssertionError(
+        f"unrecognized --platform {platform_option!r}: this file cannot tell "
+        "whether it names amd64, and skipping on a platform you asked for is "
+        "how a tier goes quietly unexecuted"
+    )
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _amd64_only(platform):
+@pytest.fixture(scope="module")
+def amd64_devbox_image(platform, request):
+    """The devbox image, or a skip — and crucially, the skip comes first.
+
+    An autouse module-scoped guard is the obvious shape and it does not work:
+    pytest instantiates higher-scoped fixtures first, so the session-scoped
+    `devbox_image` in conftest is *built* before a module-scoped skip ever runs.
+    On this arm64 machine that meant every native `pytest -m image` paid for a
+    full devbox build — an emulated Go toolchain and two .debs — and then
+    skipped all fourteen tests that needed it.
+
+    `getfixturevalue` defers the build until after the gate, so a native run
+    never asks Docker for it at all.
+    """
     if not _is_amd64(platform):
         pytest.skip(
             "the devbox image is amd64-only (hardcoded linux-amd64 Go toolchain "
             "and .debs); run with --platform amd64 to build it under emulation"
         )
+    return request.getfixturevalue("devbox_image")
 
 
 def _dockerfile_arg(dockerfile, name: str) -> str:
@@ -65,43 +93,43 @@ def _dockerfile_arg(dockerfile, name: str) -> str:
 
 class TestTheForgeBinariesMatchTheMainImage:
     @pytest.mark.parametrize("binary", ["gh", "glab"])
-    def test_the_binary_is_present_and_runs(self, devbox_image, binary):
-        assert_ok(sh(devbox_image, f"{FORGE_LIB}/{binary} --version"), binary)
+    def test_the_binary_is_present_and_runs(self, amd64_devbox_image, binary):
+        assert_ok(sh(amd64_devbox_image, f"{FORGE_LIB}/{binary} --version"), binary)
 
     @pytest.mark.parametrize(
         "binary,arg", [("gh", "GH_VERSION"), ("glab", "GLAB_VERSION")]
     )
     def test_the_installed_version_matches_this_images_pin(
-        self, devbox_image, binary, arg
+        self, amd64_devbox_image, binary, arg
     ):
-        pinned = _dockerfile_arg(devbox_image.dockerfile, arg)
-        out = assert_ok(sh(devbox_image, f"{FORGE_LIB}/{binary} --version"), binary)
+        pinned = _dockerfile_arg(amd64_devbox_image.dockerfile, arg)
+        out = assert_ok(sh(amd64_devbox_image, f"{FORGE_LIB}/{binary} --version"), binary)
 
         assert pinned in out, f"expected {pinned} in {out!r}"
 
     @pytest.mark.parametrize(
         "binary,arg", [("gh", "GH_VERSION"), ("glab", "GLAB_VERSION")]
     )
-    def test_the_two_images_ship_the_same_version(self, devbox_image, binary, arg):
+    def test_the_two_images_ship_the_same_version(self, amd64_devbox_image, binary, arg):
         # A drift here means a task behaves differently depending on which
         # container it lands in, which is the hardest kind of bug to reproduce.
         main = _dockerfile_arg(REPO / "docker" / "istota" / "Dockerfile", arg)
-        devbox = _dockerfile_arg(devbox_image.dockerfile, arg)
+        devbox = _dockerfile_arg(amd64_devbox_image.dockerfile, arg)
 
         assert main == devbox, (
             f"{binary}: the main image pins {main} and the devbox image pins "
             f"{devbox}. scripts/sync-devbox-lib.sh does not cover the ARGs."
         )
-        assert main in assert_ok(sh(devbox_image, f"{FORGE_LIB}/{binary} --version"), binary)
+        assert main in assert_ok(sh(amd64_devbox_image, f"{FORGE_LIB}/{binary} --version"), binary)
 
 
 class TestTheWrapperCopyIsInSync:
-    def test_the_image_copy_is_byte_identical_to_the_source(self, devbox_image):
+    def test_the_image_copy_is_byte_identical_to_the_source(self, amd64_devbox_image):
         # The devbox build context is docker/devbox/, so it cannot COPY from
         # src/ — the copy exists for that reason alone, and a copy with no check
         # is a copy that drifts.
         expected = hashlib.sha256(SOURCE_OF_TRUTH.read_bytes()).hexdigest()
-        result = sh(devbox_image, f"sha256sum {WRAPPER_IN_IMAGE}")
+        result = sh(amd64_devbox_image, f"sha256sum {WRAPPER_IN_IMAGE}")
         actual = assert_ok(result, f"sha256sum {WRAPPER_IN_IMAGE}").split()[0]
 
         assert actual == expected, (
@@ -109,21 +137,19 @@ class TestTheWrapperCopyIsInSync:
             "src/istota/forge_cli.py; run scripts/sync-devbox-lib.sh"
         )
 
-    def test_the_repo_copy_is_also_in_sync(self):
-        # Cheap and worth having separately: this one distinguishes "the image
-        # is stale" from "the repo copy is stale", which the assertion above
-        # cannot tell apart.
-        vendored = REPO / "docker" / "devbox" / "lib" / "istota_forge_cli.py"
-
-        assert vendored.read_bytes() == SOURCE_OF_TRUTH.read_bytes(), (
-            "the vendored copy has drifted; run scripts/sync-devbox-lib.sh"
-        )
+    # The "is the *repo* copy in sync" half deliberately lives elsewhere:
+    # `tests/test_forge_cli.py` already asserts
+    # src/istota/forge_cli.py == docker/devbox/lib/istota_forge_cli.py, in the
+    # default suite, with no Docker and on any architecture. A copy of it here
+    # would be gated behind the `image` marker and an amd64 build, so it could
+    # never run on the development machine and could never fail in a state that
+    # one had not already caught.
 
 
 class TestTheWrapperIsWhatResolvesByName:
     @pytest.mark.parametrize("binary", ["gh", "glab"])
-    def test_the_name_resolves_to_the_wrapper(self, devbox_image, binary):
-        result = sh(devbox_image, f"command -v {binary}")
+    def test_the_name_resolves_to_the_wrapper(self, amd64_devbox_image, binary):
+        result = sh(amd64_devbox_image, f"command -v {binary}")
         resolved = assert_ok(result, f"command -v {binary}").strip()
 
         assert resolved, f"{binary} does not resolve by name at all"
@@ -134,9 +160,9 @@ class TestTheWrapperIsWhatResolvesByName:
 
     @pytest.mark.parametrize("binary", ["gh", "glab"])
     def test_what_resolves_is_the_python_wrapper_not_a_real_binary(
-        self, devbox_image, binary
+        self, amd64_devbox_image, binary
     ):
-        result = sh(devbox_image, f"head -c 200 \"$(command -v {binary})\"")
+        result = sh(amd64_devbox_image, f"head -c 200 \"$(command -v {binary})\"")
         head = assert_ok(result, f"reading the {binary} on PATH")
 
         assert "python" in head.lower(), (
@@ -144,11 +170,11 @@ class TestTheWrapperIsWhatResolvesByName:
         )
 
     @pytest.mark.parametrize("binary", ["gh", "glab"])
-    def test_the_real_binary_is_off_path(self, devbox_image, binary):
+    def test_the_real_binary_is_off_path(self, amd64_devbox_image, binary):
         # The positive half is the test above; without it this passes on an
         # image that installs nothing.
         result = sh(
-            devbox_image,
+            amd64_devbox_image,
             f"test -x {FORGE_LIB}/{binary} && command -v {binary}",
         )
         resolved = assert_ok(result, f"{binary}").strip()
