@@ -89,6 +89,7 @@ nav:
     - features/nextcloud.md
     - features/google-workspace.md
     - features/web-interface.md
+    - features/usage.md
   - Configuration:
     - configuration/overview.md
     - configuration/reference.md

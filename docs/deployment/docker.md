@@ -31,6 +31,14 @@ docker compose up -d
 
 The `.env` file exposes most settings available in the Ansible role: scheduler intervals, conversation tuning, progress updates, sleep cycle, memory search, email, ntfy, developer skill, and per-user overrides.
 
+### Forge binaries
+
+The image ships `gh` and `glab` under `/usr/local/lib/istota_forge`, deliberately off `PATH` so the only `gh` or `glab` a task can resolve by name is the policy wrapper. `ISTOTA_DEVELOPER_GH_BIN_PATH` and `ISTOTA_DEVELOPER_GLAB_BIN_PATH` exist for pointing at your own build; leave both empty otherwise.
+
+Being off `PATH` is a guard against habit, not a boundary — the sandbox binds `/usr` read-only, so an absolute path still reaches the real binary. The boundary is the skill proxy, which keeps the token out of the model's environment.
+
+An upgraded container keeps the `[developer]` block written before the binaries existed, because `config.toml` is generated only when absent and lives in a named volume. Nothing needs editing: the skill probes the install location directly rather than trusting the configured path, so upgrading the container is enough.
+
 The config at `/data/config/config.toml` is generated on first start. To change settings after setup:
 
 ```bash
