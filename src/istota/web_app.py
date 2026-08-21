@@ -1919,9 +1919,16 @@ def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
     totals_24h = _db.usage_summary(conn, since=since_24h)
     totals_30d = _db.usage_summary(conn, since=since_30d)
 
+    # Scoped to `origin = 'task'`. Context size is a property of a task's own
+    # brain run; the task-less origins go through the non-streaming path, which
+    # emits no `message_delta` frames and so has no context to record. Counting
+    # them made the figure a headcount of daemon-side calls rather than a
+    # data-quality signal — and `context_triage`, the most frequent origin
+    # there, would have dominated it outright (ISSUE-272).
     context_unmeasured = conn.execute(
         "SELECT COUNT(*) FROM task_usage"
-        " WHERE created_at >= ? AND initial_context_tokens IS NULL",
+        " WHERE created_at >= ? AND origin = 'task'"
+        " AND initial_context_tokens IS NULL",
         (since_30d,),
     ).fetchone()[0]
 
@@ -1937,7 +1944,8 @@ def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
         "by_origin_24h": _groups("origin", since_24h),
         # Two honesty counters. A tmux-brain task spends real tokens and writes
         # no row, and the native brain records no context — recording synthetic
-        # zeroes for either would make the dashboard complete and wrong.
+        # zeroes for either would make the dashboard complete and wrong. The
+        # second counts task-origin rows only; see the query above.
         "unmeasured_tasks_24h": _db.unmeasured_task_count(
             conn, since=tasks_since_24h
         ),
