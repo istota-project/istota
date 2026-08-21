@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The docker image now ships the `gh` and `glab` the developer skill needs. Its git half worked — clone, branch, commit, push — but every command that would publish the work failed with "cannot run /usr/local/bin/gh", because neither binary was in the image; anyone who had set a repository directory and a forge token hit it, and a stock install with neither set was unaffected. Upgrading an existing container is enough to fix it, with no config change needed.
+
 - The GitLab reviewer setting takes a username, and every place it was documented asked for a numeric user ID — including the example value, which was a number. The setting is handed to `glab mr create --reviewer`, which wants a username, so an operator who followed the example got merge requests with no reviewer on them and a note about the misconfiguration on each one. The setting itself is unchanged; check yours if it holds a number.
 
 - The server's own logs no longer fill its disk. Neither the system journal nor the audit log shipped with a working limit — the journal's was left to a default of a tenth of the whole disk, and the audit log was set to rotate forever and never delete, so it had kept every file since April. Both are now capped, the audit files stranded above the new limit are removed on the next deploy, and `istota_journald_manage` or `istota_auditd_manage` set to false hands either one back to you.

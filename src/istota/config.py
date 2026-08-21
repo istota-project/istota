@@ -627,10 +627,13 @@ class DeveloperConfig:
     # from what it installed (the Debian archive puts both in /usr/bin); these
     # defaults are the conventional manual-install location for everything
     # else. Neither is authoritative — `developer._resolve_real_bin` falls back
-    # to the daemon's own PATH when the configured path does not exist, so a
-    # host whose code and config.toml are out of step still works. The docker
-    # image (`docker/istota/`) installs neither binary, so the developer skill
-    # needs a host or Ansible deployment.
+    # when the configured path does not exist, so a host whose code and
+    # config.toml are out of step still works: first to the location the docker
+    # image installs (`/usr/local/lib/istota_forge/`, off PATH so the wrapper
+    # stays the only one resolvable by name), then to the daemon's own PATH.
+    # The docker entrypoint also renders these two keys, but only on a first
+    # boot with a fresh volume, which is why the probe exists rather than the
+    # rendered value being relied on.
     gh_bin_path: str = "/usr/local/bin/gh"
     glab_bin_path: str = "/usr/local/bin/glab"
     # Devbox credential proxy. See src/istota/devbox_proxy.py + the
@@ -2723,7 +2726,11 @@ def load_config(config_path: Path | None = None) -> Config:
                 extra[_key] = [str(_entry) for _entry in _val]
         for _key in ("gh_bin_path", "glab_bin_path"):
             if _key in dev:
-                extra[_key] = dev[_key]
+                # `str()` for the same reason as the loop above: a hand-edited
+                # value of the wrong type would otherwise reach `os.execve` as
+                # a non-string and raise a TypeError instead of reporting a
+                # bad path.
+                extra[_key] = str(dev[_key])
         # Unknown keys are ignored rather than fatal, matching the rest of the
         # loader: only the fields named here are read off the block.
         rev = dev.get("review", {})
