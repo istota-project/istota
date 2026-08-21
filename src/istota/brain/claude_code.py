@@ -1119,9 +1119,11 @@ class ClaudeCodeBrain:
         else:
             # The non-streaming path is where the daemon's own model calls run
             # — the nightly sleep cycle, shared briefing blocks, four health OCR
-            # paths, the code reviewer — none of which has a task row. Without a
-            # structured format they were the largest unmeasured spend in the
-            # deployment. What `json` emits is CLI-version-dependent: 2.1.227
+            # paths, the code reviewer, and conversation-context triage — none
+            # of which has a task row. Without a structured format they were the
+            # largest unmeasured spend in the deployment. Triage is the odd one
+            # out on frequency: it runs once per conversational task with older
+            # history, where the rest are occasional (ISSUE-272). What `json` emits is CLI-version-dependent: 2.1.227
             # gives an array of the same frames the streaming path produces,
             # 2.1.238 gives the bare terminal `result` object.
             # `_parse_simple_json_output` reads either. There are no
@@ -1201,11 +1203,33 @@ class ClaudeCodeBrain:
         the inner function has several return points and tokens are spent on
         all of them.
         """
-        # A `subprocess.TimeoutExpired` propagates to the caller's own timeout
-        # handling, which builds the result itself. Nothing was parsed by then,
-        # so there is no usage to carry and no handler is needed here.
+        # A timeout is classified here rather than left to propagate. The old
+        # comment said it reached "the caller's own timeout handling, which
+        # builds the result itself" — there is no such caller on this path: it
+        # unwound past `_execute_simple` to `_execute`'s generic `except
+        # Exception`, which logs `logger.exception` and returns
+        # `stop_reason="error"`. So every non-streaming caller's timeout arrived
+        # as an ERROR-level stack trace attributed to the brain, and lost the
+        # `timeout` classification the vocabulary already has. That is merely
+        # noisy for a nightly OCR pass and wrong for context triage, which times
+        # out benignly once per conversational task on a slow provider.
+        # `timeout` is in neither the fallback trigger set nor the breaker's
+        # cooldown set, and `_is_retryable` already rejects it, so naming it
+        # changes no routing — only the log line and the reported reason.
+        # Nothing was parsed by then, so there is no usage to carry.
         accounting: dict = {}
-        result = ClaudeCodeBrain._execute_simple_once_inner(cmd, req, accounting)
+        try:
+            result = ClaudeCodeBrain._execute_simple_once_inner(cmd, req, accounting)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "claude timed out after %ss (non-streaming)", req.timeout_seconds
+            )
+            return BrainResult(
+                success=False,
+                result_text=f"Claude Code timed out after {req.timeout_seconds}s",
+                stop_reason="timeout",
+                usage=accounting.get("usage"),
+            )
         result.usage = accounting.get("usage")
         return result
 

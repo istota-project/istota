@@ -696,7 +696,7 @@ class TestClaudeCliTriageEnv:
         from istota import context
 
         with patch.dict(os.environ, parent_env, clear=True):
-            with patch("istota.context.subprocess.run") as mock_run:
+            with patch("istota.brain.claude_code.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(
                     returncode=0, stdout='{"relevant_ids": []}',
                 )

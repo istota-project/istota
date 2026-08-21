@@ -3,15 +3,24 @@
 import json
 import logging
 import re
-import subprocess
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from .brain import make_brain
 from .config import Config
 from .db import ConversationMessage, TalkMessage
 from .talk import clean_message_content
+
+# What a triage inference reports it spent. The caller supplies the sink because
+# it is the caller that knows which task, user and source_type the row belongs
+# to; this module only knows that an inference happened and what it cost.
+#
+# It covers the CLI path only — the inference this module performs itself. A
+# caller-supplied ``completer`` is the caller's own object, built with its own
+# config in scope, so its accounting is the caller's too (see
+# ``executor._build_native_completer``).
+UsageSink = Callable[..., None]
 
 
 def _format_created_at(created_at: str | None, user_tz: ZoneInfo | None) -> str:
@@ -59,6 +68,7 @@ def select_relevant_context(
     history: list[ConversationMessage],
     config: Config,
     completer: "Callable[[str], str | None] | None" = None,
+    on_usage: "UsageSink | None" = None,
 ) -> list[ConversationMessage]:
     """
     Select which previous messages are relevant to the current request.
@@ -69,10 +79,17 @@ def select_relevant_context(
     - If selection is disabled or history is short, all messages are included.
 
     ``completer`` is a ``prompt -> raw_output | None`` callable for triage
-    inference. When omitted, the default `claude -p -` subprocess path runs —
-    so the active brain's transport can be injected (the native brain passes
-    its own provider completer instead of shelling out to the CLI it isn't
-    using). See ``_triage_older_messages``.
+    inference. When omitted, the default `claude` CLI path runs — so the active
+    brain's transport can be injected (the native brain passes its own provider
+    completer instead of shelling out to the CLI it isn't using). See
+    ``_triage_older_messages``.
+
+    ``on_usage`` receives what the CLI path spent, so the caller can record it
+    (ISSUE-272). This is the daemon's highest-frequency model call — it runs on
+    every conversational task whose older history exceeds
+    ``skip_selection_threshold`` — and it had no row of any kind. It covers the
+    CLI path only; an injected ``completer`` is the caller's own object and
+    reports its own spend.
 
     Returns a filtered list of ConversationMessages in chronological order.
     On any triage failure, fails open: includes all the older messages
@@ -116,7 +133,7 @@ def select_relevant_context(
 
     # Triage older messages with the selection model
     selected_older = _triage_older_messages(
-        current_prompt, older_history, config, completer=completer
+        current_prompt, older_history, config, completer=completer, on_usage=on_usage
     )
 
     # Combine: selected older + guaranteed recent (chronological order)
@@ -133,50 +150,171 @@ def select_relevant_context(
 
 
 def _claude_cli_triage(
-    prompt: str, model: str, timeout: float, config: Config
+    prompt: str,
+    model: str,
+    timeout: float,
+    config: Config,
+    on_usage: "UsageSink | None" = None,
 ) -> str | None:
-    """Default triage inference: a one-shot `claude -p -` completion.
+    """Default triage inference: a one-shot, tool-less run through ``ClaudeCodeBrain``.
 
-    Returns the raw model output, or None on nonzero exit / timeout / missing
-    CLI / any subprocess error. JSON parsing and validation stay in
+    Returns the raw model output, or None on a failed attempt / timeout /
+    missing CLI / any error. JSON parsing and validation stay in
     ``_parse_relevant_ids`` so they apply uniformly across inference backends.
 
-    The child gets ``build_model_cli_env``, not the daemon's own environment
-    (ISSUE-232). This runs on a prompt assembled from conversation history,
-    so it is the one `claude` spawn driven by user-influenced input; it needs
-    the CLI's auth credential and nothing else. Imported inside the function
-    because ``executor`` imports this module at import time, and inside the
-    ``try`` so an import failure fails open like every other triage error
-    instead of propagating into prompt assembly.
+    **Why the brain rather than a bare `subprocess.run` (ISSUE-272).** This used
+    to spawn `claude -p - --model X` itself, which meant it also had to grow its
+    own copy of everything the brain already owns. Four of those mattered and
+    three were missing outright: `--output-format json` and the two-shape
+    envelope parse (without which there is no usage to report at all); the
+    ``CLAUDE_CODE_DISABLE_ADVISOR_TOOL`` guard, absent here, so a host
+    ``~/.claude/settings.json`` carrying ``advisorModel`` silently ran an
+    advisor on every conversational turn; and the model namespace, since the
+    caller resolves the name through a brain that may not be this one. The
+    transient-API retry comes along too, bounded as described below.
+
+    ``ClaudeCodeBrain`` is named rather than ``make_brain(config.brain)`` on
+    purpose: a native deployment never reaches here (the executor injects a
+    provider completer), and a tmux deployment must not — driving an
+    interactive TUI session to triage a prompt is not what that brain is for.
+    So this is the CLI path for every brain that isn't native, exactly as before.
+
+    ``on_usage`` receives this attempt's ``BrainUsage`` whether the attempt
+    succeeded or not: a run that reached the model and then failed spent real
+    tokens. It is called before the success check for that reason, and its own
+    failure is swallowed — telemetry must never turn a working triage into a
+    fail-open one.
+
+    **``selection_timeout`` bounds the whole triage, not one attempt.** The
+    brain's retry ladder is three attempts with a provider-supplied backoff
+    capped at 60s each, which is right for the task-less origins that share this
+    path — a nightly sleep cycle has nobody waiting on it. Triage does: it sits
+    between the user's message and the main brain call, holding a worker slot,
+    and its failure mode is *free* (fail open, include everything, move on). So
+    the request carries a deadline as its ``cancel_check``: the backoff polls it
+    and stops sleeping once the budget is spent, which both caps the wall clock
+    at roughly ``timeout`` and makes the wait interruptible, where before it was
+    a bare ``time.sleep`` no cancel could land on. A retry that fits inside the
+    budget still happens — that is the case where retrying is strictly better
+    than failing open.
+
+    ``ClaudeCodeBrain`` is imported inside the ``try`` so an import failure
+    fails open like every other triage error instead of propagating into prompt
+    assembly; ``executor`` imports this module at import time, so the
+    ``build_model_cli_env`` import has to be deferred regardless.
     """
+    budget = max(1, int(timeout))
+    deadline = time.monotonic() + budget
     try:
+        from .brain import BrainRequest, ClaudeCodeBrain
         from .executor import build_model_cli_env
 
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", model],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        req = BrainRequest(
+            prompt=prompt,
+            # Text-only: no tools, so no --dangerously-skip-permissions and no
+            # tool flags. The absence of the bypass is what keeps it tool-less.
+            allowed_tools=[],
+            # The executor creates this before context building, so it exists by
+            # the time triage runs. It also stops the CLI from inheriting the
+            # daemon's own working directory, which on a repo checkout meant
+            # reading that repo's CLAUDE.md and settings on every turn.
+            cwd=config.temp_dir,
+            # Not the daemon's own environment (ISSUE-232). This runs on a
+            # prompt assembled from conversation history, so it is the one
+            # `claude` spawn driven by user-influenced input; it needs the
+            # CLI's auth credential and nothing else.
             env=build_model_cli_env(config),
+            # subprocess.run takes an int; a sub-second config value would
+            # floor to a timeout of 0 and fail every call.
+            timeout_seconds=budget,
+            model=model,
+            streaming=False,
+            cancel_check=lambda: time.monotonic() >= deadline,
         )
-        if result.returncode != 0:
-            logger.warning(
-                "Context triage failed (returncode=%d): %s",
-                result.returncode,
-                result.stderr or result.stdout,
-            )
-            return None
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        logger.warning("Context triage timed out after %.1fs", timeout)
-        return None
-    except FileNotFoundError:
-        logger.error("Claude CLI not found for context triage")
-        return None
+        result = ClaudeCodeBrain().execute(req)
     except Exception as e:  # never let triage crash context assembly
         logger.warning("Context triage error: %s", e)
         return None
+
+    _report_triage_usage(on_usage, result, model)
+
+    if result.stop_reason == "cancelled":
+        # Not a user cancel — nothing wires one here. The deadline above fired
+        # mid-backoff, which is the budget working as intended.
+        logger.warning("Context triage gave up after its %ds budget", budget)
+        return None
+    if not result.success:
+        logger.warning(
+            "Context triage failed (stop_reason=%s): %s",
+            result.stop_reason,
+            (result.result_text or "")[:200],
+        )
+        return None
+    return result.result_text
+
+
+def _run_triage(
+    selection_prompt: str,
+    config: Config,
+    completer: "Callable[[str], str | None] | None",
+    on_usage: "UsageSink | None",
+    label: str,
+) -> str | None:
+    """Get raw triage output from whichever inference backend this deployment uses.
+
+    A caller-supplied ``completer`` (the native brain's own provider) wins; the
+    ``claude`` CLI is the default. Both fail open by returning None, which
+    ``_parse_relevant_ids`` and its callers read as "include everything".
+
+    The model name is resolved through ``ClaudeCodeBrain`` rather than the
+    configured brain because the CLI is what runs it, and a name resolved in
+    another brain's namespace (a native deployment's endpoint model, say) is not
+    one `claude --model` accepts. That mismatch was reachable before: the caller
+    resolved through ``make_brain(config.brain)`` and then handed the answer to
+    the CLI regardless.
+    """
+    if completer is not None:
+        try:
+            return completer(selection_prompt)
+        except Exception as e:  # never let triage crash context assembly
+            logger.warning("%s triage error: %s", label, e)
+            return None
+
+    try:
+        from .brain import ClaudeCodeBrain
+
+        model = ClaudeCodeBrain().resolve_model_name(
+            config.conversation.selection_model
+        )
+    except Exception as e:  # never let triage crash context assembly
+        logger.warning("%s triage model resolution failed: %s", label, e)
+        return None
+
+    return _claude_cli_triage(
+        selection_prompt,
+        model,
+        config.conversation.selection_timeout,
+        config,
+        on_usage,
+    )
+
+
+def _report_triage_usage(
+    on_usage: "UsageSink | None", result: Any, requested_model: str
+) -> None:
+    """Hand one triage attempt's spend to the caller's sink. Never raises."""
+    if on_usage is None or getattr(result, "usage", None) is None:
+        return
+    try:
+        on_usage(
+            result.usage,
+            model=result.model_used or requested_model,
+            brain_kind=result.brain_kind,
+            stop_reason=result.stop_reason,
+            success=result.success,
+        )
+    except Exception:
+        logger.warning("Context triage usage sink failed", exc_info=True)
 
 
 def _parse_relevant_ids(raw: str | None, n: int) -> list[int] | None:
@@ -218,6 +356,7 @@ def _triage_older_messages(
     older_history: list[ConversationMessage],
     config: Config,
     completer: "Callable[[str], str | None] | None" = None,
+    on_usage: "UsageSink | None" = None,
 ) -> list[ConversationMessage]:
     """Run the selection model to triage older messages. Returns selected messages in order.
 
@@ -266,19 +405,7 @@ Rules:
 - Only exclude messages that are clearly unrelated (different topic, fully resolved, trivial small talk)
 - Respond with ONLY the JSON, no other text"""
 
-    if completer is not None:
-        try:
-            raw = completer(selection_prompt)
-        except Exception as e:  # never let triage crash context assembly
-            logger.warning("Context triage error: %s", e)
-            raw = None
-    else:
-        model = make_brain(config.brain).resolve_model_name(
-            config.conversation.selection_model
-        )
-        raw = _claude_cli_triage(
-            selection_prompt, model, config.conversation.selection_timeout, config
-        )
+    raw = _run_triage(selection_prompt, config, completer, on_usage, "Context")
 
     ids = _parse_relevant_ids(raw, len(older_history))
     if ids is None:
@@ -440,6 +567,7 @@ def select_relevant_talk_context(
     messages: list[TalkMessage],
     config: "Config",
     completer: "Callable[[str], str | None] | None" = None,
+    on_usage: "UsageSink | None" = None,
 ) -> list[TalkMessage]:
     """Select relevant Talk messages for context, mirroring select_relevant_context().
 
@@ -449,6 +577,9 @@ def select_relevant_talk_context(
 
     ``completer`` is a ``prompt -> raw_output | None`` callable for triage
     inference (see ``select_relevant_context``); None uses the `claude` CLI.
+    ``on_usage`` records what that CLI path spent, same as there — this is the
+    second of the two call sites, and measuring only one of them would
+    undercount by whatever share of traffic arrives over Talk.
     On any triage failure, fails open and includes all the older messages.
     """
     if not messages:
@@ -477,7 +608,7 @@ def select_relevant_talk_context(
         return guaranteed_recent
 
     selected_older = _triage_older_talk_messages(
-        current_prompt, older, config, completer=completer
+        current_prompt, older, config, completer=completer, on_usage=on_usage
     )
     selected = selected_older + guaranteed_recent
 
@@ -493,6 +624,7 @@ def _triage_older_talk_messages(
     older: list[TalkMessage],
     config: "Config",
     completer: "Callable[[str], str | None] | None" = None,
+    on_usage: "UsageSink | None" = None,
 ) -> list[TalkMessage]:
     """Run the selection model to triage older Talk messages.
 
@@ -539,19 +671,7 @@ Rules:
 - Only exclude messages that are clearly unrelated (different topic, fully resolved, trivial small talk)
 - Respond with ONLY the JSON, no other text"""
 
-    if completer is not None:
-        try:
-            raw = completer(selection_prompt)
-        except Exception as e:  # never let triage crash context assembly
-            logger.warning("Talk context triage error: %s", e)
-            raw = None
-    else:
-        model = make_brain(config.brain).resolve_model_name(
-            config.conversation.selection_model
-        )
-        raw = _claude_cli_triage(
-            selection_prompt, model, config.conversation.selection_timeout, config
-        )
+    raw = _run_triage(selection_prompt, config, completer, on_usage, "Talk context")
 
     ids = _parse_relevant_ids(raw, len(older))
     if ids is None:

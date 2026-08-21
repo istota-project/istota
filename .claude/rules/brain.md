@@ -319,7 +319,7 @@ Wraps the `claude` CLI subprocess. Owns:
 11. **Non-streaming usage capture** — the simple path gets
     `--output-format json` (no `--verbose`, no partials) and parses its usage
     out of stdout rather than off a stream, which is what measures the daemon's
-    seven task-less origins. **What that flag emits is CLI-version-dependent
+    eight task-less origins. **What that flag emits is CLI-version-dependent
     and both shapes are live** (ISSUE-271): 2.1.227 emits a JSON *array* of the
     same frames the streaming path produces, 2.1.238 emits the bare terminal
     `result` frame as a single object. `_parse_simple_json_output` reads
@@ -517,9 +517,9 @@ re-attempts every cycle while the primary stays down; a bounded "still down"
 heartbeat re-alerts once per cooldown window (org-monthly limit) until an admin
 raises it, then the next probe succeeds and closes the breaker.
 
-These six sites (plus the executor) are also the seven `BrainRequest`
-construction sites the advisor-model spec enumerates. All six build their env
-from `dict(os.environ)` and run unsandboxed, so — unlike the executor, whose
+These six sites (plus the executor and conversation-context triage) are also
+the nine `BrainRequest` construction sites the advisor-model spec enumerates.
+All six build their env from `dict(os.environ)` and run unsandboxed, so — unlike the executor, whose
 sandbox only RO-binds the host's `~/.claude/settings.json` — they read the
 daemon user's **real** settings file directly. Any Claude Code setting that
 changes model behaviour (`advisorModel` is the first one Istota has taken a

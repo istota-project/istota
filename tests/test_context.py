@@ -61,7 +61,7 @@ class TestSelectRelevantContext:
         result = select_relevant_context("test", history, config)
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_hybrid_triage_selects_from_older(self, mock_run):
         """Older messages triaged, recent guaranteed."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -84,7 +84,7 @@ class TestSelectRelevantContext:
         assert result[1] == history[3]  # weather (guaranteed)
         assert result[2] == history[4]  # latest (guaranteed)
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_hybrid_empty_triage_keeps_recent(self, mock_run):
         """No older messages selected, but recent still included."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -98,7 +98,7 @@ class TestSelectRelevantContext:
         # Only guaranteed recent
         assert result == history[-2:]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_injected_completer_used_instead_of_cli(self, mock_run):
         """When a completer is supplied (native brain), the `claude` CLI is not invoked."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -116,7 +116,7 @@ class TestSelectRelevantContext:
         # triaged 0, 2 + guaranteed last 2
         assert result == [history[0], history[2], history[3], history[4]]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_cli_triage_does_not_inherit_daemon_credentials(self, mock_run):
         """ISSUE-232 — the CLI triage path spawns `claude` with an explicit
         env, so the daemon's credentials never reach a subprocess driven by
@@ -137,7 +137,7 @@ class TestSelectRelevantContext:
         assert "ISTOTA_SECRET_KEY" not in env
         assert "NC_PASS" not in env
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_completer_returning_none_fails_open(self, mock_run):
         """Native completer unavailable (returns None) → include all older, no CLI."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -148,7 +148,7 @@ class TestSelectRelevantContext:
         mock_run.assert_not_called()
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_completer_raising_fails_open(self, mock_run):
         """A completer that raises is caught and triage fails open."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -161,7 +161,7 @@ class TestSelectRelevantContext:
         mock_run.assert_not_called()
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_completer_empty_array_keeps_recent_only(self, mock_run):
         """Completer judges nothing relevant → only guaranteed recent (not fail-open)."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -172,7 +172,7 @@ class TestSelectRelevantContext:
         mock_run.assert_not_called()
         assert result == history[-2:]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_invalid_json_fails_open(self, mock_run):
         """On unparseable output, fail open: include ALL older + recent."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -186,7 +186,7 @@ class TestSelectRelevantContext:
         # Fail open: older messages included rather than silently dropped
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_timeout_fails_open(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
@@ -194,7 +194,7 @@ class TestSelectRelevantContext:
         result = select_relevant_context("test", history, config)
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_cli_not_found_fails_open(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
@@ -202,7 +202,7 @@ class TestSelectRelevantContext:
         result = select_relevant_context("test", history, config)
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_nonzero_return_fails_open(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
@@ -214,7 +214,7 @@ class TestSelectRelevantContext:
         result = select_relevant_context("test", history, config)
         assert result == history
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_markdown_code_fence(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = [
@@ -235,7 +235,7 @@ class TestSelectRelevantContext:
         assert result[1] == history[3]  # recent1 (guaranteed)
         assert result[2] == history[4]  # recent2 (guaranteed)
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_json_in_explanation_text(self, mock_run):
         """Model returns explanation text with embedded JSON."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -253,7 +253,7 @@ class TestSelectRelevantContext:
         assert result[2] == history[3]
         assert result[3] == history[4]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_out_of_range_ids_filtered(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
@@ -270,7 +270,7 @@ class TestSelectRelevantContext:
         assert result[1] == history[3]
         assert result[2] == history[4]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_non_integer_ids_filtered(self, mock_run):
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
         history = _history(5)
@@ -286,7 +286,7 @@ class TestSelectRelevantContext:
         assert result[1] == history[3]
         assert result[2] == history[4]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_results_in_chronological_order(self, mock_run):
         """Triaged messages should be in chronological order before recent."""
         config = _make_config(skip_selection_threshold=2, always_include_recent=2)
@@ -306,7 +306,7 @@ class TestSelectRelevantContext:
         assert result[3] == history[6]  # guaranteed recent
         assert result[4] == history[7]
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_custom_threshold(self, mock_run):
         config = _make_config(skip_selection_threshold=5)
         history = _history(5)
@@ -315,7 +315,7 @@ class TestSelectRelevantContext:
         assert result == history
         mock_run.assert_not_called()
 
-    @patch("istota.context.subprocess.run")
+    @patch("istota.brain.claude_code.subprocess.run")
     def test_triage_not_called_when_disabled(self, mock_run):
         config = _make_config(use_selection=False)
         history = _history(10)

@@ -599,8 +599,8 @@
               usage.
             {/if}
             {#if (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
-              {formatNumber(stats.usage.context_unmeasured_rows_30d ?? 0)} row(s) in 30d carry no context
-              measurement.
+              {formatNumber(stats.usage.context_unmeasured_rows_30d ?? 0)} task row(s) in 30d carry no
+              context measurement.
             {/if}
           </p>
         {/if}

@@ -731,35 +731,103 @@ def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
     return f"{result_text}\n\n{note}"
 
 
-def _build_native_completer(native_config, timeout: float):
+def _build_native_completer(native_config, timeout: float, *, on_usage=None):
     """A `prompt -> raw_output | None` one-shot completer over the native provider.
 
-    Used for both Pass-2 skill classification and conversation-context triage,
-    so the native brain runs them through its own provider/model instead of
-    shelling out to the `claude` CLI it isn't using.
+    Conversation-context triage on a native deployment, so the native brain runs
+    it through its own provider/model instead of shelling out to the `claude`
+    CLI it isn't using.
 
     Returns None if the provider can't be built (e.g. missing key / bad config),
     so the caller skips the brain-aware path rather than mis-routing to the CLI.
+
+    ``on_usage`` (ISSUE-272) receives what the turn spent, in the same shared
+    vocabulary the CLI path reports. Without it this path returned only
+    ``AssistantMessage.text`` and dropped the ``usage`` sitting on the same
+    object — so a native deployment's triage was as unmeasured as a
+    claude_code one, for a different reason. Reported on a failed turn too:
+    a turn that reached the provider and then errored still spent tokens.
     """
     try:
         from istota.llm import make_provider
-        from istota.llm.oneshot import make_completer
+        from istota.llm.oneshot import make_message_completer
 
         provider = make_provider(native_config)
-        # Generous output budget: a JSON skill array is short, but reasoning
+        # Generous output budget: a JSON id array is short, but reasoning
         # models burn tokens thinking first and would otherwise return empty.
-        completer = make_completer(provider, native_config.model, max_tokens=4096)
+        completer = make_message_completer(
+            provider, native_config.model, max_tokens=4096
+        )
     except Exception:
         logger.warning(
-            "native Pass-2 classifier setup failed; skipping semantic routing",
+            "native triage completer setup failed; skipping brain-aware triage",
             exc_info=True,
         )
         return None
 
     def _classify(prompt: str) -> str | None:
-        return completer(prompt, timeout=timeout)
+        message = completer(prompt, timeout=timeout)
+        if message is None:
+            return None
+        if on_usage is not None:
+            _report_native_usage(on_usage, message, native_config.model)
+        # An `error` turn carries an error message where the answer would be;
+        # returning it would feed prose to a JSON parser. None is the fail-open
+        # signal the callers already handle.
+        if message.stop_reason == "error":
+            return None
+        return message.text
 
     return _classify
+
+
+def _report_native_usage(on_usage, message, requested_model: str) -> None:
+    """Convert one native turn's usage to the shared vocabulary and report it.
+
+    Never raises: telemetry must not turn a working triage into a fail-open one.
+
+    ``cost_reported`` follows the same conservative reading the native brain
+    uses — True only when the provider returned a cost of its own. The catalog
+    prices an unknown model at zero, so without the distinction a
+    direct-Anthropic or local deployment would write a fabricated `0.0` labelled
+    as real spend.
+
+    **A turn that measured nothing writes no row.** Every ``StreamError`` site in
+    ``llm/openai_compat.py`` builds a fresh ``AssistantMessage`` with a default
+    ``Usage()``, so a failed native turn carries zeros rather than what it spent.
+    Reporting those would write ``has_totals=1`` rows of pure zero — and every
+    token aggregate filters on ``has_totals``, so during a provider outage they
+    would arrive in bulk and drag this origin's per-call averages toward zero
+    while inflating its measured-call count. Zeros here mean "not measured", not
+    "free". This mirrors the CLI half, where `_parse_simple_json_output` returns
+    no usage for an unparseable attempt and `_report_triage_usage` returns
+    early; without the check the two halves disagree, invisibly, behind one sink.
+
+    A provider-reported cost is kept even at zero tokens: that is the provider
+    saying the turn was free, which is a measurement.
+    """
+    try:
+        from istota import usage as usage_types
+        from istota.llm.catalog import get_model_info
+        from istota.session.usage import TaskUsage
+
+        if message.usage.total_tokens == 0 and message.usage.cost_usd is None:
+            return
+
+        model = message.model or requested_model
+        accumulated = TaskUsage()
+        accumulated.add(message.usage, get_model_info(model))
+        on_usage(
+            usage_types.from_task_usage(
+                accumulated, cost_reported=message.usage.cost_usd is not None
+            ),
+            model=model,
+            brain_kind="native",
+            stop_reason=message.stop_reason,
+            success=message.stop_reason != "error",
+        )
+    except Exception:
+        logger.warning("native triage usage sink failed", exc_info=True)
 
 
 def _native_web_fetch_enabled(task: "db.Task", config: Config) -> bool:
@@ -785,12 +853,16 @@ def _native_web_fetch_enabled(task: "db.Task", config: Config) -> bool:
 def _build_triage_completer(task: "db.Task", config: Config):
     """Conversation-context triage completer, routed through the task's brain.
 
-    Mirrors the Pass-2 skill-routing decision (per-source-type brain routing):
-    - claude_code → None, so context triage uses the `claude` CLI as before.
+    Per-source-type brain routing decides the transport:
+    - claude_code (and tmux) → None, so context triage uses the `claude` CLI.
     - native → a native provider completer. If it can't be built (missing key /
       bad config), returns a completer that always yields None so triage fails
       open (includes all older messages) instead of shelling out to the `claude`
       CLI the native brain isn't using.
+
+    The completer carries its own usage sink, because it is the object that
+    performs the inference on this path (ISSUE-272). The CLI path's sink is
+    passed separately — see ``_build_triage_usage_sink``.
     """
     from .brain import resolve_brain_kind
 
@@ -799,10 +871,38 @@ def _build_triage_completer(task: "db.Task", config: Config):
         return None
 
     native = _native_with_user_key(routed.native, config, task.user_id)
-    completer = _build_native_completer(native, config.conversation.selection_timeout)
+    completer = _build_native_completer(
+        native,
+        config.conversation.selection_timeout,
+        on_usage=_build_triage_usage_sink(task, config),
+    )
     if completer is None:
         return lambda _prompt: None
     return completer
+
+
+def _build_triage_usage_sink(task: "db.Task", config: Config):
+    """Record one conversation-context triage inference as a `task_usage` row.
+
+    ``origin="context_triage"``, and **no ``task_id``** — the same shape the
+    other task-less origins use. A triage inference is not one of the task's own
+    attempts, and a row carrying the id would take an ``attempt_seq`` in that
+    task's sequence, which is meant to count brain attempts. ``user_id`` and
+    ``source_type`` are available here (unlike the ownerless sleep-cycle pass),
+    so the row is still attributable.
+
+    Opens its own short connection (``conn=None``): prompt assembly holds no
+    write transaction, so there is no caller connection to reuse.
+    """
+    def _sink(usage, *, model="", brain_kind="", stop_reason="", success=False):
+        persist_brain_usage(
+            config, None, usage=usage, origin="context_triage",
+            user_id=task.user_id or "", source_type=task.source_type or "",
+            brain_kind=brain_kind, model=model,
+            stop_reason=stop_reason, success=success,
+        )
+
+    return _sink
 
 
 # Credential-related env var patterns to strip from subprocess environments
@@ -2297,7 +2397,9 @@ def _build_talk_api_context(
 
     # Select relevant messages (triage routed through the task's brain)
     relevant = select_relevant_talk_context(
-        task.prompt, talk_messages, config, completer=_build_triage_completer(task, config)
+        task.prompt, talk_messages, config,
+        completer=_build_triage_completer(task, config),
+        on_usage=_build_triage_usage_sink(task, config),
     )
 
     # Ensure reply parent survives triage
@@ -2419,7 +2521,9 @@ def _build_db_context(
             )
 
         relevant = select_relevant_context(
-            task.prompt, history, config, completer=_build_triage_completer(task, config)
+            task.prompt, history, config,
+            completer=_build_triage_completer(task, config),
+            on_usage=_build_triage_usage_sink(task, config),
         )
 
         if reply_parent_msg:

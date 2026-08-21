@@ -1,10 +1,11 @@
 """Advisor-model spec — direct-caller coverage (Stage 1).
 
-Seven of the eight ``BrainRequest`` construction sites (sleep cycle,
-shared-block synthesis, health explainer, the three health OCR paths, and the
-code_review CLI) build their env from ``dict(os.environ)`` and run unsandboxed,
-so they'd otherwise inherit the host's ``~/.claude/settings.json``
-``advisorModel`` the same way the sandboxed executor path did before Stage 1.
+Eight of the nine ``BrainRequest`` construction sites (sleep cycle,
+shared-block synthesis, health explainer, the three health OCR paths, the
+code_review CLI, and conversation-context triage) run unsandboxed — seven of
+them building their env from ``dict(os.environ)`` — so they'd otherwise inherit
+the host's ``~/.claude/settings.json`` ``advisorModel`` the same way the
+sandboxed executor path did before Stage 1.
 None of them ever sets ``BrainRequest.advisor``
 — the fix at the brain layer (Stage 1) covers them "for free" because the
 suppression predicate lives in ``ClaudeCodeBrain.execute`` / ``TmuxClaudeBrain``,
@@ -45,6 +46,13 @@ _KNOWN_SITES = {
     # ~/.claude/settings.json cannot hand a tool to a reviewer that is
     # specified not to have one.
     "skills/code_review/__init__.py",
+    # Conversation-context triage. Text-only (`allowed_tools=[]`) and the
+    # `advisor=""` default is load-bearing here for a second reason: this is
+    # the daemon's most frequent model call, once per conversational task with
+    # older history, so a host settings-file advisor left open would be paid
+    # for on every turn. Before ISSUE-272 this site spawned `claude` directly
+    # and never set the disable var at all — the channel really was open.
+    "context.py",
 }
 
 
