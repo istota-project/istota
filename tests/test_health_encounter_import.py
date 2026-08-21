@@ -187,7 +187,7 @@ class TestExtractRoute:
     def test_extract_invokes_extract_from_file(self, client, monkeypatch):
         captured: dict = {}
 
-        def _fake(path: Path, mime: str, *, config=None) -> dict:
+        def _fake(path: Path, mime: str, *, config=None, user_id="") -> dict:
             captured["path"] = path
             captured["mime"] = mime
             return {"rows": [], "mode": "vision", "warnings": []}
@@ -409,7 +409,7 @@ class TestImportDocumentAttachment:
     """The uploaded source is kept and linked to everything it produced."""
 
     def _extract(self, client, monkeypatch, *, rows=None):
-        def _fake(path: Path, mime: str, *, config=None) -> dict:
+        def _fake(path: Path, mime: str, *, config=None, user_id="") -> dict:
             return {
                 "rows": rows if rows is not None else [],
                 "mode": "vision",

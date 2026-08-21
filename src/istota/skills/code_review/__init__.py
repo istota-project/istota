@@ -310,6 +310,21 @@ def cmd_run(args):
             result_file=None,
         )
         result = brain.execute(req)
+
+        # Imported here rather than at module scope: `executor` imports
+        # `briefings.generate`, and a top-level import from any of these callers
+        # risks closing a cycle back through it.
+        from istota.executor import persist_brain_usage
+
+        # One call per review agent, with no task row behind it. The review runs
+        # up to four model invocations per round, so this is real spend.
+        persist_brain_usage(
+            config, None, usage=result.usage, origin="code_review",
+            user_id=user_id, brain_kind=result.brain_kind,
+            model=result.model_used or req.model,
+            stop_reason=result.stop_reason, success=result.success,
+        )
+
         report_brain_result(result, config.brain)
         if not result.success:
             logger.error(

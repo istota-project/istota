@@ -161,6 +161,9 @@ class StubResult:
     stop_reason: str = "completed"
     usage: object | None = None
     model_used: str = ""
+    # Mirrors BrainResult. A double that drifts from the contract it stands in
+    # for stops testing the caller and starts testing the double.
+    brain_kind: str = ""
     actions_taken: object | None = None
     execution_trace: object | None = None
 

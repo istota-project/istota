@@ -276,6 +276,20 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s brain error: %s", label, e)
         return False, ""
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import persist_brain_usage
+
+    # One call per shared block per briefing. Shared blocks are operator-level
+    # content with no single owner, so the row carries the system identity.
+    persist_brain_usage(
+        config, None, usage=result.usage, origin="shared_blocks",
+        user_id=SYSTEM_IDENTITY, brain_kind=result.brain_kind,
+        model=result.model_used or req.model,
+        stop_reason=result.stop_reason, success=result.success,
+    )
+
     # Feed the result into the shared breaker (one-shot alert on open).
     _opened_reason = report_brain_result(result, config.brain)
     if _opened_reason:

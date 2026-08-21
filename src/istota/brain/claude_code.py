@@ -131,6 +131,53 @@ RETRY_AFTER_MAX_SECONDS = 60.0
 _RETRY_SLEEP_SLICE_SECONDS = 0.5
 
 
+def _parse_simple_json_output(stdout: str):
+    """Read `--output-format json` stdout into `(answer_text, BrainUsage | None)`.
+
+    Returns `(None, None)` for anything that is not a JSON array of frames, and
+    that fallback is load-bearing rather than defensive: roughly ninety tests
+    across six files patch `subprocess.run` with plain-text stdout, and a
+    deployment running a CLI that ignores the flag behaves the same way. A
+    `(None, None)` answer means the caller treats stdout as the answer exactly
+    as it did before, so the new behaviour is confined to the case where the
+    array really parses.
+
+    Non-streaming output carries no `message_delta` frames, so these runs get
+    totals and NULL context columns.
+    """
+    if not stdout or not stdout.lstrip().startswith("["):
+        return None, None
+    try:
+        frames = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None, None
+    if not isinstance(frames, list):
+        return None, None
+
+    result_frame = None
+    model_seen = ""
+    api_key_source = None
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        kind = frame.get("type")
+        if kind == "result":
+            result_frame = frame
+        elif kind == "system":
+            if not model_seen and frame.get("model"):
+                model_seen = str(frame["model"])
+            if api_key_source is None and frame.get("apiKeySource"):
+                api_key_source = str(frame["apiKeySource"])
+    if result_frame is None:
+        return None, None
+
+    answer = result_frame.get("result")
+    usage = usage_types.from_cli_result(
+        result_frame, [], api_key_source, model_hint=model_seen,
+    )
+    return (answer if isinstance(answer, str) else ""), usage
+
+
 def parse_api_error(text: str) -> dict | None:
     """Parse API error string into structured data.
 
@@ -975,6 +1022,16 @@ class ClaudeCodeBrain:
                 "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
             ]
+        else:
+            # The non-streaming path is where the daemon's own model calls run
+            # — the nightly sleep cycle, shared briefing blocks, four health OCR
+            # paths, the code reviewer — none of which has a task row. Without a
+            # structured format they were the largest unmeasured spend in the
+            # deployment. `json` emits an array of the same frames terminated by
+            # the same `result` frame, so the existing parser applies unchanged.
+            # There are no `message_delta` frames here, so these runs carry
+            # totals and NULL context.
+            cmd += ["--output-format", "json"]
         return cmd
 
     # --- non-streaming path ---
@@ -1027,6 +1084,27 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _execute_simple_once(cmd: list[str], req: BrainRequest) -> BrainResult:
+        """One non-streaming attempt, with its usage attached to whatever it
+        returns.
+
+        Same single-exit shape as the streaming path, and for the same reason:
+        the inner function has several return points and tokens are spent on
+        all of them.
+        """
+        accounting: dict = {}
+        try:
+            result = ClaudeCodeBrain._execute_simple_once_inner(cmd, req, accounting)
+        except subprocess.TimeoutExpired:
+            # Propagated to the caller's own timeout handling, which builds the
+            # result. Nothing was parsed, so there is no usage to carry.
+            raise
+        result.usage = accounting.get("usage")
+        return result
+
+    @staticmethod
+    def _execute_simple_once_inner(
+        cmd: list[str], req: BrainRequest, accounting: dict
+    ) -> BrainResult:
         # Still subprocess.run, and so still killing only the direct child on
         # timeout — the non-streaming path's grandchildren are orphaned the way
         # the streaming path's used to be (ISSUE-257, deferred half). Fixing it
@@ -1050,6 +1128,21 @@ class ClaudeCodeBrain:
         )
 
         output = result.stdout.strip()
+
+        # `--output-format json` gives a JSON array of the same frames the
+        # streaming path emits, terminated by the same `result` frame. Parsed
+        # here so the daemon's task-less model calls are measured at all.
+        #
+        # The parse is guarded and the fallback is the whole point: roughly
+        # ninety tests across six files patch `subprocess.run` with plain-text
+        # stdout, and every real deployment predating this flag behaves the same
+        # way. Anything that does not decode as an array of frames is treated as
+        # the answer text exactly as before, so new behaviour is confined to the
+        # case where the array actually parses.
+        answer_text, simple_usage = _parse_simple_json_output(output)
+        if answer_text is not None:
+            output = answer_text
+        accounting["usage"] = simple_usage
 
         signal_death = _signal_result(result.returncode, None)
         if signal_death is not None:

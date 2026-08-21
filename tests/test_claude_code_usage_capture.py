@@ -343,6 +343,106 @@ class TestRetryWrapperKeepsUsage:
         assert result.usage.model_requests == 2
 
 
+class TestNonStreaming:
+    """Stage 4: the path the daemon's task-less model calls take.
+
+    `--output-format json` emits the same frames as an array, so the totals are
+    readable. There are no `message_delta` frames, so these runs carry NULL
+    context — totals only.
+    """
+
+    @staticmethod
+    def _run_simple(stdout, *, returncode=0, tmp_path=None):
+        req = BrainRequest(
+            prompt="hi", allowed_tools=[], cwd=tmp_path or Path("/tmp"), env={},
+            timeout_seconds=60, streaming=False,
+        )
+        completed = MagicMock()
+        completed.stdout = stdout
+        completed.stderr = ""
+        completed.returncode = returncode
+        with patch(
+            "istota.brain.claude_code.subprocess.run", return_value=completed
+        ):
+            return ClaudeCodeBrain().execute(req)
+
+    def _json_array(self):
+        return json.dumps([
+            json.loads(_init()),
+            json.loads(_RESULT),
+        ])
+
+    def test_the_array_parses_to_the_same_totals(self, tmp_path):
+        result = self._run_simple(self._json_array(), tmp_path=tmp_path)
+
+        assert result.success is True
+        assert result.result_text == "Done."
+        assert result.usage is not None
+        assert result.usage.billed_input_tokens == 550
+        assert result.usage.output_tokens == 161
+        assert result.usage.has_totals is True
+        assert result.usage.cost_basis == "api"
+
+    def test_context_columns_are_null_with_no_message_delta(self, tmp_path):
+        result = self._run_simple(self._json_array(), tmp_path=tmp_path)
+
+        assert result.usage.initial_context_tokens is None
+        assert result.usage.peak_context_tokens is None
+        assert result.usage.model_requests == 0
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "Here is the answer.",
+            "",
+            "  ",
+            '{"not": "an array"}',
+            "[unclosed",
+            "[]",
+            '["a string, not a frame"]',
+            "[1, 2, 3]",
+        ],
+    )
+    def test_anything_that_is_not_a_frame_array_falls_back_to_answer_text(
+        self, stdout, tmp_path
+    ):
+        """The fallback is the point, not a nicety: roughly ninety tests across
+        six files patch `subprocess.run` with plain-text stdout, and a CLI that
+        ignores the flag behaves the same way. New behaviour is confined to the
+        case where the array really parses."""
+        result = self._run_simple(stdout, tmp_path=tmp_path)
+
+        if stdout.strip():
+            assert result.result_text == stdout.strip()
+        assert result.usage is None
+
+    def test_plain_text_stdout_is_still_the_answer(self, tmp_path):
+        result = self._run_simple("The answer is 42.", tmp_path=tmp_path)
+
+        assert result.success is True
+        assert result.result_text == "The answer is 42."
+
+    def test_an_array_with_no_result_frame_falls_back(self, tmp_path):
+        stdout = json.dumps([json.loads(_init())])
+
+        result = self._run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.usage is None
+        assert result.result_text == stdout
+
+    def test_the_command_asks_for_json_not_stream_json(self):
+        req = BrainRequest(
+            prompt="hi", allowed_tools=[], cwd=Path("/tmp"), env={},
+            timeout_seconds=60, streaming=False,
+        )
+        cmd = ClaudeCodeBrain._build_command(req)
+
+        assert "--output-format" in cmd
+        assert cmd[cmd.index("--output-format") + 1] == "json"
+        assert "stream-json" not in cmd
+        assert "--include-partial-messages" not in cmd
+
+
 class TestFailurePathsStillMeasure:
     @pytest.mark.parametrize("returncode", [0, 1, -9])
     def test_usage_is_attached_regardless_of_outcome(self, returncode, tmp_path):

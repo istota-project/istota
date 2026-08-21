@@ -249,6 +249,52 @@ class TestNonTaskCallers:
         assert row["origin"] == "sleep_cycle"
         assert row["source_type"] == ""
 
+    # The seven daemon call sites that run the brain with `streaming=False`.
+    # Each has a cadence that makes it real spend: the sleep cycle runs nightly
+    # per user and per channel, shared blocks once per block per briefing, the
+    # OCR paths once per uploaded document, the reviewer up to four model
+    # invocations per round.
+    ORIGINS = [
+        "sleep_cycle",
+        "shared_blocks",
+        "health_explainer",
+        "health_ocr",
+        "health_encounter_ocr",
+        "health_immunization_ocr",
+        "code_review",
+    ]
+
+    @pytest.mark.parametrize("origin", ORIGINS)
+    def test_each_non_task_origin_round_trips(self, env, origin):
+        cfg, dbp, _ = env
+
+        with db.get_db(dbp) as conn:
+            persist_brain_usage(
+                cfg, conn, usage=_usage(), origin=origin, user_id="alice",
+                brain_kind="claude_code", model="model-a", success=True,
+            )
+
+        row = _rows(dbp)[0]
+        assert row["origin"] == origin
+        assert row["task_id"] is None
+        assert row["model"] == "model-a"
+
+    def test_the_origins_are_visible_as_a_grouping(self, env):
+        """`usage_by_origin` is what makes a user's non-task spend legible
+        rather than looking like an arithmetic error against their task count."""
+        cfg, dbp, _ = env
+        with db.get_db(dbp) as conn:
+            for origin in self.ORIGINS:
+                persist_brain_usage(
+                    cfg, conn, usage=_usage(), origin=origin, user_id="alice",
+                    brain_kind="claude_code",
+                )
+            conn.commit()
+            groups = db.usage_summary(conn, group_by="origin")
+
+        assert {g["key"] for g in groups} == set(self.ORIGINS)
+        assert all(g["rows"] == 1 for g in groups)
+
     def test_several_non_task_rows_do_not_collide(self, env):
         """They all carry task_id NULL; the unique index is partial for this."""
         cfg, dbp, _ = env

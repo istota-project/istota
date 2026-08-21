@@ -127,7 +127,7 @@ def _parse_response(raw: str) -> dict | None:
     }
 
 
-def _call_brain(prompt: str, config) -> str | None:
+def _call_brain(prompt: str, config, user_id: str = "") -> str | None:
     """Run the prompt through the active brain. ``None`` on failure."""
     try:
         from istota.brain import BrainRequest, make_brain  # noqa: PLC0415
@@ -156,6 +156,19 @@ def _call_brain(prompt: str, config) -> str | None:
     except Exception as e:  # noqa: BLE001
         logger.warning("health_explainer_brain_failed error=%s", e)
         return None
+    # Imported here rather than at module scope: `executor` imports
+    # `briefings.generate`, and a top-level import from any of these callers
+    # risks closing a cycle back through it.
+    from istota.executor import persist_brain_usage
+
+    # One call per explain request, with no task row behind it.
+    persist_brain_usage(
+        config, None, usage=result.usage, origin="health_explainer",
+        user_id=user_id, brain_kind=result.brain_kind,
+        model=result.model_used or req.model,
+        stop_reason=result.stop_reason, success=result.success,
+    )
+
     if not result.success:
         logger.warning(
             "health_explainer_brain_unsuccessful stop_reason=%s",
@@ -207,7 +220,7 @@ def get_or_generate(
         name=name, display_name=display_name, direction=direction,
         unit=unit, ref_low=ref_low, ref_high=ref_high, category=category,
     )
-    raw = _call_brain(prompt, config)
+    raw = _call_brain(prompt, config, user_id=ctx.user_id)
     parsed = _parse_response(raw) if raw else None
 
     if parsed is None:

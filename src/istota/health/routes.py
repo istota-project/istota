@@ -1551,7 +1551,9 @@ async def api_encounter_extract(
             tmp.write(raw)
             tmp_path = Path(tmp.name)
         try:
-            return extract_from_file(tmp_path, mime, config=config)
+            return extract_from_file(
+                tmp_path, mime, config=config, user_id=ctx.user_id
+            )
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -2425,7 +2427,9 @@ async def api_immunization_extract(
             tmp.write(raw)
             tmp_path = Path(tmp.name)
         try:
-            return extract_from_file(tmp_path, mime, refs, config=config)
+            return extract_from_file(
+                tmp_path, mime, refs, config=config, user_id=ctx.user_id
+            )
         finally:
             tmp_path.unlink(missing_ok=True)
 
