@@ -272,7 +272,7 @@ class TestSelectRelevantTalkContext:
         mock_result.returncode = 0
         mock_result.stdout = json.dumps({"relevant_ids": [0, 3, 5]})
 
-        with patch("istota.context.subprocess.run", return_value=mock_result):
+        with patch("istota.brain.claude_code.subprocess.run", return_value=mock_result):
             result = select_relevant_talk_context("hello", messages, config)
 
         # 3 triaged + 2 guaranteed recent = 5
@@ -302,7 +302,7 @@ class TestSelectRelevantTalkContext:
             {"PATH": "/usr/bin", "ISTOTA_SECRET_KEY": "k" * 64, "NC_PASS": "pw"},
             clear=True,
         ):
-            with patch("istota.context.subprocess.run", return_value=mock_result) as mock_run:
+            with patch("istota.brain.claude_code.subprocess.run", return_value=mock_result) as mock_run:
                 select_relevant_talk_context("hello", messages, config)
 
         env = mock_run.call_args.kwargs.get("env")
@@ -318,7 +318,7 @@ class TestSelectRelevantTalkContext:
             for i in range(10)
         ]
 
-        with patch("istota.context.subprocess.run", side_effect=Exception("boom")):
+        with patch("istota.brain.claude_code.subprocess.run", side_effect=Exception("boom")):
             result = select_relevant_talk_context("hello", messages, config)
 
         # Fail open: all 10 messages (8 older + 2 recent), chronological order
@@ -337,7 +337,7 @@ class TestSelectRelevantTalkContext:
             calls.append(prompt)
             return json.dumps({"relevant_ids": [0, 3, 5]})
 
-        with patch("istota.context.subprocess.run") as mock_run:
+        with patch("istota.brain.claude_code.subprocess.run") as mock_run:
             result = select_relevant_talk_context(
                 "hello", messages, config, completer=completer
             )
@@ -354,7 +354,7 @@ class TestSelectRelevantTalkContext:
             TalkMessage(i, "alice", "Alice", False, f"msg {i}", 100 + i, None, "user", None)
             for i in range(10)
         ]
-        with patch("istota.context.subprocess.run") as mock_run:
+        with patch("istota.brain.claude_code.subprocess.run") as mock_run:
             result = select_relevant_talk_context(
                 "hello", messages, config, completer=lambda _p: None
             )
@@ -377,7 +377,7 @@ class TestSelectRelevantTalkContext:
         # Select index 0 from the trimmed set (which is message_id=40)
         mock_result.stdout = json.dumps({"relevant_ids": [0]})
 
-        with patch("istota.context.subprocess.run", return_value=mock_result) as mock_run:
+        with patch("istota.brain.claude_code.subprocess.run", return_value=mock_result) as mock_run:
             result = select_relevant_talk_context("hello", messages, config)
 
         # Should have been called with 8 older messages (10 lookback - 2 recent)

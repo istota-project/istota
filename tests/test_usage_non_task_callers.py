@@ -150,11 +150,16 @@ class TestChannelSleepCycle:
 
 
 def test_every_named_origin_is_reachable_from_its_module():
-    """The seven sites the spec enumerates, checked as source-level presence.
+    """The eight task-less origins, checked as source-level presence.
 
     Cheap and shallow on purpose — it catches a site losing its call or drifting
     to a different `origin` string, which is the failure the direct-writer tests
     cannot see. The two classes above prove the mechanism actually runs.
+
+    `context_triage` is keyed on `executor.py` rather than on `context.py`,
+    unlike the other seven: the inference happens in `context.py`, but the sink
+    that names the origin is built in the executor, which is what knows the
+    task, user and source_type the row belongs to.
     """
     import pathlib
 
@@ -166,6 +171,7 @@ def test_every_named_origin_is_reachable_from_its_module():
         "src/istota/health/encounter_ocr.py": "health_encounter_ocr",
         "src/istota/health/immunization_ocr.py": "health_immunization_ocr",
         "src/istota/skills/code_review/__init__.py": "code_review",
+        "src/istota/executor.py": "context_triage",
     }
     root = pathlib.Path(__file__).resolve().parent.parent
 

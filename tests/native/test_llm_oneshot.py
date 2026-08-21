@@ -43,3 +43,35 @@ def test_timeout_returns_none():
             yield  # never reached
 
     assert complete_text(_SlowProvider(), "", "x", model="m", timeout=0.1) is None
+
+
+def test_error_stop_reason_on_a_normal_done_returns_none():
+    """OpenRouter reports an upstream generation failure as an ordinary finished
+    turn whose `finish_reason` is `error`, not as a transport error. The text
+    there is empty or partial, never an answer.
+
+    This is a deliberate behaviour change (ISSUE-272): before `complete_text`
+    was rebased onto `complete_message` it returned that text. Pinned so the
+    difference is a decision rather than a refactor artefact.
+    """
+    provider = MockProvider(
+        [AssistantMessage(content=[TextContent(text="partial")], stop_reason="error")]
+    )
+    assert complete_text(provider, "", "x", model="m") is None
+
+
+def test_a_stream_error_is_stamped_with_the_error_reason():
+    """`StreamError.message` defaults to a bare `AssistantMessage` whose
+    `stop_reason` is `end_turn`. `acomplete_message` stamps `error` when it
+    collapses the union, so a caller reading the message cannot mistake a
+    failure for an empty success — and a site that forgot the field cannot
+    make it one."""
+    from istota.llm.oneshot import complete_message
+
+    provider = MockProvider(
+        [AssistantMessage(content=[TextContent(text="boom")], stop_reason="error")]
+    )
+    message = complete_message(provider, "", "x", model="m")
+
+    assert message is not None
+    assert message.stop_reason == "error"
