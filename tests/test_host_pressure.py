@@ -557,6 +557,9 @@ class TestBreadcrumb:
             "psi_io_some_avg10=39.10 "
             "psi_cpu_some_avg10=0.00 "
             "load1=76.12 "
+            "memory_events_high=? "
+            "memory_events_oom_kill=? "
+            "memory_events_cgroup=? "
             "tmpfs_used_kb=/dev/shm:400000,/run:41344"
         )
 
@@ -1070,3 +1073,534 @@ class TestReadContainerShm:
         assert len(rows) == 1
         assert rows[0].available is False
         assert "not running" in rows[0].detail
+
+
+# ---------------------------------------------------------------------------
+# snapshot_trigger (Stage 3)
+# ---------------------------------------------------------------------------
+
+# The 2026-08-21 burst, read off the production breadcrumb series: 1.52 GB of
+# shmem, none of it in any host tmpfs mount, absorbed by zram so cleanly that
+# PSI barely moved and 2.9 GB stayed available. It is the reason
+# ``snapshot_trigger`` exists as something other than a rename of
+# ``is_under_pressure``: both thresholds this spec originally named would have
+# looked straight past the one event in 24 hours worth snapshotting.
+BURST_MEMINFO = """\
+MemTotal:        8138624 kB
+MemFree:          812044 kB
+MemAvailable:    3002716 kB
+Cached:          1204812 kB
+Shmem:           1558528 kB
+SwapTotal:       4068860 kB
+SwapFree:        1739260 kB
+"""
+
+BURST_PRESSURE_MEMORY = """\
+some avg10=0.07 avg60=0.02 avg300=0.01 total=88213
+full avg10=0.00 avg60=0.00 avg300=0.00 total=1204
+"""
+
+# The host tmpfs mounts during that burst: 856 kB in total, flat throughout.
+BURST_MOUNTS = (
+    "tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"
+    "tmpfs /run tmpfs rw,nosuid,nodev,mode=755 0 0\n"
+)
+BURST_STATVFS = {
+    "/dev/shm": (2 * 1024 * 1024 * 1024, 4 * 1024),
+    "/run": (795 * 1024 * 1024, 852 * 1024),
+}
+
+
+def _burst_sample_and_tmpfs(tmp_path):
+    root = build_proc(
+        tmp_path / "proc",
+        meminfo=BURST_MEMINFO,
+        pressure_memory=BURST_PRESSURE_MEMORY,
+        pressure_io=None,
+        pressure_cpu=None,
+        mounts=BURST_MOUNTS,
+    )
+    sample = host_pressure.read_sample(root)
+    tmpfs = host_pressure.read_tmpfs_usage(
+        root / "self" / "mounts",
+        statvfs=fake_statvfs(BURST_STATVFS),
+        stat=fake_stat({"/dev/shm": 21, "/run": 22}),
+    )
+    return sample, tmpfs
+
+
+class TestSnapshotTrigger:
+    def test_quiet_host_does_not_trigger(self, tmp_path):
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=HEALTHY_MEMINFO,
+            pressure_memory=HEALTHY_PRESSURE_MEMORY,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert (
+            host_pressure.snapshot_trigger(
+                sample,
+                [],
+                psi_threshold=40.0,
+                min_available_mb=768,
+                shmem_unaccounted_mb=1024,
+            )
+            is None
+        )
+
+    def test_incident_triggers_and_names_psi(self, tmp_path):
+        root = build_proc(tmp_path / "proc")
+        sample = host_pressure.read_sample(root)
+        reason = host_pressure.snapshot_trigger(
+            sample, [], psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=1024
+        )
+        assert reason is not None
+        assert "psi_mem_some_avg10" in reason
+
+    def test_low_available_triggers_without_psi(self, tmp_path):
+        """A squeeze that has not yet turned into stalling still fires."""
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=INCIDENT_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        reason = host_pressure.snapshot_trigger(
+            sample, [], psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=1024
+        )
+        assert reason is not None
+        assert "mem_available_mb" in reason
+
+    def test_shmem_burst_triggers_where_the_other_two_abstain(self, tmp_path):
+        """The regression guard for the 2026-08-21 burst.
+
+        This is the whole reason for the third trigger. Assert both halves: that
+        the residue fires, *and* that neither of the original two would have. An
+        implementation that fired here for the wrong reason would pass a
+        one-sided assertion and still miss the next accumulation.
+        """
+        sample, tmpfs = _burst_sample_and_tmpfs(tmp_path)
+
+        assert not host_pressure.is_under_pressure(
+            sample, psi_threshold=40.0, min_available_mb=768
+        )
+
+        reason = host_pressure.snapshot_trigger(
+            sample, tmpfs, psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=1024
+        )
+        assert reason is not None
+        assert "shmem_unaccounted_mb" in reason
+
+    def test_baseline_residue_does_not_trigger(self, tmp_path):
+        """~80 MB of residue is the ordinary post-reboot baseline, not an event."""
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=HEALTHY_MEMINFO,
+            pressure_memory=HEALTHY_PRESSURE_MEMORY,
+            pressure_io=None,
+            pressure_cpu=None,
+            mounts=BURST_MOUNTS,
+        )
+        sample = host_pressure.read_sample(root)
+        tmpfs = host_pressure.read_tmpfs_usage(
+            root / "self" / "mounts",
+            statvfs=fake_statvfs(BURST_STATVFS),
+            stat=fake_stat({"/dev/shm": 21, "/run": 22}),
+        )
+        assert (
+            host_pressure.snapshot_trigger(
+                sample, tmpfs, psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=1024
+            )
+            is None
+        )
+
+    def test_zero_shmem_threshold_disables_that_trigger(self, tmp_path):
+        sample, tmpfs = _burst_sample_and_tmpfs(tmp_path)
+        assert (
+            host_pressure.snapshot_trigger(
+                sample, tmpfs, psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=0
+            )
+            is None
+        )
+
+    def test_zero_psi_threshold_disables_that_arm(self, tmp_path):
+        """Zero means off, not "fire on any movement at all".
+
+        A bare `> psi_threshold` inverts this: every live host reports some
+        non-zero PSI, so the setting that reads as "disabled" would become the
+        noisiest available — a snapshot every sample and an operator alert
+        every cooldown, forever, on a perfectly healthy box. The gate side
+        already substituted infinity for a non-positive threshold, so the
+        semantics were settled; this arm just had not been told.
+        """
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=HEALTHY_MEMINFO,
+            pressure_memory="some avg10=0.05 avg60=0.01 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert sample.psi_mem_some_avg10 == 0.05
+        assert (
+            host_pressure.snapshot_trigger(
+                sample, [], psi_threshold=0.0, min_available_mb=768, shmem_unaccounted_mb=1024
+            )
+            is None
+        )
+
+    def test_zero_floor_disables_that_arm(self, tmp_path):
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=INCIDENT_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert (
+            host_pressure.snapshot_trigger(
+                sample, [], psi_threshold=40.0, min_available_mb=0, shmem_unaccounted_mb=0
+            )
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# An absent MemAvailable abstains rather than reading as zero
+# ---------------------------------------------------------------------------
+
+# lxcfs and some container runtimes hand out a trimmed meminfo. MemTotal is
+# there, MemAvailable is not.
+TRIMMED_MEMINFO = """\
+MemTotal:        8129380 kB
+MemFree:         3908112 kB
+Cached:          1204812 kB
+Shmem:             84992 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+"""
+
+
+class TestAbsentMemAvailable:
+    def test_sample_records_that_it_was_not_measured(self, tmp_path):
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=TRIMMED_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert sample is not None
+        assert sample.mem_available_measured is False
+
+    def test_a_present_field_is_marked_measured(self, tmp_path):
+        root = build_proc(tmp_path / "proc")
+        assert host_pressure.read_sample(root).mem_available_measured is True
+
+    def test_the_gate_does_not_close_on_an_unmeasured_floor(self, tmp_path):
+        """Otherwise a trimmed meminfo halts dispatch for the life of the process.
+
+        ``mem_available_kb`` defaults to 0 when the line is absent, and
+        ``0 < 768 * 1024`` is true on every subsequent tick. The gate is built
+        to fail *open* in every uncertain case, and "the kernel never told us"
+        is the most uncertain case there is.
+        """
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=TRIMMED_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert not host_pressure.is_under_pressure(
+            sample, psi_threshold=40.0, min_available_mb=768
+        )
+
+    def test_the_snapshot_does_not_fire_on_an_unmeasured_floor(self, tmp_path):
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=TRIMMED_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert (
+            host_pressure.snapshot_trigger(
+                sample, [], psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=0
+            )
+            is None
+        )
+
+    def test_a_genuine_zero_still_closes_the_gate(self, tmp_path):
+        """The field is present and reads 0 — the kernel clamps a negative
+        estimate — so this is a measurement, and the gate must act on it."""
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=TRIMMED_MEMINFO.replace(
+                "MemFree:         3908112 kB",
+                "MemFree:            2044 kB\nMemAvailable:          0 kB",
+            ),
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert sample.mem_available_measured is True
+        assert host_pressure.is_under_pressure(
+            sample, psi_threshold=40.0, min_available_mb=768
+        )
+
+    def test_breadcrumb_renders_it_unmeasured(self, tmp_path):
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=TRIMMED_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+            mounts="",
+        )
+        sample = host_pressure.read_sample(root)
+        assert "mem_available_kb=?" in host_pressure.breadcrumb(sample, [])
+
+    def test_absent_psi_abstains_rather_than_reading_as_calm(self, tmp_path):
+        """A kernel with PSI switched off must not silence the other triggers."""
+        root = build_proc(
+            tmp_path / "proc",
+            meminfo=HEALTHY_MEMINFO,
+            pressure_memory=None,
+            pressure_io=None,
+            pressure_cpu=None,
+        )
+        sample = host_pressure.read_sample(root)
+        assert sample.psi_mem_some_avg10 is None
+        # Nothing else is wrong, so this is None — but by abstaining, not by
+        # comparing against a PSI figure that was never measured.
+        assert (
+            host_pressure.snapshot_trigger(
+                sample, [], psi_threshold=40.0, min_available_mb=768, shmem_unaccounted_mb=1024
+            )
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# read_memory_events (Stage 3)
+# ---------------------------------------------------------------------------
+
+
+def build_cgroup(root: Path, *, self_cgroup: str, events: str | None) -> None:
+    """Lay down ``/proc/self/cgroup`` plus the matching ``memory.events``."""
+    selfdir = root / "proc" / "self"
+    selfdir.mkdir(parents=True, exist_ok=True)
+    (selfdir / "cgroup").write_text(self_cgroup)
+    if events is not None:
+        leaf = root / "cgroup" / self_cgroup.strip().split(":")[-1].lstrip("/")
+        leaf.mkdir(parents=True, exist_ok=True)
+        (leaf / "memory.events").write_text(events)
+
+
+CGROUP_LINE = "0::/system.slice/istota-scheduler.service/supervisor\n"
+
+MEMORY_EVENTS = """\
+low 0
+high 41
+max 0
+oom 0
+oom_kill 2
+"""
+
+
+class TestReadMemoryEvents:
+    def test_reads_the_daemons_own_cgroup(self, tmp_path):
+        build_cgroup(tmp_path, self_cgroup=CGROUP_LINE, events=MEMORY_EVENTS)
+        events = host_pressure.read_memory_events(
+            proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+        )
+        assert events is not None
+        assert events.high == 41
+        assert events.oom_kill == 2
+
+    def test_absent_cgroup_file_is_not_an_error(self, tmp_path):
+        build_cgroup(tmp_path, self_cgroup=CGROUP_LINE, events=None)
+        assert (
+            host_pressure.read_memory_events(
+                proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+            )
+            is None
+        )
+
+    def test_walks_up_to_the_unit_when_the_leaf_has_no_file(self, tmp_path):
+        """The production shape, and the reason this reader is not a one-liner.
+
+        A cgroup only gets a controller's interface files if its *parent* lists
+        that controller in ``cgroup.subtree_control``. On the production host
+        the unit's
+        subtree_control is empty, so ``system.slice/<unit>.service/`` has
+        ``memory.events`` and ``memory.high`` while the ``supervisor/`` leaf the
+        daemon actually runs in has neither. Reading only the exact path from
+        ``/proc/self/cgroup`` finds nothing there — and renders ``?`` forever
+        while looking like an honest "not available on this host".
+
+        Walking up is also semantically correct: ``MemoryHigh=`` is applied to
+        the unit cgroup, so the unit's counter is the one that moves.
+        """
+        selfdir = tmp_path / "proc" / "self"
+        selfdir.mkdir(parents=True)
+        (selfdir / "cgroup").write_text(CGROUP_LINE)
+
+        unit = tmp_path / "cgroup" / "system.slice" / "istota-scheduler.service"
+        (unit / "supervisor").mkdir(parents=True)  # leaf exists, carries no files
+        (unit / "memory.events").write_text(MEMORY_EVENTS)
+
+        events = host_pressure.read_memory_events(
+            proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+        )
+        assert events is not None
+        assert events.high == 41
+
+    def test_the_nearest_ancestor_wins(self, tmp_path):
+        """Walking up stops at the first hit, not at the root."""
+        selfdir = tmp_path / "proc" / "self"
+        selfdir.mkdir(parents=True)
+        (selfdir / "cgroup").write_text(CGROUP_LINE)
+
+        root = tmp_path / "cgroup"
+        unit = root / "system.slice" / "istota-scheduler.service"
+        (unit / "supervisor").mkdir(parents=True)
+        (root / "memory.events").write_text("low 0\nhigh 999\n")
+        (unit / "memory.events").write_text(MEMORY_EVENTS)
+
+        events = host_pressure.read_memory_events(
+            proc_root=tmp_path / "proc", cgroup_root=root
+        )
+        assert events.high == 41  # the unit, not the cgroup root
+
+    def test_the_walk_stops_at_our_own_unit(self, tmp_path):
+        """Never report another unit's counters as ours.
+
+        Walking to `system.slice` or to the cgroup root finds a file, but it
+        aggregates every service on the box. `memory_events_high=777` read off
+        the slice says "something on this host was throttled" while the field
+        exists to say "istota hit its own MemoryHigh" — the exact inversion of
+        the one diagnostic it provides. A miss must stay a miss.
+        """
+        selfdir = tmp_path / "proc" / "self"
+        selfdir.mkdir(parents=True)
+        (selfdir / "cgroup").write_text(CGROUP_LINE)
+
+        root = tmp_path / "cgroup"
+        (root / "system.slice" / "istota-scheduler.service" / "supervisor").mkdir(
+            parents=True
+        )
+        # Only the slice above our unit has the file.
+        (root / "system.slice" / "memory.events").write_text("low 0\nhigh 777\n")
+
+        assert (
+            host_pressure.read_memory_events(
+                proc_root=tmp_path / "proc", cgroup_root=root
+            )
+            is None
+        )
+
+    def test_the_resolved_cgroup_is_recorded(self, tmp_path):
+        """So a reader can tell whose counter they are looking at."""
+        selfdir = tmp_path / "proc" / "self"
+        selfdir.mkdir(parents=True)
+        (selfdir / "cgroup").write_text(CGROUP_LINE)
+        unit = tmp_path / "cgroup" / "system.slice" / "istota-scheduler.service"
+        (unit / "supervisor").mkdir(parents=True)
+        (unit / "memory.events").write_text(MEMORY_EVENTS)
+
+        events = host_pressure.read_memory_events(
+            proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+        )
+        assert events.source == "/system.slice/istota-scheduler.service"
+
+    def test_no_ancestor_has_the_file(self, tmp_path):
+        selfdir = tmp_path / "proc" / "self"
+        selfdir.mkdir(parents=True)
+        (selfdir / "cgroup").write_text(CGROUP_LINE)
+        (tmp_path / "cgroup" / "system.slice" / "istota-scheduler.service" / "supervisor").mkdir(
+            parents=True
+        )
+        assert (
+            host_pressure.read_memory_events(
+                proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+            )
+            is None
+        )
+
+    def test_no_proc_at_all_is_not_an_error(self, tmp_path):
+        assert (
+            host_pressure.read_memory_events(
+                proc_root=tmp_path / "nope", cgroup_root=tmp_path / "cgroup"
+            )
+            is None
+        )
+
+    def test_cgroup_v1_lines_are_ignored(self, tmp_path):
+        """Only the unified (``0::``) hierarchy has ``memory.events``."""
+        build_cgroup(
+            tmp_path,
+            self_cgroup="11:memory:/system.slice/istota-scheduler.service\n",
+            events=MEMORY_EVENTS,
+        )
+        assert (
+            host_pressure.read_memory_events(
+                proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+            )
+            is None
+        )
+
+    def test_malformed_lines_are_skipped(self, tmp_path):
+        build_cgroup(
+            tmp_path,
+            self_cgroup=CGROUP_LINE,
+            events="low 0\nhigh notanumber\nmax 3\n",
+        )
+        events = host_pressure.read_memory_events(
+            proc_root=tmp_path / "proc", cgroup_root=tmp_path / "cgroup"
+        )
+        assert events is not None
+        assert events.high == 0  # an unparseable field stays at its default
+        assert events.max == 3
+
+
+class TestBreadcrumbMemoryEvents:
+    def test_breadcrumb_carries_the_throttle_counters(self, tmp_path):
+        """``MemoryHigh=`` throttling is invisible without this.
+
+        Stage 2 shipped ``MemoryHigh=5G`` on the scheduler unit. A cgroup over
+        that limit is not killed, it is slowed — every process in it, including
+        the dispatch loop — so the symptom is "everything is slow and nothing is
+        logged". That is the same shape as the hang this spec exists to fix, and
+        the counter is the only thing that tells the two apart.
+        """
+        root = build_proc(tmp_path / "proc", mounts="")
+        sample = host_pressure.read_sample(root)
+        events = host_pressure.MemoryEvents(low=0, high=41, max=0, oom=0, oom_kill=2)
+        line = host_pressure.breadcrumb(sample, [], events=events)
+        assert "memory_events_high=41" in line
+        assert "memory_events_oom_kill=2" in line
+        assert line.count("\n") == 0
+
+    def test_absent_events_render_as_unmeasured_not_zero(self, tmp_path):
+        """A host with no delegated cgroup has not reported "nothing happened"."""
+        root = build_proc(tmp_path / "proc", mounts="")
+        sample = host_pressure.read_sample(root)
+        line = host_pressure.breadcrumb(sample, [], events=None)
+        assert "memory_events_high=?" in line
+        assert "memory_events_oom_kill=?" in line
+
+    def test_events_default_to_absent_for_existing_callers(self, tmp_path):
+        root = build_proc(tmp_path / "proc", mounts="")
+        sample = host_pressure.read_sample(root)
+        assert "memory_events_high=?" in host_pressure.breadcrumb(sample, [])
