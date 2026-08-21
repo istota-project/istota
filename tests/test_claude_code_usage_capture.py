@@ -343,28 +343,29 @@ class TestRetryWrapperKeepsUsage:
         assert result.usage.model_requests == 2
 
 
+def _run_simple(stdout, *, returncode=0, tmp_path=None):
+    """Drive the non-streaming path with `subprocess.run` patched to one stdout."""
+    req = BrainRequest(
+        prompt="hi", allowed_tools=[], cwd=tmp_path or Path("/tmp"), env={},
+        timeout_seconds=60, streaming=False,
+    )
+    completed = MagicMock()
+    completed.stdout = stdout
+    completed.stderr = ""
+    completed.returncode = returncode
+    with patch("istota.brain.claude_code.subprocess.run", return_value=completed):
+        return ClaudeCodeBrain().execute(req)
+
+
 class TestNonStreaming:
     """Stage 4: the path the daemon's task-less model calls take.
 
-    `--output-format json` emits the same frames as an array, so the totals are
-    readable. There are no `message_delta` frames, so these runs carry NULL
-    context — totals only.
+    CLI 2.1.227 emits `--output-format json` as an array of the same frames the
+    streaming path produces, so the totals are readable. There are no
+    `message_delta` frames, so these runs carry NULL context — totals only. The
+    single-object form newer CLIs emit is covered by
+    `TestNonStreamingSingleObject`.
     """
-
-    @staticmethod
-    def _run_simple(stdout, *, returncode=0, tmp_path=None):
-        req = BrainRequest(
-            prompt="hi", allowed_tools=[], cwd=tmp_path or Path("/tmp"), env={},
-            timeout_seconds=60, streaming=False,
-        )
-        completed = MagicMock()
-        completed.stdout = stdout
-        completed.stderr = ""
-        completed.returncode = returncode
-        with patch(
-            "istota.brain.claude_code.subprocess.run", return_value=completed
-        ):
-            return ClaudeCodeBrain().execute(req)
 
     def _json_array(self):
         return json.dumps([
@@ -373,7 +374,7 @@ class TestNonStreaming:
         ])
 
     def test_the_array_parses_to_the_same_totals(self, tmp_path):
-        result = self._run_simple(self._json_array(), tmp_path=tmp_path)
+        result = _run_simple(self._json_array(), tmp_path=tmp_path)
 
         assert result.success is True
         assert result.result_text == "Done."
@@ -384,7 +385,7 @@ class TestNonStreaming:
         assert result.usage.cost_basis == "api"
 
     def test_context_columns_are_null_with_no_message_delta(self, tmp_path):
-        result = self._run_simple(self._json_array(), tmp_path=tmp_path)
+        result = _run_simple(self._json_array(), tmp_path=tmp_path)
 
         assert result.usage.initial_context_tokens is None
         assert result.usage.peak_context_tokens is None
@@ -410,14 +411,14 @@ class TestNonStreaming:
         six files patch `subprocess.run` with plain-text stdout, and a CLI that
         ignores the flag behaves the same way. New behaviour is confined to the
         case where the array really parses."""
-        result = self._run_simple(stdout, tmp_path=tmp_path)
+        result = _run_simple(stdout, tmp_path=tmp_path)
 
         if stdout.strip():
             assert result.result_text == stdout.strip()
         assert result.usage is None
 
     def test_plain_text_stdout_is_still_the_answer(self, tmp_path):
-        result = self._run_simple("The answer is 42.", tmp_path=tmp_path)
+        result = _run_simple("The answer is 42.", tmp_path=tmp_path)
 
         assert result.success is True
         assert result.result_text == "The answer is 42."
@@ -441,7 +442,7 @@ class TestNonStreaming:
             },
         ])
 
-        result = self._run_simple(stdout, tmp_path=tmp_path)
+        result = _run_simple(stdout, tmp_path=tmp_path)
 
         assert result.stop_reason == "transient_api_error"
         assert "529" in result.result_text
@@ -454,7 +455,7 @@ class TestNonStreaming:
             {"type": "result", "subtype": "success", "total_cost_usd": 0.01},
         ])
 
-        result = self._run_simple(stdout, tmp_path=tmp_path)
+        result = _run_simple(stdout, tmp_path=tmp_path)
 
         assert result.result_text == stdout
         assert result.usage is not None
@@ -462,7 +463,7 @@ class TestNonStreaming:
     def test_an_array_with_no_result_frame_falls_back(self, tmp_path):
         stdout = json.dumps([json.loads(_init())])
 
-        result = self._run_simple(stdout, tmp_path=tmp_path)
+        result = _run_simple(stdout, tmp_path=tmp_path)
 
         assert result.usage is None
         assert result.result_text == stdout
@@ -488,3 +489,342 @@ class TestFailurePathsStillMeasure:
 
         assert result.usage is not None
         assert result.brain_kind == "claude_code"
+
+
+# A genuine `--output-format json` envelope from CLI 2.1.238, which emits the
+# terminal frame as one object rather than wrapping it in an array. Session and
+# uuid values are placeholders; the shape is otherwise as captured. The array
+# form 2.1.227 emits is covered by `TestNonStreaming` above — both shapes are
+# real, and the adapter has to read either.
+_SINGLE_OBJECT_RESULT = json.dumps({
+    "is_error": False,
+    "duration_api_ms": 27854,
+    "num_turns": 2,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-0000-0000-000000000000",
+    "total_cost_usd": 0.0319275,
+    "usage": {"input_tokens": 17, "output_tokens": 147, "service_tier": "standard"},
+    "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+            "inputTokens": 550,
+            "outputTokens": 161,
+            "cacheReadInputTokens": 14425,
+            "cacheCreationInputTokens": 14565,
+            "costUSD": 0.0319275,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000,
+        }
+    },
+    "permission_denials": [],
+    "subtype": "success",
+    "api_error_status": None,
+    "result": "Done.",
+    "type": "result",
+    "duration_ms": 28104,
+    "uuid": "00000000-0000-0000-0000-000000000001",
+})
+
+
+class TestNonStreamingSingleObject:
+    """ISSUE-271: `--output-format json` emits one object, not an array.
+
+    The CLI's own help has always called it "json (single result)". 2.1.227
+    nonetheless emits an array; 2.1.238, the deployed version, emits the bare
+    terminal frame. Reading only the array form means every daemon-side model
+    call — seven origins, none of them `task` — returns the JSON envelope where
+    the answer should be and records no usage row at all.
+    """
+
+    def test_the_single_object_form_yields_the_answer(self, tmp_path):
+        result = _run_simple(_SINGLE_OBJECT_RESULT, tmp_path=tmp_path)
+
+        assert result.success is True
+        assert result.result_text == "Done."
+
+    def test_the_single_object_form_yields_a_usage_row(self, tmp_path):
+        result = _run_simple(_SINGLE_OBJECT_RESULT, tmp_path=tmp_path)
+
+        assert result.usage is not None
+        assert result.usage.billed_input_tokens == 550
+        assert result.usage.output_tokens == 161
+        assert result.usage.cache_read_tokens == 14425
+        assert result.usage.cache_write_tokens == 14565
+        assert result.usage.cost_usd == pytest.approx(0.0319275)
+        assert result.usage.has_totals is True
+        assert result.usage.model == "claude-haiku-4-5-20251001"
+
+    def test_cost_basis_degrades_to_unknown_with_no_init_frame(self, tmp_path):
+        """The single-object form carries no `system` init frame, so there is no
+        `apiKeySource` to read. `unknown` is the honest answer — inferring the
+        basis from config would be the guess `cost_basis_from_api_key_source`
+        exists to refuse."""
+        result = _run_simple(_SINGLE_OBJECT_RESULT, tmp_path=tmp_path)
+
+        assert result.usage.cost_basis == "unknown"
+
+    def test_context_columns_are_null(self, tmp_path):
+        result = _run_simple(_SINGLE_OBJECT_RESULT, tmp_path=tmp_path)
+
+        assert result.usage.initial_context_tokens is None
+        assert result.usage.peak_context_tokens is None
+        assert result.usage.model_requests == 0
+
+    def test_a_single_object_error_frame_keeps_its_text(self, tmp_path):
+        """Same reasoning as the array form: an `error_during_execution` frame
+        carries no `result`, and blanking the answer would skip the classifiers
+        so a provider failure comes back as a generic `error`."""
+        stdout = json.dumps({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "error": "API Error: 529 Overloaded",
+            "total_cost_usd": 0.01,
+            "modelUsage": {"m": {"inputTokens": 5, "costUSD": 0.01}},
+        })
+
+        result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.stop_reason == "transient_api_error"
+        assert "529" in result.result_text
+        assert result.usage is not None
+        assert result.usage.billed_input_tokens == 5
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            '{"not": "an array"}',
+            '{"type": "system", "subtype": "init"}',
+            '{"type": "assistant"}',
+            "{unclosed",
+            "{}",
+        ],
+    )
+    def test_an_object_that_is_not_a_result_frame_still_falls_back(
+        self, stdout, tmp_path
+    ):
+        """Only `type == "result"` makes an object the terminal frame. A bare
+        JSON object in a plain-text answer must not be mistaken for one."""
+        result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.result_text == stdout.strip()
+        assert result.usage is None
+
+    def test_a_json_object_answer_is_left_alone(self, tmp_path):
+        """The daemon asks several callers for JSON answers. One that happens to
+        carry a `type` key must not be swallowed as an envelope."""
+        stdout = json.dumps({"type": "summary", "text": "the model's answer"})
+
+        result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.result_text == stdout
+        assert result.usage is None
+
+    def test_an_error_frame_with_an_empty_result_still_classifies(self, tmp_path):
+        """`result` present-and-empty, not merely absent.
+
+        The extraction used to test `isinstance(answer, str)`, and `""` is a
+        `str` — so the `error` fallback was never consulted and the run came
+        back as "produced no output" with a generic `error`, which is in
+        neither the fallback trigger set nor the breaker's cooldown set. That
+        is verbatim the outcome the comment beside it says it prevents.
+        """
+        stdout = json.dumps({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "",
+            "error": "API Error: 529 Overloaded",
+            "total_cost_usd": 0.01,
+            "modelUsage": {"m": {"inputTokens": 5, "costUSD": 0.01}},
+        })
+
+        result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.stop_reason == "transient_api_error"
+        assert "529" in result.result_text
+
+    def test_an_empty_answer_is_not_replaced_by_the_envelope(self, tmp_path):
+        """A degenerate-but-successful answer is not a provider failure. Falling
+        through to raw stdout here would put JSON where the answer goes."""
+        stdout = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "",
+            "total_cost_usd": 0.01,
+            "modelUsage": {"m": {"inputTokens": 5, "costUSD": 0.01}},
+        })
+
+        result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.result_text != stdout
+        assert "modelUsage" not in result.result_text
+
+
+class TestUnreadableEnvelopeWarns:
+    """The silent fallback is how ISSUE-271 stayed invisible for three weeks.
+
+    The warning has to fire for the shape-change class that actually happened —
+    array to object — which means an unreadable *object* must warn, not just an
+    array with no terminal frame. It must equally stay quiet when the model
+    simply answered with JSON of its own, since a warning that fires on every
+    structured answer trains an operator to ignore the real one.
+    """
+
+    def test_an_array_with_no_terminal_frame_warns(self, tmp_path, caplog):
+        stdout = json.dumps([json.loads(_init())])
+
+        with caplog.at_level("WARNING", logger="istota.brain.claude_code"):
+            _run_simple(stdout, tmp_path=tmp_path)
+
+        assert "envelope has probably changed" in caplog.text
+
+    def test_a_renamed_terminal_object_warns(self, tmp_path, caplog):
+        """The next envelope change, in the direction the last one moved."""
+        stdout = json.dumps({
+            "type": "final_result",
+            "subtype": "success",
+            "result": "Done.",
+            "total_cost_usd": 0.01,
+            "modelUsage": {"m": {"inputTokens": 5, "costUSD": 0.01}},
+        })
+
+        with caplog.at_level("WARNING", logger="istota.brain.claude_code"):
+            result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert "envelope has probably changed" in caplog.text
+        assert result.usage is None
+
+    def test_a_bare_init_object_warns(self, tmp_path, caplog):
+        """No envelope-only keys, but `system` is a type only the CLI emits."""
+        stdout = json.dumps({"type": "system", "subtype": "init"})
+
+        with caplog.at_level("WARNING", logger="istota.brain.claude_code"):
+            _run_simple(stdout, tmp_path=tmp_path)
+
+        assert "envelope has probably changed" in caplog.text
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            '["first", "second"]',
+            '[{"type": "bug", "file": "x.py"}, {"type": "nit", "file": "y.py"}]',
+            '{"type": "summary", "text": "the model\'s answer"}',
+            '{"findings": [], "verdict": "ok"}',
+            "{}",
+            "[]",
+        ],
+    )
+    def test_a_model_authored_json_answer_does_not_warn(
+        self, stdout, tmp_path, caplog
+    ):
+        with caplog.at_level("WARNING", logger="istota.brain.claude_code"):
+            _run_simple(stdout, tmp_path=tmp_path)
+
+        assert "envelope has probably changed" not in caplog.text
+
+
+class TestSimpleRetryKeepsUsage:
+    """The non-streaming mirror of `TestRetryWrapperKeepsUsage`.
+
+    That class patches `Popen` and runs `streaming=True`, so it covered only
+    the streaming loop — `_execute_simple`'s two self-built results dropped the
+    usage of every attempt. Inert before ISSUE-271, because on the deployed CLI
+    there was never any usage on this path to lose.
+    """
+
+    @staticmethod
+    def _error_envelope():
+        return json.dumps({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "error": "API Error: 500 Internal server error",
+            "total_cost_usd": 0.01,
+            "modelUsage": {"m": {"inputTokens": 5, "outputTokens": 3, "costUSD": 0.01}},
+        })
+
+    def test_exhausted_retries_still_record_the_spend(self, tmp_path):
+        req = BrainRequest(
+            prompt="hi", allowed_tools=[], cwd=tmp_path, env={},
+            timeout_seconds=60, streaming=False,
+        )
+        completed = MagicMock()
+        completed.stdout = self._error_envelope()
+        completed.stderr = ""
+        completed.returncode = 1
+
+        with patch(
+            "istota.brain.claude_code.subprocess.run", return_value=completed
+        ), patch("istota.brain.claude_code._interruptible_sleep", return_value=False):
+            result = ClaudeCodeBrain().execute(req)
+
+        assert result.success is False
+        assert result.stop_reason == "transient_api_error"
+        assert result.usage is not None
+        assert result.usage.billed_input_tokens == 5
+
+    def test_cancelling_during_the_backoff_still_records_the_spend(self, tmp_path):
+        req = BrainRequest(
+            prompt="hi", allowed_tools=[], cwd=tmp_path, env={},
+            timeout_seconds=60, streaming=False,
+        )
+        completed = MagicMock()
+        completed.stdout = self._error_envelope()
+        completed.stderr = ""
+        completed.returncode = 1
+
+        with patch(
+            "istota.brain.claude_code.subprocess.run", return_value=completed
+        ), patch("istota.brain.claude_code._interruptible_sleep", return_value=True):
+            result = ClaudeCodeBrain().execute(req)
+
+        assert result.stop_reason == "cancelled"
+        assert result.usage is not None
+        assert result.usage.billed_input_tokens == 5
+
+
+class TestSingleObjectReachesTheUsageTable:
+    """The end of the chain ISSUE-271 broke, through the real writer.
+
+    `_parse_simple_json_output` returning `(None, None)` meant `result.usage`
+    was `None`, and `persist_brain_usage` returns on `if usage is None` before
+    even its log line — so the seven non-task origins recorded nothing at all.
+    Asserting on the brain's return value alone would not have caught that the
+    row never lands.
+    """
+
+    def test_a_non_task_origin_records_a_row(self, tmp_path):
+        from istota import db
+        from istota.executor import persist_brain_usage
+
+        dbp = tmp_path / "istota.db"
+        db.init_db(dbp)
+
+        result = _run_simple(_SINGLE_OBJECT_RESULT, tmp_path=tmp_path)
+
+        with db.get_db(dbp) as conn:
+            persist_brain_usage(
+                _CfgWithDb(dbp),
+                conn,
+                usage=result.usage,
+                origin="code_review",
+                user_id="alice",
+                brain_kind="claude_code",
+                success=True,
+            )
+            rows = list(
+                conn.execute(
+                    "SELECT origin, output_tokens, cost_basis FROM task_usage"
+                ).fetchall()
+            )
+
+        parents = [r for r in rows if r["origin"] == "code_review"]
+        assert len(parents) == 1
+        assert parents[0]["output_tokens"] == 161
+        assert parents[0]["cost_basis"] == "unknown"
+
+
+class _CfgWithDb:
+    def __init__(self, dbp):
+        self.db_path = dbp

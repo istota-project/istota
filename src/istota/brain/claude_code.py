@@ -131,27 +131,101 @@ RETRY_AFTER_MAX_SECONDS = 60.0
 _RETRY_SLEEP_SLICE_SECONDS = 0.5
 
 
+# Frame `type` values the CLI itself emits, and keys only its own envelope
+# carries. Together these separate "the CLI changed its envelope" from "the
+# model answered with JSON of its own" — a distinction worth drawing carefully,
+# because a warning that fires on every structured answer is the false alarm
+# that trains an operator to ignore the real one. A model may well use `type`
+# in its own schema; it will not report its own token spend.
+_CLI_FRAME_TYPES = frozenset({"result", "system", "assistant", "user", "stream_event"})
+_CLI_ENVELOPE_KEYS = ("modelUsage", "total_cost_usd", "session_id")
+
+
+def _looks_like_cli_envelope(obj) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    if any(key in obj for key in _CLI_ENVELOPE_KEYS):
+        return True
+    kind = obj.get("type")
+    return isinstance(kind, str) and kind in _CLI_FRAME_TYPES
+
+
+def _warn_if_cli_envelope(frames) -> None:
+    """Warn when output that came from the CLI could not be read as an envelope.
+
+    The silent fallback is how ISSUE-271 stayed invisible for three weeks: it
+    reads as success at every layer above, so the answer is a JSON blob and the
+    usage row is simply absent. One line here is what turns the next envelope
+    change into a log entry on the first sleep cycle rather than a source dive
+    three weeks later.
+    """
+    if not any(_looks_like_cli_envelope(frame) for frame in frames):
+        return
+    logger.warning(
+        "claude_code: --output-format json returned CLI-shaped output with no "
+        "terminal result frame; treating stdout as the answer and recording no "
+        "usage. The CLI's envelope has probably changed again (ISSUE-271)."
+    )
+
+
 def _parse_simple_json_output(stdout: str):
     """Read `--output-format json` stdout into `(answer_text, BrainUsage | None)`.
 
-    Returns `(None, None)` for anything that is not a JSON array of frames, and
-    that fallback is load-bearing rather than defensive: roughly ninety tests
-    across six files patch `subprocess.run` with plain-text stdout, and a
-    deployment running a CLI that ignores the flag behaves the same way. A
-    `(None, None)` answer means the caller treats stdout as the answer exactly
-    as it did before, so the new behaviour is confined to the case where the
-    array really parses.
+    **Two shapes are real and both must be read** (ISSUE-271). The CLI's help
+    has always described the flag as "json (single result)", but 2.1.227 emits
+    a JSON *array* of the same frames the streaming path produces, while
+    2.1.238 emits the bare terminal `result` frame as one object. Accepting
+    only the array meant every daemon-side model call on a newer CLI got the
+    JSON envelope back as its answer and recorded no usage row — seven origins,
+    none of them `task`, including the code reviewer (whose findings parser
+    then reported `malformed_output` for every diff).
+
+    Returns `(None, None)` for anything that is neither shape, and that
+    fallback is load-bearing rather than defensive: roughly ninety tests across
+    six files patch `subprocess.run` with plain-text stdout, and a deployment
+    running a CLI that ignores the flag behaves the same way. A `(None, None)`
+    answer means the caller treats stdout as the answer exactly as it did
+    before.
+
+    A bare object only counts as the terminal frame when its `type` is
+    `result`. Several daemon callers ask the model for a JSON answer, so a
+    `{`-leading stdout is not on its own evidence of an envelope.
 
     Non-streaming output carries no `message_delta` frames, so these runs get
-    totals and NULL context columns.
+    totals and NULL context columns. The single-object shape additionally
+    carries no `system` init frame, which costs two fields sniffed off it.
+    `cost_basis` lands on `unknown`, deliberately: totals and cost come from
+    `modelUsage`, which is present either way, and inferring the basis from
+    config would be exactly the guess `cost_basis_from_api_key_source` refuses
+    to make — labelling a subscription's list-price equivalent as real spend.
+    `model_hint` is likewise empty, so `usage.model` falls to whichever model
+    `modelUsage` says carried the cost; a costed frame with no `modelUsage`
+    children lands model-less rather than mislabelled. A blank `model` on one
+    of these rows is that, not corruption.
     """
-    if not stdout or not stdout.lstrip().startswith("["):
+    if not stdout:
+        return None, None
+    head = stdout.lstrip()[:1]
+    if head not in ("[", "{"):
         return None, None
     try:
-        frames = json.loads(stdout)
+        decoded = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
         return None, None
-    if not isinstance(frames, list):
+
+    if isinstance(decoded, list):
+        frames = decoded
+    elif isinstance(decoded, dict):
+        if decoded.get("type") == "result":
+            frames = [decoded]
+        else:
+            # The array→object move is exactly what ISSUE-271 was, so an
+            # unreadable *object* is the shape most likely to regress next.
+            # Warning only from the list branch below would leave that one as
+            # silent as the original.
+            _warn_if_cli_envelope([decoded])
+            return None, None
+    else:
         return None, None
 
     result_frame = None
@@ -169,24 +243,31 @@ def _parse_simple_json_output(stdout: str):
             if api_key_source is None and frame.get("apiKeySource"):
                 api_key_source = str(frame["apiKeySource"])
     if result_frame is None:
+        _warn_if_cli_envelope(frames)
         return None, None
 
     usage = usage_types.from_cli_result(
         result_frame, [], api_key_source, model_hint=model_seen,
     )
     answer = result_frame.get("result")
-    if not isinstance(answer, str):
-        # An `error_during_execution`-shaped frame carries no `result`. Falling
-        # through to an empty string would blank the answer, and the caller's
-        # `if returncode == 0 and output:` guard would then skip the classifiers
-        # entirely — so a provider failure that used to be read off stdout and
-        # classified would come back as "produced no output" with a generic
-        # `error`, which is in neither the fallback trigger set nor the
-        # breaker's cooldown set.
-        answer = result_frame.get("error")
+    error_text = result_frame.get("error")
+    if not (isinstance(answer, str) and answer):
+        # An `error_during_execution`-shaped frame carries its text in `error`,
+        # with `result` either absent *or present and empty* — the empty case is
+        # why this tests truthiness rather than type. Leaving the answer blank
+        # would make the caller's `if returncode == 0 and output:` guard skip
+        # the classifiers entirely, so a provider failure that used to be read
+        # off stdout and classified would come back as "produced no output"
+        # with a generic `error`, which is in neither the fallback trigger set
+        # nor the breaker's cooldown set.
+        if isinstance(error_text, str) and error_text:
+            answer = error_text
     if not isinstance(answer, str):
         # Nothing textual in the frame at all. `None` tells the caller to keep
-        # raw stdout, so the classifiers still have something to read.
+        # raw stdout, so the classifiers still have something to read. A frame
+        # whose `result` is genuinely the empty string keeps it: that is a
+        # degenerate answer, not a provider failure, and handing the caller the
+        # raw envelope instead would put JSON where the answer goes.
         return None, usage
     return answer, usage
 
@@ -1040,20 +1121,34 @@ class ClaudeCodeBrain:
             # — the nightly sleep cycle, shared briefing blocks, four health OCR
             # paths, the code reviewer — none of which has a task row. Without a
             # structured format they were the largest unmeasured spend in the
-            # deployment. `json` emits an array of the same frames terminated by
-            # the same `result` frame, so the existing parser applies unchanged.
-            # There are no `message_delta` frames here, so these runs carry
-            # totals and NULL context.
+            # deployment. What `json` emits is CLI-version-dependent: 2.1.227
+            # gives an array of the same frames the streaming path produces,
+            # 2.1.238 gives the bare terminal `result` object.
+            # `_parse_simple_json_output` reads either. There are no
+            # `message_delta` frames on this path, so these runs carry totals
+            # and NULL context.
             cmd += ["--output-format", "json"]
         return cmd
 
     # --- non-streaming path ---
 
     def _execute_simple(self, cmd: list[str], req: BrainRequest) -> BrainResult:
-        """Subprocess.run with auto-retry on transient API errors."""
+        """Subprocess.run with auto-retry on transient API errors.
+
+        Carries the last attempt's usage onto the two results this loop builds
+        itself, for the reason the streaming path does: a run that reached the
+        model and then exhausted its retries spent real tokens, and dropping
+        them writes no row at all for the worst case. Inert until ISSUE-271 —
+        on a CLI emitting the single-object shape there was never any usage
+        here to lose.
+        """
         last_error = ""
+        last_usage = None
         for attempt in range(API_RETRY_MAX_ATTEMPTS):
             result = self._execute_simple_once(cmd, req)
+            if result.usage is not None:
+                last_usage = result.usage
+
             if result.success:
                 return result
 
@@ -1082,6 +1177,7 @@ class ClaudeCodeBrain:
                         success=False,
                         result_text="Cancelled by user",
                         stop_reason="cancelled",
+                        usage=last_usage,
                     )
             else:
                 logger.error(
@@ -1093,6 +1189,7 @@ class ClaudeCodeBrain:
             success=False,
             result_text=last_error,
             stop_reason="transient_api_error",
+            usage=last_usage,
         )
 
     @staticmethod
@@ -1140,16 +1237,16 @@ class ClaudeCodeBrain:
 
         output = result.stdout.strip()
 
-        # `--output-format json` gives a JSON array of the same frames the
-        # streaming path emits, terminated by the same `result` frame. Parsed
-        # here so the daemon's task-less model calls are measured at all.
+        # `--output-format json` gives either an array of the same frames the
+        # streaming path emits or the bare terminal `result` object, depending
+        # on the CLI version. Parsed here so the daemon's task-less model calls
+        # are measured at all.
         #
         # The parse is guarded and the fallback is the whole point: roughly
         # ninety tests across six files patch `subprocess.run` with plain-text
         # stdout, and every real deployment predating this flag behaves the same
-        # way. Anything that does not decode as an array of frames is treated as
-        # the answer text exactly as before, so new behaviour is confined to the
-        # case where the array actually parses.
+        # way. Anything that decodes as neither shape is treated as the answer
+        # text exactly as before.
         answer_text, simple_usage = _parse_simple_json_output(output)
         if answer_text is not None:
             output = answer_text
