@@ -133,6 +133,7 @@ class TestCreate:
         assert (path / "memory.max").read_text().strip() == "max"
         assert (path / "pids.max").read_text().strip() == "max"
 
+    @pytest.mark.requires_dac
     def test_returns_none_and_logs_once_when_the_root_is_not_writable(
         self, tmp_path, caplog
     ):
@@ -352,6 +353,7 @@ class TestProbe:
         assert "memory" in reason
         assert not (cgroup_root / "task-probe").exists()
 
+    @pytest.mark.requires_dac
     def test_names_the_reason_when_the_root_is_not_writable(self, tmp_path):
         root = tmp_path / "locked"
         root.mkdir()
