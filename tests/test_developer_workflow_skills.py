@@ -296,7 +296,8 @@ class TestBodiesDoNotContradict:
             "the refused-verb list must not be described as a boundary"
         )
 
-    def test_no_recipe_runs_a_command_under_a_near_ceiling_timeout(self):
+    @pytest.mark.parametrize("name", ["developer", "commit", "code_review"])
+    def test_no_recipe_runs_a_command_under_a_near_ceiling_timeout(self, name):
         """D3. `timeout 590` inside a 600-second tool cap is the pattern the
         2026-08-20 incident kept hitting: it guarantees a kill at the moment a
         long run might have finished, and discards everything the run produced.
@@ -306,20 +307,88 @@ class TestBodiesDoNotContradict:
 
         Scoped to fenced code, because the prose has to be free to *name* the
         pattern it forbids — a check over the whole body would fail on the
-        rule's own explanation of itself."""
+        rule's own explanation of itself. Extraction goes through
+        `_fenced_lines`, not a local regex: the D3 recipe's fence is indented
+        under a list item, and an anchored `^```` misses every such block while
+        still finding enough unindented ones to look like it worked."""
         import re
 
-        fences = re.findall(r"^```.*?^```", self._body("developer"), re.S | re.M)
-        assert fences, "no fenced recipes found — the extraction is wrong"
         near_ceiling = [
             m.group(0)
-            for fence in fences
-            for m in re.finditer(r"\btimeout\s+(\d{3,})\b", fence)
+            for line in _fenced_lines(self._body(name))
+            for m in re.finditer(r"\btimeout\s+(\d{3,})\b", line)
             if int(m.group(1)) >= 300
         ]
         assert near_ceiling == [], (
-            f"a recipe wraps a command in a near-ceiling timeout: {near_ceiling}"
+            f"a {name} recipe wraps a command in a near-ceiling timeout: {near_ceiling}"
         )
+
+    def test_the_detached_run_recipe_records_its_exit_status(self):
+        """D3, and the rule three bullets above it: the exit status is the
+        result. A detached run reports nothing back through the tool call, so
+        if the recipe does not write its status to a file there is no way to
+        read one — leaving the model to infer pass or fail from log text, which
+        is exactly what the pipefail rule exists to forbid.
+
+        Also pins `setsid`. The Bash tool kills its whole process group in a
+        `finally` (`session/tools/bash.py`), on the normal return as much as on
+        an interrupt, so a merely backgrounded run is dead the moment the call
+        that started it finishes — and the recipe would then be a slower way of
+        getting nothing."""
+        recipe = "\n".join(_fenced_lines(self._body("developer")))
+        assert ".check.status" in recipe, "the detached run records no exit status"
+        assert "echo $? >" in recipe, "the status file is written without $?"
+        assert "setsid" in recipe, (
+            "a backgrounded run without its own session is killed by the group "
+            "kill when the starting bash call returns"
+        )
+
+    def test_the_detached_run_recipe_actually_backgrounds_and_reports(self, tmp_path):
+        """Run the recipe's own line rather than describe it.
+
+        Two drafts of this recipe were wrong in the same way and both looked
+        right: `&` binds looser than `&&` and looser than `;`, so
+        `cd "$D" && cmd &` backgrounds the `cd`, and `cmd > log; echo $? > st &`
+        backgrounds only the `echo` and runs the suite in the foreground —
+        which is precisely the blocking behaviour the bullet exists to avoid,
+        while still producing a correct-looking status file at the end.
+
+        `setsid` is stripped here: it is absent on the macOS dev machines and
+        the property it buys (escaping the Bash tool's process-group kill) is
+        not observable from a plain pytest run. The pinning assertion above
+        covers it."""
+        import re
+        import subprocess
+
+        line = next(
+            (ln for ln in _fenced_lines(self._body("developer")) if "setsid" in ln),
+            None,
+        )
+        assert line is not None, "no detached-run line found in the body"
+        # A one-second command exiting 7 stands in for the suite.
+        line = line.replace("setsid ", "").strip()
+        line = re.sub(r"uv run pytest[^>]*", 'sh -c "sleep 1; exit 7" ', line)
+        assert "sleep 1" in line, f"substitution missed the runner: {line!r}"
+
+        poll = f'cd "{tmp_path}" && cat .check.status 2>/dev/null || echo still running'
+        script = (
+            f'cd "{tmp_path}" || exit 1\n'
+            "rm -f .check.status\n"
+            f"{line}\n"
+            "sleep 0.3\n"
+            f'echo "during=$({poll})"\n'
+            "sleep 1.5\n"
+            f'echo "after=$({poll})"\n'
+        )
+        out = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30
+        ).stdout
+
+        # Backgrounded: the poll taken 0.3s in must not already have the answer.
+        assert "during=still running" in out, out
+        # And the status file carries the exit code, not the log text.
+        assert "after=7" in out, out
+        assert (tmp_path / ".check.log").exists()
 
     def test_the_worker_cap_names_the_variable_xdist_actually_reads(self):
         """D2. The cap is only worth stating if it takes effect, and an env var

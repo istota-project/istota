@@ -254,14 +254,20 @@ Test and lint output is the largest single source of wasted context. Spend it de
   exit "$STATUS"                                # last statement of the call
   ```
 
-- **A run that might outlast the tool call goes detached, not up against the ceiling.** A bash call is capped at 600 seconds, and the reflex fix — `timeout 590 uv run pytest …` — is the worst of both: it guarantees a kill at the moment a long suite might have finished, and throws away what the run had produced. Start it in the background writing to a file, then poll in separate cheap calls until it is done and read the log:
+- **A run that might outlast the tool call goes detached, not up against the ceiling.** A bash call is capped at 600 seconds, and the reflex fix — `timeout 590 uv run pytest …` — is the worst of both: it guarantees a kill at the moment a long suite might have finished, and throws away what the run had produced. Start it in its own session, writing both its output and its **exit status** to files:
 
   ```bash
-  cd "$WORK_DIR" && nohup uv run pytest -q --no-header > .check.log 2>&1 & echo $! > .check.pid
-  # then, per poll:  kill -0 "$(cat .check.pid)" 2>/dev/null && echo running || echo done
+  cd "$WORK_DIR" || exit 1
+  rm -f .check.status
+  setsid sh -c 'uv run pytest -q --no-header > .check.log 2>&1; echo $? > .check.status' &
   ```
 
-  A detached run also survives the call being interrupted, so a poll that times out costs one poll rather than the whole suite, and the log on disk is the full output either way.
+  ```bash
+  cd "$WORK_DIR" && cat .check.status 2>/dev/null || echo still running   # poll
+  cd "$WORK_DIR" && tail -n 30 .check.log        # separate call, once it appeared
+  ```
+
+  Three details, each load-bearing. `setsid`, not a bare `&`: your bash call kills its whole process group when it returns, so a merely backgrounded run dies the moment the call that started it finishes — a new session is what escapes that. `cd` on its own line, because `&` binds looser than `&&`, so `cd "$WORK_DIR" && cmd &` backgrounds the `cd` too and scatters the files across two directories. And the **status file is the result**: it appearing is what "finished" means, and what it holds is the exit code. Do not read pass or fail out of the log text, and do not poll for a pid — a missing pid file reads exactly like a finished run.
 
 - **Bail on the first failure while iterating** (`-x`, `--bail=1`). One real failure beats forty cascading ones. Drop the flag for the final full run.
 - **One command, one output.** Chain lint, typecheck and tests into a single invocation rather than three.
