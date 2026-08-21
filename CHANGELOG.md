@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A quote or a backslash in a password no longer breaks a fresh Docker install. The container writes its own settings file on first boot, and it dropped four values straight in without escaping them — your Nextcloud app password, your mail password and both forge tokens. A double quote in any of them ended the value early and left the file unreadable, while the boot log still said the settings had been written; every later boot then reused the broken file, because the container only generates one when none exists. If you hit this, delete the generated file and restart the container.
+
+- A settings file that fails to generate no longer leaves a broken one behind. Generation writes to a temporary file and moves it into place at the end, so an interruption part-way through — no disk space, a missing dependency — now fails the boot loudly instead of leaving a half-written file that every later boot accepts as finished.
+
 - Mail you send to your own bot no longer turns up twice. A message to the bot's address was answered by email and also copied, question and answer, into whichever room your notifications go to — so an exchange already sitting in your inbox appeared a second time in a room it had nothing to do with, and counted as context for every later task there. Mail from anyone else still lands in that room, which is what the copy is for.
 
 - An email shown in the chat transcript no longer displays the tags the bot wraps around it. The wrapper marks the message as text from outside that the model must not take instructions from, and it is meant to be stripped before a person reads it — but the code that strips it had never matched the code that writes it, so every email turn showed the tags, the warning and an instruction addressed to the model, under your own name. Messages already stored read correctly too, not only new ones.

@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 import tomllib
+import re
 from pathlib import Path
 
 import pytest
@@ -149,20 +150,74 @@ class TestTheRenderedConfigLoads:
 
 
 class TestQuotingSurvivesTheRender:
-    """A generated TOML file is a quoting problem wearing a config's clothes."""
+    """A generated TOML file is a quoting problem wearing a config's clothes.
 
-    def test_a_password_with_a_quote_does_not_break_the_toml(self, tmp_path):
-        # entrypoint.sh:780 has a python3 heredoc for exactly this reason on the
-        # Monarch credentials. The app password goes through a plain shell
-        # heredoc, so this records what that path actually tolerates.
-        path = render(tmp_path, **{**REQUIRED, "APP_PASSWORD": "pa'ss word"})
+    Every value here is interpolated into a `"`-delimited TOML basic string by a
+    shell heredoc, so the two characters that matter are `"` and `\\`. A single
+    quote is inert and proves nothing — the first draft of this class tested one
+    and passed while the real case was broken.
 
-        assert tomllib.loads(path.read_text())["nextcloud"]["app_password"] == "pa'ss word"
+    The failure mode is the bad one: `render-config.sh` exits 0 and prints
+    "Config written to", so the entrypoint's file-exists guard treats the
+    corrupt file as complete on every subsequent boot and never regenerates it.
+    """
+
+    # The credentials an operator types into docker/.env by hand, and therefore
+    # the ones that can carry a shell metacharacter. The rest of the values in
+    # the rendered config are machine-generated hex or come from a URL.
+    @pytest.mark.parametrize(
+        "variable,section,key,extra",
+        [
+            ("APP_PASSWORD", "nextcloud", "app_password", {}),
+            (
+                "ISTOTA_EMAIL_IMAP_PASSWORD",
+                "email",
+                "imap_password",
+                {
+                    "ISTOTA_EMAIL_ENABLED": "true",
+                    "ISTOTA_EMAIL_BOT_ADDRESS": "bot@example.com",
+                    "ISTOTA_EMAIL_IMAP_HOST": "imap.example.com",
+                    "ISTOTA_EMAIL_IMAP_USER": "bot",
+                },
+            ),
+            (
+                "ISTOTA_DEVELOPER_GITLAB_TOKEN",
+                "developer",
+                "gitlab_token",
+                {
+                    "ISTOTA_DEVELOPER_ENABLED": "true",
+                    "ISTOTA_DEVELOPER_REPOS_DIR": "/data/repos",
+                },
+            ),
+            (
+                "ISTOTA_DEVELOPER_GITHUB_TOKEN",
+                "developer",
+                "github_token",
+                {
+                    "ISTOTA_DEVELOPER_ENABLED": "true",
+                    "ISTOTA_DEVELOPER_REPOS_DIR": "/data/repos",
+                },
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "value",
+        ['pa"ss', "back\\slash", 'both"and\\', "pa'ss word"],
+        ids=["double-quote", "backslash", "both", "single-quote-and-space"],
+    )
+    def test_a_credential_survives_the_round_trip(
+        self, tmp_path, variable, section, key, extra, value
+    ):
+        path = render(tmp_path, **{**REQUIRED, **extra, variable: value})
+
+        rendered = tomllib.loads(path.read_text())
+        assert rendered[section][key] == value
 
     def test_the_monarch_python_helper_escapes_a_backslash_and_a_quote(self, tmp_path):
-        # entrypoint.sh:780 renders these two through a python3 heredoc rather
+        # render-config.sh renders these two through a python3 heredoc rather
         # than a shell heredoc, precisely so a quote or a backslash in a
-        # password cannot break the TOML. This is that escaping, exercised.
+        # password cannot break the TOML. It was the only value that got that
+        # treatment; the parametrized cases above are the rest catching up.
         path = render(
             tmp_path,
             **REQUIRED,
@@ -214,12 +269,12 @@ class TestTheDeveloperBlock:
                 **REQUIRED,
                 ISTOTA_DEVELOPER_ENABLED="true",
                 ISTOTA_DEVELOPER_REPOS_DIR="/data/repos",
-                ISTOTA_DEVELOPER_GITLAB_TOKEN="glpat-fabricated",
+                ISTOTA_DEVELOPER_GITLAB_TOKEN="fabricated-gitlab-token",
                 ISTOTA_DEVELOPER_GITLAB_URL="http://gitlab.test",
             )
         )
 
-        assert config.developer.gitlab_token == "glpat-fabricated"
+        assert config.developer.gitlab_token == "fabricated-gitlab-token"
         assert config.developer.gitlab_url == "http://gitlab.test"
 
     def test_the_forge_binary_paths_can_be_overridden(self, tmp_path):
@@ -356,6 +411,15 @@ class TestTheInputContract:
             f"the failure does not name {missing}; an operator reading this "
             f"boot log has to guess.\n{proc.stderr}"
         )
+        # The assertion the preflight actually exists for, and the one the first
+        # draft of this test left out. Bare `set -u` also exits non-zero and
+        # also names the variable — but only *after* the first `cat >` has
+        # truncated the destination, leaving 374 bytes of config that the
+        # entrypoint's file-exists guard accepts as complete forever. Without
+        # this line the test passes with the preflight deleted.
+        assert not config_file.exists(), (
+            f"a partial config was written despite the missing {missing}"
+        )
 
     def test_config_file_itself_is_required(self, tmp_path):
         proc = subprocess.run(
@@ -368,6 +432,52 @@ class TestTheInputContract:
 
         assert proc.returncode != 0
         assert "CONFIG_FILE" in proc.stderr
+
+    def test_a_failure_part_way_through_leaves_no_config_behind(self, tmp_path):
+        """The failure mode that turns into a silent production incident.
+
+        Everything the preflight does not cover fails *after* the first
+        ``cat >`` has truncated the destination: python3 absent for the session
+        secret, ENOSPC, a future unguarded ``${VAR}``. entrypoint.sh then finds a
+        file on the next boot, skips the render for good, runs the backfill
+        passes over the fragment and execs the daemon on it.
+
+        Reproduced by breaking ``python3``, which the render shells out to for
+        the session secret — a real dependency of the script, failing at a point
+        the preflight cannot reach, rather than a fault injected into the render
+        itself. A stub in front of the real PATH rather than an empty PATH,
+        which would take ``cat``, ``mv`` and ``sed`` with it and fail the render
+        for a reason that has nothing to do with the property under test.
+        """
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        config_file = tmp_path / "config.toml"
+        stub_bin = tmp_path / "bin"
+        stub_bin.mkdir()
+        broken = stub_bin / "python3"
+        broken.write_text("#!/bin/sh\necho 'python3 is broken' >&2\nexit 1\n")
+        broken.chmod(0o755)
+
+        proc = subprocess.run(
+            ["bash", str(RENDER_CONFIG)],
+            env={
+                "PATH": f"{stub_bin}:{os.environ.get('PATH', '')}",
+                "CONFIG_FILE": str(config_file),
+                **REQUIRED,
+                # So the session secret — the first python3 call — is reached.
+                "OAUTH_CLIENT_ID": "client-id",
+                "OAUTH_CLIENT_SECRET": "client-secret",
+            },
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        assert proc.returncode != 0, "the render reported success without python3"
+        assert not config_file.exists(), (
+            "a truncated config.toml was left on disk; the entrypoint's "
+            "file-exists guard will treat it as complete on every later boot"
+        )
+        assert not list(tmp_path.glob("*.partial")), "the partial file was not cleaned up"
 
     def test_the_script_is_executable_and_parses_under_bash(self):
         # `sh -n` would check the wrong grammar: the file is #!/bin/bash and
@@ -390,6 +500,62 @@ class TestTheEntrypointStillOwnsWhatItKept:
         assert "render-config.sh" in entrypoint
         # The unmistakable first line of the old inline block.
         assert "# Istota configuration — generated by Docker entrypoint" not in entrypoint
+
+    def test_every_provisioning_local_the_render_reads_is_exported_to_it(self):
+        """The one failure mode the extraction itself creates.
+
+        Before the split, a variable the render read was in scope by
+        construction. Now it has to be named in the entrypoint's ``export``
+        list, and a name that is missing renders as its ``:-`` default or empty
+        — silently, in production, while every test here stays green, because
+        these tests fabricate the environment directly and never exercise the
+        hand-off.
+
+        ``LOCATION_INGEST_TOKEN`` is the shape to worry about: assigned in the
+        entrypoint's provisioning phase, never present in docker-compose.yml, so
+        nothing else would put it in the child's environment.
+
+        ISTOTA_* is excluded because those reach the container from compose
+        rather than from the entrypoint. Names assigned inside the render are
+        read from the file rather than listed here, so adding a local does not
+        mean editing this test.
+        """
+        rendered = RENDER_CONFIG.read_text()
+        entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text()
+
+        # Comments are stripped first: the header documents the contract in
+        # prose and names variables inside it, including placeholders like
+        # `${VAR}`, none of which the script actually reads.
+        code = "\n".join(
+            line for line in rendered.splitlines() if not line.lstrip().startswith("#")
+        )
+        referenced = set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)", code))
+        assigned = set(re.findall(r"^\s*([A-Z][A-Z0-9_]*)=", code, re.M))
+
+        needed = {n for n in referenced - assigned if not n.startswith("ISTOTA_")}
+        assert needed, "the scan found nothing to check; the regex has rotted"
+
+        # The export that hands off to the render, not the unrelated one-liner
+        # for ISTOTA_ADMINS_FILE near the top of the entrypoint. Identified by
+        # the input every render must receive.
+        blocks = [
+            match.group(1)
+            for match in re.finditer(
+                r"^\s*export\s+((?:[^\n]*\\\n)*[^\n]*)", entrypoint, re.M
+            )
+            if "CONFIG_FILE" in match.group(1)
+        ]
+        assert len(blocks) == 1, (
+            f"expected exactly one export block naming CONFIG_FILE, found {len(blocks)}"
+        )
+        exported = set(re.findall(r"[A-Z][A-Z0-9_]*", blocks[0]))
+
+        missing = sorted(needed - exported)
+        assert not missing, (
+            f"render-config.sh reads {missing}, which entrypoint.sh does not "
+            "export to it. Each would render as its default or empty on a real "
+            "boot while every test in this file still passes."
+        )
 
     def test_the_backfill_passes_stayed_in_the_entrypoint(self):
         entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text()

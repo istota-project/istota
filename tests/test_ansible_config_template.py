@@ -165,12 +165,28 @@ class TestEveryRenderedKeyIsARealField:
     fail, and a flat name set cannot tell those apart.
     """
 
-    def test_the_walk_reaches_the_sections_that_matter(self, parsed):
-        # Guard on the guard. If the template stops emitting these — or the
-        # walk below stops descending into them — the coverage claim below
-        # shrinks without any test going red.
-        for section in ("scheduler", "security", "web", "logging"):
-            assert section in parsed, f"[{section}] is not in the rendered template"
+    @pytest.mark.parametrize(
+        "section", ["scheduler", "security", "web", "logging", "nextcloud", "brain"]
+    )
+    def test_the_walk_descends_into_the_sections_that_matter(self, parsed, section):
+        """Guard on the guard, asserting the descent rather than the presence.
+
+        The first version of this only checked ``section in parsed``, which is
+        not the same claim. ``_nested_dataclass`` resolves a field's annotation
+        to a dataclass by name; if that resolution broke — a field annotated
+        ``SchedulerConfig | None``, a qualified name, ``config.py`` moving off
+        ``from __future__ import annotations`` — the walk would silently check
+        top-level keys only, and a presence check would stay green over a
+        coverage claim that had collapsed to nothing.
+
+        So: inject a key that cannot be a real field, and require the walk to
+        report it at the right depth.
+        """
+        assert section in parsed, f"[{section}] is not in the rendered template"
+
+        poisoned = {**parsed, section: {**parsed[section], "zzz_not_a_field": 1}}
+
+        assert f"{section}.zzz_not_a_field" in _unknown_keys(poisoned, Config, prefix="")
 
     def test_no_section_names_a_field_the_dataclass_does_not_have(self, parsed):
         unknown = sorted(_unknown_keys(parsed, Config, prefix=""))
@@ -211,9 +227,15 @@ def _unknown_keys(section: dict, target, prefix: str) -> list[str]:
 def _nested_dataclass(annotation):
     """The dataclass a field's annotation names, or None.
 
-    Annotations in `config.py` are strings under `from __future__ import
-    annotations`, so this resolves by name against the config module rather than
-    by inspecting a type object.
+    Handles both forms, because `config.py` today gives type objects and a
+    future `from __future__ import annotations` there would give strings —
+    either way the name is what gets resolved against the config module.
+
+    Returns None for anything that is not a plain dataclass annotation, which
+    includes unions like `SchedulerConfig | None`. That is a silent loss of
+    coverage rather than an error, so
+    `TestEveryRenderedKeyIsARealField::test_the_walk_descends_into_the_sections_that_matter`
+    asserts the descent for each section that matters instead of trusting this.
     """
     name = annotation if isinstance(annotation, str) else getattr(annotation, "__name__", "")
     candidate = getattr(config_module, name, None)

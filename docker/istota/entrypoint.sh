@@ -10,9 +10,14 @@ API_PROVISION_FLAG="/data/config/.api-provisioned"
 NC_URL="${NC_INTERNAL_URL:-http://nextcloud}"
 
 # render-config.sh sits beside this file — /render-config.sh in the image, and
-# docker/istota/ in a checkout, which is where the test harness and the lean
-# stack's compose file call it from.
+# docker/istota/ in a checkout, which is where tests/test_render_config.py runs
+# it from.
+#
+# The trailing-slash strip keeps the invocation readable in a boot-failure
+# message: ENTRYPOINT ["/entrypoint.sh"] makes dirname return "/", and the
+# unstripped form would print "//render-config.sh".
 ENTRYPOINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENTRYPOINT_DIR="${ENTRYPOINT_DIR%/}"
 
 # --- Admin allowlist ---
 #
@@ -349,14 +354,27 @@ if [ ! -f "$CONFIG_FILE" ]; then
     # rather than environment ones. `export` on an unset name is a no-op that
     # puts nothing in the child environment, so the script's own `:-` defaults
     # still apply. The full contract is documented in its header.
-    export CONFIG_FILE USER_NAME NC_URL APP_PASSWORD BOT_USER \
-        USER_DISPLAY_NAME USER_TIMEZONE USER_EMAIL \
-        USER_LOG_CHANNEL USER_ALERTS_CHANNEL USER_DISABLED_SKILLS \
-        USER_MAX_FOREGROUND_WORKERS USER_MAX_BACKGROUND_WORKERS \
-        LOG_TOKEN ALERTS_TOKEN LOCATION_INGEST_TOKEN \
-        OAUTH_CLIENT_ID OAUTH_CLIENT_SECRET OAUTH_REDIRECT_URI \
-        WEB_PORT MONARCH_EMAIL MONARCH_PASSWORD
-    "$ENTRYPOINT_DIR/render-config.sh"
+    #
+    # In a subshell, because `export` sets the attribute on *this* shell for
+    # good, not for one call — five of these are credentials (the app password,
+    # the OAuth secret, three room and ingest tokens) and they would otherwise
+    # be inherited by the `exec uv run istota-scheduler` at the end of this
+    # file. `build_clean_env` and `build_stripped_env` in executor.py both
+    # happen to filter them out today, but that containment is incidental: it
+    # keys on the substrings PASSWORD/SECRET/TOKEN, and a future credential
+    # named without one of those would ride straight through.
+    #
+    # `set -e` still applies: a subshell exiting non-zero fails the parent.
+    (
+        export CONFIG_FILE USER_NAME NC_URL APP_PASSWORD BOT_USER \
+            USER_DISPLAY_NAME USER_TIMEZONE USER_EMAIL \
+            USER_LOG_CHANNEL USER_ALERTS_CHANNEL USER_DISABLED_SKILLS \
+            USER_MAX_FOREGROUND_WORKERS USER_MAX_BACKGROUND_WORKERS \
+            LOG_TOKEN ALERTS_TOKEN LOCATION_INGEST_TOKEN \
+            OAUTH_CLIENT_ID OAUTH_CLIENT_SECRET OAUTH_REDIRECT_URI \
+            WEB_PORT MONARCH_EMAIL MONARCH_PASSWORD
+        "$ENTRYPOINT_DIR/render-config.sh"
+    )
 else
     echo "[istota] Config already exists, skipping generation."
 
