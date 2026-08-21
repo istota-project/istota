@@ -177,6 +177,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn |
 | `sandbox_wrap: Callable[[list[str]], list[str]] \| None` | Wraps raw cmd (e.g. with bwrap); no-op if not provided |
 | `fs_read_roots: list[Path] \| None` / `fs_write_roots: list[Path] \| None` | NativeBrain-only file-tool path allowlist (NB-1). Populated by the executor (`native_fs_roots`) only under effective sandboxing; other brains ignore them (bwrap already confines their tools). `None` = unconfined (dev / no bwrap). |
+| `fs_write_denied_roots: list[Path]` | RO carve-outs nested inside a write root — what bwrap gets by re-binding a subdirectory `--ro-bind` after its parent's RW bind, and what containment alone cannot express. Today `{user_temp_dir}/.developer`. Note the different empty semantics from the pair above: `[]`, not `None`, because a deny set has no unconfined meaning to signal. Enforced on the write path only (the directory stays readable) and ahead of `ToolEnv`'s unconfined early return. |
 | `result_file: Path \| None` | claude_code-specific fallback file path |
 
 ## BrainResult fields
@@ -577,6 +578,12 @@ project notes for the full list):
   `fs_write_roots`, active only when `native_fs_confinement_active(config)`
   (`sandbox_enabled` + bwrap available) — matching the claude_code boundary.
   Other brains ignore the fields (bwrap already confines their tools).
+  `fs_write_denied_roots` carries the RO carve-outs bwrap gets by re-binding a
+  subdirectory `--ro-bind` after its parent's RW bind — containment alone can't
+  express a hole inside a root. Today that is `{user_temp_dir}/.developer`,
+  which holds the credential helpers; a writable copy of those is a
+  credential-interception path. Denied is checked before allowed, on the write
+  path only, so the directory stays readable.
 - **Model resolution (NB-3).** Built-in role aliases (`fast`/`general`/`smart`)
   resolve to `native.model` unless remapped via `[models.aliases]`; provider
   shortcuts (`opus`/`sonnet`/`haiku`) pass through untranslated. A `:effort`

@@ -1788,6 +1788,15 @@ def native_fs_roots(
     credential-fetch helper and the git credential helpers — which the
     claude_code path has protected since the RO re-bind was added and which
     this function silently left writable until it grew this return value.
+
+    Carve-outs here deny *writes* only. bwrap's other nested override, the
+    tmpfs masks over ``db_path.parent`` and ``module_db_root()``, is a total
+    mask this cannot express — what holds that property on the native side is
+    that neither path is under a returned root, which in turn rests on
+    ``Config.module_db_root`` refusing a module dir under the Nextcloud mount
+    and on ``_validate_workspace_dir`` refusing a workspace that would bind one
+    back in. Those two guards, not this function, are what to check if a
+    deployment ever puts a database under ``temp_dir`` or ``repos_dir``.
     """
     write: list[Path] = []
     read_only: list[Path] = []
@@ -1806,7 +1815,14 @@ def native_fs_roots(
     # .developer/ (RO carve-out inside the workspace above). Mirrors the
     # _ro_bind in build_bwrap_cmd: the scripts in here hold the credential
     # helpers, so a writable copy is a credential-interception path.
-    _add(write_denied, user_temp_dir.resolve() / ".developer")
+    #
+    # Appended directly rather than through _add, which skips a path that does
+    # not exist yet. build_bwrap_cmd re-checks `dev_dir.is_dir()` on every Bash
+    # invocation, while this list is built once per task — so an existence gate
+    # here would leave a window where a .developer created mid-run is read-only
+    # for Bash and writable for the file tools. A deny root that never comes
+    # into existence costs one failed comparison.
+    write_denied.append(user_temp_dir.resolve() / ".developer")
 
     # REPL workspace (RW), validated against the protected-path blocklist.
     if workspace_dir is not None:

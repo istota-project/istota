@@ -893,11 +893,14 @@ class TestNativeFsRoots:
         assert dev_dir.resolve() not in write
         assert user_temp.resolve() in read    # and .developer stays readable
 
-    def test_no_denied_roots_when_developer_dir_absent(
+    def test_developer_dir_denied_before_it_exists(
         self, sandbox_config, make_sandbox_task,
     ):
+        """The deny list is built once per task; build_bwrap_cmd re-checks on
+        every Bash call. Gating on existence here would leave a .developer
+        created mid-run writable for the file tools and read-only for Bash."""
         task = make_sandbox_task()
         user_temp = sandbox_config.temp_dir / "alice"
         user_temp.mkdir(parents=True)
         _, _, denied = self._roots(sandbox_config, task, False, user_temp=user_temp)
-        assert denied == []
+        assert (user_temp.resolve() / ".developer") in denied
