@@ -249,6 +249,33 @@ class TestDeniedReason:
     def test_api_read_methods_allowed(self, args):
         assert denied_reason(FORGE_GITHUB, args, self._policy()) is None
 
+    @pytest.mark.parametrize("args", [
+        ["api", "-f", "name=x", "/orgs/o/repos"],
+        ["api", "-F", "name=x", "/orgs/o/repos"],
+        ["api", "--field", "name=x", "/orgs/o/repos"],
+        ["api", "--raw-field", "name=x", "/orgs/o/repos"],
+        ["api", "--input", "body.json", "/orgs/o/repos"],
+        # glab's own help: "Using this flag changes the default HTTP method to
+        # POST." Same implicit-POST shape as -f, and it was missing from the
+        # body-flag list, so `glab api --form k=v /path` wrote unchallenged.
+        # gh has no --form, so listing it costs nothing on that side.
+        ["api", "--form", "name=x", "/projects/1/hooks"],
+        ["api", "--form=name=x", "/projects/1/hooks"],
+    ])
+    def test_api_body_flags_are_implicit_writes(self, args):
+        """A body parameter flips both CLIs off GET with no method flag
+        anywhere, so no flag-value rule can see it."""
+        assert denied_reason(FORGE_GITLAB, args, self._policy(FORGE_GITLAB)) is not None
+
+    @pytest.mark.parametrize("args", [
+        ["api", "-X", "GET", "-f", "q=repo:o/r", "/search/issues"],
+        ["api", "--method", "HEAD", "--form", "a=b", "/x"],
+    ])
+    def test_api_body_flags_waived_when_read_method_is_explicit(self, args):
+        """`gh api -X GET -f q=...` is the documented way to send a query
+        body on a read. Denying it would break search."""
+        assert denied_reason(FORGE_GITLAB, args, self._policy(FORGE_GITLAB)) is None
+
     def test_denied_word_in_flag_value_is_allowed(self):
         """`config` is a path rule; it must not fire on a label value."""
         for args in (

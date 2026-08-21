@@ -69,7 +69,11 @@ _WRITE_METHODS = ["post", "put", "patch", "delete"]
 # `gh api -X GET -f q=… /search/issues` is a real pattern.
 _READ_METHODS = ["get", "head"]
 # Any of these turns `gh api` into a POST with no -X anywhere in the argv.
-_BODY_FLAGS = ["f", "F", "field", "raw-field", "input"]
+# `form` is glab-only and says so in its own help: "Using this flag changes
+# the default HTTP method to POST." gh has no --form, so carrying it in the
+# shared list costs nothing there and closes the same implicit-POST hole
+# that -f/-F open.
+_BODY_FLAGS = ["f", "F", "field", "raw-field", "input", "form"]
 
 # The baseline policy. Held in code rather than config: it is a safety default,
 # not a preference. Operators extend it (developer.forge_cli_extra_denied) or
