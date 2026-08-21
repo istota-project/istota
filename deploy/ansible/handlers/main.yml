@@ -84,3 +84,18 @@
   systemd:
     name: nginx
     state: restarted
+
+- name: restart systemd-journald
+  systemd:
+    name: systemd-journald
+    state: restarted
+
+# Debian ships a sysv script for auditd and the unit is generated from it, so
+# `service auditd restart` is the supported path. Failures are NOT swallowed:
+# the config lands on disk either way, and a handler that reports ok while the
+# daemon keeps the old rotation policy is the "green play, no-op" shape the
+# zram track already got caught by.
+- name: restart auditd
+  command: service auditd restart
+  register: auditd_restart
+  changed_when: auditd_restart.rc == 0

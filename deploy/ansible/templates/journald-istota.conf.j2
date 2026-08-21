@@ -1,0 +1,9 @@
+# {{ istota_namespace | capitalize }} journal cap - managed by Ansible
+#
+# A drop-in rather than an edit to /etc/systemd/journald.conf, which is
+# package-managed. Without this the [Journal] section is empty and SystemMaxUse
+# defaults to 10% of the filesystem — 4G on a 40G root, which the journal will
+# reach and then hold forever.
+[Journal]
+SystemMaxUse={{ istota_journald_max_use }}
+SystemMaxFileSize={{ istota_journald_max_file_size }}

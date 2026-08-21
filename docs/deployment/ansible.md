@@ -58,6 +58,8 @@ ln -s /path/to/istota/deploy/ansible /path/to/roles/istota
 | Node.js | `istota_nodejs_enabled` | `false` |
 | Developer/GitLab | `istota_developer_enabled` | `false` |
 | Database backups | `istota_backup_enabled` | `true` |
+| Journal size cap | `istota_journald_manage` | `true` |
+| auditd log rotation | `istota_auditd_manage` | `true` |
 | Bubblewrap sandbox | `istota_security_sandbox_enabled` | `true` |
 | Web interface | `istota_web_enabled` | `true` |
 | GPS location | `istota_location_enabled` | `false` |

@@ -546,6 +546,94 @@
     mode: "0644"
   when: not istota_update_only and not istota_web_only
 
+# The two system logs the role does not own but shares a disk with. Neither has
+# a working cap on Debian: journald's [Journal] section is empty (so the cap
+# falls back to 10% of the filesystem) and auditd ships max_log_file_action =
+# keep_logs, which overrides num_logs and never deletes. Together they had
+# reached 4.3G of a 40G production root.
+# systemd ships journald.conf but not a journald.conf.d/ directory, so the
+# drop-in has nowhere to land on a stock Debian host and `template` does not
+# create parents.
+- name: Create the journald drop-in directory
+  file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: not istota_update_only and not istota_web_only and istota_journald_manage
+
+# 99- prefix: drop-ins apply in lexicographic order and the last one wins, so a
+# vendor or hosting-provider file sorting after "istota" would silently undo the
+# cap.
+- name: Cap the systemd journal
+  template:
+    src: journald-istota.conf.j2
+    dest: "/etc/systemd/journald.conf.d/99-{{ istota_namespace }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart systemd-journald
+  when: not istota_update_only and not istota_web_only and istota_journald_manage
+
+- name: Check whether auditd is installed
+  stat:
+    path: /etc/audit/auditd.conf
+  register: auditd_conf
+  when: not istota_update_only and not istota_web_only and istota_auditd_manage
+
+# Anchored regexps on purpose: an unanchored match appends a second key instead
+# of replacing the first, and auditd reads the first — the change would look
+# applied and do nothing.
+- name: Bound the auditd log rotation
+  lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: "^\\s*{{ item.key }}\\s*="
+    line: "{{ item.key }} = {{ item.value }}"
+    owner: root
+    group: root
+    mode: "0640"
+  loop:
+    - key: num_logs
+      value: "{{ istota_auditd_num_logs }}"
+    - key: max_log_file
+      value: "{{ istota_auditd_max_log_file }}"
+    - key: max_log_file_action
+      value: "{{ istota_auditd_max_log_file_action }}"
+  notify: restart auditd
+  when:
+    - not istota_update_only and not istota_web_only
+    - istota_auditd_manage
+    - auditd_conf.stat.exists | default(false)
+
+# ROTATE bounds future growth but reclaims nothing: auditd only ever shifts
+# audit.log.1..num_logs-1, so every file left above that index by the previous
+# keep_logs setting is stranded forever. A host that ran keep_logs for months
+# keeps the whole backlog after the config change, which is how this looked
+# like a fixed problem while the disk stayed full.
+- name: Find stranded auditd logs above the rotation bound
+  find:
+    paths: /var/log/audit
+    patterns: "audit.log.*"
+    use_regex: false
+  register: auditd_stranded
+  when:
+    - not istota_update_only and not istota_web_only
+    - istota_auditd_manage
+    - auditd_conf.stat.exists | default(false)
+
+- name: Remove stranded auditd logs above the rotation bound
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ auditd_stranded.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when:
+    - not istota_update_only and not istota_web_only
+    - istota_auditd_manage
+    - item.path | regex_search('\\.log\\.([0-9]+)$', '\\1') | first | int >= istota_auditd_num_logs
+
 # rclone — inlined (replace with a dedicated role if you prefer)
 - name: Install rclone
   shell: curl https://rclone.org/install.sh | bash

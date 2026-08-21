@@ -6,8 +6,13 @@ DB="{{ istota_home }}/data/istota.db"
 LOCAL_DIR="{{ istota_backup_local_dir }}"
 REMOTE_DIR="{{ istota_backup_remote_dir }}"
 MOUNT_PATH="{{ istota_nextcloud_mount_path }}"
+# Local and remote keep separate windows on purpose. Local is the fast-restore
+# working set on the same disk that is filling up; the copies on the mount are
+# the off-host tail and are the ones you actually want a long history of.
 DAILY_RETENTION={{ istota_backup_db_daily_retention }}
 WEEKLY_RETENTION={{ istota_backup_db_weekly_retention }}
+DAILY_RETENTION_REMOTE={{ istota_backup_db_daily_retention_remote }}
+WEEKLY_RETENTION_REMOTE={{ istota_backup_db_weekly_retention_remote }}
 
 RCLONE_CONFIG="{{ istota_backup_rclone_config }}"
 RCLONE_REMOTE="{{ istota_backup_rclone_remote }}"
@@ -122,8 +127,8 @@ _backup_one_db() {
     find "${LOCAL_DIR}/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
 
     if mount_available; then
-        find "${REMOTE_DIR}/db/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
-        find "${REMOTE_DIR}/db/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION_REMOTE} -delete 2>/dev/null || true
+        find "${REMOTE_DIR}/db/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION_REMOTE * 7)) -delete 2>/dev/null || true
     fi
 
     return 0

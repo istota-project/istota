@@ -26,6 +26,47 @@ flock -n 200 || exit 0
 
 cd "$REPO_DIR"
 
+# Reap stale claude CLI builds. The CLI self-updates on its own schedule and
+# leaves every previous version behind at ~320MB each; nothing else removes
+# them. This runs before the "already up to date" early exits below, because
+# claude's release cadence has nothing to do with this repo's — gating the
+# prune on an istota update meant it never ran on a tag-pinned host.
+#
+# Keep the newest N by mtime and always spare the build the launcher points at:
+# after a rollback the live build is deliberately not the newest file. The
+# comparison is on the entry *name* rather than the full path, because
+# `readlink -f` canonicalises every component while a concatenated path does
+# not — the two only match when no parent directory is a symlink.
+CLAUDE_VERSIONS_KEEP={{ istota_claude_versions_keep }}
+CLAUDE_VERSIONS_DIR="${HOME_DIR}/.local/share/claude/versions"
+# A non-numeric or empty override would make $((KEEP + 1)) evaluate to 1, i.e.
+# "delete everything". Refuse the value rather than the directory.
+if ! [ "$CLAUDE_VERSIONS_KEEP" -ge 1 ] 2>/dev/null; then
+    log "WARNING: claude_versions_keep is not a positive integer, skipping prune"
+elif [ -d "$CLAUDE_VERSIONS_DIR" ]; then
+    CLAUDE_LIVE_NAME="$(basename "$(readlink -f "${HOME_DIR}/.local/bin/claude" 2>/dev/null || true)")"
+    if [ -z "$CLAUDE_LIVE_NAME" ] || [ ! -e "${CLAUDE_VERSIONS_DIR}/${CLAUDE_LIVE_NAME}" ]; then
+        # A guard that cannot name the live build must not delete anything.
+        log "WARNING: cannot resolve the live claude build, skipping prune"
+    else
+        # Best-effort: this must not abort the run under set -e.
+        ls -1t "$CLAUDE_VERSIONS_DIR" 2>/dev/null | tail -n +$((CLAUDE_VERSIONS_KEEP + 1)) | \
+        while IFS= read -r stale_version; do
+            [ -n "$stale_version" ] || continue
+            [ "$stale_version" != "$CLAUDE_LIVE_NAME" ] || continue
+            # rm -rf, not -f: a future layout where a version is a directory
+            # would otherwise fail silently and reclaim nothing. $stale_version
+            # comes from ls and cannot contain a slash.
+            if rm -rf "${CLAUDE_VERSIONS_DIR}/${stale_version}"; then
+                log "Removed stale claude version ${stale_version}"
+            else
+                log "WARNING: could not remove claude version ${stale_version}"
+            fi
+        done || true
+    fi
+fi
+
+
 # ISSUE-258: the clone token now comes from a credential helper rather than
 # from remote.origin.url, so a missing or revoked token makes git ask for a
 # username instead of failing. There is no terminal here and stdin is not

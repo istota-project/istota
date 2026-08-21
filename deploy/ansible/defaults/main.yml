@@ -341,6 +341,30 @@ istota_logging_rotate: true                         # Let Python handle rotation
 istota_logging_max_size_mb: 10
 istota_logging_backup_count: 5
 
+# Host log retention. These bound the two system logs the role does not own but
+# does have to live on the same disk as: neither ships with a working cap on
+# Debian, and together they had reached 4.3G on a 40G root.
+#
+# journald's [Journal] section is empty out of the box, which means the cap
+# falls back to 10% of the filesystem. The drop-in makes it explicit.
+istota_journald_manage: true
+istota_journald_max_use: "500M"        # total journal size across all files
+istota_journald_max_file_size: "50M"   # per-file cap, so rotation stays granular
+#
+# auditd ships max_log_file_action = keep_logs, which overrides num_logs and
+# never deletes: it rotates forever and every 6MB file stays. ROTATE is what
+# turns num_logs into an actual bound. Set istota_auditd_manage to false if the
+# host's audit policy is owned by something else.
+istota_auditd_manage: true
+istota_auditd_num_logs: 5
+istota_auditd_max_log_file: 6          # MB per file, so the cap is num_logs * this
+istota_auditd_max_log_file_action: "ROTATE"
+
+# The claude CLI self-updates and leaves each previous build behind at ~320MB.
+# Nothing reaps them, so the directory grows by a release every day or two.
+# Keep at least 2: one live, one to roll back to after a bad release.
+istota_claude_versions_keep: 2
+
 # Nextcloud settings (required)
 istota_nextcloud_url: ""
 istota_nextcloud_username: "{{ istota_namespace }}"
@@ -1062,8 +1086,23 @@ istota_web_root_file_mode: "0644"
 istota_backup_enabled: true
 istota_backup_local_dir: "{{ istota_home }}/data/backups"
 istota_backup_remote_dir: "{{ istota_nextcloud_mount_path }}/Backups"
-istota_backup_db_daily_retention: 7
-istota_backup_db_weekly_retention: 4
+# Local snapshots are the fast-restore working set and sit on the same disk the
+# daemon is running out of; the copies on the mount are the durable tail and
+# cost nothing locally, so they keep the longer window. Before these were split
+# both finds read the same variable, and shrinking the local window to reclaim
+# disk silently truncated the off-host history too.
+#
+# The local window is not cut to the bone on purpose. The remote copy is gated
+# on mount_available and there is no back-fill: a snapshot skipped while the
+# mount is down is never copied up later, so the local daily file is its only
+# copy. The window has to outlast a plausible mount outage.
+#
+# These feed `find -mtime +N`, which deletes strictly older than N*24h, so a
+# value of N retains N+1 days.
+istota_backup_db_daily_retention: 5          # delete local dailies older than N days
+istota_backup_db_weekly_retention: 3         # delete local weeklies older than N weeks
+istota_backup_db_daily_retention_remote: 7   # same, for the copies on the mount
+istota_backup_db_weekly_retention_remote: 4
 istota_backup_db_cron: "0 */6 * * *"
 istota_backup_files_cron: "0 3 * * *"
 istota_backup_files_sources:
