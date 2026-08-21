@@ -8143,6 +8143,150 @@ class TestWorkerIdleWait:
         assert fake.sleeps == pytest.approx([0.5, 0.5, 0.5, 0.5])
         assert sum(fake.sleeps) == pytest.approx(2.0)
 
+    def test_closed_admission_gate_blocks_the_claim(self, monkeypatch):
+        """A parked worker must not claim while the host has no room.
+
+        Gating `dispatch()` alone bounds new worker *threads*, not new task
+        *starts*: a worker already alive re-enters here and claims whatever
+        arrives, so on a squeezed host work keeps starting in the slot that
+        already exists. The 2026-08-20 trigger was a single task running a test
+        suite, so one claim into a lingering worker is the whole incident.
+        """
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(1, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 5,
+            admission_open=lambda: False,
+        )
+
+        # Tasks are waiting and the worker still refuses to take one.
+        assert result is None
+        assert run_one.calls == 0
+
+    def test_a_closed_gate_still_lets_the_worker_age_out(self, monkeypatch):
+        """Refusing to claim must not turn into parking forever.
+
+        Under sustained pressure the workers drain away and dispatch declines
+        to respawn them, so the pool empties instead of holding idle threads
+        against a host that has no room for them.
+        """
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=_Counter(value=(1, True)), pending_count=lambda: 5,
+            admission_open=lambda: False,
+        )
+
+        assert result is None
+        # Slept the full deadline rather than spinning on the closed gate.
+        assert fake.sleeps == pytest.approx([0.5, 0.5, 0.5, 0.5])
+
+    def test_a_reopening_gate_is_picked_up_mid_linger(self, monkeypatch):
+        """The hold is transient, on this path as on dispatch's."""
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(9, True))
+        gate = _scripted([False, False, True])
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=10),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 1,
+            admission_open=gate,
+        )
+
+        assert result == (9, True)
+        assert run_one.calls == 1
+
+    def test_the_gate_is_checked_before_the_pending_count(self, monkeypatch):
+        """A closed gate should cost nothing — not even the indexed read."""
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pending = _Counter(value=5)
+
+        _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=_Counter(value=(1, True)), pending_count=pending,
+            admission_open=lambda: False,
+        )
+
+        assert pending.calls == 0
+
+    def test_legacy_branch_also_refuses_on_a_closed_gate(self, monkeypatch):
+        """The coarse-wait branch is the one whose closed-gate semantics differ.
+
+        `worker_idle_poll_interval >= worker_idle_timeout` takes the legacy
+        single-recheck path, which has no polling loop to continue — so a shut
+        gate returns None and the worker exits, rather than aging out. That is
+        the same exit this branch already takes on an empty queue, so parity
+        holds; it is pinned here because it is the branch a reader of the
+        fine-cadence tests would assume works the other way.
+        """
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(1, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=2, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 5,
+            admission_open=lambda: False,
+        )
+
+        assert result is None
+        assert run_one.calls == 0
+
+    def test_legacy_branch_still_claims_when_the_gate_is_open(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(4, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=2, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 5,
+            admission_open=lambda: True,
+        )
+
+        assert result == (4, True)
+        assert run_one.calls == 1
+
+    def test_admission_defaults_to_open_for_existing_callers(self, monkeypatch):
+        """The parameter is optional; omitting it keeps the old behaviour."""
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(3, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=10),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 1,
+        )
+
+        assert result == (3, True)
+
     def test_final_slice_clamped(self, monkeypatch):
         import istota.scheduler as sched_mod
 
