@@ -178,9 +178,10 @@ markers = [
     "live: native-brain tests hitting a real LLM API (needs a key; deselected by default)",
     "linux: requires a real Linux kernel and a usable bubblewrap (deselected by default; run via scripts/test-linux.sh)",
     "image: builds and runs a Docker image (needs a Docker daemon, run with -n0; deselected by default)",
+    "smoke: end-to-end against the lean compose stack (needs a Docker daemon, run with -n0; deselected by default)",
     "requires_dac: needs POSIX permission bits to constrain the process (skipped as root)",
 ]
-addopts = "-m 'not integration and not live and not linux and not image' -n auto"
+addopts = "-m 'not integration and not live and not linux and not image and not smoke' -n auto"
 asyncio_mode = "auto"
 
 [tool.uv.sources]
