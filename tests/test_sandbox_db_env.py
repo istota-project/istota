@@ -8,13 +8,20 @@ direct-write fallback instead of deferring.
 """
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from istota import db
-from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig
+from istota.config import (
+    Config,
+    DeveloperConfig,
+    NextcloudConfig,
+    SchedulerConfig,
+    SecurityConfig,
+)
 
 
 def _write_skill_md(base_dir: Path, name: str, frontmatter: dict, body: str = "") -> Path:
@@ -269,3 +276,88 @@ class TestSkillClientRefusesInSandbox:
             _run_direct("kv", ["get", "x"])
         assert exc.value.code == 0
         assert mock_run.call_args[0][0][1:3] == ["-m", "istota.skills.kv"]
+
+
+class TestForgeCliPathPrepend:
+    """ISTOTA_PATH_PREPEND reaches the model's PATH and nothing else's.
+
+    The developer hook puts `.developer` ahead of /usr/local/bin so the model
+    typing `gh` reaches the wrapper. That directory must not appear on the PATH
+    the skill proxy hands host-side skill CLIs: those run outside bwrap as the
+    daemon user, and two of them resolve a binary by bare name —
+    google_workspace does os.execvp("gws", ...), devbox does
+    shutil.which("docker"). A task-temp directory on that PATH is a host-side
+    code-execution path.
+
+    The executor comment calls this ordering load-bearing. These tests are what
+    make that true rather than merely stated.
+    """
+
+    @pytest.fixture
+    def dev_config(self, env_config, tmp_path):
+        env_config.developer = DeveloperConfig(
+            enabled=True,
+            repos_dir=str(tmp_path / "repos"),
+            gitlab_url="https://gitlab.example.com",
+            gitlab_token="glpat-test",
+            gitlab_username="bot",
+        )
+        # The real bundled skills dir, so the developer manifest and its
+        # setup_env hook are actually in the index. env_config points at an
+        # empty one, under which the hook never runs and every assertion below
+        # would pass for the wrong reason.
+        env_config.bundled_skills_dir = None
+        return env_config
+
+    @staticmethod
+    def _dev_bin_entries(path_value, temp_dir):
+        """PATH entries under the task's .developer, matched by realpath.
+
+        /var is a symlink to /private/var on macOS, so comparing the strings
+        the hook emitted against a resolved expectation fails for a reason
+        that has nothing to do with the property under test.
+        """
+        target = os.path.realpath(temp_dir / "alice" / ".developer")
+        return [
+            e for e in path_value.split(os.pathsep)
+            if e and os.path.realpath(e) == target
+        ]
+
+    def test_developer_dir_is_on_the_models_path(self, dev_config):
+        claude_env, _ = _run_task(dev_config)
+        assert self._dev_bin_entries(claude_env["PATH"], dev_config.temp_dir)
+
+    def test_developer_dir_comes_before_the_system_path(self, dev_config):
+        """Behind /usr/local/bin it would resolve to the real gh, unwrapped."""
+        claude_env, _ = _run_task(dev_config)
+        entries = claude_env["PATH"].split(os.pathsep)
+        target = os.path.realpath(dev_config.temp_dir / "alice" / ".developer")
+        assert os.path.realpath(entries[0]) == target
+
+    def test_developer_dir_is_absent_from_the_proxy_base_env(self, dev_config):
+        """The finding this whole ordering exists to prevent."""
+        _, proxy_call = _run_task(dev_config)
+        assert proxy_call is not None
+        base_env = _proxy_base_env(proxy_call)
+        assert not self._dev_bin_entries(
+            base_env.get("PATH", ""), dev_config.temp_dir,
+        )
+        # Nothing under the task temp root at all, not just .developer.
+        temp_root = os.path.realpath(dev_config.temp_dir)
+        for entry in base_env.get("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            assert not os.path.realpath(entry).startswith(temp_root), entry
+
+    def test_reserved_key_reaches_neither_environment(self, dev_config):
+        """It is plumbing; the model should never see it, and neither should
+        a skill CLI that might be tempted to honour it."""
+        claude_env, proxy_call = _run_task(dev_config)
+        assert "ISTOTA_PATH_PREPEND" not in claude_env
+        assert "ISTOTA_PATH_PREPEND" not in _proxy_base_env(proxy_call)
+
+    def test_no_prepend_without_the_developer_skill(self, env_config):
+        """A deployment with no developer tokens gets an untouched PATH."""
+        claude_env, proxy_call = _run_task(env_config)
+        assert "ISTOTA_PATH_PREPEND" not in claude_env
+        assert claude_env["PATH"] == _proxy_base_env(proxy_call)["PATH"]

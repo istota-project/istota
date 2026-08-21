@@ -141,9 +141,33 @@ def sock_path():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def _write_policy(bin_dir, real_bin, cfg, *, forge="github", **overrides):
+    """The policy file, beside the wrapper — which is where it looks.
+
+    Nothing here travels by environment any more: the wrapper runs as a child
+    of the model's own shell, so an env-supplied policy path is a policy the
+    model chooses. Tests that want a different setting change the file, the
+    same way the deployment does.
+    """
+    from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
+
+    policy = {}
+    for name in (FORGE_GITHUB, FORGE_GITLAB):
+        section = build_policy(name)
+        section["real_bin"] = str(real_bin)
+        section["config_dir"] = str(cfg)
+        section["url"] = "https://github.com" if name == FORGE_GITHUB else "https://gitlab.com"
+        if name == forge:
+            section.update(overrides)
+        policy[name] = section
+    path = bin_dir / "forge-policy.json"
+    path.write_text(json.dumps(policy))
+    return path
+
+
 @pytest.fixture
 def deployed(tmp_path):
-    """The wrapper installed as `gh`, next to a fake real binary."""
+    """The wrapper installed as `gh`, next to a fake real binary and a policy."""
     wrapper = tmp_path / "bin" / "gh"
     wrapper.parent.mkdir(parents=True)
     shutil.copy(_MODULE, wrapper)
@@ -155,6 +179,7 @@ def deployed(tmp_path):
 
     cfg = tmp_path / "gh-config"
     cfg.mkdir()
+    _write_policy(wrapper.parent, real, cfg)
     return wrapper, real, cfg
 
 
@@ -189,8 +214,6 @@ class TestExecPath:
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list", "--state", "open"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -203,10 +226,7 @@ class TestExecPath:
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
-                "ISTOTA_GH_URL": "https://github.com",
             })
         finally:
             proxy.close()
@@ -224,8 +244,6 @@ class TestExecPath:
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
                 "ISTOTA_FORGE_POLICY": str(policy_file),
                 "GH_DEBUG": "api",
@@ -241,8 +259,6 @@ class TestExecPath:
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -255,8 +271,6 @@ class TestExecPath:
         try:
             r = _run(wrapper, ["pr", "list"], {
                 "PATH": "/opt/x:/usr/bin:/bin",
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -273,8 +287,6 @@ class TestRefusals:
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["repo", "delete", "someorg/somerepo"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -288,8 +300,6 @@ class TestRefusals:
     def test_denied_message_does_not_overclaim(self, deployed, tmp_path):
         wrapper, real, cfg = deployed
         r = _run(wrapper, ["auth", "token"], {
-            "ISTOTA_GH_REAL": str(real),
-            "ISTOTA_GH_CONFIG_DIR": str(cfg),
             "ISTOTA_SKILL_PROXY_SOCK": str(tmp_path / "absent.sock"),
         })
         assert r.returncode == EXIT_DENIED
@@ -299,8 +309,6 @@ class TestRefusals:
     def test_no_proxy_exits_four(self, deployed):
         wrapper, real, cfg = deployed
         r = _run(wrapper, ["pr", "list"], {
-            "ISTOTA_GH_REAL": str(real),
-            "ISTOTA_GH_CONFIG_DIR": str(cfg),
         })
         assert r.returncode == EXIT_NO_PROXY
         assert "no credential proxy" in r.stderr
@@ -312,10 +320,11 @@ class TestRefusals:
         $HOME/.config/gh - writable, and gh expands `aliases` from it before
         dispatch, so the deny list stops applying. Fail loudly instead."""
         wrapper, real, _ = deployed
+        # A policy with no config_dir is the wiring mistake this guards.
+        _write_policy(wrapper.parent, real, "", config_dir="")
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -330,8 +339,6 @@ class TestRefusals:
         )
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -346,12 +353,12 @@ class TestRefusals:
     def test_missing_real_binary_exits_six_without_the_token(self, deployed, tmp_path, sock_path):
         """Exit 6 is the one error path that formats a message with the token
         already fetched and in scope, so it is the leakage case that matters."""
-        wrapper, _, cfg = deployed
+        wrapper, real, cfg = deployed
+        missing = tmp_path / "does-not-exist"
+        _write_policy(wrapper.parent, missing, cfg)
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(tmp_path / "does-not-exist"),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -361,14 +368,80 @@ class TestRefusals:
         assert SENTINEL not in r.stdout
         assert "does-not-exist" in r.stderr
 
+
+class TestEnvironmentCannotRedirectTheWrapper:
+    """The model sets its own environment; the wrapper must not read its
+    trust anchors from there.
+
+    Each of these was a one-token bypass while the setting came from an
+    ISTOTA_* variable: point the policy at a toothless file, or the config dir
+    at one carrying an `aliases:` block, or the real binary at anything at all.
+    They now travel in the policy file, whose location the wrapper computes
+    from its own path.
+    """
+
+    def test_real_binary_env_override_is_ignored(self, deployed, tmp_path, sock_path):
+        wrapper, real, cfg = deployed
+        impostor = tmp_path / "impostor"
+        impostor.write_text("#!/bin/sh\necho IMPOSTOR RAN\n")
+        impostor.chmod(0o700)
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            r = _run(wrapper, ["pr", "list"], {
+                "ISTOTA_GH_REAL": str(impostor),
+                "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert r.returncode == 0, r.stderr
+        assert "IMPOSTOR" not in r.stdout
+        assert _fields(r.stdout)["ARGV"] == "pr list"
+
+    def test_policy_env_override_is_ignored(self, deployed, tmp_path, sock_path):
+        """A shape-valid policy naming no real rule would disable the lot."""
+        wrapper, real, cfg = deployed
+        toothless = tmp_path / "toothless.json"
+        toothless.write_text(json.dumps({
+            FORGE_GITHUB: {
+                "path_rules": [["never", "matches"]],
+                "flag_value_rules": [], "body_flag_rules": [],
+            },
+        }))
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            r = _run(wrapper, ["repo", "delete", "someorg/somerepo"], {
+                "ISTOTA_FORGE_POLICY": str(toothless),
+                "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert r.returncode == EXIT_DENIED
+        assert "repo delete" in r.stderr
+
+    def test_config_dir_env_override_is_ignored(self, deployed, tmp_path, sock_path):
+        """gh expands aliases from config.yml before dispatch, so a config dir
+        the model picks is a config dir the model writes."""
+        wrapper, real, cfg = deployed
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        (mine / "config.yml").write_text("aliases:\n    x: repo delete\n")
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            r = _run(wrapper, ["pr", "list"], {
+                "ISTOTA_GH_CONFIG_DIR": str(mine),
+                "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert r.returncode == 0, r.stderr
+        assert _fields(r.stdout)["GH_CONFIG_DIR"] == str(cfg)
+
     def test_non_executable_real_binary_exits_six(self, deployed, tmp_path, sock_path):
         wrapper, real, cfg = deployed
         real.chmod(0o600)
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
@@ -384,8 +457,6 @@ class TestMetaAndRetiredNames:
         for one breaks every deployment with the proxy switched off."""
         wrapper, real, cfg = deployed
         r = _run(wrapper, ["--version"], {
-            "ISTOTA_GH_REAL": str(real),
-            "ISTOTA_GH_CONFIG_DIR": str(cfg),
         })
         assert r.returncode == 0, r.stderr
         fields = _fields(r.stdout)
@@ -420,8 +491,6 @@ class TestDevboxBackend:
         )
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_CRED_SOCK": proxy.path,
             })
         finally:
@@ -449,8 +518,6 @@ class TestDevboxBackend:
         )
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_CRED_SOCK": proxy.path,
             })
         finally:
@@ -465,8 +532,6 @@ class TestDevboxBackend:
         )
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "ISTOTA_GH_REAL": str(real),
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_CRED_SOCK": proxy.path,
             })
         finally:
@@ -502,10 +567,8 @@ class TestAgainstRealBinary:
         if gh is None:
             pytest.skip("gh not installed")
         wrapper, _, cfg = deployed
-        r = _run(wrapper, ["--version"], {
-            "ISTOTA_GH_REAL": gh,
-            "ISTOTA_GH_CONFIG_DIR": str(cfg),
-        })
+        _write_policy(wrapper.parent, gh, cfg)
+        r = _run(wrapper, ["--version"], {})
         assert r.returncode == 0, r.stderr
         assert "gh version" in r.stdout
 
@@ -519,11 +582,8 @@ class TestAgainstRealBinary:
         wrapper, _, _ = deployed
         cfg = _seed_config_dir(tmp_path, "ro-gh", 0o400)
         try:
-            r = _run(wrapper, ["--version"], {
-                "ISTOTA_GH_REAL": gh,
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
-                "ISTOTA_FORGE_STATE_DIR": str(tmp_path / "state"),
-            })
+            _write_policy(wrapper.parent, gh, cfg)
+            r = _run(wrapper, ["--version"], {})
             assert r.returncode == 0, r.stderr
             assert "gh version" in r.stdout
         finally:
@@ -545,24 +605,46 @@ class TestAgainstRealBinary:
         strict = _seed_config_dir(tmp_path, "ro-glab-400", 0o400)
         loose = _seed_config_dir(tmp_path, "ro-glab-600", 0o600)
         try:
-            env = {
-                "ISTOTA_GLAB_REAL": glab,
-                "ISTOTA_FORGE_STATE_DIR": str(tmp_path / "state"),
-            }
-            bad = _run(glab_wrapper, ["--version"], {
-                **env, "ISTOTA_GLAB_CONFIG_DIR": str(strict),
-            })
+            _write_policy(glab_wrapper.parent, glab, strict, forge="gitlab")
+            bad = _run(glab_wrapper, ["--version"], {})
             assert bad.returncode != 0
             assert "600" in (bad.stdout + bad.stderr)
 
-            good = _run(glab_wrapper, ["--version"], {
-                **env, "ISTOTA_GLAB_CONFIG_DIR": str(loose),
-            })
+            _write_policy(glab_wrapper.parent, glab, loose, forge="gitlab")
+            good = _run(glab_wrapper, ["--version"], {})
             assert good.returncode == 0, good.stderr
             assert "glab" in good.stdout
         finally:
             strict.chmod(0o700)
             loose.chmod(0o700)
+
+    def test_real_gh_ignores_a_planted_extension(self, deployed, tmp_path, sock_path):
+        """gh execs gh-<name> from $XDG_DATA_HOME/gh/extensions for an unknown
+        first argument — argv the deny list cannot see. The wrapper pins
+        XDG_DATA_HOME at an empty directory to shut that."""
+        gh = shutil.which("gh")
+        if gh is None:
+            pytest.skip("gh not installed")
+        wrapper, _, cfg = deployed
+        planted = tmp_path / "planted"
+        ext = planted / "gh" / "extensions" / "gh-pwned"
+        ext.mkdir(parents=True)
+        (ext / "gh-pwned").write_text("#!/bin/sh\necho EXTENSION EXECUTED\n")
+        (ext / "gh-pwned").chmod(0o755)
+        pinned = tmp_path / "pinned-data"
+        pinned.mkdir()
+        _write_policy(wrapper.parent, gh, cfg, data_dir=str(pinned))
+
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            r = _run(wrapper, ["pwned"], {
+                "XDG_DATA_HOME": str(planted),
+                "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
+            })
+        finally:
+            proxy.close()
+        assert "EXTENSION EXECUTED" not in r.stdout
+        assert "unknown command" in (r.stdout + r.stderr).lower()
 
     def test_denied_verb_never_reaches_the_real_binary(self, deployed, tmp_path, sock_path):
         gh = shutil.which("gh")
@@ -572,8 +654,6 @@ class TestAgainstRealBinary:
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["repo", "delete", "someorg/somerepo"], {
-                "ISTOTA_GH_REAL": gh,
-                "ISTOTA_GH_CONFIG_DIR": str(cfg),
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:

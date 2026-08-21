@@ -1326,6 +1326,43 @@ gh_bin_path = "{tmp_path / 'no-such-gh'}"
             load_config(config_file)
         assert not any("not found at" in r.getMessage() for r in caplog.records)
 
+    def test_forge_tokens_without_the_skill_proxy_are_warned_about(
+        self, tmp_path, caplog,
+    ):
+        """The wrapper asks a credential proxy for the token and never falls
+        back to an ambient one. With the proxy off there is no socket, so
+        every forge command exits 4 — a behaviour change from the retired
+        curl wrappers, which had a direct-token branch."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_token = "ghp-x"
+
+[security]
+skill_proxy_enabled = false
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert any(
+            "no credential proxy to ask" in r.getMessage() for r in caplog.records
+        )
+
+    def test_no_proxy_warning_when_the_proxy_is_on(self, tmp_path, caplog):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+github_token = "ghp-x"
+""")
+        with caplog.at_level("WARNING", logger="istota.config"):
+            load_config(config_file)
+        assert not any(
+            "no credential proxy to ask" in r.getMessage() for r in caplog.records
+        )
+
     def test_github_env_var_override(self, tmp_path, monkeypatch):
         config_file = tmp_path / "config.toml"
         config_file.write_text("")

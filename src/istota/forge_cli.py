@@ -317,6 +317,27 @@ def _valid_body_flag_rule(rule: object) -> bool:
     )
 
 
+def policy_path(argv0: str) -> str:
+    """Where the policy lives, computed rather than taken from the caller.
+
+    **This is deliberately not an environment variable.** The wrapper runs
+    inside the sandbox as a child of the model's own shell, so anything it
+    reads out of ``os.environ`` is something the model can set: an
+    ``ISTOTA_FORGE_POLICY`` pointing at a shape-valid file whose rules name
+    nothing real would be a one-token bypass of every rule below, and would
+    make the read-only bind, the seeding and the file modes decorative.
+
+    So the wrapper locates its own policy: next to the copy of itself that is
+    executing (inside ``.developer``, which is read-only in the sandbox),
+    falling back to the image path for the devbox. Both are places the model
+    cannot write; neither is anything it can redirect.
+    """
+    beside = os.path.join(os.path.dirname(os.path.abspath(argv0)), "forge-policy.json")
+    if os.path.exists(beside):
+        return beside
+    return "/etc/istota-forge/policy.json"
+
+
 def load_policy(path: str | None, forge: str) -> dict:
     """Read the policy file, falling back to the baseline.
 
@@ -325,6 +346,11 @@ def load_policy(path: str | None, forge: str) -> dict:
     ["repo delete"]`` (strings, not lists of words) parses as valid JSON and
     then matches nothing, which disables the deny list without a word of
     complaint. Anything that does not validate is treated as absent.
+
+    Beyond the rules, the file carries the settings the wrapper must not take
+    from the environment either — ``real_bin``, ``url``, ``config_dir``,
+    ``data_dir``, ``state_dir`` and ``direct_token``. They ride along here
+    because this file's location is trustworthy and the environment is not.
     """
     if not path:
         return baseline_policy(forge)
@@ -346,11 +372,17 @@ def load_policy(path: str | None, forge: str) -> dict:
         body_flag_rules = section.get("body_flag_rules", [])
         if not all(_valid_body_flag_rule(r) for r in body_flag_rules):
             raise ValueError("malformed body_flag_rules")
-        return {
+        loaded = {
             "path_rules": [list(r) for r in path_rules],
             "flag_value_rules": [dict(r) for r in flag_value_rules],
             "body_flag_rules": [dict(r) for r in body_flag_rules],
         }
+        for key in ("real_bin", "url", "config_dir", "data_dir", "state_dir"):
+            value = section.get(key)
+            if isinstance(value, str) and value:
+                loaded[key] = value
+        loaded["direct_token"] = bool(section.get("direct_token", False))
+        return loaded
     except Exception as e:
         print(
             f"forge-cli: policy file unusable ({e}); falling back to the "
@@ -560,16 +592,32 @@ def _sock_roundtrip(sock_path: str, request: dict) -> dict:
         raise CredentialError(f"unparseable proxy response: {e}") from e
 
 
-def fetch_token(forge: str, parent_env: dict[str, str]) -> str:
+def fetch_token(forge: str, parent_env: dict[str, str], policy: dict | None = None) -> str:
     """Ask whichever proxy this environment has for the forge token.
 
     Sandbox: the skill proxy, same request the generated credential-fetch
     helper makes. Devbox: the devbox proxy's forge_token action, which Stage 4
     adds — until then that branch reaches a proxy that answers
-    ``unknown_action`` and the call exits 5. An ambient GH_TOKEN is never used
-    as a fallback; that would mean something upstream failed to strip it, and
-    inheriting it would hide the failure.
+    ``unknown_action`` and the call exits 5.
+
+    An ambient token is used only when the *policy* says to. On a deployment
+    with the skill proxy switched off — which the local single-user installer
+    writes — there is no socket to ask, and the token is legitimately in the
+    environment rather than having escaped a stripping step. Refusing it there
+    would leave the wrapper shadowing the real binary on PATH while being
+    incapable of ever working. The permission comes from the policy file
+    because that is the one input the model cannot forge; an env-carried
+    "direct mode" flag would let it opt itself into reading whatever token it
+    had planted.
     """
+    if policy and policy.get("direct_token"):
+        ambient = parent_env.get(_TOKEN_VAR[forge], "")
+        if ambient:
+            return ambient
+        raise CredentialError(
+            f"{_TOKEN_VAR[forge]} not set (policy allows direct tokens)"
+        )
+
     skill_sock = parent_env.get("ISTOTA_SKILL_PROXY_SOCK")
     if skill_sock:
         reply = _sock_roundtrip(
@@ -651,7 +699,14 @@ _SCRUB = (
     "GH_BROWSER", "BROWSER",
     "GH_REPO", "GH_PATH", "GH_FORCE_TTY",
     "GLAMOUR_STYLE", "CLICOLOR_FORCE",
-    "XDG_STATE_HOME", "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    # Retired inputs. Read from the environment, each of these let the model
+    # redirect the wrapper's own trust anchors; they now come from the policy
+    # file, whose location the wrapper computes. Scrubbed so a leftover in a
+    # deployed environment cannot quietly resurrect the old behaviour.
+    "ISTOTA_GH_REAL", "ISTOTA_GLAB_REAL",
+    "ISTOTA_GH_CONFIG_DIR", "ISTOTA_GLAB_CONFIG_DIR",
+    "ISTOTA_GH_URL", "ISTOTA_GITLAB_URL", "ISTOTA_FORGE_STATE_DIR",
 )
 
 
@@ -700,6 +755,7 @@ def build_invocation(
     config_dir: str,
     forge_url: str = "",
     state_dir: str = "",
+    data_dir: str = "",
 ) -> tuple[str, list[str], dict[str, str]]:
     """The exact ``(path, argv, env)`` to exec. Pure; ``main`` does the exec.
 
@@ -732,6 +788,12 @@ def build_invocation(
     # cannot turn a forge call into a filesystem error.
     if state_dir:
         env["XDG_STATE_HOME"] = state_dir
+    # Pinned so gh cannot reach an extensions directory the model can write.
+    # Unset, gh derives it from HOME, and HOME's .local/share is writable
+    # inside the sandbox — `gh <anything>` then execs gh-<anything> from
+    # there, which no argv rule can see. See _data_dir().
+    if data_dir:
+        env["XDG_DATA_HOME"] = data_dir
 
     if forge == FORGE_GITHUB:
         env["GH_CONFIG_DIR"] = config_dir
@@ -780,13 +842,16 @@ def build_invocation(
 # --------------------------------------------------------------------------- #
 
 
-def _real_bin(forge: str, env: dict[str, str]) -> str:
-    var = "ISTOTA_GH_REAL" if forge == FORGE_GITHUB else "ISTOTA_GLAB_REAL"
+# Every setting below comes from the policy file, never from os.environ. The
+# wrapper is a child of the model's shell, so an env-supplied path is a path
+# the model chooses — see policy_path() for the full reasoning. Defaults apply
+# only when the policy omits a key.
+def _real_bin(forge: str, policy: dict) -> str:
     default = "/usr/local/bin/gh" if forge == FORGE_GITHUB else "/usr/local/bin/glab"
-    return env.get(var) or default
+    return policy.get("real_bin") or default
 
 
-def _config_dir(forge: str, env: dict[str, str]) -> str:
+def _config_dir(forge: str, policy: dict) -> str:
     """The read-only, pre-seeded CLI config directory.
 
     Read-only is the point: gh expands ``aliases`` from ``config.yml`` before
@@ -797,23 +862,30 @@ def _config_dir(forge: str, env: dict[str, str]) -> str:
     600"). So the seeded file is 0600 and the immutability comes from the
     sandbox's read-only bind over ``.developer``, not from the file mode.
     """
-    var = "ISTOTA_GH_CONFIG_DIR" if forge == FORGE_GITHUB else "ISTOTA_GLAB_CONFIG_DIR"
-    return env.get(var, "")
+    return policy.get("config_dir", "")
 
 
-def _state_dir(env: dict[str, str]) -> str:
+def _state_dir(policy: dict) -> str:
     """Writable scratch for the CLI's own state, kept out of the config dir."""
-    return env.get("ISTOTA_FORGE_STATE_DIR", "")
+    return policy.get("state_dir", "")
 
 
-def _forge_url(forge: str, env: dict[str, str]) -> str:
-    """The configured forge URL, under a name distinct from what we emit.
+def _data_dir(policy: dict) -> str:
+    """Pinned, empty, read-only — the extensions directory.
 
-    The wrapper writes GH_HOST / GITLAB_HOST into the child; reading the same
-    names here would make the input and the output indistinguishable.
+    gh dispatches an unknown first argument to ``gh-<name>`` in
+    ``$XDG_DATA_HOME/gh/extensions``, which the argv rules cannot see: the
+    argv is ``gh pwned`` and matches nothing. Verified against gh 2.98 — a
+    planted extension runs, both via XDG_DATA_HOME and via
+    ``$HOME/.local/share``, and pointing XDG_DATA_HOME at an empty directory
+    shuts both. Leaving it unset means gh derives it from HOME, and HOME
+    inside the sandbox has model-writable ``.local/share``.
     """
-    var = "ISTOTA_GH_URL" if forge == FORGE_GITHUB else "ISTOTA_GITLAB_URL"
-    return env.get(var, "")
+    return policy.get("data_dir", "")
+
+
+def _forge_url(forge: str, policy: dict) -> str:
+    return policy.get("url", "")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -839,9 +911,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_USAGE
 
-    real_bin = _real_bin(forge, env)
-    config_dir = _config_dir(forge, env)
-    forge_url = _forge_url(forge, env)
+    policy = load_policy(policy_path(argv0), forge)
+    real_bin = _real_bin(forge, policy)
+    config_dir = _config_dir(forge, policy)
+    forge_url = _forge_url(forge, policy)
 
     token: str | None = None
     if not is_meta_invocation(args):
@@ -858,9 +931,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return EXIT_MISCONFIGURED
-        reason = denied_reason(
-            forge, args, load_policy(env.get("ISTOTA_FORGE_POLICY"), forge),
-        )
+        reason = denied_reason(forge, args, policy)
         if reason is not None:
             print(
                 f"{name}: '{reason}' is not permitted by this deployment. It is "
@@ -870,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_DENIED
         try:
-            token = fetch_token(forge, env)
+            token = fetch_token(forge, env, policy)
         except NoProxyError as e:
             print(f"{name}: {e}", file=sys.stderr)
             return EXIT_NO_PROXY
@@ -880,7 +951,7 @@ def main(argv: list[str] | None = None) -> int:
 
     path, child_argv, child_env = build_invocation(
         forge, args, env, token, real_bin, config_dir, forge_url,
-        _state_dir(env),
+        _state_dir(policy), _data_dir(policy),
     )
     try:
         os.execve(path, child_argv, child_env)

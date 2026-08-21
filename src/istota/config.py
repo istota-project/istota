@@ -3013,6 +3013,20 @@ def _validate_forge_clis(config: "Config") -> None:
                     "or point %s_bin_path at the real one.",
                     label, path, label,
                 )
+        if not config.security.skill_proxy_enabled:
+            # The wrapper gets its token from a credential proxy and never
+            # from an ambient GH_TOKEN — an ambient one would mean something
+            # upstream failed to strip it. With the proxy off there is no
+            # socket, so every forge command exits 4. The retired curl
+            # wrappers had a direct-token branch, so this is a behaviour
+            # change for that configuration and worth naming rather than
+            # leaving to be discovered.
+            _logger.warning(
+                "[developer] forge tokens are configured but "
+                "[security] skill_proxy_enabled = false; gh and glab have no "
+                "credential proxy to ask and every forge command will fail. "
+                "Enable the skill proxy, or clear the developer tokens.",
+            )
 
     try:
         from .forge_cli import FORGE_GITHUB, FORGE_GITLAB, unmatched_permits

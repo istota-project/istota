@@ -9,10 +9,16 @@ Generates, inside the task's user temp directory:
 - a seeded, read-only config directory per CLI.
 
 Everything lands in ``{user_temp_dir}/.developer``, which ``build_bwrap_cmd``
-re-binds read-only inside the sandbox (and which ``native_fs_roots`` excludes
-from the native brain's write roots). That is what makes the wrapper, the
-policy and the alias table unwritable by the model — none of it would mean
-anything in a directory the model could edit.
+re-binds read-only inside the sandbox and which ``native_fs_roots`` excludes
+from the native brain's write roots. Those two together are what stop the
+model's *own file tools* rewriting the wrapper, the policy or gh's alias
+table, which is the level of protection an accident guard needs.
+
+It is not an absolute. ``user_temp_dir`` is also the deferred directory, which
+``skill_host_paths`` admits as a host-side write root, so a determined model
+has paths to that directory that neither the bind nor the deny root covers.
+Same posture as the policy itself: it stops a mistake, not a decision. The
+boundary that does the real work is the forge token's own scope.
 
 Static env vars (DEVELOPER_REPOS_DIR, GITLAB_URL, GITHUB_URL, the optional
 namespace/owner/reviewer/credit knobs, GITLAB_TOKEN, GITHUB_TOKEN) come
@@ -24,7 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
+import os
 from pathlib import Path
 
 from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
@@ -35,6 +41,21 @@ logger = logging.getLogger("istota.skills.developer")
 _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
 
 
+def _atomic_write(dest: Path, data: str, mode: int) -> Path:
+    """Write via a temp file in the same directory, then rename.
+
+    Tasks for one user share ``user_temp_dir`` and the worker pool runs them
+    concurrently, so a plain truncate-then-write can be read half-finished by
+    a wrapper another task is running right now. ``os.replace`` is atomic and
+    leaves an already-open process on its own inode.
+    """
+    tmp = dest.with_name(f".{dest.name}.tmp{os.getpid()}")
+    tmp.write_text(data)
+    tmp.chmod(mode)
+    os.replace(tmp, dest)
+    return dest
+
+
 def _write_forge_cli(dev_bin: Path, name: str) -> Path:
     """Install the wrapper under one of the names it dispatches on.
 
@@ -42,10 +63,9 @@ def _write_forge_cli(dev_bin: Path, name: str) -> Path:
     the sandbox's view of a symlink's target is one more thing to get wrong
     for no benefit.
     """
-    dest = dev_bin / name
-    shutil.copyfile(_FORGE_CLI_SOURCE, dest)
-    dest.chmod(0o700)
-    return dest
+    return _atomic_write(
+        dev_bin / name, _FORGE_CLI_SOURCE.read_text(), 0o700,
+    )
 
 
 def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
@@ -62,12 +82,31 @@ def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
     dispatch, so an absent file is one the model could otherwise supply.
     """
     cfg = dev_bin / name
-    cfg.mkdir(parents=True, exist_ok=True)
+    cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
     config_yml = cfg / "config.yml"
-    if not config_yml.exists():
-        config_yml.write_text("")
-    config_yml.chmod(0o600)
+    # Truncated on every run, not seeded once. user_temp_dir persists across
+    # tasks, so a "write it only if absent" guard would make the seed a
+    # one-time act: anything that got an alias table in there once — a
+    # deployment without bwrap, or a host-side write — would have it honoured
+    # by every later task. The wrapper and the policy are both rewritten
+    # unconditionally; this is the file that most needs to be.
+    _atomic_write(config_yml, "", 0o600)
     return cfg
+
+
+def _pinned_data_dir(dev_bin: Path, name: str) -> Path:
+    """An empty directory to point XDG_DATA_HOME at.
+
+    gh dispatches an unknown first argument to ``gh-<name>`` in
+    ``$XDG_DATA_HOME/gh/extensions``, and the argv rules cannot see that — the
+    argv is ``gh <name>`` and matches nothing. Left unset, gh derives the path
+    from HOME, whose ``.local/share`` is writable inside the sandbox. Verified
+    against gh 2.98: a planted extension runs, and pinning the variable at an
+    empty directory stops it.
+    """
+    data = dev_bin / name
+    data.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return data
 
 
 def setup_env(ctx) -> dict[str, str]:
@@ -169,21 +208,45 @@ def setup_env(ctx) -> dict[str, str]:
     # message, which is a clearer failure than "command not found" leading
     # the model to the real binary and an unauthenticated call.
     if dev.gitlab_token or dev.github_token:
+        state_dir = user_temp_dir / ".forge-state"
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        def _section(forge: str, url: str, real_bin: str) -> dict:
+            section = build_policy(
+                forge,
+                extra_denied=list(getattr(dev, "forge_cli_extra_denied", [])),
+                permit=list(getattr(dev, "forge_cli_permit", [])),
+            )
+            section["url"] = url
+            section["real_bin"] = real_bin
+            section["config_dir"] = str(_seed_cli_config_dir(dev_bin, f"{forge}-config"))
+            section["data_dir"] = str(_pinned_data_dir(dev_bin, f"{forge}-data"))
+            section["state_dir"] = str(state_dir)
+            # With the skill proxy off there is no socket to ask, and the
+            # token is legitimately in the environment rather than having
+            # escaped a stripping step. Saying so here rather than in an env
+            # var matters: this file is the one input the model cannot
+            # redirect, so it is the only safe place to grant that permission.
+            section["direct_token"] = not use_proxy
+            return section
+
         policy = {
-            FORGE_GITHUB: build_policy(
+            FORGE_GITHUB: _section(
                 FORGE_GITHUB,
-                extra_denied=list(getattr(dev, "forge_cli_extra_denied", [])),
-                permit=list(getattr(dev, "forge_cli_permit", [])),
+                dev.github_url,
+                getattr(dev, "gh_bin_path", "") or "/usr/local/bin/gh",
             ),
-            FORGE_GITLAB: build_policy(
+            FORGE_GITLAB: _section(
                 FORGE_GITLAB,
-                extra_denied=list(getattr(dev, "forge_cli_extra_denied", [])),
-                permit=list(getattr(dev, "forge_cli_permit", [])),
+                dev.gitlab_url,
+                getattr(dev, "glab_bin_path", "") or "/usr/local/bin/glab",
             ),
         }
-        policy_path = dev_bin / "forge-policy.json"
-        policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True))
-        policy_path.chmod(0o600)
+        _atomic_write(
+            dev_bin / "forge-policy.json",
+            json.dumps(policy, indent=2, sort_keys=True),
+            0o600,
+        )
 
         _write_forge_cli(dev_bin, "gh")
         _write_forge_cli(dev_bin, "glab")
@@ -192,27 +255,15 @@ def setup_env(ctx) -> dict[str, str]:
         _write_forge_cli(dev_bin, "github-api")
         _write_forge_cli(dev_bin, "gitlab-api")
 
-        # Writable scratch for the CLIs' own state — gh drops a device id
-        # under $XDG_STATE_HOME on every run, and that must not land in the
-        # read-only config dir or in a possibly read-only HOME.
-        state_dir = user_temp_dir / ".forge-state"
-        state_dir.mkdir(parents=True, exist_ok=True)
-
-        env["ISTOTA_FORGE_POLICY"] = str(policy_path)
-        env["ISTOTA_GH_REAL"] = getattr(dev, "gh_bin_path", "") or "/usr/local/bin/gh"
-        env["ISTOTA_GLAB_REAL"] = (
-            getattr(dev, "glab_bin_path", "") or "/usr/local/bin/glab"
-        )
-        env["ISTOTA_GH_CONFIG_DIR"] = str(_seed_cli_config_dir(dev_bin, "gh-config"))
-        env["ISTOTA_GLAB_CONFIG_DIR"] = str(
-            _seed_cli_config_dir(dev_bin, "glab-config")
-        )
-        env["ISTOTA_FORGE_STATE_DIR"] = str(state_dir)
-        env["ISTOTA_GH_URL"] = dev.github_url
-        env["ISTOTA_GITLAB_URL"] = dev.gitlab_url
+        # The only var the wrapper needs from the environment. Everything else
+        # it might have read from there — the policy, the real binary, the
+        # config and data dirs, the forge URL — now travels in the policy file,
+        # because the wrapper runs as a child of the model's own shell and an
+        # env-supplied path is a path the model chooses.
+        #
         # Reserved key: the executor prepends this to the *model's* PATH only,
         # after snapshotting the environment it gives host-side skill CLIs.
-        # See executor.HOOK_PATH_PREPEND_KEY — the ordering is a security
+        # See executor.HOOK_PATH_PREPEND_KEY — that ordering is a security
         # property, not housekeeping.
         env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
 

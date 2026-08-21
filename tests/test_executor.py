@@ -32,6 +32,7 @@ from istota.executor import (
 from istota import db as _db
 from istota.brain import BrainRequest, ClaudeCodeBrain
 from istota.brain._types import BrainResult
+import json
 from pathlib import Path
 
 from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, SecurityConfig, SiteConfig, UserConfig
@@ -486,7 +487,8 @@ class TestResolveUserTz:
 class TestSkillsFingerprintIntegration:
     def _make_config(self, tmp_path):
         db_path = tmp_path / "test.db"
-        db.init_db(db_path)
+        if not db_path.exists():
+            db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
@@ -632,11 +634,16 @@ class TestDeveloperEnvVars:
     and what it hands back, not the contents of a generated script.
     """
 
-    def _make_config(self, tmp_path, developer_enabled=True, github=False, **dev_kw):
+    def _make_config(
+        self, tmp_path, developer_enabled=True, github=False,
+        skill_proxy_enabled=False, **dev_kw,
+    ):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
+        # exist_ok: a test may build two configs from one tmp_path to compare
+        # how the hook behaves across settings.
+        skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n'
         )
@@ -662,7 +669,7 @@ class TestDeveloperEnvVars:
             bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
             developer=DeveloperConfig(**kw),
-            security=SecurityConfig(skill_proxy_enabled=False),
+            security=SecurityConfig(skill_proxy_enabled=skill_proxy_enabled),
         )
 
     def _make_task(self, conn):
@@ -725,31 +732,77 @@ class TestDeveloperEnvVars:
         assert "GITLAB_API_CMD" not in env
         assert "GITHUB_API_CMD" not in env
 
-    def test_forge_env_points_at_what_was_written(self, tmp_path):
+    def test_path_prepend_is_the_only_env_var_the_wrapper_needs(self, tmp_path):
+        """Everything else travels in the policy file. The wrapper runs as a
+        child of the model's shell, so an env-supplied path is a path the model
+        chooses — an ISTOTA_FORGE_POLICY pointing at a toothless file would be
+        a one-token bypass of the whole rule set."""
         config = self._make_config(tmp_path, github=True)
         env, user_temp = self._hook_env(config, tmp_path)
-        dev_bin = user_temp / ".developer"
-        assert env["ISTOTA_FORGE_POLICY"] == str(dev_bin / "forge-policy.json")
-        assert env["ISTOTA_GH_CONFIG_DIR"] == str(dev_bin / "gh-config")
-        assert env["ISTOTA_GLAB_CONFIG_DIR"] == str(dev_bin / "glab-config")
-        assert env["ISTOTA_GH_URL"] == "https://github.com"
-        assert env["ISTOTA_GITLAB_URL"] == "https://gitlab.example.com"
-        assert Path(env["ISTOTA_FORGE_STATE_DIR"]).is_dir()
+        assert env["ISTOTA_PATH_PREPEND"] == str(user_temp / ".developer")
+        for retired in (
+            "ISTOTA_FORGE_POLICY", "ISTOTA_GH_CONFIG_DIR",
+            "ISTOTA_GLAB_CONFIG_DIR", "ISTOTA_GH_URL", "ISTOTA_GITLAB_URL",
+            "ISTOTA_GH_REAL", "ISTOTA_GLAB_REAL", "ISTOTA_FORGE_STATE_DIR",
+        ):
+            assert retired not in env, retired
 
-    def test_real_binary_paths_from_config(self, tmp_path):
+    def test_policy_carries_the_settings_the_wrapper_must_not_trust(self, tmp_path):
         config = self._make_config(
-            tmp_path, gh_bin_path="/opt/gh", glab_bin_path="/opt/glab",
+            tmp_path, github=True, gh_bin_path="/opt/gh", glab_bin_path="/opt/glab",
         )
-        env, _ = self._hook_env(config, tmp_path)
-        assert env["ISTOTA_GH_REAL"] == "/opt/gh"
-        assert env["ISTOTA_GLAB_REAL"] == "/opt/glab"
+        _, user_temp = self._hook_env(config, tmp_path)
+        dev_bin = user_temp / ".developer"
+        policy = json.loads((dev_bin / "forge-policy.json").read_text())
+        gh = policy["github"]
+        assert gh["real_bin"] == "/opt/gh"
+        assert gh["url"] == "https://github.com"
+        assert gh["config_dir"] == str(dev_bin / "github-config")
+        assert gh["data_dir"] == str(dev_bin / "github-data")
+        assert Path(gh["state_dir"]).is_dir()
+        assert policy["gitlab"]["real_bin"] == "/opt/glab"
+        assert policy["gitlab"]["url"] == "https://gitlab.example.com"
+
+    def test_policy_grants_direct_tokens_only_with_the_proxy_off(self, tmp_path):
+        """The permission lives in the policy file because that is the one
+        input the model cannot redirect. An env flag would let it opt itself
+        into reading whatever token it had planted."""
+        _, user_temp = self._hook_env(
+            self._make_config(tmp_path, skill_proxy_enabled=False), tmp_path,
+        )
+        off = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        assert off["github"]["direct_token"] is True
+
+        _, user_temp2 = self._hook_env(
+            self._make_config(tmp_path, skill_proxy_enabled=True), tmp_path,
+        )
+        on = json.loads(
+            (user_temp2 / ".developer" / "forge-policy.json").read_text()
+        )
+        assert on["github"]["direct_token"] is False
+
+    def test_data_dir_is_pinned_and_empty(self, tmp_path):
+        """gh execs gh-<name> from $XDG_DATA_HOME/gh/extensions for an unknown
+        first argument, which no argv rule can see."""
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        data = Path(policy["github"]["data_dir"])
+        assert data.is_dir()
+        assert list(data.iterdir()) == []
 
     def test_policy_file_is_loadable_and_denies_the_baseline(self, tmp_path):
         from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
 
         config = self._make_config(tmp_path)
-        env, _ = self._hook_env(config, tmp_path)
-        policy = load_policy(env["ISTOTA_FORGE_POLICY"], FORGE_GITHUB)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = load_policy(
+            str(user_temp / ".developer" / "forge-policy.json"), FORGE_GITHUB,
+        )
         assert denied_reason(FORGE_GITHUB, ["repo", "delete", "x"], policy)
         assert denied_reason(FORGE_GITHUB, ["pr", "create"], policy) is None
 
@@ -761,8 +814,10 @@ class TestDeveloperEnvVars:
             forge_cli_extra_denied=["gh pr merge"],
             forge_cli_permit=["gh repo delete"],
         )
-        env, _ = self._hook_env(config, tmp_path)
-        policy = load_policy(env["ISTOTA_FORGE_POLICY"], FORGE_GITHUB)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = load_policy(
+            str(user_temp / ".developer" / "forge-policy.json"), FORGE_GITHUB,
+        )
         assert denied_reason(FORGE_GITHUB, ["pr", "merge", "1"], policy)
         assert denied_reason(FORGE_GITHUB, ["repo", "delete", "x"], policy) is None
 
@@ -770,18 +825,53 @@ class TestDeveloperEnvVars:
         """glab refuses any mode but 0600; gh accepts either. Measured against
         glab 1.114 — see the integration tests in test_forge_cli_exec.py."""
         config = self._make_config(tmp_path)
-        env, _ = self._hook_env(config, tmp_path)
-        for key in ("ISTOTA_GH_CONFIG_DIR", "ISTOTA_GLAB_CONFIG_DIR"):
-            cfg = Path(env[key])
-            config_yml = cfg / "config.yml"
-            assert config_yml.exists(), key
-            assert config_yml.stat().st_mode & 0o777 == 0o600, key
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        for forge in ("github", "gitlab"):
+            config_yml = Path(policy[forge]["config_dir"]) / "config.yml"
+            assert config_yml.exists(), forge
+            assert config_yml.stat().st_mode & 0o777 == 0o600, forge
 
     def test_no_token_means_no_forge_wrappers(self, tmp_path):
         config = self._make_config(tmp_path, gitlab_token="", github_token="")
         env, user_temp = self._hook_env(config, tmp_path)
         assert "ISTOTA_PATH_PREPEND" not in env
         assert not (user_temp / ".developer" / "gh").exists()
+
+    def test_credential_fetch_written_when_the_proxy_is_on(self, tmp_path):
+        """The proxy branch of setup_env. With the proxy on, the helper must
+        not hold the token itself — it shells out to credential-fetch, which
+        asks the proxy for it at call time."""
+        config = self._make_config(tmp_path, skill_proxy_enabled=True)
+        _, user_temp = self._hook_env(config, tmp_path)
+        dev_bin = user_temp / ".developer"
+        fetch = dev_bin / "credential-fetch"
+        assert fetch.exists()
+        assert fetch.stat().st_mode & 0o777 == 0o700
+        body = (dev_bin / "git-credential-helper").read_text()
+        assert f'echo password="$({fetch} GITLAB_TOKEN)"' in body
+        assert "glpat-test" not in body
+
+    def test_credential_fetch_absent_when_the_proxy_is_off(self, tmp_path):
+        config = self._make_config(tmp_path, skill_proxy_enabled=False)
+        _, user_temp = self._hook_env(config, tmp_path)
+        assert not (user_temp / ".developer" / "credential-fetch").exists()
+
+    def test_seeded_config_is_truncated_every_run(self, tmp_path):
+        """user_temp_dir persists across tasks. gh expands aliases from
+        config.yml before dispatch, so a file that survived one run would be
+        honoured by every later one."""
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        cfg = Path(policy["github"]["config_dir"]) / "config.yml"
+        cfg.write_text("aliases:\n    pwn: repo delete\n")
+        self._hook_env(config, tmp_path)
+        assert cfg.read_text() == ""
 
     def test_no_token_value_appears_in_the_returned_env(self, tmp_path):
         config = self._make_config(tmp_path, github=True)
@@ -792,13 +882,18 @@ class TestDeveloperEnvVars:
 
 
 class TestPathPrependOrdering:
-    """ISTOTA_PATH_PREPEND reaches the model and not the skill proxy.
+    """A secondary guard on the *shape* of the ordering, not its effect.
 
-    This is the ordering the executor comment calls load-bearing:
-    ``proxy_base_env`` is handed to every host-side skill CLI, which runs
-    outside bwrap as the daemon user, and two of them resolve a binary by bare
-    name. A task-temp directory on *that* PATH is a host-side code-execution
-    path.
+    The behavioural tests are TestForgeCliPathPrepend in
+    tests/test_sandbox_db_env.py: they run a real task and assert the model's
+    PATH carries .developer while the skill proxy's does not. Those are what
+    prove the property, and they do fail when the two statements are swapped.
+
+    This one exists because the property is easy to break by *moving code*
+    while keeping every behaviour test green in some future refactor that
+    also changes the fixtures. It asserts the merge loop still skips the key
+    and the application still sits after the snapshot. If it ever fights a
+    legitimate refactor, delete it — the behavioural tests are the contract.
     """
 
     def test_reserved_key_is_not_merged_into_env(self):
@@ -813,15 +908,6 @@ class TestPathPrependOrdering:
         assert src.index("proxy_base_env = {**env") < src.index(
             "_path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY"
         )
-
-    def test_prepend_lands_ahead_of_the_existing_path(self, tmp_path):
-        import os
-
-        entries = [str(tmp_path / "a"), str(tmp_path / "b")]
-        base = "/usr/bin:/bin"
-        prepended = os.pathsep.join([*entries, base])
-        assert prepended.split(os.pathsep)[:2] == entries
-        assert prepended.endswith(base)
 
 
 class TestWebsiteEnvVars:
@@ -1406,7 +1492,9 @@ class TestCalDAVCredentialScoping:
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
+        # exist_ok: a test may build two configs from one tmp_path to compare
+        # how the hook behaves across settings.
+        skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n'
         )
@@ -2248,7 +2336,9 @@ class TestNotificationReplyContextScoping:
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
+        # exist_ok: a test may build two configs from one tmp_path to compare
+        # how the hook behaves across settings.
+        skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n'
         )
