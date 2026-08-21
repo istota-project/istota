@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Run a command while holding a machine-wide slot, so test suites queue instead of colliding.
+
+Several worktrees each running `pytest -n auto` ask for `cpu_count()` workers
+apiece. On a 12-core laptop three concurrent jobs is 36 workers, and the result
+is not just slow -- runs start failing on timeouts that have nothing to do with
+the code under test. Serialized, the same three runs finish sooner and each one
+gets an honest answer.
+
+    scripts/qtest uv run pytest
+    scripts/qtest npm --prefix web run test
+    scripts/qtest rtk test uv run pytest
+
+qtest takes no flags of its own; everything after the program name belongs to
+the command. It is configured by environment variable instead:
+
+    QTEST_SLOTS      how many runs may hold the machine at once (default 1)
+    QTEST_TIMEOUT    seconds to wait for a slot before giving up (default 1800)
+    QTEST_LOCK_DIR   where the slot files live (default ~/.cache/qtest)
+    QTEST_DISABLE    set to 1 to run straight through without taking a slot
+
+The lock is deliberately outside any repository: the contended resource is the
+machine, so every worktree and every project has to queue against the same
+slots. Two repos sharing the default lock dir is the intended behaviour, not a
+collision.
+
+Slots are `flock` advisory locks, which the kernel releases when the holding
+process exits -- including when it is killed. There is no stale lock to clean
+up, which matters here because a lock that outlived its holder would wedge
+every worktree on the machine.
+
+The command runs as the leader of its own process group, and an interrupt or a
+normal exit sweeps that whole group. A test run has no business leaving workers
+behind -- an orphaned pool holds the cores while the slot moves on to the next
+run, which is the exact state the semaphore exists to prevent. The consequence
+worth knowing: do not use qtest to launch something meant to outlive it, like a
+dev server. The one gap is `kill -9` on qtest itself, which no process can
+handle; that leaks the group and frees the slot at the same time, so prefer
+Ctrl-C or SIGTERM.
+
+Exit codes: the command's own, or 2 for a usage error, or 75 (EX_TEMPFAIL) if
+no slot came free before the timeout. On 75 the command has NOT been run.
+"""
+
+import errno
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+EXIT_USAGE = 2
+EXIT_NO_SLOT = 75  # EX_TEMPFAIL
+
+DEFAULT_SLOTS = 1
+DEFAULT_TIMEOUT = 1800.0
+POLL_INTERVAL = 0.25
+
+
+def fail(message, code=EXIT_USAGE):
+    print(f"qtest: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def env_int(name, default, minimum):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        fail(f"{name} must be a whole number, got {raw!r}")
+    if value < minimum:
+        fail(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
+def env_float(name, default, minimum):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        fail(f"{name} must be a number, got {raw!r}")
+    if value < minimum:
+        fail(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
+def lock_dir():
+    raw = os.environ.get("QTEST_LOCK_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    return Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "qtest"
+
+
+def open_slots(directory, slots):
+    """Open one file per slot. Python marks these non-inheritable, so the child
+    never gets a copy of the descriptor and can't hold the lock past our exit."""
+    directory.mkdir(parents=True, exist_ok=True)
+    return [
+        os.open(directory / f"slot-{i}.lock", os.O_CREAT | os.O_RDWR, 0o644) for i in range(slots)
+    ]
+
+
+def try_lock(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+            return False
+        raise
+
+
+def acquire(fds, timeout, on_wait=None):
+    """Poll the slots until one is free. Returns seconds waited, or None on timeout.
+
+    Polling rather than a blocking flock(2) is what buys the timeout: Python
+    exposes no blocking flock with a deadline that is safe against signals.
+
+    `on_wait` fires once, the first time every slot is busy. Announcing the
+    wait up front rather than only in hindsight is the difference between a
+    caller seeing a queued run and a caller seeing a command that has printed
+    nothing for ten minutes.
+    """
+    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    announced = False
+    while True:
+        for fd in fds:
+            if try_lock(fd):
+                return time.monotonic() - started
+        if time.monotonic() >= deadline:
+            return None
+        if not announced:
+            announced = True
+            if on_wait is not None:
+                on_wait()
+        time.sleep(POLL_INTERVAL)
+
+
+def spawn(command):
+    """Start the command as the leader of its own process group.
+
+    The group is the point. `qtest uv run pytest` is four levels deep --
+    qtest, uv, pytest, then N xdist workers -- and signalling only the direct
+    child leaves the workers running as orphans. They would keep every core
+    busy while qtest exited and released the slot to the next queued run,
+    which is a worse machine to be on than if there had been no semaphore.
+    A leader can be signalled as a unit instead.
+    """
+    try:
+        return subprocess.Popen(command, process_group=0)
+    except TypeError:
+        # process_group= landed in 3.11; start_new_session also makes the
+        # child a group leader, at the cost of the controlling terminal.
+        return subprocess.Popen(command, start_new_session=True)
+
+
+def signal_group(pgid, signum):
+    """Signal the command's whole process group. Never raises: this runs from a
+    signal handler, where an exception would abandon the tree we came to kill."""
+    try:
+        os.killpg(pgid, signum)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def run(command):
+    """Run the command, forwarding termination signals, and return its exit code.
+
+    The handlers go on *before* the child exists, and that ordering is the
+    whole trick. Arming them afterwards leaves a window between fork and
+    handler installation in which a signal takes its default action and kills
+    qtest outright -- no cleanup, no sweep, and the process group we were about
+    to take responsibility for is orphaned. It is a narrow window, but Ctrl-C
+    right after starting a run lands in it, so a signal arriving early is
+    recorded and replayed once there is a group to send it to.
+    """
+    pending = None
+    pgid = None
+
+    def forward(signum, _frame):
+        nonlocal pending
+        if pgid is None:
+            pending = signum  # nothing to signal yet; replay it below
+        else:
+            signal_group(pgid, signum)
+
+    previous = {}
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous[signum] = signal.signal(signum, forward)
+        except (ValueError, OSError):
+            pass
+
+    def restore():
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+    if pending is not None:
+        # Signalled before the command started. Don't start it.
+        restore()
+        return 128 + pending
+
+    try:
+        child = spawn(command)
+    except BaseException:
+        restore()
+        raise
+
+    pgid = child.pid  # it leads the group, so the ids coincide
+    if pending is not None:
+        signal_group(pgid, pending)
+
+    try:
+        status = child.wait()
+    finally:
+        restore()
+        # The direct child has been reaped, but a stuck worker can outlive it.
+        # Sweeping the group is a no-op when the run ended cleanly, and is the
+        # difference between a released slot and a released slot on a machine
+        # that is still fully loaded.
+        signal_group(pgid, signal.SIGKILL)
+
+    # Popen reports a signal death as a negative number; callers expect the
+    # shell's 128+N.
+    return 128 - status if status < 0 else status
+
+
+def main(argv):
+    command = argv[1:]
+    if not command:
+        fail("usage: qtest <command> [args...]")
+
+    if os.environ.get("QTEST_DISABLE", "").lower() in ("1", "true", "yes"):
+        raise SystemExit(run(command))
+
+    slots = env_int("QTEST_SLOTS", DEFAULT_SLOTS, minimum=1)
+    timeout = env_float("QTEST_TIMEOUT", DEFAULT_TIMEOUT, minimum=0.0)
+
+    fds = open_slots(lock_dir(), slots)
+
+    def announce_wait():
+        print(
+            f"qtest: all {slots} slot(s) busy, queueing (up to {timeout:g}s)",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    waited = acquire(fds, timeout, on_wait=announce_wait)
+    if waited is None:
+        fail(
+            f"timed out after {timeout:g}s waiting for one of {slots} slot(s); "
+            f"command not run. Another test suite is still going -- retry, or set "
+            f"QTEST_DISABLE=1 to bypass the queue.",
+            code=EXIT_NO_SLOT,
+        )
+    if waited >= POLL_INTERVAL:
+        print(
+            f"qtest: got a slot after waiting {waited:.0f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    try:
+        raise SystemExit(run(command))
+    except FileNotFoundError:
+        fail(f"command not found: {command[0]}", code=127)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

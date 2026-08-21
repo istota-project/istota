@@ -144,13 +144,13 @@ Python is **linted but not formatted**. `ruff check` runs clean over `src/` and 
 
 ## Verification
 
-There is no wrapper script and no single entry point. Run the checks directly, and run only the half the change touches — Python and `web/` are independent.
+There is no single entry point. Run the checks directly, and run only the half the change touches — Python and `web/` are independent.
 
 Python:
 
 ```bash
 ruff check --output-format concise src tests
-uv run pytest                    # pyproject pins `-m 'not integration and not live' -n auto`
+scripts/qtest uv run pytest      # pyproject pins `-m 'not integration and not live' -n auto`
 ```
 
 Web, from the repo root (needs `npm ci` in `web/` first):
@@ -158,11 +158,13 @@ Web, from the repo root (needs `npm ci` in `web/` first):
 ```bash
 npm --prefix web run lint:design
 npm --prefix web run check       # svelte-check
-npm --prefix web run test        # vitest run
+scripts/qtest npm --prefix web run test    # vitest run
 npm --prefix web run format:check
 ```
 
 Chain them in one shell invocation rather than one call each, and use `-x` / `--bail=1` while iterating so the first real failure stops the run. Drop those flags for the full run before a commit.
+
+**Wrap every full suite run in `scripts/qtest`.** Both suites size their worker pool from `cpu_count()` — pytest via `-n auto`, vitest by default — so each run claims the whole machine. That is correct for one run and pathological for several: work spread across worktrees means three jobs can ask for 36 workers on 12 cores, and runs then fail on timeouts that have nothing to do with the code. `qtest` is a `flock` semaphore holding one machine-wide slot (`QTEST_SLOTS` to raise it, `QTEST_TIMEOUT` to bound the wait, `QTEST_DISABLE=1` to bypass); it queues the run instead, so suites finish sooner and their results mean something. Serialize the expensive runs only — the fast feedback loop of a single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`. Exit code 75 means no slot came free and **the command did not run**; that is not a test failure. The lock lives in `~/.cache/qtest`, outside any repo, because the resource being shared is the laptop: other checkouts queue against the same slot by design.
 
 ## Committing
 
