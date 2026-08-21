@@ -260,15 +260,19 @@ def _render_cost(cost_by_basis: dict) -> str:
     """One rule: no currency unless it is money.
 
     Returns a dollar figure when the group's spend is entirely `api`, and the
-    placeholder otherwise. A group spanning bases is never summed into one
+    bare placeholder otherwise. A group spanning bases is never summed into one
     number — an operator who switched the CLI's auth mid-window has rows of both
     kinds, and adding a plan-equivalent to real spend is the misread this whole
     design refuses.
+
+    With no `api` rows there is nothing to qualify, so the placeholder stands on
+    its own: naming the bases behind it made a column of dashes noisier without
+    changing what it says, which is that no money was spent here.
     """
-    # Keyed on which bases are *present*, not on their magnitude. A catalog
-    # estimate is routinely 0.0 — that is the whole reason `estimated` exists as
-    # a basis — and a zero that vanished would render as a bare placeholder,
-    # telling the operator there is no figure but not why.
+    # The `+` marker is keyed on which bases are *present*, not on their
+    # magnitude. A catalog estimate is routinely 0.0 — that is the whole reason
+    # `estimated` exists as a basis — and dropping it on magnitude would let a
+    # partial dollar figure read as the whole of a group's spend.
     bases = cost_by_basis or {}
     real = bases.get("api")
     other = sorted(b for b in bases if b != "api")
@@ -276,8 +280,6 @@ def _render_cost(cost_by_basis: dict) -> str:
         return f"${_fmt_money(real)}"
     if real is not None:
         return f"${_fmt_money(real)} +{'+'.join(other)}"
-    if other:
-        return f"{COST_PLACEHOLDER} ({'+'.join(other)})"
     return COST_PLACEHOLDER
 
 

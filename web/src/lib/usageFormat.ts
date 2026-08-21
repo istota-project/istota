@@ -24,14 +24,16 @@ export function formatNumber(n: number): string {
 /**
  * One rule: no currency unless it is money.
  *
- * Keyed on which bases are *present*, not on their magnitude. A catalog
- * estimate is routinely 0.0 — that is the whole reason `estimated` exists as a
- * basis — and a zero that vanished would tell the reader there is no figure
- * without telling them why.
- *
  * A group spanning bases is marked, never summed: an operator switching the
  * CLI's auth mid-window has rows of both kinds, and adding a plan-equivalent to
- * real spend is the misread this design refuses.
+ * real spend is the misread this design refuses. That `+` marker is keyed on
+ * which bases are *present*, not on their magnitude — a catalog estimate is
+ * routinely 0.0, and dropping it on magnitude would let a partial dollar figure
+ * read as the whole of a group's spend.
+ *
+ * With no `api` rows there is nothing to qualify, so the placeholder stands on
+ * its own: naming the bases behind it made a column of dashes noisier without
+ * changing what it says, which is that no money was spent here.
  */
 export function formatCost(byBasis: Record<string, number> | undefined): string {
   const bases = byBasis ?? {};
@@ -41,7 +43,6 @@ export function formatCost(byBasis: Record<string, number> | undefined): string 
     .sort();
   if (real !== undefined && other.length === 0) return `$${formatMoney(real)}`;
   if (real !== undefined) return `$${formatMoney(real)} +${other.join('+')}`;
-  if (other.length > 0) return `${COST_PLACEHOLDER} (${other.join('+')})`;
   return COST_PLACEHOLDER;
 }
 
