@@ -238,6 +238,21 @@ The tier decides how much process the rest of the change gets. Pick it before wr
 Test and lint output is the largest single source of wasted context. Spend it deliberately.
 
 - **Failure-only output.** Use the runner's own quiet flags: `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast`.
+- **The exit status is the result, and a pipe throws it away.** A pipeline reports the status of its *last* command, so `pytest … | tail` exits 0 on a suite that just failed. Every other bullet here pushes toward trimming output, which is what makes this the place to say it:
+
+  ```bash
+  set -o pipefail                               # same Bash call as the pipe
+  uv run pytest -q --no-header | tail -n 20
+  ```
+
+  Or capture, check, then read — no shell option involved, and the whole log survives:
+
+  ```bash
+  uv run pytest -q --no-header > "$WORK_DIR/.check.log" 2>&1; STATUS=$?
+  tail -n 20 "$WORK_DIR/.check.log"
+  exit "$STATUS"                                # last statement of the call
+  ```
+
 - **Bail on the first failure while iterating** (`-x`, `--bail=1`). One real failure beats forty cascading ones. Drop the flag for the final full run.
 - **One command, one output.** Chain lint, typecheck and tests into a single invocation rather than three.
 - **Affected tests during the loop, the full suite once at the end of the work.** Not after every fix and not before every commit.
@@ -278,7 +293,7 @@ Report in this shape every time, so the room gets a consistent block:
 
 Tier: <Fast | Standard | Full>, <why — boundary surface, size, or default>
 Worked: <what changed, one or two sentences>
-Tests: <result of the final full pass, which stacks it covered; N added>
+Tests: <the final full pass, the exit status it was read from, which stacks it covered; N added>
 Review: <counts by severity and what you did about them> | <skipped, why> | <not run, Fast tier>
 Landed: <MR/PR URL> | <why not>
 Worktree: <path, left in place>
@@ -286,7 +301,7 @@ Worktree: <path, left in place>
 Deferred: <anything you did not take on, and why it is separate — one line each>
 ```
 
-Omit `Deferred` when there is nothing in it.
+Omit `Deferred` when there is nothing in it. `Tests:` names an exit status rather than an impression of one — the last twenty lines of a run say nothing about the twelve failures above them.
 
 ## GitLab: Pushing and Creating a Merge Request
 
@@ -481,11 +496,9 @@ git -C "$BARE_DIR" branch -d "istota/42-add-auth"
 | File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ...` |
 | Look up a user | `gh api /users/USERNAME` | `glab api /users?username=USERNAME` |
 
-**The two CLIs do not have the same structured-output surface.** `gh` takes `--json` plus `--jq`/`-q` and filters in-process. `glab` takes `-F json` and nothing else — there is no `--jq` — so a glab field read is `-F json` piped to `python3`, and the pipeline needs `set -o pipefail` for its exit status to mean anything. Newer glab does have `--jq`, which is the trap: the deployment installs glab from the Debian archive on the Ansible path and pins a much newer build in the Docker image, so a recipe here has to run on the older of the two. Check `glab <command> --help` on the deployed binary before using a flag you know from `gh`. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
+**The two CLIs do not have the same structured-output surface.** `gh` takes `--json` plus `--jq`/`-q` and filters in-process. `glab` takes `-F json` and nothing else — there is no `--jq` — so a glab field read is `-F json` piped to `python3`, and the pipeline needs `set -o pipefail` for its exit status to mean anything. Newer glab does have `--jq`, which is the trap: the deployment installs glab from the Debian archive on the Ansible path and pins a much newer build in the Docker image, so a recipe here has to run on the older of the two. Check `glab <command> --help` on the deployed binary before using a flag you know from `gh`. Anything not covered here: `gh <command> --help`, `glab <command> --help`. `gh api` and `glab api` reach any read endpoint the token allows; a write goes through the verb.
 
 Check the help before trusting a spelling from memory — the deployed CLIs may be older than the ones these examples were written against, and `glab mr note` in particular was restructured. Newer glab wants `glab mr note create N -m "..."`; older glab wants `glab mr note N -m "..."` with no subcommand. Run `glab mr note --help` and use whichever it shows.
-
-`gh api` and `glab api` reach any read endpoint the token allows. Writes through them are refused — use the verb.
 
 ## Error Handling
 
@@ -505,5 +518,4 @@ Check the help before trusting a spelling from memory — the deployed CLIs may 
 - **Exit 2**: a usage error, or one of the retired `github-api` / `gitlab-api` names. Use `gh` / `glab`.
 - **Exit 7**: the wrapper is misconfigured (no CLI config directory). A deployment problem — report it.
 - **Exit 6**: the real CLI is missing or not executable on this host. Report the path in the message; the operator has to install it.
-- **`gh api` write refused**: writes through the raw API are blocked on purpose. There is a verb for it — `gh pr edit`, `gh issue comment`, and so on.
 - **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive), and that the token's scope covers it. A fine-grained token restricted to a repository list returns 404, not 403, for anything outside it — so "not found" can mean "not granted".

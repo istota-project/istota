@@ -362,16 +362,23 @@ class TestLoadBudget:
     stated rather than assumed. Parity with the pre-split single file is not
     achievable — `developer` sheds ~52 lines and gains more than that back.
 
-    The ceiling is 700 because that is the figure `.claude/rules/skills.md`
-    already documents as the contract ("held under a 700-line budget"). It sat
-    at 675 here, below the number the rules file states, and four fixes to the
-    recipes landing in one week (ISSUE-264, -267, -268, -269) ran it out. Fitting
-    them meant deleting reviewed content from a recipe the model executes, so
-    the test moved to the documented number rather than the recipes shrinking to
-    an undocumented one. Raise this again only by changing the rules file first.
+    The ceiling is whatever `.claude/rules/skills.md` documents as the
+    contract; this number tracks that one and never leads it. It sat at 675
+    here, below the figure the rules file stated, and four fixes to the recipes
+    landing in one week (ISSUE-264, -267, -268, -269) ran it out. Fitting them
+    meant deleting reviewed content from a recipe the model executes, so the
+    test moved to the documented number rather than the recipes shrinking to an
+    undocumented one.
+
+    700 → 715 for ISSUE-264, by the procedure the paragraph above prescribes:
+    the rules file first, then this. The rule that a test runner's exit status
+    is not readable through a pipe costs twelve net lines, and the same
+    reasoning applies — a fifth recipe fix in the same week says the figure was
+    set below what the recipes cost, not that this fix is too expensive. Raise
+    it again the same way, and only that way.
     """
 
-    BUDGET_LINES = 700
+    BUDGET_LINES = 715
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
@@ -1001,3 +1008,147 @@ class TestCredentialFreeConfigs:
         out = _run_fragment(f'cd "$BARE_DIR"\n{self._preflight()}', bare_clone)
 
         assert out.strip() == "", f"false positive on a port: {out!r}"
+
+
+def _section(body: str, heading: str) -> str:
+    """One `##`/`###` section: the heading through the next heading of any depth."""
+    start = body.index(heading)
+    rest = body[start + len(heading) :]
+    nxt = re.search(r"^#{2,4} ", rest, re.MULTILINE)
+    return rest[: nxt.start()] if nxt else rest
+
+
+# Anything whose exit status *is* the verification result. A pipe on one of
+# these is the failure this class exists to stop.
+_TEST_RUNNERS = (
+    "pytest",
+    "vitest",
+    "jest",
+    "go test",
+    "npm test",
+    "npm run check",
+    "npm run lint",
+    "npm --prefix",
+    "make check",
+    "just check",
+    "tox",
+    "ruff check",
+    "tsc",
+    "svelte-check",
+)
+
+
+class TestVerificationBudgetKeepsTheExitStatus:
+    """ISSUE-264. Section 7 is entirely about *shrinking* test output — quiet
+    flags, `-x`, one command one output — and every one of those instructions
+    pushes toward a pipeline. A pipeline reports the status of its last command,
+    so `pytest … | tail` exits 0 on a suite that failed and the run reads as
+    green. That happened twice in one month; the real result was caught by
+    reading the output, which is luck rather than method.
+
+    The document already knows this — the worktree recipe carries the same
+    lesson about `cmd | sed || echo main` — but it is attached to a different
+    command five sections away from the one where it costs the most. A rule of
+    this shape only holds where the tempting command is written.
+    """
+
+    # Prints *and* fails. A stand-in that only failed would let a non-zero exit
+    # caused by the plumbing — an unwritable path, a missing `tail` — pass for
+    # the status the recipe is supposed to be carrying.
+    FAILING_RUN = "sh -c 'echo SUITE_OUTPUT_MARKER; exit 1'"
+
+    def _body(self) -> str:
+        return (_BUNDLED_SKILLS_DIR / "developer" / "skill.md").read_text()
+
+    def _run_fence(self, marker: str, work_dir: Path) -> subprocess.CompletedProcess:
+        """The fence containing `marker`, run with the suite swapped out.
+
+        `WORK_DIR` is passed because the capture recipe writes under it: two
+        developer tasks can be in section 7 at once, so an absolute shared path
+        would show one job the other's failures — and under `-n auto` the same
+        collision lands inside this suite.
+        """
+        block = _fenced_block(self._body(), marker)
+        return _run_recipe(
+            block.replace("uv run pytest -q --no-header", self.FAILING_RUN),
+            Path("/nonexistent"),
+            WORK_DIR=str(work_dir),
+        )
+
+    def test_the_budget_says_a_pipe_discards_the_test_status(self):
+        """The one line the entry asked for, in section 7 rather than in a
+        general principles section elsewhere."""
+        budget = _section(self._body(), "### 7. The verification budget")
+        assert "pipefail" in budget, (
+            "the verification budget tells the model to trim test output and "
+            "never says a pipe discards the status it is trimming"
+        )
+
+    def test_the_budget_shows_a_pipeline_that_carries_the_runners_status(self, tmp_path):
+        """Run rather than pattern-matched. Asserting that `set -o pipefail`
+        appears above a pipe would equally accept it appearing in a *different*
+        Bash call, which buys the pipeline nothing — options do not survive
+        between fences."""
+        proc = self._run_fence("| tail -n 20", tmp_path)
+
+        assert "SUITE_OUTPUT_MARKER" in proc.stdout, (
+            f"the recipe never produced the run's output: {proc.stderr!r}"
+        )
+        assert proc.returncode != 0, (
+            "the recipe trims a failing suite's output and still exits 0 — "
+            "which is the defect it is supposed to demonstrate away"
+        )
+
+    def test_the_budget_shows_a_capture_that_survives_a_shell_without_pipefail(self, tmp_path):
+        """The second remedy. `pipefail` is not set in every shell the model
+        gets, so the entry asked for the capture-and-check form too."""
+        proc = self._run_fence("STATUS=$?", tmp_path)
+
+        assert "SUITE_OUTPUT_MARKER" in proc.stdout, (
+            f"the recipe never read the log back: {proc.stderr!r}"
+        )
+        assert proc.returncode != 0, "the capture recipe swallowed a failing suite's status"
+
+    def test_the_report_names_the_status_the_pass_was_read_from(self):
+        """Second line of defence. `Tests: full suite green` is the sentence a
+        human acts on, so the template has to ask where "green" came from."""
+        report = _section(self._body(), "### 12. Report")
+        assert "exit status" in report, (
+            "the report template accepts a claim of a green suite without "
+            "naming the exit status it was read from"
+        )
+
+    def test_no_recipe_pipes_a_test_runner_without_pipefail(self):
+        """The document must not model the habit it forbids. Scoped to runners,
+        because their exit status *is* the answer — unlike a `git` read whose
+        output is the answer.
+
+        Backslash continuations are joined first, as
+        `test_no_runnable_glab_line_uses_a_gh_only_filter_flag` does: section 7
+        tells the model to chain the linters and the tests into one invocation,
+        which is written across lines, and a runner parked on a line carrying no
+        `|` would slip a per-line scan.
+        """
+        inspected = []
+        for block in _fenced_blocks(self._body()):
+            lines = re.sub(r"\\\n\s*", " ", block).splitlines()
+            pipefail = next(
+                (i for i, line in enumerate(lines) if "set -o pipefail" in line), None
+            )
+            for i, line in enumerate(lines):
+                if line.lstrip().startswith("#") or "|" not in line:
+                    continue
+                left = line.split("|")[0]
+                runner = next((r for r in _TEST_RUNNERS if r in left), None)
+                if runner is None:
+                    continue
+                inspected.append(line.strip())
+                assert pipefail is not None and pipefail < i, (
+                    f"developer pipes `{runner}` with no pipefail above it, so "
+                    f"the suite's status is discarded: {line.strip()!r}"
+                )
+
+        # Without this the guard is green on a document that deleted the very
+        # recipe ISSUE-264 asked it to keep. Same reason as the `assert piping`
+        # in `test_every_piping_recipe_sets_pipefail_before_it_pipes`.
+        assert inspected, "no piped test-runner line found — the guard is inspecting nothing"
