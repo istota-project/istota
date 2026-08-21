@@ -708,25 +708,37 @@ messages are re-polled rather than silently lost.
   in `user_profiles.email_reply_routing`; set via `istota user ensure
   --email-reply-routing`.
 
-  **The user's own thread reply gets no origin copy (ISSUE-254).** The mirror
-  above exists for the *emissary* case — an external contact replying to mail we
-  sent on the user's behalf, where the room copy is the only way the user learns
-  it arrived. A reply the user sends from their own address is not that, and
-  mirroring it duplicated a private exchange into the room: each reply quotes the
-  whole prior thread, so the N-th message wrote roughly N copies of the
-  conversation into a transcript that is then LLM context for every later task in
-  that room. The discriminator is **per-message, not per-user** — `email_reply_
+  **Mail the user sends themselves gets no room copy (ISSUE-254, widened by
+  ISSUE-275).** The mirror above exists for mail the user did not write — an
+  external contact replying to mail we sent on their behalf, or a stranger's
+  first contact at `bot+<user>@` — where the room copy is the only way they learn
+  it arrived. Mail from their own address is not that: the answer goes back the
+  way the question came, so the room copy renders a conversation they are already
+  having a second time, and then charges it to that room's LLM context. On a
+  thread it is worse than redundant — each reply quotes the whole prior chain, so
+  the N-th message wrote roughly N copies of the conversation into the
+  transcript. The discriminator is **per-message, not per-user** — `email_reply_
   routing = "thread"` would suppress the emissary case too — and it is
   `email_support.sender_claims_to_be_user`, i.e. the envelope sender is one of the
   routed user's own addresses. **Not** `not is_emissary_reply`, which is false for
   a plus-address route as well: that is a third party writing to `bot+<user>@`,
-  and it keeps its mirror. Two legs key on the same room token, so suppressing
-  either alone changes nothing: `output_target` drops the origin leg (in *both*
+  and it keeps its mirror. ISSUE-254 additionally required a matched thread
+  (`sent_email_match`), and **ISSUE-275 dropped that conjunct**: it left the
+  ordinary case untouched — the user mailing their own bot, which is first
+  contact every time, and which therefore got the `room:<tok>,email` plan
+  ISSUE-247 built for strangers. Three legs now key on the answer. On the thread
+  routes, two — `output_target` drops the origin leg (in *both*
   branches — the legacy NULL-`origin_target` one hardcodes `talk,email` and is
   live for any send with no deliverable origin, not merely pre-migration rows),
   and `IncomingMessage.mirror_to_room` turns off `record_inbound`'s mirror, which
   would otherwise fire on rung 1 because the task inherits the origin room as its
-  `conversation_token`. That inheritance stays — the reply still continues that
+  `conversation_token`. On the `plus_address` / `sender_match` routes, the third:
+  the poller does not call `routed_notification_room` at all, leaving
+  `output_target` unset — the pre-ISSUE-247 shape, delivered by mail alone. There
+  the token is a thread hash rather than a room, so rung 1 misses and that leg is
+  the only thing that could have named one; `mirror_to_room` is set from the same
+  answer regardless, so the decision is stated rather than left resting on that
+  coincidence. That inheritance stays — the reply still continues that
   conversation's *context*, it just does not write itself back into it. The answer
   side needs no third change: `_room_turn_belongs_here` wants either a delivery
   into the room or a question already in it, and neither holds. **It does change
@@ -742,14 +754,26 @@ messages are re-polled rather than silently lost.
   goes to the *user*, so the question reaches the only person who can answer it,
   on the surface they are reading. The cost, stated: deferred ops a park would
   have held until the answer now apply on completion. The outbound email approval
-  gate is unaffected — it runs on the delivery leg, not on this park. Scope
-  boundary:
-  a *first-contact* self-addressed mail keeps its `room:<tok>,email` plan and its
-  mirror — one message pair with no quoted chain, into the room the user's routing
-  chose for mail that names no conversation. Residual: this rests on an
-  unauthenticated `From:`, so a spoof now also buys *suppression*. Same forgery
-  the confirmation gate already faces, which is what the ISSUE-228 canary watches
-  for and what ISSUE-249's authserv-id scoping made harder to hide; a new
+  gate is unaffected — it runs on the delivery leg, not on this park. On a
+  first-contact self-addressed mail the same follows: the email leg is the user's
+  own address, so the question reaches them there.
+
+  `tasks.withheld_from_room` stays **False** on the first-contact routes, and by
+  the column's own rule rather than an exemption — it means "there is a room, and
+  this exchange is deliberately not part of it", and with a thread hash for a
+  token and no room in the plan, nothing was resolved to be absent from. The same
+  rule already covered a genuine email-only thread. The approval path follows
+  from that without a special case: `_room_holds_no_copy_of_this_exchange` reads
+  False, `_restore_transcript_mirror` runs, and `transcript_room_for_task`
+  resolves no room, so it publishes nothing.
+
+  Residual: this rests on an unauthenticated `From:`, so a spoof also buys
+  *suppression*, and ISSUE-275 widens that reach from a thread reply to any
+  inbound mail. What it does not widen is who can use it quietly — a self-claim
+  on either gated route still meets the confirmation gate under
+  `confirm_sender_match`, and the canary still warns on a failing verdict. Same
+  forgery the confirmation gate already faces, which is what the ISSUE-228 canary
+  watches for and what ISSUE-249's authserv-id scoping made harder to hide; a new
   consequence of it, not a new class.
 
   **The decision is recorded on the task (ISSUE-255).** The task still carries
@@ -810,10 +834,29 @@ messages are re-polled rather than silently lost.
   left the composed answer only in `tasks.result`. Both predate ISSUE-254 (any
   `email_reply_routing = "thread"` user had them); what changed is that an
   email-only plan became the *default* outcome for a self-reply. Both now raise
-  through `purpose="alert"`, gated on `withheld_from_room` rather than on "the
-  plan is email-only" — a cron mailing a report to an external address is
-  deliberately task-only and must stay silent — and the delivery-failure notice
-  carries the answer body itself, since the point is that the answer survives.
+  through `purpose="alert"`, and the delivery-failure notice carries the answer
+  body itself, since the point is that the answer survives.
+
+  **The gate is "was the user themselves waiting for this answer", in two
+  spellings** — `task.withheld_from_room or email_from_the_user`. Deliberately
+  not "the plan is email-only", which is the tidier-looking gate that must not be
+  taken: an external correspondent's reply under `email_reply_routing = "thread"`
+  has the identical plan and the identical absent channel, and a stranger is
+  waiting for that answer, not the user. (A cron mailing a report is excluded
+  earlier still, by the `source_type in ("briefing", "scheduled")` arm above
+  both.) Two spellings because the poller can record the answer on the task in
+  only one of the two cases: `withheld_from_room` covers a self-addressed
+  *thread* reply, and reads False for self-addressed *first contact* — correctly,
+  by the column's own rule, since no room is resolved there. ISSUE-275 made first
+  contact the common case, which put the user mailing their own bot straight back
+  into the silence this branch exists to end, so `scheduler._email_task_from_the_
+  user` recovers the fact from the `processed_emails` row the poller already
+  writes, judged by the same `sender_claims_to_be_user` the ingest decision uses.
+  A reconstruction rather than a second column, and the same one
+  `confirmations._restore_transcript_mirror` makes; it never raises and answers
+  False when the ledger row has been pruned, so a lost lookup costs a notice
+  rather than a delivery. Both directions are pinned by
+  `tests/test_email_self_reply_residue.py::TestAPermanentFailureReachesTheUser`.
   Both are buffered and sent after every DB transaction closes, for the reason
   every other notification on this path is: routed by purpose, an alert can land
   on `web`, whose delivery opens a second connection to the same database. The
