@@ -86,6 +86,25 @@ def _tmpfs_paths(argv):
     return [argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "--tmpfs"]
 
 
+def _mask_paths(argv):
+    """The database masks alone, without the namespace's own tmpfs mounts.
+
+    `build_bwrap_cmd` emits `--tmpfs /tmp` early, with `--proc` and `--dev`,
+    and the database masks last — after every bind, which is the ordering the
+    masks depend on. So "after the last bind" is exactly the mask set.
+
+    The distinction only shows on Linux: `tmp_path` lives under `/tmp` there
+    and under `/private/var/folders` on darwin, so a test asking "does any
+    tmpfs shadow the workspace" gets a false yes from the namespace's `/tmp`
+    in the Linux runner and never on the developer host. It is a false yes
+    because the workspace is bound *after* that tmpfs and is therefore present
+    in the namespace regardless.
+    """
+    binds = [i for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")]
+    after = max(binds) if binds else -1
+    return [argv[i + 1] for i in range(after + 1, len(argv) - 1) if argv[i] == "--tmpfs"]
+
+
 def _last_index(argv, value):
     for i in range(len(argv) - 1, -1, -1):
         if argv[i] == value:
@@ -367,6 +386,50 @@ class TestMasksAreReadOnly:
         assert str((iso_config.temp_dir / "modules").resolve()) in masked
 
 
+class TestMaskPathsHelper:
+    """The helper the test below is built on, checked against a live argv.
+
+    `_mask_paths` is defined as "every `--tmpfs` after the last bind", which is
+    exactly the property `build_bwrap_cmd` promises and exactly the property a
+    refactor could break. If the masks ever moved ahead of the binds — or were
+    dropped — the helper would return an empty list and every loop over it
+    would pass by never running. So the helper gets its own control.
+    """
+
+    def test_it_finds_the_database_masks_for_an_ordinary_config(
+        self, iso_config, iso_task,
+    ):
+        argv = _bwrap(iso_config, iso_task, True)
+        masks = _mask_paths(argv)
+
+        assert str(iso_config.db_path.parent.resolve()) in masks
+        # The default layout derives the module root under the framework DB's
+        # directory, so it gets no mask of its own — `_mask_dir` skips a
+        # candidate an earlier mask already covers. Covered is what matters.
+        module_root = iso_config.module_db_root()
+        assert any(module_root.is_relative_to(Path(m)) for m in masks)
+
+    def test_it_finds_a_module_root_masked_in_its_own_right(
+        self, iso_config, iso_task, tmp_path,
+    ):
+        """Two masks when the two roots are siblings rather than nested."""
+        module_root = tmp_path / "srv" / "app" / "istota" / "moduledbs"
+        module_root.mkdir(parents=True)
+        iso_config.module_data_dir = module_root
+
+        masks = _mask_paths(_bwrap(iso_config, iso_task, True))
+
+        assert str(iso_config.db_path.parent.resolve()) in masks
+        assert str(module_root.resolve()) in masks
+
+    def test_it_excludes_the_namespace_tmpfs_mounts(self, iso_config, iso_task):
+        """`/tmp` is mounted with `--proc` and `--dev`, long before any bind."""
+        argv = _bwrap(iso_config, iso_task, True)
+
+        assert "/tmp" in _tmpfs_paths(argv), "precondition: the namespace mounts /tmp"
+        assert "/tmp" not in _mask_paths(argv)
+
+
 class TestMaskDoesNotShadowNeededPaths:
     """A mask above the workspace would be an outage, not a hardening."""
 
@@ -396,7 +459,13 @@ class TestMaskDoesNotShadowNeededPaths:
         iso_config.module_data_dir = iso_config.temp_dir / "modules"
         argv = _bwrap(iso_config, iso_task, True)
         user_temp = (iso_config.temp_dir / "alice").resolve()
-        for masked in _tmpfs_paths(argv):
+        masks = _mask_paths(argv)
+        # A floor before the loop. `_mask_paths` returns [] if the masks ever
+        # stopped being the last mount operations, and a loop over [] passes
+        # without asserting anything — vacuously green under exactly the
+        # ordering regression this file exists to catch.
+        assert masks, "no masks after the last bind — has the mask ordering changed?"
+        for masked in masks:
             assert not user_temp.is_relative_to(masked), (
                 f"{masked} shadows the user temp dir"
             )

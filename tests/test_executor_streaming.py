@@ -105,6 +105,20 @@ def _patch_executor():
     patches = []
     for name, ret in zip(_EXECUTOR_PATCHES, _EXECUTOR_PATCH_RETURNS):
         patches.append(patch(name, return_value=ret))
+    # The bwrap capability probes, pinned rather than left to the host.
+    #
+    # These tests patch `istota.executor.subprocess.Popen`, and that attribute
+    # *is* the real subprocess module's — so `subprocess.run`, which the probes
+    # use, gets the mock too and raises "not enough values to unpack" out of
+    # the sandbox wrap. Turning the sandbox off would dodge that and take the
+    # wrap out of these tests entirely; pinning the probes keeps
+    # `build_bwrap_cmd` on the path, and makes darwin and Linux agree about
+    # what it builds instead of one platform silently skipping it.
+    patches += [
+        patch("istota.executor._bwrap_available", return_value=True),
+        patch("istota.executor._bwrap_supports_remount_ro", return_value=True),
+        patch("istota.executor._bwrap_supports_disable_userns", return_value=True),
+    ]
     return patches
 
 

@@ -19,12 +19,23 @@ PATTERN_FILE = REPO_ROOT / ".private-data-patterns"
 HOOK = REPO_ROOT / ".githooks" / "pre-commit"
 
 
-def run_scan(*paths: Path) -> subprocess.CompletedProcess:
+def run_scan(*paths: Path, home: Path | str | None = None) -> subprocess.CompletedProcess:
+    """Run the scanner. ``home`` overrides ``$HOME``, which it derives from.
+
+    The override exists because the home-directory pattern class is the one
+    the scanner builds out of its own environment, so a test that reads the
+    ambient `$HOME` asserts something different on every machine — and nothing
+    at all where the basename is generic, which is the case inside a container.
+    """
+    env = dict(os.environ)
+    if home is not None:
+        env["HOME"] = str(home)
     return subprocess.run(
         ["bash", str(SCANNER), *[str(p) for p in paths]],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env=env,
     )
 
 
@@ -152,6 +163,7 @@ class TestBatchedScan:
         assert result.returncode == 1, result.stdout
         assert "lines.txt:1" in result.stdout
 
+    @pytest.mark.requires_dac
     def test_unreadable_file_is_skipped_not_counted(self, tmp_path):
         target = write(tmp_path, "ssn: 123-45-6789\n")  # private-data-ok
         target.chmod(0o000)
@@ -203,11 +215,36 @@ class TestPatternClasses:
         assert result.returncode == 1, f"{label} not detected:\n{result.stdout}"
 
     def test_home_directory_path_is_derived(self, tmp_path):
-        """No configuration needed: an absolute path into $HOME is private by construction."""
-        target = write(tmp_path, f"log_path = '{Path.home()}/notes/private.md'\n")
-        result = run_scan(target)
+        """No configuration needed: an absolute path into $HOME is private by construction.
+
+        `$HOME` is supplied rather than read, so this asserts the same thing on
+        every machine. Reading the ambient one made the assertion depend on
+        what the developer's account is called, and lose its meaning entirely
+        under `scripts/test-linux.sh`, where `$HOME` is `/root`.
+        """
+        # A path that never existed, rather than one under tmp_path: on macOS
+        # tmp_path carries the account name, so writing it into the sample
+        # trips whatever the developer put in .private-data-local and the test
+        # passes on the wrong pattern. The scanner only string-matches $HOME,
+        # so it need not be a real directory.
+        home = "/somewhere/somebody"
+        target = write(tmp_path, f"log_path = '{home}/notes/private.md'\n")
+        result = run_scan(target, home=home)
         assert result.returncode == 1
         assert "home directory" in result.stdout
+
+    def test_a_generically_named_home_derives_no_pattern(self, tmp_path):
+        """The other half of the same rule, and the reason the test above sets $HOME.
+
+        A home directory called `root`, `runner` or `ubuntu` names nobody, so
+        the scanner declines to build a pattern from it (GENERIC_TERMS in
+        `scripts/check-private-data.sh`). Asserted rather than assumed: the
+        container the Linux runner uses is exactly this case, and without this
+        the behaviour there would be untested in both directions.
+        """
+        home = "/somewhere/root"
+        target = write(tmp_path, f"log_path = '{home}/notes/private.md'\n")
+        assert run_scan(target, home=home).returncode == 0
 
     def test_git_user_email_is_derived(self, tmp_path):
         email = subprocess.run(

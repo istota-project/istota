@@ -525,6 +525,7 @@ class TestWritableDirs:
             (r.name, r.status, r.detail) for r in results if r.status != OK
         ]
 
+    @pytest.mark.requires_dac
     def test_unwritable_dir_fails(self, make_config, tmp_path):
         if sys.platform == "win32":  # pragma: no cover
             pytest.skip("posix permissions")
@@ -898,6 +899,7 @@ class TestWrapperShadowing:
         copy = Path(__file__).resolve().parents[1] / "docker/devbox/lib/istota_forge_cli.py"
         assert doctor._WRAPPER_SENTINEL in copy.read_bytes()[:8192]
 
+    @pytest.mark.requires_dac
     def test_an_unreadable_binary_is_unknown_not_a_failure(
         self, make_config, tmp_path, monkeypatch
     ):

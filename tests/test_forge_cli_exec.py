@@ -11,6 +11,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -293,15 +294,22 @@ class TestExecPath:
 
     def test_path_reaches_the_child_unchanged(self, deployed, tmp_path, sock_path):
         wrapper, real, cfg = deployed
+        # The wrapper's shebang is `#!/usr/bin/env python3`, resolved against
+        # exactly this PATH — so the interpreter's own directory has to be on
+        # it or the kernel never starts the wrapper and the child prints
+        # nothing. /usr/bin/python3 exists on the developer host and not in a
+        # python:slim image, which is the whole difference. The value is
+        # arbitrary; that it comes back identical is the assertion.
+        path = f"/opt/x:{Path(sys.executable).parent}:/usr/bin:/bin"
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
         try:
             r = _run(wrapper, ["pr", "list"], {
-                "PATH": "/opt/x:/usr/bin:/bin",
+                "PATH": path,
                 "ISTOTA_SKILL_PROXY_SOCK": proxy.path,
             })
         finally:
             proxy.close()
-        assert _fields(r.stdout)["PATH"] == "/opt/x:/usr/bin:/bin"
+        assert _fields(r.stdout)["PATH"] == path, (r.stdout, r.stderr)
 
 
 class TestRefusals:
