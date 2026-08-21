@@ -752,6 +752,56 @@ class TestBuildNetworkAllowlist:
         assert "github.com:443" in hosts
         assert "api.github.com:443" in hosts
 
+    def test_developer_actions_log_host(self):
+        """`gh run view --log-failed` fetches job logs from a second host.
+
+        Measured through a logging CONNECT proxy against gh 2.98: one stable
+        hostname, identical across independent runs, so an exact entry works
+        and NetworkProxy needs no wildcard matching."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                github_url="https://github.com",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "results-receiver.actions.githubusercontent.com:443" in hosts
+
+    def test_azure_blob_storage_is_not_allowlisted(self):
+        """`gh run download` pulls artifacts from
+        productionresultssa<N>.blob.core.windows.net, where the shard varies
+        (4 and 7 observed for one repository). The only entry that would cover
+        it is *.blob.core.windows.net — all of Azure Blob Storage, which is a
+        general-purpose exfiltration channel. Artifacts are not worth that, so
+        the verb stays unadvertised rather than the allowlist widened."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                github_url="https://github.com",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert not any("blob.core.windows.net" in h for h in hosts)
+
+    def test_actions_log_host_not_added_for_enterprise_server(self):
+        """The log host is a github.com service. A GHE Server deployment serves
+        its own, so adding this one there would be noise, not access."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir="/tmp/repos",
+                github_url="https://ghe.example.com",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "ghe.example.com:443" in hosts
+        assert "results-receiver.actions.githubusercontent.com:443" not in hosts
+
     def test_developer_hosts_only_when_skill_selected(self):
         config = Config(
             security=SecurityConfig(network=NetworkConfig()),

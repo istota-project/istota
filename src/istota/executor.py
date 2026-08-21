@@ -1036,6 +1036,25 @@ def _build_network_allowlist(
             parsed = urlparse(config.developer.github_url)
             if parsed.hostname and "github.com" in parsed.hostname:
                 hosts.add("api.github.com:443")
+                # `gh run view --log-failed` — the CI feedback loop — fetches
+                # job logs from a second host. Measured against gh 2.98 through
+                # a logging CONNECT proxy: one stable hostname, the same across
+                # independent runs, so an exact entry is enough and the proxy
+                # needs no wildcard support.
+                #
+                # `gh run download` is deliberately NOT covered. Artifacts come
+                # from productionresultssa<N>.blob.core.windows.net, where the
+                # shard varies (4 and 7 observed for one repository), and the
+                # only entry that would cover it is *.blob.core.windows.net —
+                # all of Azure Blob Storage, a general-purpose exfiltration
+                # channel. Logs are what the feedback loop needs; artifacts
+                # are not worth that.
+                hosts.add("results-receiver.actions.githubusercontent.com:443")
+            elif parsed.hostname:
+                # GitHub Enterprise Server: the API is a path on the same host
+                # (<host>/api/v3), so no separate entry — but the web host
+                # itself was already added above and is what gh talks to.
+                pass
 
     # Nextcloud skill: the instance host. Only reachable when the skill proxy
     # is off — with it on, the skill CLI runs server-side in the daemon's netns
