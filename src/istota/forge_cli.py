@@ -546,7 +546,14 @@ def denied_reason(forge: str, args: list[str], policy: dict) -> str | None:
         if declared and all(m in waived for m in declared):
             continue
         for name in rule.get("flags", []):
-            if any(v for v in flags.get(name, [])):
+            # Presence, not a non-empty value. `normalize_args` cannot know a
+            # flag's arity, so it declines to swallow a next token beginning
+            # with `-` and records an empty value instead. pflag has no such
+            # doubt: `--input -` hands `-` to the flag and reads the body from
+            # stdin. Testing the value therefore missed every body whose value
+            # starts with a dash — including `--input -`, which is the
+            # documented stdin form in both CLIs.
+            if name in flags:
                 return (
                     f"{' '.join(rule['path'])} {_flag_spelling(name)} "
                     f"(a request body makes this a write)"

@@ -261,6 +261,16 @@ class TestDeniedReason:
         # gh has no --form, so listing it costs nothing on that side.
         ["api", "--form", "name=x", "/projects/1/hooks"],
         ["api", "--form=name=x", "/projects/1/hooks"],
+        # A body value that itself starts with `-`. `normalize_args` will not
+        # consume it as the flag's value (it cannot know the arity), so the
+        # flag lands with an empty recorded value — but pflag consumes it
+        # unconditionally, so the write happens. `--input -` is the documented
+        # read-from-stdin form in both CLIs, which makes this the most
+        # reachable spelling of all, not an exotic one.
+        ["api", "--input", "-", "/repos/o/r/issues"],
+        ["api", "--field", "-x=1", "/repos/o/r/issues"],
+        ["api", "-f", "-x=1", "/repos/o/r/issues"],
+        ["api", "--form", "-x=1", "/projects/1/hooks"],
     ])
     def test_api_body_flags_are_implicit_writes(self, args):
         """A body parameter flips both CLIs off GET with no method flag
@@ -273,7 +283,13 @@ class TestDeniedReason:
     ])
     def test_api_body_flags_waived_when_read_method_is_explicit(self, args):
         """`gh api -X GET -f q=...` is the documented way to send a query
-        body on a read. Denying it would break search."""
+        body on a read. Denying it would break search.
+
+        A regression net, not coverage: both cases passed before `form` and
+        the presence-not-value fix landed, because neither could deny them.
+        They are here so a future tightening of the body-flag rule cannot
+        take the waiver with it. Both CLIs document `--method` as beating the
+        implicit POST, so waiving on an explicit read method is sound."""
         assert denied_reason(FORGE_GITLAB, args, self._policy(FORGE_GITLAB)) is None
 
     def test_denied_word_in_flag_value_is_allowed(self):
