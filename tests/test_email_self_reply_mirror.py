@@ -1,5 +1,14 @@
-"""ISSUE-254 — a thread reply the user sends from their own address stays out of
-the origin room.
+"""ISSUE-254 / ISSUE-275 — mail the user sends from their own address stays out
+of the room.
+
+ISSUE-254 drew this at the thread reply. ISSUE-275 widened it to the whole
+predicate: the deciding fact is that the envelope sender is one of the routed
+user's own addresses, and a *first contact* at `bot+<user>@` is that fact just
+as much as a reply is. Scoping it to threads left the ordinary case — the user
+mailing their own bot — copying question and answer into whichever room their
+notification route names, on top of the mail exchange they were already having.
+The classes below are split accordingly: `TestSelfAddressedThreadReply` is the
+original scope, `TestSelfAddressedFirstContact` the widened one.
 
 The origin mirror ISSUE-247 built for emissary replies keyed on the thread, not
 on who wrote it, so it applied to the user's own replies too. A private email
@@ -292,6 +301,151 @@ class TestSelfAddressedThreadReply:
 
 
 # ---------------------------------------------------------------------------
+# ISSUE-275 — the same predicate, on the route the user actually uses
+# ---------------------------------------------------------------------------
+
+
+class TestSelfAddressedFirstContact:
+    """The user mailing their own bot at `bot+<user>@`, with no thread behind it.
+
+    ISSUE-247 gave this route a `room:<tok>,email` plan so that a *stranger's*
+    first contact would land somewhere the user could see it. The route does not
+    distinguish who sent the mail, so the user's own mail got the same treatment
+    — one copy answered by email, an identical copy pushed into the room they
+    watch, and both then in that room's LLM context.
+
+    `routed_notification_room` is what names the room, so it is the user's
+    alerts/DM route rather than any conversation the mail belongs to. That is
+    the tell: the mail has no relationship with that room at all, it is just
+    where mail with nowhere else to go is shown.
+    """
+
+    def _poll_first_contact(self, config, *, sender, to=None):
+        """One plus-addressed message, no `sent_emails` row to thread against."""
+        envelope = EmailEnvelope(
+            id="30", subject="Quick test", sender=sender,
+            date="Mon, 01 Jan 2026 12:00:00 +0000", is_read=False,
+        )
+        email = Email(
+            id="30", subject="Quick test", sender=sender,
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="Does this round-trip?", attachments=[],
+            message_id="<r30@x.com>", references=None,
+            to=to or (f"bot+{USER}@test.com",), cc=(),
+            authentication_results=None,
+        )
+        with (
+            patch("istota.transport.email.inbound.list_emails",
+                  return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments",
+                  return_value=[]),
+            patch("istota.transport.email.inbound.ensure_user_directories_v2"),
+            patch("istota.transport.email.inbound.upload_file_to_inbox_v2"),
+            patch("istota.transport.email.inbound._deliver_confirmation_prompts"),
+            patch("istota.transport.email.inbound._deliver_dmarc_alerts"),
+        ):
+            task_ids = poll_emails(config)
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            return db.get_task(conn, task_ids[0])
+
+    def test_the_plan_names_no_room(self, db_path, config):
+        """Leg 1. The user is on the email surface by demonstration, so the
+        answer goes back the way the question came."""
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+
+        task = self._poll_first_contact(config, sender=USER_ADDR)
+
+        assert task.output_target is None
+        # And the token stays a thread hash — it never was the room.
+        assert task.conversation_token != ROOM
+
+    def test_the_question_is_not_mirrored(self, db_path, config):
+        """Leg 2, and the thing the user saw: their own email rendered as a turn
+        in `#assistant`, wrapper tags and all."""
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+
+        self._poll_first_contact(config, sender=USER_ADDR)
+
+        assert _room_rows(db_path) == []
+
+    @patch("istota.scheduler.post_result_to_email", return_value=True)
+    @patch("istota.scheduler.run_coro", return_value=True)
+    def test_the_answer_is_not_mirrored_either(
+        self, mock_run_coro, mock_post_email, db_path, config,
+    ):
+        """No third change: with no room leg and no question in the room,
+        `_room_turn_belongs_here` has nothing to fire on."""
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+        self._poll_first_contact(config, sender=USER_ADDR)
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "It round-tripped clean.", None, None),
+        ):
+            process_one_task(config)
+
+        assert _room_rows(db_path) == []
+        assert mock_post_email.called
+
+    def test_the_sender_match_route_is_covered_too(self, db_path, config):
+        """The user mailing the bot's plain address rather than the plus form.
+        Routed by the `From:` instead of the recipient, same fact about who
+        sent it, same answer."""
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+
+        task = self._poll_first_contact(
+            config, sender=USER_ADDR, to=("bot@test.com",),
+        )
+
+        assert task.output_target is None
+        assert _room_rows(db_path) == []
+
+    def test_a_stranger_at_the_same_address_keeps_the_room(self, db_path, config):
+        """The regression guard, and the reason ISSUE-247 exists. A third party
+        writing to `bot+<user>@` is not the user, and the room copy is the only
+        way the user learns the mail arrived."""
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+
+        task = self._poll_first_contact(config, sender=EXTERNAL_ADDR)
+
+        assert task.output_target == f"room:{ROOM},email"
+
+    def test_a_gated_self_claim_publishes_nothing_on_approval(
+        self, db_path, config,
+    ):
+        """The approval path has to agree with the ingest decision rather than
+        merely happen to. Under `confirm_sender_match` the own-address claim
+        stops counting as trust, so this message reaches the gate; approving it
+        must not hand back the copy the plan deliberately did not ask for."""
+        from istota import confirmations
+
+        config.email.confirm_sender_match = "gate"
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+
+        task = self._poll_first_contact(config, sender=USER_ADDR)
+        assert task.status == "pending_confirmation"
+
+        with db.get_db(db_path) as conn:
+            confirmations.approve(conn, task, config=config)
+
+        assert _room_rows(db_path) == []
+
+
+# ---------------------------------------------------------------------------
 # The regression guard: everybody else keeps their mirror
 # ---------------------------------------------------------------------------
 
@@ -469,20 +623,23 @@ class TestApprovalDoesNotRestoreIt:
 
         assert _room_rows(db_path) == []
 
-    def test_approving_a_self_addressed_first_contact_still_restores_it(
+    def test_approving_a_self_addressed_first_contact_restores_nothing(
         self, db_path, config,
     ):
-        """The scope boundary, which is what `_room_holds_no_copy_of_this_exchange`
-        has to keep getting right.
+        """The scope boundary, redrawn by ISSUE-275 and inverted here with it.
 
-        A first-contact self-addressed mail carries no thread to suppress, so it
-        gets the `room:<tok>,email` routing ISSUE-247 gave it and keeps its
-        mirror — the sender is the user, and the room still holds the exchange.
-        It used to be the case that separated the two halves of a reconstruction;
-        since ISSUE-255 it is the case that must leave `withheld_from_room` False,
-        which is asserted directly in
-        `tests/test_email_self_reply_residue.py::TestTheDecisionIsRecorded`. Kept
-        here as the end-to-end half: the row must actually reappear on approval."""
+        This case used to be the boundary: a first-contact self-addressed mail
+        carried no thread to suppress, so it kept the `room:<tok>,email` routing
+        ISSUE-247 gave it, and approving it published the question into the room.
+        The predicate is now the sender rather than the thread, so there is no
+        room leg to restore and approval writes nothing.
+
+        `_room_holds_no_copy_of_this_exchange` is not what makes that true here —
+        it reads `withheld_from_room`, which stays False because no room was ever
+        resolved. The restore runs and finds nothing to publish, which is the
+        same fail-safe direction: `transcript_room_for_task` resolves rooms that
+        exist in the plan, and this plan names none. Asserted end to end rather
+        than against either helper, because that agreement is the point."""
         from istota import confirmations
 
         config.email.confirm_sender_match = "gate"
@@ -493,13 +650,13 @@ class TestApprovalDoesNotRestoreIt:
         # contact routed by the user's own address.
         task = _poll_reply(config, sender=USER_ADDR)
         assert task.status == "pending_confirmation"
-        assert task.output_target == f"room:{ROOM},email"
+        assert task.output_target is None
         assert _room_rows(db_path) == []
 
         with db.get_db(db_path) as conn:
             confirmations.approve(conn, task, config=config)
 
-        assert [r for r, _ in _room_rows(db_path)] == ["user"]
+        assert _room_rows(db_path) == []
 
     def test_approving_an_external_reply_still_restores_its_question(
         self, db_path, config,

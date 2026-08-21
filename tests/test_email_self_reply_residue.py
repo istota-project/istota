@@ -154,17 +154,26 @@ class TestTheDecisionIsRecorded:
         assert task.withheld_from_room is False
 
     def test_a_self_addressed_first_contact_is_not(self, db_path, config):
-        """The scope boundary ISSUE-254 drew. A first-contact self-addressed mail
-        keeps its `room:<tok>,email` plan and its mirror — one message pair with
-        no quoted chain, in the room the user's own routing chose — so the room
-        genuinely does hold this exchange and no consumer should skip it."""
+        """Still False after ISSUE-275 widened the suppression to this case, and
+        the reason is the column's own rule rather than an exemption.
+
+        `withheld_from_room` means "there is a room, and this exchange is
+        deliberately not part of it". A first-contact mail's token is a thread
+        hash naming no room, and the plan now names none either — so nothing was
+        resolved for the exchange to be absent from, and the answer is False.
+        The same rule already covered a genuine email-only thread: flagging it
+        would make every consumer keyed on the token drop the thread's own prior
+        turns from the only history it has.
+
+        The mirror is gone all the same; `test_email_self_reply_mirror.py`
+        asserts that. This column is not what removes it."""
         config.users[USER].alerts_channel = ROOM
         with db.get_db(db_path) as conn:
             _origin_room(conn)
         # No `sent_emails` row: nothing to thread against.
         task = _poll_reply(config, sender=USER_ADDR)
 
-        assert task.output_target == f"room:{ROOM},email"
+        assert task.output_target is None
         assert task.withheld_from_room is False
 
     def test_a_gated_turn_is_not_marked_withheld(self, db_path, config):
@@ -486,9 +495,11 @@ class TestAPermanentFailureReachesTheUser:
         An external correspondent's thread reply under `email_reply_routing =
         "thread"` has exactly the same email-only plan and exactly the same
         absent error channel — it is the population that already had this
-        failure before ISSUE-254 widened it. Gating on the recorded fact rather
-        than on the shape of the plan is what keeps it silent, so this is the
-        test that fails if the gate is widened to `not plan_talk`."""
+        failure before ISSUE-254 widened it. Gating on who was waiting for the
+        answer, rather than on the shape of the plan, is what keeps it silent: a
+        stranger is waiting for this one. So this is the test that fails if the
+        gate is widened to `not plan_talk` or to `source_type == "email"`, both
+        of which look like tidier spellings of the two arms it actually has."""
         config.users[USER].email_reply_routing = "thread"
         task = _external_reply(config, db_path)
         assert task.output_target == "email"
@@ -500,6 +511,31 @@ class TestAPermanentFailureReachesTheUser:
             c for c in notify.call_args_list
             if c.kwargs.get("purpose") == "alert"
         ] == []
+
+    def test_a_self_addressed_first_contact_is_told_too(self, db_path, config):
+        """The case ISSUE-275 put back into the silence this class exists to end.
+
+        `withheld_from_room` is False here — no room was resolved, so by the
+        column's own rule there is nothing for the exchange to be absent from —
+        yet the user is the correspondent and is sitting waiting for the answer.
+        The second arm recovers that from `processed_emails`, so both spellings
+        of "the user themselves was waiting" reach the same notice."""
+        config.users[USER].alerts_channel = ROOM
+        with db.get_db(db_path) as conn:
+            _origin_room(conn)
+        # No `sent_emails` row: nothing to thread against.
+        task = _poll_reply(config, sender=USER_ADDR)
+        assert task.withheld_from_room is False
+        assert task.output_target is None
+
+        notify = self._fail_permanently(config, db_path, task)
+
+        alerts = [
+            c for c in notify.call_args_list
+            if c.kwargs.get("purpose") == "alert"
+        ]
+        assert alerts, "a failed self-addressed first contact told the user nothing"
+        assert str(task.id) in alerts[0].args[2]
 
     def test_a_cron_is_suppressed_earlier_still(self, db_path, config):
         """Not the scoping guard — a scheduled job never reaches the new branch
