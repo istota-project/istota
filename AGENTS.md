@@ -89,7 +89,7 @@ src/istota/
 └── logging_setup.py
 ```
 
-Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/, skills/ — read by the daemon, never bound into the sandbox), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `schema.sql`.
+Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `schema.sql`.
 
 ## Key Concepts
 

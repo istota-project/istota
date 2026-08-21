@@ -30,9 +30,7 @@ Git credentials are configured automatically for both platforms — clone and pu
 
 `gh` and `glab` are the real GitHub and GitLab command-line tools. You reach them through a wrapper that fetches the token when you invoke them and then gets out of the way, so the whole flag surface is yours — `gh <command> --help` and `glab <command> --help` are accurate.
 
-**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped.
-
-**A remote URL never carries a credential.** `origin` is always a bare `https://host/namespace/project.git` — the helper supplies the username and token at invocation time. This matters because a remote URL is *printed*: `git remote -v`, `git config --list`, `git remote show origin` and several push failures put it in front of you verbatim, and from there it lands in the task result and the transcript. So never construct a URL with credentials in it, never `set-url` one, and never paste a token into a clone command. If you find a remote that already has one — a `:` and a secret before the `@` — stop, report it to the user as a credential to rotate, and do not quote the value back. Do not use it and carry on.
+**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped. **A remote URL never carries a credential.** `origin` is always a bare `https://host/namespace/project.git`, because remote URLs get *printed* — by `git remote -v`, `git config --list` and several push failures — so a token in one lands in the task result and the transcript. Never build one with credentials in it, never `set-url` one, never paste a token into a clone command; find one carrying a secret between `:` and `@` and you stop, report it as a credential to rotate without quoting the value, and do not use it.
 
 **Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` / `glab api` are refused too — an explicit `-X POST`, and any body flag (`-f`, `-F`, `--field`, `--raw-field`, `--form`, `--input`), which both CLIs treat as an implicit POST. Use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
 
@@ -41,7 +39,7 @@ This is an accident guard, not a security boundary. Hitting it means you are abo
 **No terminal, and a 120-second budget.** These commands run non-interactively under a Bash tool that times out. Avoid every watch and follow mode: `gh pr checks --watch`, `gh run watch`, `glab ci status --live`, `glab ci status --wait`, `glab ci trace`, and `glab ci view` (a full-screen TUI). Run the plain command again instead of waiting inside one.
 
 **Pre-submission checks** (mandatory before every MR/PR):
-1. **Namespace verification**: Before creating any MR or PR, confirm the remote you are about to push to is the intended one — and read it from the worktree rather than from a path you retyped, because the worktree's `origin` is what will actually receive the push. From inside `$WORK_DIR`: `gh repo view --json nameWithOwner -q .nameWithOwner` or `glab repo view -F json --jq .path_with_namespace`. If the user said "submit to `acme/widget`", verify it resolves to `acme`. Abort and ask on any mismatch.
+1. **Namespace verification**: Before creating any MR or PR, confirm the remote you are about to push to is the intended one — and read it from the worktree rather than from a path you retyped, because the worktree's `origin` is what will actually receive the push. From inside `$WORK_DIR`: `gh repo view --json nameWithOwner -q .nameWithOwner`, or on GitLab `glab repo view -F json` piped to a parser — glab has no `--jq`, and the full recipe below fails closed on a glab error rather than comparing an empty string. If the user said "submit to `acme/widget`", verify it resolves to `acme`. Abort and ask on any mismatch.
 2. **Response verification**: `gh pr create` and `glab mr create` exit non-zero on failure and print the URL on success, so check the exit status rather than scraping the output for error text. Then confirm the thing exists before reporting success: `gh pr view --json number,url,state` or `glab mr view -F json`.
 3. **No live source editing**: Never edit files under production installation paths (e.g., `/srv/app/*/src/`). All source changes must go through worktrees in `$DEVELOPER_REPOS_DIR` and be submitted as MRs/PRs.
 
@@ -150,22 +148,15 @@ cd "$BARE_DIR"
 git rev-parse --is-bare-repository
 git symbolic-ref --quiet --short refs/remotes/origin/HEAD   # -> origin/main or origin/master
 git fetch origin --prune
-# Credential check. Prints the *name* of any setting that embeds a secret and
-# never the value — echoing the value is the leak this is looking for. Covers
-# the whole config, not just remotes: a credential can ride in an
-# Authorization header (`http.*.extraheader`) or in a key itself
-# (`url.<base>.insteadOf`), where even the name is unsafe to print.
-git config --list --includes | awk -F= '
-    { key = $1 }
-    key ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "a credential is embedded in a config key"; next }
-    /^http\..*extraheader=/       { print key; next }
-    /:\/\/[^\/@]*:[^\/@]+@/       { print key }
-'   # end of the credential check
+# Whole config, not just remotes: prints the setting's NAME, never the value.
+git config --list --includes | awk -F= '{ k = $1 }
+    k ~ /:\/\/[^\/@]*:[^\/@]+@/ { print "credential embedded in a config key"; next }
+    /^http\..*extraheader=/ || /:\/\/[^\/@]*:[^\/@]+@/ { print k }'   # end of the credential check
 ```
 
 - No repository, or the fetch fails: stop and report. Do not clone something else and carry on.
 - The base branch is whatever `symbolic-ref` reports, stripped of `origin/`. Never assume `main` — plenty of repositories are still on `master`, and a worktree branched from a base that does not exist is the single most common way this dies.
-- The credential check printing anything: stop. That setting has a token in it, every worktree you cut will inherit it, and the next `git remote -v` or `git config --list` puts it in your context. Report what it printed to the user as a credential to rotate — that line only, never the value — and do not start work in that repository. The daemon sweeps these at task setup, so seeing one means it appeared afterwards and the user needs to know. Matching a `:secret@` rather than a bare `@` is deliberate: `git@github.com:owner/repo` is a username, not a secret. The check is a tripwire, not a guarantee — it is deliberately simpler than the daemon's sweep, so a clean result is not proof of a clean config.
+- The credential check printing anything: stop. Every worktree you cut inherits that setting, and the next `git remote -v` puts it in your context. Report what it printed — that line only, never the value — as a credential to rotate, and do not work in that repository. The daemon sweeps these at task setup, so one appearing here appeared afterwards. It matches `:secret@` rather than a bare `@` because `git@github.com:owner/repo` is a username; it is a tripwire and simpler than the daemon's sweep, so a clean result is not proof.
 
 ### 2. Create the worktree, then read back what was made
 
@@ -245,7 +236,7 @@ Unless the change is Fast tier, run a review after the work's full pass and afte
 
 The review is part of the lifecycle rather than optional diligence, because this workflow has no separate owning process that would run one. Fix every must-fix. Fix every high you agree with, and report any you decline as a decision, with the reason — a declined finding is a judgement call to be surfaced, not an omission to be quiet about. Fixes land as their own commits on the same branch; do not amend a commit the review already read.
 
-If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached — that is a state of the environment, not of the diff. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself: report it and do not open the MR.
+If the review is unavailable — the CLI is not configured, the brain is degraded, the call cap is reached, no reviewer returned a usable answer — that is a state of the environment, not of the diff. It comes back `skipped`. Land the work and report it as unreviewed, naming the reason. If the review *errors*, something is wrong with the request itself — a bad range, a path outside the allowed roots — and it is yours to correct: report it and do not open the MR.
 
 ### 10. Land
 
@@ -283,8 +274,16 @@ Run these from inside `$WORK_DIR` — both CLIs read the repository from the wor
 ```bash
 cd "$WORK_DIR"
 
+# glab has no `--jq`: a field read is `-F json` piped to a parser. pipefail so a
+# glab that fails after printing is not masked by the python3 that parsed it.
+set -o pipefail
+
 # REQUIRED: confirm the project before creating anything (pre-submission check 1).
-RESOLVED=$(glab repo view -F json --jq .path_with_namespace)
+# `||` fails closed: a glab error aborts rather than becoming an empty string.
+RESOLVED=$(glab repo view -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)["path_with_namespace"])') || {
+    echo "ERROR: could not read origin's project path from glab. Aborting."
+    exit 1
+}
 if [ "$RESOLVED" != "namespace/project" ]; then
     echo "ERROR: origin resolves to '$RESOLVED', not 'namespace/project'. Aborting."
     exit 1
@@ -313,8 +312,14 @@ glab mr create \
 Then verify it exists, and capture the id for later steps (pre-submission check 2):
 
 ```bash
-MR_IID=$(glab mr view -F json --jq .iid)
-glab mr view -F json --jq '"!\(.iid) \(.web_url)"'
+set -o pipefail
+# Abort rather than carry an empty id: `glab mr merge ""` acts on whatever MR the
+# current branch has.
+MR_IID=$(glab mr view -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)["iid"])') || {
+    echo "ERROR: could not read the merge request id. Aborting."
+    exit 1
+}
+glab mr view -F json | python3 -c 'import json,sys; d=json.load(sys.stdin); print("!%s %s" % (d["iid"], d["web_url"]))'
 ```
 
 ## GitHub: Pushing and Creating a Pull Request
@@ -372,8 +377,12 @@ git push origin HEAD
 ## GitLab: Listing and Merging MRs
 
 ```bash
+set -o pipefail
+# $MR_IID came from an earlier block, and a block is its own shell. Re-check it:
+# `glab mr merge ""` merges the current branch's MR rather than refusing.
+[ -n "${MR_IID:-}" ] || { echo "ERROR: MR_IID is empty. Re-read it before merging."; exit 1; }
 glab mr list                       # open MRs, human-readable
-glab mr list -F json --jq '.[] | "!\(.iid) \(.title)"'
+glab mr list -F json | python3 -c 'import json,sys; print("\n".join("!%s %s" % (m["iid"], m["title"]) for m in json.load(sys.stdin)) or "(none open)")'
 glab mr view "$MR_IID"             # description, discussions, pipeline state
 glab mr diff "$MR_IID"
 
@@ -411,7 +420,11 @@ gh run view "$RUN_ID" --log-failed  # only the failing steps
 # GitLab
 glab ci status                     # current branch's pipeline
 glab ci list --ref "$BRANCH"
-PIPELINE_ID=$(glab ci list --ref "$BRANCH" --per-page 1 -F json --jq '.[0].id')
+set -o pipefail
+PIPELINE_ID=$(glab ci list --ref "$BRANCH" --per-page 1 -F json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])') || {
+    echo "No pipeline for $BRANCH yet, or glab could not read one. Re-run shortly."
+    exit 1
+}
 glab ci get -p "$PIPELINE_ID"
 ```
 
@@ -447,7 +460,7 @@ git -C "$BARE_DIR" branch -d "istota/42-add-auth"
 | File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ...` |
 | Look up a user | `gh api /users/USERNAME` | `glab api /users?username=USERNAME` |
 
-Both CLIs take `--json`/`-F json` plus `--jq`/`-q` for structured output, so there is no need to pipe through `python3` to read a field. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
+**The two CLIs do not have the same structured-output surface.** `gh` takes `--json` plus `--jq`/`-q` and filters in-process. `glab` takes `-F json` and nothing else — there is no `--jq` — so a glab field read is `-F json` piped to `python3`, and the pipeline needs `set -o pipefail` for its exit status to mean anything. Newer glab does have `--jq`, which is the trap: the deployment installs glab from the Debian archive on the Ansible path and pins a much newer build in the Docker image, so a recipe here has to run on the older of the two. Check `glab <command> --help` on the deployed binary before using a flag you know from `gh`. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
 
 Check the help before trusting a spelling from memory — the deployed CLIs may be older than the ones these examples were written against, and `glab mr note` in particular was restructured. Newer glab wants `glab mr note create N -m "..."`; older glab wants `glab mr note N -m "..."` with no subcommand. Run `glab mr note --help` and use whichever it shows.
 

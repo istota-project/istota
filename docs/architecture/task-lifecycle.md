@@ -92,6 +92,16 @@ Back in the scheduler, `process_one_task()` handles the result inside a DB trans
 5. **Memory search indexing**: index conversation under user and channel namespaces
 6. **Delivery routing**: `transport.routing.resolve_delivery_plan` turns `output_target` into an ordered, channel-resolved destination list (Talk, email, ntfy, TASKS.md write-back, or stream surfaces web/REPL). Stream destinations need no push — the `task_events` log is the delivery
 
+### Stopping a running task
+
+Cancelling from chat (`!stop`) or the web cancel endpoint, and a task hitting `task_timeout_minutes`, all signal the **whole process group** rather than the brain's own process. `kill_process_group(pid, sig)` is the one implementation, shared by both kill paths in `ClaudeCodeBrain`'s streaming spawn, by `!stop` and the web endpoint, and by the scheduler's and the native brain's timeout kills.
+
+Killing only the top-level process left everything it had launched still running with nothing to stop it — a cancelled test run kept every core on the host busy until the next restart.
+
+The function falls back to signalling the single process when the pid leads no group of its own. A non-leader shares the daemon's group, so signalling it would kill the scheduler; both of today's `worker_pid` writers record leaders, so the fallback guards a future caller rather than either brain. It never raises, because the brain's timeout calls it from a `threading.Timer` callback where an exception would report a timeout while leaving the process alive.
+
+Background work the daemon starts on its own, such as the sleep cycle, is not covered yet and still stops only its top-level process.
+
 ### Failure path
 
 1. Check if task was cancelled by user (`!stop` command)

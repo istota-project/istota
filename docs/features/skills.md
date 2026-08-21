@@ -14,7 +14,7 @@ A single deterministic pass produces the **eager** skill set (the former LLM "Pa
 - `source_types` matches the task's source type (e.g., `briefing` -> calendar, markets)
 - Attachment file extensions match `file_types` (e.g., `.wav` -> whisper)
 - Sticky skills carried from recent conversation turns (see below)
-- `companion_skills` of already-selected skills are pulled in
+- `companion_skills` of already-selected skills are pulled in — **one level only**, so companions-of-companions are not expanded and a companion cycle is inert. `expand_companions` is shared by selection and by `skills show`, so both paths apply the same gates and the same depth. A skill that needs a rule to arrive with it therefore declares that companion itself rather than relying on a sibling to bring it
 
 Keyword (`triggers`) matching is **not** a selector — every non-eager eligible skill is in the on-demand menu, so a keyword guess is redundant. `triggers` survives only as `!skills` documentation. (The former `resource_types` menu-membership gate was removed in the Resources sunset — no bundled skill declared it.)
 

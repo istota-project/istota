@@ -55,6 +55,18 @@ Four checks can outlast a tick — the DB health sweep and the DB backup snapsho
 
 Because none of the known-long checks runs on the loop thread any more, there are no `LoopWatchdog.suspended()` call sites left — the stall watchdog covers the whole loop.
 
+### Host memory breadcrumb
+
+Every `host_pressure_breadcrumb_interval` seconds (default 300), the loop writes one `host_pressure` line carrying `MemAvailable`, `Shmem`, `SwapFree`, the PSI memory figures, per-tmpfs usage, and `shmem_unaccounted_kb` — `Shmem` minus the summed tmpfs usage. It runs whether or not the box is under pressure, which is the point: a slow leak crosses no alarm threshold until the day it is fatal, and the August 2026 host loss accumulated 4.64 GB of unreclaimable shmem over five days with nothing recording any of it.
+
+`shmem_unaccounted_kb` is the field that does the work. It separates memory some mount can be `du`'d for from memory that lives in no filesystem at all — the distinction the outage investigation could not make, and the reason it never named a culprit.
+
+The line goes to its own logger (`istota.scheduler.pressure`), so a multi-day series comes out whole with `journalctl … | grep host_pressure` and none of the surrounding scheduler chatter. A sampling failure logs under `host_pressure_error` instead, deliberately not sharing the prefix, so a parsed series never picks up a row with no fields. The whole emit is wrapped: instrumentation must not take the daemon down.
+
+It costs six small file reads plus a `statvfs` and a `stat` per tmpfs mount, so it stays on the loop thread rather than paying for a thread every interval. `host_pressure_enabled = false` turns it off; so does an interval of 0. On a platform with no PSI interface (macOS, a kernel without `CONFIG_PSI`) it says so once and then no-ops.
+
+`host_pressure.py` is a stdlib-only leaf. Every reader takes its `/proc` root as a parameter and none of them raise. `python -m istota.host_pressure --snapshot` produces the threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders.
+
 ### Startup orphan recovery
 
 The heartbeat-based stuck-task reclaim *infers* a dead worker and takes up to `worker_stuck_minutes` to do it. A scheduler restart is deterministic instead: the daemon holds a singleton flock, so the moment a fresh instance boots, every `running` / `locked` row belongs to the dead instance. `recover_orphaned_tasks_on_startup` runs once under the flock, before any worker spawns, and resolves each orphan in priority order — `cancel_requested` → `cancelled`; retries exhausted, too old, or an inline-only source (REPL) → `failed`; otherwise back to `pending` with `attempt_count` bumped and every liveness column cleared. Terminal outcomes emit a terminal event frame so a watching web client gets closure instead of a hung spinner; released orphans emit nothing, since the re-run streams its own `task_started`. `pending_confirmation` rows are left alone.
@@ -173,6 +185,7 @@ Runs every `briefing_check_interval`:
 - Log warnings for tasks pending longer than 30 min
 - Auto-fail tasks pending longer than `stale_pending_fail_hours` (2)
 - Delete completed tasks older than `task_retention_days` (7)
+- Prune `task_usage` / `task_usage_models` rows older than `usage_retention_days` (180) — far above the task window on purpose, so spend history survives task cleanup
 - Prune `processed_emails` rows older than `processed_email_retention_days` (90, floored at `email_retention_days + 1`), excluding rows the stored transcript still references
 - Prune the `message_deletions` ledger (fixed 30 days) — it exists only to tell a reconnecting client what vanished while it was away
 - Delete processed emails from IMAP older than `email_retention_days` (7), via one server-side `BEFORE` search
@@ -195,5 +208,6 @@ Runs every `briefing_check_interval`:
 | Shared files | 120s | `shared_file_check_interval` |
 | Heartbeats | 60s | `heartbeat_check_interval` |
 | SQLite health (`quick_check` + self-heal `REINDEX`) | 86400s (24h) | `db_health_check_interval` |
+| Host memory breadcrumb | 300s | `host_pressure_breadcrumb_interval` |
 
 `dispatch_interval` decouples cold pending-task pickup latency from the interval-gated checks: the main loop runs `pool.dispatch()` on this sub-tick cadence without re-running the per-subsystem checks (0 or ≥ `poll_interval` = legacy one-dispatch-per-tick). `cron_max_staleness_minutes` (default 60) is the insertion-time staleness gate for `check_scheduled_jobs` / `check_briefings` — after a long outage it skips the catch-up insert and resumes from the next future fire, suppressing thundering-herd catch-up.

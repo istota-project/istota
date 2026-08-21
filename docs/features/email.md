@@ -201,6 +201,14 @@ The origin descriptor self-addresses the surface and channel, so a reply to a we
 
 The bot drafts a response and asks for confirmation. On approval, the task re-executes with `confirmation_context` injected, instructing it to send the draft rather than re-draft. Pending confirmations are auto-cancelled when the user sends a new message in the same conversation.
 
+### Finding a reply to something the bot sent
+
+Every read verb takes `--scope {mine,shared,all}`, defaulting to `all`. `mine` means mail addressed to your `bot+<you>@…` plus-address, mail from your own address, **or** a reply to a thread you started.
+
+That third arm matters when a correspondent answers the bot's plain address rather than your personal one. Such a reply is delivered and answered normally, but `list --scope mine` did not show it — so the one query you run when you suspect something went missing was the query that hid it.
+
+`list` narrows the fetch server-side, so its thread arm reaches back over your last twenty-five or so sent messages. `search` filters the whole window client-side and has always found these; use it when hunting a reply to something older than that.
+
 ## Configuration
 
 ```toml
@@ -222,6 +230,8 @@ outbound_approval_floor = "untrusted"  # off | untrusted | all
 SMTP credentials fall back to IMAP credentials if not set.
 
 Polling interval is controlled by `email_poll_interval` in `[scheduler]` (default 60s), and `email_poll_batch_size` (default 50) caps how many messages one poll walks. The cap is a batch boundary, not a window: each poll takes the oldest unprocessed mail and leaves the rest for the next tick, so a burst larger than one batch drains in arrival order instead of burying the messages underneath it. A poll that fills its batch logs that a backlog remains. Mail is deleted from the IMAP folder after `email_retention_days` (default 7) via a server-side date search, so the sweep keeps working on a busy mailbox. It deletes everything in the folder past the cutoff, not only mail Istota processed, and the deletion is permanent — set the window deliberately, and note that the first run after upgrading from a version whose sweep silently did nothing will clear the accumulated backlog (the candidate count is logged before anything is removed). A backlog is drained a couple of thousand messages per cleanup tick rather than in one pass, so a large one clears over several minutes; each tick logs how many are left. The record of which messages have already been processed is pruned separately after `processed_email_retention_days` (default 90) — always at least as long as the mail itself, so a message still in the folder can't lose its record and be ingested a second time.
+
+That record is keyed on `(uidvalidity, email_id)`, not on the id alone. IMAP UIDs restart when a mailbox is recreated, so a move to a new mail server, or a rebuilt mailbox, used to make every new message look like one already handled — silently skipped, with no error and no log line.
 
 ### Volume limits
 
