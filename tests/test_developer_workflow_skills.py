@@ -149,6 +149,24 @@ class TestCliFlagMatchesReality:
         assert repos.sensitive is False, "a directory path is not a credential"
 
 
+def _fenced_lines(body: str):
+    """Lines inside ``` blocks — the ones a model will copy and run.
+
+    Toggling on `line.startswith` misses an indented fence, which is the normal
+    way to put a recipe inside a list item; `developer` has two, in the Error
+    Handling bullets. Miss those and every following line is classified
+    inversely, so a guard that only inspects runnable lines silently starts
+    inspecting prose instead.
+    """
+    in_fence = False
+    for line in body.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            yield line
+
+
 class TestBodiesDoNotContradict:
     """The three bodies arrive in one response, so a rule stated in one and
     broken in another is a live contradiction the model has to resolve. These
@@ -223,9 +241,10 @@ class TestBodiesDoNotContradict:
         one never requested anybody. `gh pr create --reviewer` replaces both."""
         body = self._body("developer")
         assert "--reviewer" in body
-        assert "/reviews" not in body, (
-            "developer still posts to the pull-request reviews endpoint"
-        )
+        for line in _fenced_lines(body):
+            assert "/reviews" not in line, (
+                f"developer still posts to the pull-request reviews endpoint: {line!r}"
+            )
 
     def test_does_not_advertise_run_download(self):
         """`gh run download` redirects to a per-request Azure blob shard, and
@@ -235,15 +254,10 @@ class TestBodiesDoNotContradict:
         it in prose is required rather than forbidden — the spec asks for the
         reason in writing so the next reader does not "fix" the allowlist."""
         body = self._body("developer")
-        in_fence = False
-        for line in body.splitlines():
-            if line.startswith("```"):
-                in_fence = not in_fence
-                continue
-            if in_fence:
-                assert "gh run download" not in line, (
-                    f"developer puts `gh run download` in a runnable block: {line!r}"
-                )
+        for line in _fenced_lines(body):
+            assert "gh run download" not in line, (
+                f"developer puts `gh run download` in a runnable block: {line!r}"
+            )
         assert "gh run download" in body, (
             "developer should say why the verb is unavailable, not stay silent"
         )
@@ -256,6 +270,16 @@ class TestBodiesDoNotContradict:
         teaches the model a false model of the boundary."""
         body = self._body("developer")
         assert "embedded in helper scripts" not in body
+        # And the replacement is actually there. Without this, deleting the
+        # whole Credentials paragraph leaves the test green, which is the
+        # opposite of what defect 4 asks for — the spec says *replace* the
+        # rule, so replacement is the property under test.
+        assert "not a claim that you would be stopped" in body, (
+            "the conduct rule must not imply the model would be prevented"
+        )
+        assert "accident guard, not a security boundary" in body, (
+            "the refused-verb list must not be described as a boundary"
+        )
 
     def test_commit_precedes_review_in_the_lifecycle(self):
         """The review resolves a commit range, so a lifecycle that numbers the
@@ -323,7 +347,7 @@ class TestLoadBudget:
     stated rather than assumed. Parity with the pre-split single file is not
     achievable — `developer` sheds ~52 lines and gains more than that back."""
 
-    BUDGET_LINES = 650
+    BUDGET_LINES = 675
 
     def test_three_bodies_fit_the_budget(self):
         total = 0

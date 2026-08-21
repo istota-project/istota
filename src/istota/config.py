@@ -599,7 +599,11 @@ class DeveloperConfig:
     gitlab_token: str = ""        # API token (read_api + write_repository scope recommended)
     gitlab_username: str = ""     # GitLab username for HTTPS auth
     gitlab_default_namespace: str = ""  # Default namespace for resolving short repo names (e.g., "myorg")
-    gitlab_reviewer_id: str = ""       # GitLab user ID to assign as MR reviewer
+    # A *username*, despite the name: `glab mr create --reviewer` takes
+    # usernames, not numeric IDs. The name predates the CLI wrapper and
+    # renaming it means touching the env spec, the Ansible var and the
+    # rendered config; the comment carries the truth until then.
+    gitlab_reviewer_id: str = ""       # GitLab reviewer username for new MRs
     # Patterns are matched against the bare path the shim emits — the
     # devbox proxy strips ``/api/v4`` into the upstream ``base_url``
     # (devbox_proxy.py:handle_gitlab_api) before matching. Don't add the

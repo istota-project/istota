@@ -32,7 +32,7 @@ Git credentials are configured automatically for both platforms — clone and pu
 
 **Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped.
 
-**Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` (`-X POST`, `-f key=value`) are refused too — use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
+**Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` / `glab api` are refused too — an explicit `-X POST`, and any body flag (`-f`, `-F`, `--field`, `--raw-field`, `--form`, `--input`), which both CLIs treat as an implicit POST. Use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
 
 This is an accident guard, not a security boundary. Hitting it means you are about to do something outside this skill's job, so stop and ask the user — do not look for another route to the same effect.
 
@@ -278,21 +278,28 @@ fi
 
 git push -u origin "$BRANCH"
 
+# The reviewer variable is absent entirely unless the operator configured one,
+# and `--reviewer ""` is an error rather than a no-op — so build the flag
+# rather than interpolating it.
+REVIEWER_ARGS=""
+[ -n "${GITLAB_REVIEWER_ID:-}" ] && REVIEWER_ARGS="--reviewer $GITLAB_REVIEWER_ID"
+
 glab mr create \
     --source-branch "$BRANCH" \
     --target-branch "$DEFAULT_BRANCH" \
     --title "Add user authentication" \
     --description "Implements JWT auth. Created by {BOT_NAME} task $TASK_ID." \
     --remove-source-branch \
-    --reviewer "$GITLAB_REVIEWER_ID" \
+    $REVIEWER_ARGS \
     --yes
 ```
 
-`--yes` skips the confirmation prompt; without it the command waits for a terminal that is not there. Drop `--reviewer` if `$GITLAB_REVIEWER_ID` is empty — an empty value is an error, not a no-op. **The flag takes a username.** If the configured value is numeric, tell the user their `developer.gitlab_reviewer_id` needs to be the reviewer's username instead, and create the MR without the flag.
+`--yes` skips the confirmation prompt; without it the command waits for a terminal that is not there. **`--reviewer` takes a username**, despite the variable's name. If the configured value is numeric, create the MR without the flag and tell the user their `developer.gitlab_reviewer_id` needs to be the reviewer's username.
 
-Then verify it exists (pre-submission check 2):
+Then verify it exists, and capture the id for later steps (pre-submission check 2):
 
 ```bash
+MR_IID=$(glab mr view -F json --jq .iid)
 glab mr view -F json --jq '"!\(.iid) \(.web_url)"'
 ```
 
@@ -302,27 +309,32 @@ glab mr view -F json --jq '"!\(.iid) \(.web_url)"'
 cd "$WORK_DIR"
 
 # REQUIRED: confirm the repository before creating anything.
+# Substitute the owner/repo the user actually asked for.
 RESOLVED=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-if [ "$RESOLVED" != "$OWNER/$REPO" ]; then
-    echo "ERROR: origin resolves to '$RESOLVED', not '$OWNER/$REPO'. Aborting."
+if [ "$RESOLVED" != "owner/repo" ]; then
+    echo "ERROR: origin resolves to '$RESOLVED', not 'owner/repo'. Aborting."
     exit 1
 fi
 
 git push -u origin "$BRANCH"
+
+REVIEWER_ARGS=""
+[ -n "${GITHUB_REVIEWER:-}" ] && REVIEWER_ARGS="--reviewer $GITHUB_REVIEWER"
 
 gh pr create \
     --head "$BRANCH" \
     --base "$DEFAULT_BRANCH" \
     --title "Add user authentication" \
     --body "Implements JWT auth. Created by {BOT_NAME} task $TASK_ID." \
-    --reviewer "$GITHUB_REVIEWER"
+    $REVIEWER_ARGS
 ```
 
-`--reviewer` requests the review as part of creating the pull request. Drop the flag when `$GITHUB_REVIEWER` is empty.
+`--reviewer` requests the review as part of creating the pull request — this is the whole reviewer step, not a follow-up call.
 
-Then verify:
+Then verify, and capture the number for later steps:
 
 ```bash
+PR_NUMBER=$(gh pr view --json number -q .number)
 gh pr view --json number,url,state -q '"#\(.number) \(.state) \(.url)"'
 ```
 
@@ -354,7 +366,9 @@ glab mr diff "$MR_IID"
 glab mr merge "$MR_IID" --yes
 ```
 
-Merge options: `--squash`, `--rebase`, `--remove-source-branch`, `--auto-merge` (merge once the pipeline passes). `--yes` is required in a non-interactive context.
+Merge options: `--squash`, `--rebase`, `--remove-source-branch`. `--yes` is required in a non-interactive context.
+
+**This may queue rather than merge.** When a pipeline is running, glab enables auto-merge by default and still exits 0 — so the MR is scheduled behind CI, not merged. Pass `--auto-merge=false` if you mean now, and read the command's output before reporting a merge as done.
 
 ## GitHub: Listing and Merging PRs
 
@@ -377,12 +391,14 @@ This is the loop that makes a bot useful on a real repository: push, see what br
 # GitHub
 gh pr checks                       # one line per check
 gh run list --branch "$BRANCH" --limit 5
+RUN_ID=$(gh run list --branch "$BRANCH" --limit 1 --json databaseId -q '.[0].databaseId')
 gh run view "$RUN_ID" --log-failed  # only the failing steps
 
 # GitLab
 glab ci status                     # current branch's pipeline
-glab ci list --branch "$BRANCH"
-glab ci get --pipeline-id "$PIPELINE_ID"
+glab ci list --ref "$BRANCH"
+PIPELINE_ID=$(glab ci list --ref "$BRANCH" --per-page 1 -F json --jq '.[0].id')
+glab ci get -p "$PIPELINE_ID"
 ```
 
 `gh pr checks` exits 0 when everything passed, 8 when checks are still pending, and non-zero otherwise — so treat 8 as "come back later", not as a failure.
@@ -412,14 +428,14 @@ git -C "$BARE_DIR" branch -d "istota/42-add-auth"
 | Comment on it | `gh pr comment N --body "..."` | `glab mr note create N -m "..."` |
 | Request a review | `gh pr edit N --add-reviewer USER` | `glab mr update N --reviewer USER` |
 | CI state | `gh pr checks` | `glab ci status` |
-| Failing CI logs | `gh run view ID --log-failed` | `glab ci trace JOB_ID` (blocking — prefer `glab ci get`) |
+| Failing CI logs | `gh run view ID --log-failed` | `glab ci get -p PIPELINE_ID` |
 | Merge it | `gh pr merge N --squash` | `glab mr merge N --yes` |
 | File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ...` |
 | Look up a user | `gh api /users/USERNAME` | `glab api /users?username=USERNAME` |
 
 Both CLIs take `--json`/`-F json` plus `--jq`/`-q` for structured output, so there is no need to pipe through `python3` to read a field. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
 
-Check the help before trusting a spelling from memory. `glab mr note` in particular was restructured into subcommands, and the deployed version may be older than the one these examples were written against.
+Check the help before trusting a spelling from memory — the deployed CLIs may be older than the ones these examples were written against, and `glab mr note` in particular was restructured. Newer glab wants `glab mr note create N -m "..."`; older glab wants `glab mr note N -m "..."` with no subcommand. Run `glab mr note --help` and use whichever it shows.
 
 `gh api` and `glab api` reach any read endpoint the token allows. Writes through them are refused — use the verb.
 
@@ -438,6 +454,8 @@ Check the help before trusting a spelling from memory. `glab mr note` in particu
 - **MR/PR has merge conflicts**: Rebase the worktree branch onto the latest target and force-push `$BRANCH`, subject to the same restriction.
 - **Exit 3, "not permitted by this deployment"**: a refused verb. Stop and tell the user what you were about to do and why you wanted to. Do not reach for `gh api`, a raw `curl`, or the web UI to get the same effect.
 - **Exit 4 or 5 from `gh` / `glab`**: the credential path, not your command. Exit 4 means no credential proxy is reachable; exit 5 means the proxy refused or has no token for that forge. Both are deployment problems — report them, and note that only the affected forge is down (a missing GitLab token does not stop `gh`).
+- **Exit 2**: a usage error, or one of the retired `github-api` / `gitlab-api` names. Use `gh` / `glab`.
+- **Exit 7**: the wrapper is misconfigured (no CLI config directory). A deployment problem — report it.
 - **Exit 6**: the real CLI is missing or not executable on this host. Report the path in the message; the operator has to install it.
 - **`gh api` write refused**: writes through the raw API are blocked on purpose. There is a verb for it — `gh pr edit`, `gh issue comment`, and so on.
 - **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive), and that the token's scope covers it. A fine-grained token restricted to a repository list returns 404, not 403, for anything outside it — so "not found" can mean "not granted".
