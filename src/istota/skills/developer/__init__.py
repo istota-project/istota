@@ -1,9 +1,24 @@
 """Developer skill — setup_env hook.
 
-Generates the credential-fetch helper script and the per-platform
-git-credential-helper / gitlab-api / github-api wrapper scripts inside the
-task's user temp directory, and exports the GIT_CONFIG_* env vars that
-point git at those helpers.
+Generates, inside the task's user temp directory:
+
+- the credential-fetch helper and the per-platform git-credential-helper
+  scripts, plus the ``GIT_CONFIG_*`` vars that point git at them;
+- ``gh`` and ``glab``, copies of :mod:`istota.forge_cli` that wrap the real
+  binaries, and the policy file they read;
+- a seeded, read-only config directory per CLI.
+
+Everything lands in ``{user_temp_dir}/.developer``, which ``build_bwrap_cmd``
+re-binds read-only inside the sandbox and which ``native_fs_roots`` excludes
+from the native brain's write roots. Those two together are what stop the
+model's *own file tools* rewriting the wrapper, the policy or gh's alias
+table, which is the level of protection an accident guard needs.
+
+It is not an absolute. ``user_temp_dir`` is also the deferred directory, which
+``skill_host_paths`` admits as a host-side write root, so a determined model
+has paths to that directory that neither the bind nor the deny root covers.
+Same posture as the policy itself: it stops a mistake, not a decision. The
+boundary that does the real work is the forge token's own scope.
 
 Static env vars (DEVELOPER_REPOS_DIR, GITLAB_URL, GITHUB_URL, the optional
 namespace/owner/reviewer/credit knobs, GITLAB_TOKEN, GITHUB_TOKEN) come
@@ -13,23 +28,124 @@ that aren't expressible as static EnvSpecs.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
 from pathlib import Path
+
+from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 
 logger = logging.getLogger("istota.skills.developer")
 
+# Where the canonical wrapper lives, for copying into the task's .developer.
+_FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
 
-def _allowlist_pattern_to_case(pattern: str) -> str:
-    """Convert an allowlist pattern like 'GET /api/v4/projects/*' to a shell case glob."""
-    parts = pattern.split("*")
-    result = "*".join(f'"{p}"' for p in parts if p)
-    if pattern.endswith("*"):
-        result += "*"
-    return result
+
+# Last-resort defaults, used only when nothing is configured and the binary is
+# not on the daemon's PATH either. They are the conventional manual-install
+# location; the Ansible role installs from the Debian archive into /usr/bin and
+# renders that path into config.toml.
+_FALLBACK_BIN = {"gh": "/usr/local/bin/gh", "glab": "/usr/local/bin/glab"}
+
+
+def _resolve_real_bin(configured: str, name: str) -> str:
+    """Absolute path to the real forge binary the wrapper should exec.
+
+    An operator's explicit path is returned as given, existing or not: exec'ing
+    something *else* because the chosen one is missing would be the wrong
+    surprise, and ``_validate_forge_clis`` already warns at start-up. Only the
+    unchosen case falls back — an unset key, or the code default still standing
+    — and then to what the *daemon's own* PATH resolves. That lookup runs
+    host-side and never sees the model's environment, and the result is still
+    an absolute path baked into the policy file, so the wrapper's exec stays as
+    pinned as before.
+
+    The fallback exists because the two halves of this setting ship
+    separately. The Ansible role installs the binaries into ``/usr/bin``, but
+    only a full play run rewrites ``config.toml``, and the auto-update cron
+    pulls code without running Ansible at all. In that window ``gh_bin_path``
+    is absent from the file, the dataclass default stands, and every forge
+    command would otherwise exec a path that does not exist.
+    """
+    default = _FALLBACK_BIN[name]
+    if configured and configured != default:
+        return configured
+    if os.path.exists(default):
+        return default
+    return shutil.which(name) or default
+
+
+def _atomic_write(dest: Path, data: str, mode: int) -> Path:
+    """Write via a temp file in the same directory, then rename.
+
+    Tasks for one user share ``user_temp_dir`` and the worker pool runs them
+    concurrently, so a plain truncate-then-write can be read half-finished by
+    a wrapper another task is running right now. ``os.replace`` is atomic and
+    leaves an already-open process on its own inode.
+    """
+    tmp = dest.with_name(f".{dest.name}.tmp{os.getpid()}")
+    tmp.write_text(data)
+    tmp.chmod(mode)
+    os.replace(tmp, dest)
+    return dest
+
+
+def _write_forge_cli(dev_bin: Path, name: str) -> Path:
+    """Install the wrapper under one of the names it dispatches on.
+
+    A copy rather than a symlink: ``forge_from_argv0`` reads ``argv[0]``, and
+    the sandbox's view of a symlink's target is one more thing to get wrong
+    for no benefit.
+    """
+    return _atomic_write(
+        dev_bin / name, _FORGE_CLI_SOURCE.read_text(), 0o700,
+    )
+
+
+def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
+    """A pre-seeded CLI config directory, at the modes each CLI will accept.
+
+    ``config.yml`` is mode 0600, not 0400, because glab refuses to start on
+    anything else ("has the permissions 400, but glab requires 600"); gh is
+    happy with either. The file being owner-writable does not matter: the
+    model reaches this path only through the sandbox, where ``.developer`` is
+    a read-only bind, and that is what actually holds it down.
+
+    Seeding an empty file rather than leaving the directory bare is
+    deliberate. gh expands ``aliases`` from ``config.yml`` *before* command
+    dispatch, so an absent file is one the model could otherwise supply.
+    """
+    cfg = dev_bin / name
+    cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config_yml = cfg / "config.yml"
+    # Truncated on every run, not seeded once. user_temp_dir persists across
+    # tasks, so a "write it only if absent" guard would make the seed a
+    # one-time act: anything that got an alias table in there once — a
+    # deployment without bwrap, or a host-side write — would have it honoured
+    # by every later task. The wrapper and the policy are both rewritten
+    # unconditionally; this is the file that most needs to be.
+    _atomic_write(config_yml, "", 0o600)
+    return cfg
+
+
+def _pinned_data_dir(dev_bin: Path, name: str) -> Path:
+    """An empty directory to point XDG_DATA_HOME at.
+
+    gh dispatches an unknown first argument to ``gh-<name>`` in
+    ``$XDG_DATA_HOME/gh/extensions``, and the argv rules cannot see that — the
+    argv is ``gh <name>`` and matches nothing. Left unset, gh derives the path
+    from HOME, whose ``.local/share`` is writable inside the sandbox. Verified
+    against gh 2.98: a planted extension runs, and pinning the variable at an
+    empty directory stops it.
+    """
+    data = dev_bin / name
+    data.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return data
 
 
 def setup_env(ctx) -> dict[str, str]:
-    """Write helper scripts and return GIT_CONFIG_* / *_API_CMD env vars.
+    """Write helper scripts and return the GIT_CONFIG_* / forge-CLI env vars.
 
     Self-gates on ``config.developer.enabled`` and a non-empty
     ``repos_dir`` — the hook is invoked for every skill in the index, so
@@ -76,9 +192,13 @@ def setup_env(ctx) -> dict[str, str]:
         cred_fetch_cmd = str(cred_fetch)
 
     def _token_expr(var_name: str) -> str:
+        # Quoted: git's credential protocol wants the value verbatim, and an
+        # unquoted expansion is word-split by sh and rejoined by echo on
+        # single spaces. No PAT format has whitespace today; this costs two
+        # characters and removes a way for a future one to fail unreadably.
         if use_proxy:
-            return f"$({cred_fetch_cmd} {var_name})"
-        return f"${var_name}"
+            return f'"$({cred_fetch_cmd} {var_name})"'
+        return f'"${var_name}"'
 
     git_config_index = 0
 
@@ -97,43 +217,6 @@ def setup_env(ctx) -> dict[str, str]:
         env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(git_cred)
         git_config_index += 1
 
-        api_script = dev_bin / "gitlab-api"
-        allowlist_cases = "\n".join(
-            f"  {_allowlist_pattern_to_case(p)}) ;;"
-            for p in dev.gitlab_api_allowlist
-        )
-        if use_proxy:
-            token_line = f'TOKEN=$({cred_fetch_cmd} GITLAB_TOKEN)\n'
-            curl_header = '"PRIVATE-TOKEN: $TOKEN"'
-        else:
-            token_line = ""
-            curl_header = '"PRIVATE-TOKEN: $GITLAB_TOKEN"'
-        # The GitLab API root is ``<host>/api/v4`` — we build that into
-        # the curl target so callers pass bare paths (``/projects/...``,
-        # ``/user``) matching the bundled allowlist patterns. A leading
-        # ``/api/v4`` in the endpoint is stripped for back-compat with
-        # prompts written against the old convention; allowlist matching
-        # is always done on the bare form.
-        api_script.write_text(
-            "#!/bin/sh\n"
-            'METHOD="$1"; shift\n'
-            'ENDPOINT="$1"; shift\n'
-            'case "$ENDPOINT" in\n'
-            '  /api/v4/*) ENDPOINT="${ENDPOINT#/api/v4}" ;;\n'
-            'esac\n'
-            'CLEAN="${ENDPOINT%%\\?*}"\n'
-            'case "$METHOD $CLEAN" in\n'
-            f"{allowlist_cases}\n"
-            '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
-            '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
-            "esac\n"
-            f'{token_line}'
-            f'curl -s --header {curl_header} '
-            f'--request "$METHOD" "{gitlab_host}/api/v4$ENDPOINT" "$@"\n'
-        )
-        api_script.chmod(0o700)
-        env["GITLAB_API_CMD"] = str(api_script)
-
     if dev.github_token:
         github_host = dev.github_url.rstrip("/")
         gh_username = dev.github_username or "x-access-token"
@@ -150,41 +233,73 @@ def setup_env(ctx) -> dict[str, str]:
         env[f"GIT_CONFIG_VALUE_{git_config_index}"] = str(gh_cred)
         git_config_index += 1
 
-        gh_api_script = dev_bin / "github-api"
-        gh_allowlist_cases = "\n".join(
-            f"  {_allowlist_pattern_to_case(p)}) ;;"
-            for p in dev.github_api_allowlist
-        )
-        gh_host_stripped = github_host.rstrip("/")
-        if "github.com" == gh_host_stripped.split("//")[-1]:
-            gh_api_base = "https://api.github.com"
-        else:
-            gh_api_base = f"{gh_host_stripped}/api/v3"
-        if use_proxy:
-            gh_token_line = f'TOKEN=$({cred_fetch_cmd} GITHUB_TOKEN)\n'
-            gh_curl_header = '"Authorization: Bearer $TOKEN"'
-        else:
-            gh_token_line = ""
-            gh_curl_header = '"Authorization: Bearer $GITHUB_TOKEN"'
-        gh_api_script.write_text(
-            "#!/bin/sh\n"
-            'METHOD="$1"; shift\n'
-            'ENDPOINT="$1"; shift\n'
-            'CLEAN="${ENDPOINT%%\\?*}"\n'
-            'case "$METHOD $CLEAN" in\n'
-            f"{gh_allowlist_cases}\n"
-            '  *) printf \'{"error":"endpoint not allowed: %s %s"}\\n\' '
-            '"$METHOD" "$CLEAN" >&2; exit 1 ;;\n'
-            "esac\n"
-            f'{gh_token_line}'
-            f'curl -s --header {gh_curl_header} '
-            f'--header "Accept: application/vnd.github+json" '
-            f'--request "$METHOD" "{gh_api_base}$ENDPOINT" "$@"\n'
-        )
-        gh_api_script.chmod(0o700)
-        env["GITHUB_API_CMD"] = str(gh_api_script)
-
     if git_config_index > 0:
         env["GIT_CONFIG_COUNT"] = str(git_config_index)
+
+    # --- Forge CLIs -------------------------------------------------------
+    #
+    # Installed whenever either token is configured. Both names go on PATH
+    # regardless: `glab` with no GitLab token exits 5 with the proxy's own
+    # message, which is a clearer failure than "command not found" leading
+    # the model to the real binary and an unauthenticated call.
+    if dev.gitlab_token or dev.github_token:
+        state_dir = user_temp_dir / ".forge-state"
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        def _section(forge: str, url: str, real_bin: str) -> dict:
+            section = build_policy(
+                forge,
+                extra_denied=list(getattr(dev, "forge_cli_extra_denied", [])),
+                permit=list(getattr(dev, "forge_cli_permit", [])),
+            )
+            section["url"] = url
+            section["real_bin"] = real_bin
+            section["config_dir"] = str(_seed_cli_config_dir(dev_bin, f"{forge}-config"))
+            section["data_dir"] = str(_pinned_data_dir(dev_bin, f"{forge}-data"))
+            section["state_dir"] = str(state_dir)
+            # With the skill proxy off there is no socket to ask, and the
+            # token is legitimately in the environment rather than having
+            # escaped a stripping step. Saying so here rather than in an env
+            # var matters: this file is the one input the model cannot
+            # redirect, so it is the only safe place to grant that permission.
+            section["direct_token"] = not use_proxy
+            return section
+
+        policy = {
+            FORGE_GITHUB: _section(
+                FORGE_GITHUB,
+                dev.github_url,
+                _resolve_real_bin(getattr(dev, "gh_bin_path", ""), "gh"),
+            ),
+            FORGE_GITLAB: _section(
+                FORGE_GITLAB,
+                dev.gitlab_url,
+                _resolve_real_bin(getattr(dev, "glab_bin_path", ""), "glab"),
+            ),
+        }
+        _atomic_write(
+            dev_bin / "forge-policy.json",
+            json.dumps(policy, indent=2, sort_keys=True),
+            0o600,
+        )
+
+        _write_forge_cli(dev_bin, "gh")
+        _write_forge_cli(dev_bin, "glab")
+        # The retired names, so a cached habit or an old CRON.md job gets the
+        # one-line explanation rather than "command not found".
+        _write_forge_cli(dev_bin, "github-api")
+        _write_forge_cli(dev_bin, "gitlab-api")
+
+        # The only var the wrapper needs from the environment. Everything else
+        # it might have read from there — the policy, the real binary, the
+        # config and data dirs, the forge URL — now travels in the policy file,
+        # because the wrapper runs as a child of the model's own shell and an
+        # env-supplied path is a path the model chooses.
+        #
+        # Reserved key: the executor prepends this to the *model's* PATH only,
+        # after snapshotting the environment it gives host-side skill CLIs.
+        # See executor.HOOK_PATH_PREPEND_KEY — that ordering is a security
+        # property, not housekeeping.
+        env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
 
     return env

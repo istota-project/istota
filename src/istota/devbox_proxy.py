@@ -2,26 +2,30 @@
 
 Per-user asyncio daemon that lives on the host, listens on a Unix socket
 bind-mounted into the user's devbox container, and answers structured
-requests for git credentials and GitHub/GitLab REST API calls. The
-container never sees a token — the proxy injects it server-side.
+requests for git credentials and forge tokens.
 
 See `.claude/skills/spec/devbox-credential-proxy` (in the user's notes
 vault) for the full design. The protocol is in
 ``src/istota/devbox_proxy_protocol.py``.
 
-This Stage-2 implementation covers happy paths for the four actions —
-``ping``, ``git_credential`` (get/store/erase), ``gitlab_api``, and
-``github_api`` — plus Unix-socket plumbing and structured-error
-fallbacks for the unknown-action / bad-request cases that fall out of
-the protocol layer. Allowlist enforcement, audit logging, timeouts, and
-upstream-error semantics land in Stage 3.
+Three actions: ``ping``, ``git_credential`` (get/store/erase), and
+``forge_token``. Every one of them answers out of the context held in
+memory — the daemon makes no outbound requests of its own.
+
+``forge_token`` replaced the ``gitlab_api`` / ``github_api`` actions,
+which had the proxy make the REST call itself against an endpoint
+allowlist. That allowlist could not describe what a real ``gh``
+invocation does (``gh pr create`` is several calls, ``gh pr checks``
+paginates), so the container now runs the real ``gh`` / ``glab`` behind
+``forge_cli.py`` and asks here only for the token. The container
+consequently *does* see the token, which it did not before; the git
+path already handed it one on every push, and the boundary that does
+the work is the token's own scope.
 """
 
 from __future__ import annotations
 
 import asyncio
-import fnmatch
-import json
 import logging
 import os
 import signal
@@ -31,19 +35,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from istota.devbox_proxy_protocol import (
-    ACTION_GH_API,
+    ACTION_FORGE_TOKEN,
     ACTION_GIT_CREDENTIAL,
-    ACTION_GL_API,
     ACTION_PING,
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
     ERR_NO_TOKEN,
-    ERR_NOT_ALLOWED,
     ERR_UNKNOWN_ACTION,
-    ERR_UPSTREAM,
+    ERR_UNKNOWN_PROVIDER,
     MAX_REQUEST_BYTES,
     ProtocolError,
     decode_request,
@@ -66,6 +66,10 @@ class DevboxProxyContext:
 
     Held in memory for the lifetime of the unit. Tokens are loaded once
     at startup; rotation is handled by restarting the systemd unit.
+
+    No HTTP client and no timeout: since ``forge_token`` replaced the two
+    REST actions the daemon answers every request out of these fields and
+    never leaves the host.
     """
 
     user_id: str
@@ -73,10 +77,6 @@ class DevboxProxyContext:
     github_token: str
     gitlab_url: str
     github_url: str
-    gitlab_allowlist: tuple[str, ...]
-    github_allowlist: tuple[str, ...]
-    api_timeout: float
-    http_client: httpx.AsyncClient
 
     @property
     def providers(self) -> list[str]:
@@ -117,10 +117,10 @@ def _audit(
 ) -> None:
     """Emit one structured audit line in key=value form.
 
-    Values containing whitespace, ``=``, or quotes are single-quoted.
-    Anything ``None`` is dropped — keeps the line compact. Q3 of the
-    spec's open questions resolved on 2026-05-15: key-value text in both
-    the journal and the optional file sink.
+    Values that are not plain are single-quoted and escaped by
+    ``_audit_value``; anything ``None`` is dropped, which keeps the line
+    compact. Q3 of the spec's open questions resolved on 2026-05-15:
+    key-value text in both the journal and the optional file sink.
     """
     parts = [
         f"user={user_id}",
@@ -131,35 +131,61 @@ def _audit(
     for key, value in extra.items():
         if value is None:
             continue
-        s = str(value)
-        if any(c in s for c in (" ", "=", "'", "\\")):
-            # Backslash must be escaped before single-quote, else a value
-            # containing ``\'`` would be parsed ambiguously by downstream
-            # key=value log parsers.
-            s = "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
-        parts.append(f"{key}={s}")
+        parts.append(f"{key}={_audit_value(value)}")
     audit_logger.info("devbox_proxy " + " ".join(parts))
+
+
+# Characters that may appear in an audit value unquoted. An allowlist rather
+# than a denylist because several of these values are caller-controlled — the
+# git-credential ``host`` field and ``forge_token``'s ``provider`` both come
+# straight off the wire. The previous denylist (space, ``=``, quote,
+# backslash) let a newline through unquoted, which forges a whole second
+# audit line: one request writing ``result=ok`` for a call that never
+# happened. Common host and provider spellings stay unquoted, so existing
+# log lines are unchanged.
+_AUDIT_SAFE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "._-/:@+,"
+)
+
+# Caller-controlled values are truncated before they reach the log. Without
+# this a 16 MiB ``provider`` string (the wire cap) becomes a 16 MiB log line.
+_AUDIT_MAX_VALUE_CHARS = 200
+
+
+def _audit_value(value: Any) -> str:
+    """Render one audit value, quoted and escaped when it isn't plain."""
+    s = str(value)
+    if len(s) > _AUDIT_MAX_VALUE_CHARS:
+        s = s[:_AUDIT_MAX_VALUE_CHARS] + "…truncated"
+    if s and all(c in _AUDIT_SAFE_CHARS for c in s):
+        return s
+    # Backslash first, else an escape inserted below gets escaped again.
+    escaped = (
+        s.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    # Anything else non-printable (NUL, other control bytes) would still
+    # break a line-oriented parser; render it as an escape too. Above 0xFF the
+    # escape is \uXXXX rather than \xNN: "%02x" is a *minimum* width, so
+    # U+2028 (a line separator, and the reason this branch exists) would
+    # otherwise render as \x2028, which a parser reads as \x20 followed by a
+    # literal "28".
+    escaped = "".join(
+        c if c.isprintable() or c == " "
+        else ("\\x%02x" % ord(c) if ord(c) <= 0xFF else "\\u%04x" % ord(c))
+        for c in escaped
+    )
+    return "'" + escaped + "'"
 
 
 def _elapsed_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
-
-
-# ---- Allowlist -------------------------------------------------------------
-
-
-def _endpoint_allowed(
-    method: str, endpoint: str, allowlist: tuple[str, ...]
-) -> bool:
-    """Return True if ``METHOD <path>`` matches any allowlist glob.
-
-    Mirrors the existing host-side wrapper's shell-glob semantics
-    (`_allowlist_pattern_to_case` in `developer/__init__.py`): query
-    strings are stripped before matching; ``*`` is fnmatch-style.
-    """
-    path = endpoint.split("?", 1)[0]
-    target = f"{method.upper()} {path}"
-    return any(fnmatch.fnmatchcase(target, pat) for pat in allowlist)
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -197,18 +223,6 @@ def _provider_for_host(host: str, ctx: DevboxProxyContext) -> str | None:
     if host == gl_host or host == "gitlab.com":
         return "gitlab"
     return None
-
-
-def _github_api_base(github_url: str) -> str:
-    """Return the API base URL for a configured ``github_url``.
-
-    Public github.com is served from ``api.github.com`` (no path prefix);
-    GitHub Enterprise Server uses ``<host>/api/v3``.
-    """
-    root = (github_url or "").rstrip("/")
-    if root in ("https://github.com", "http://github.com"):
-        return "https://api.github.com"
-    return f"{root}/api/v3"
 
 
 # ---- Action handlers -------------------------------------------------------
@@ -299,181 +313,54 @@ async def handle_git_credential(request: dict, ctx: DevboxProxyContext) -> str:
     return encode_response(ok=True, stdout=stdout)
 
 
-async def _do_upstream(
-    *,
-    base_url: str,
-    method: str,
-    endpoint: str,
-    body: str | bytes | None,
-    headers: dict[str, str],
-    ctx: DevboxProxyContext,
-) -> str:
-    """Forward a single request to ``base_url + endpoint`` and structure the response."""
-    url = f"{base_url.rstrip('/')}{endpoint}"
-    content: bytes | None
-    if body is None:
-        content = None
-    elif isinstance(body, str):
-        content = body.encode("utf-8")
-    else:
-        content = body
-    try:
-        resp = await ctx.http_client.request(
-            method,
-            url,
-            content=content,
-            headers=headers,
-            timeout=ctx.api_timeout,
-        )
-    except httpx.TimeoutException:
-        return encode_error(
-            ERR_UPSTREAM,
-            f"timeout after {ctx.api_timeout}s",
-            status=0,
-        )
-    except httpx.RequestError as e:
-        return encode_error(
-            ERR_UPSTREAM,
-            f"request error: {e}",
-            status=0,
-        )
+async def handle_forge_token(request: dict, ctx: DevboxProxyContext) -> str:
+    """Hand the in-container ``gh`` / ``glab`` wrapper its forge token.
 
-    out_headers = dict(resp.headers)
-    if 200 <= resp.status_code < 300:
-        return encode_response(
-            ok=True,
-            status=resp.status_code,
-            headers=out_headers,
-            body=resp.text,
-        )
-    return encode_error(
-        ERR_UPSTREAM,
-        f"upstream returned {resp.status_code}",
-        status=resp.status_code,
-        body=resp.text,
-    )
+    The wrapper (``src/istota/forge_cli.py``, vendored into the image)
+    sends ``{"action": "forge_token", "provider": "github"|"gitlab"}`` and
+    execs the real binary with the token in its environment. There is no
+    policy check here: the policy is the wrapper's, read from a root-owned
+    file in the image, and re-deciding it on this side would mean parsing
+    an argv the proxy never sees.
 
+    The configured URL rides along with the token. The devbox image is built
+    once and shared by every user, so its baked policy cannot name a per-user
+    ``gitlab_url``; without this the wrapper leaves ``GITLAB_HOST`` unset and
+    glab sends a self-hosted token to gitlab.com. This daemon is per-user and
+    already hands over the token, so it is the right place to answer from.
 
-async def _handle_provider_api(
-    *,
-    request: dict,
-    ctx: DevboxProxyContext,
-    action: str,
-    provider: str,
-    token: str,
-    allowlist: tuple[str, ...],
-    auth_headers: dict[str, str],
-    base_url: str,
-) -> str:
+    The audit line records the provider and never the token.
+    """
     start = time.perf_counter()
+    provider = str(request.get("provider") or "").strip().lower()
+
+    if provider == "github":
+        token, url = ctx.github_token, ctx.github_url
+    elif provider == "gitlab":
+        token, url = ctx.gitlab_token, ctx.gitlab_url
+    else:
+        _audit(
+            user_id=ctx.user_id, action=ACTION_FORGE_TOKEN,
+            result="unknown_provider", dur_ms=_elapsed_ms(start),
+            provider=provider or "(missing)",
+        )
+        return encode_error(
+            ERR_UNKNOWN_PROVIDER,
+            f"unknown forge provider {provider!r} — expected 'github' or 'gitlab'",
+        )
+
     if not token:
         _audit(
-            user_id=ctx.user_id, action=action,
-            result="no_token", dur_ms=_elapsed_ms(start),
+            user_id=ctx.user_id, action=ACTION_FORGE_TOKEN,
+            result="no_token", dur_ms=_elapsed_ms(start), provider=provider,
         )
         return encode_error(ERR_NO_TOKEN, f"no token configured for {provider}")
 
-    method = str(request.get("method") or "GET").upper()
-    endpoint = str(request.get("endpoint") or "")
-    body = request.get("body")
-    extra_headers = request.get("headers") or {}
-
-    # Defense in depth: a header value containing CR/LF or NUL would let
-    # a malicious caller smuggle extra HTTP headers into the upstream
-    # request. httpx blocks most of these at its own layer, but we reject
-    # at our boundary so the daemon's audit log shows the attempt and we
-    # never depend on the upstream library's policy.
-    if isinstance(extra_headers, dict):
-        for k, v in extra_headers.items():
-            if not isinstance(k, str) or not isinstance(v, (str, int, float)):
-                _audit(
-                    user_id=ctx.user_id, action=action,
-                    result="bad_request", dur_ms=_elapsed_ms(start),
-                    method=method, endpoint=endpoint, reason="header_type",
-                )
-                return encode_error(
-                    ERR_BAD_REQUEST, "header keys must be str, values str/number",
-                )
-            if any(c in str(v) for c in ("\r", "\n", "\x00")):
-                _audit(
-                    user_id=ctx.user_id, action=action,
-                    result="bad_request", dur_ms=_elapsed_ms(start),
-                    method=method, endpoint=endpoint, reason="header_smuggling",
-                )
-                return encode_error(
-                    ERR_BAD_REQUEST,
-                    f"header {k!r} contains CR/LF/NUL — rejected",
-                )
-
-    if not _endpoint_allowed(method, endpoint, allowlist):
-        _audit(
-            user_id=ctx.user_id, action=action,
-            result="not_allowed", dur_ms=_elapsed_ms(start),
-            method=method, endpoint=endpoint,
-        )
-        return encode_error(
-            ERR_NOT_ALLOWED,
-            f"endpoint {method} {endpoint.split('?', 1)[0]} not in allowlist",
-        )
-
-    headers = {**auth_headers, **extra_headers}
-    response = await _do_upstream(
-        base_url=base_url,
-        method=method,
-        endpoint=endpoint,
-        body=body,
-        headers=headers,
-        ctx=ctx,
+    _audit(
+        user_id=ctx.user_id, action=ACTION_FORGE_TOKEN,
+        result="ok", dur_ms=_elapsed_ms(start), provider=provider,
     )
-    # Re-decode the envelope to learn the actual status/result for the
-    # audit line; keeps _do_upstream pure and avoids passing audit state
-    # into the helper.
-    parsed = json.loads(response)
-    if parsed.get("ok"):
-        _audit(
-            user_id=ctx.user_id, action=action,
-            result="ok", dur_ms=_elapsed_ms(start),
-            method=method, endpoint=endpoint,
-            status=parsed.get("status"),
-        )
-    else:
-        _audit(
-            user_id=ctx.user_id, action=action,
-            result=parsed.get("error", "error"),
-            dur_ms=_elapsed_ms(start),
-            method=method, endpoint=endpoint,
-            status=parsed.get("status"),
-        )
-    return response
-
-
-async def handle_gitlab_api(request: dict, ctx: DevboxProxyContext) -> str:
-    return await _handle_provider_api(
-        request=request,
-        ctx=ctx,
-        action=ACTION_GL_API,
-        provider="gitlab",
-        token=ctx.gitlab_token,
-        allowlist=ctx.gitlab_allowlist,
-        auth_headers={"PRIVATE-TOKEN": ctx.gitlab_token},
-        base_url=f"{ctx.gitlab_url.rstrip('/')}/api/v4",
-    )
-
-
-async def handle_github_api(request: dict, ctx: DevboxProxyContext) -> str:
-    return await _handle_provider_api(
-        request=request,
-        ctx=ctx,
-        action=ACTION_GH_API,
-        provider="github",
-        token=ctx.github_token,
-        allowlist=ctx.github_allowlist,
-        auth_headers={
-            "Authorization": f"token {ctx.github_token}",
-            "Accept": "application/vnd.github+json",
-        },
-        base_url=_github_api_base(ctx.github_url),
-    )
+    return encode_response(ok=True, token=token, url=url)
 
 
 # ---- Connection dispatch ---------------------------------------------------
@@ -482,8 +369,23 @@ async def handle_github_api(request: dict, ctx: DevboxProxyContext) -> str:
 _ACTION_HANDLERS = {
     ACTION_PING: handle_ping,
     ACTION_GIT_CREDENTIAL: handle_git_credential,
-    ACTION_GL_API: handle_gitlab_api,
-    ACTION_GH_API: handle_github_api,
+    ACTION_FORGE_TOKEN: handle_forge_token,
+}
+
+# Actions this daemon used to answer, kept only as a diagnosis.
+#
+# The deployment's auto-update path resets to main and restarts the daemon on a
+# short cron; it does not rebuild the devbox image, which Ansible does. So
+# between this landing and the next Ansible run, a *running* container still
+# holds the old curated shims and sends these two names at a daemon that no
+# longer has handlers for them. Without this the operator gets a bare
+# `unknown_action` and a journal that says nothing happened at all — the shape
+# the spec split Stage 2 to avoid, arriving on the devbox path instead.
+#
+# Delete once no deployed image can still send them.
+_RETIRED_ACTIONS = {
+    "gitlab_api": "glab",
+    "github_api": "gh",
 }
 
 
@@ -531,10 +433,26 @@ async def handle_connection(
         action = request.get("action")
         handler = _ACTION_HANDLERS.get(action)
         if handler is None:
-            await _write_line(
-                writer,
-                encode_error(ERR_UNKNOWN_ACTION, f"unknown action: {action!r}"),
+            start = time.perf_counter()
+            retired = _RETIRED_ACTIONS.get(action)
+            if retired:
+                message = (
+                    f"the {action!r} action is retired — this devbox image is "
+                    f"older than the daemon. Rebuild it (run the Ansible role) "
+                    f"so the container gets the real {retired!r} behind the "
+                    f"forge wrapper."
+                )
+            else:
+                message = f"unknown action: {action!r}"
+            # Audited, unlike the other early returns on this path: these two
+            # names are what an un-rebuilt image sends, and a silent rejection
+            # is indistinguishable from the proxy never being reached.
+            _audit(
+                user_id=ctx.user_id, action="unknown",
+                result="retired_action" if retired else "unknown_action",
+                dur_ms=_elapsed_ms(start), requested=action,
             )
+            await _write_line(writer, encode_error(ERR_UNKNOWN_ACTION, message))
             return
 
         response_line = await handler(request, ctx)
@@ -564,18 +482,12 @@ async def _write_line(writer: asyncio.StreamWriter, line: str) -> None:
 async def build_context(user_id: str, config) -> DevboxProxyContext:
     """Build a DevboxProxyContext from a loaded Config."""
     dev = config.developer
-    timeout = float(getattr(dev, "api_timeout_seconds", 30))
-    client = httpx.AsyncClient(timeout=timeout)
     return DevboxProxyContext(
         user_id=user_id,
         gitlab_token=getattr(dev, "gitlab_token", "") or "",
         github_token=getattr(dev, "github_token", "") or "",
         gitlab_url=getattr(dev, "gitlab_url", "https://gitlab.com") or "https://gitlab.com",
         github_url=getattr(dev, "github_url", "https://github.com") or "https://github.com",
-        gitlab_allowlist=tuple(getattr(dev, "gitlab_api_allowlist", ()) or ()),
-        github_allowlist=tuple(getattr(dev, "github_api_allowlist", ()) or ()),
-        api_timeout=timeout,
-        http_client=client,
     )
 
 
@@ -605,7 +517,7 @@ async def serve(
     """Run the devbox proxy daemon for one user.
 
     Returns when the server is stopped (cancelled). Cleans up the socket
-    file and the HTTP client on the way out.
+    file on the way out.
     """
     ctx = await build_context(user_id, config)
     audit_log_path = getattr(config.developer, "devbox_proxy_audit_log", "") or ""
@@ -711,7 +623,6 @@ async def serve(
                 if exc and not isinstance(exc, asyncio.CancelledError):
                     raise exc
     finally:
-        await ctx.http_client.aclose()
         try:
             sock_path.unlink(missing_ok=True)
         except OSError:

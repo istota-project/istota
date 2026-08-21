@@ -461,3 +461,154 @@ class TestFileToolQuality:
         (tmp_path / "dangling.py").symlink_to(tmp_path / "gone")
         result = await _run(make_glob_tool(_env(tmp_path)), {"pattern": "*.py"})
         assert "real.py" in _text(result)
+
+
+class TestWriteDeniedRoots:
+    """A read-only carve-out nested inside a writable root.
+
+    Mirrors build_cmd's ``--ro-bind`` of ``.developer`` applied after the
+    read-write bind of its parent (executor.py, "must be read-only to prevent a
+    compromised subprocess from replacing them"): reads pass, writes do not.
+    """
+
+    def _env(self, workspace, denied):
+        return ToolEnv(
+            cwd=workspace,
+            read_roots=(workspace,),
+            write_roots=(workspace,),
+            write_denied_roots=tuple(denied),
+        )
+
+    async def test_write_into_denied_subdir_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        env = self._env(ws, [carve])
+        target = carve / "credential-fetch"
+        result = await _run(
+            make_write_tool(env), {"file_path": str(target), "content": "#!/bin/sh\n"},
+        )
+        assert not target.exists()
+        assert "read-only" in _text(result).lower()
+
+    async def test_read_from_denied_subdir_allowed(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        (carve / "helper").write_text("visible\n")
+        env = self._env(ws, [carve])
+        result = await _run(make_read_tool(env), {"file_path": str(carve / "helper")})
+        assert "visible" in _text(result)
+
+    async def test_edit_inside_denied_subdir_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        target = carve / "credential-fetch"
+        target.write_text("original\n")
+        env = self._env(ws, [carve])
+        result = await _run(
+            make_edit_tool(env),
+            {
+                "file_path": str(target),
+                "old_string": "original",
+                "new_string": "tampered",
+            },
+        )
+        assert target.read_text() == "original\n"
+        assert "read-only" in _text(result).lower()
+
+    async def test_sibling_of_denied_subdir_still_writable(self, tmp_path):
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        env = self._env(ws, [carve])
+        target = ws / "notes.txt"
+        result = await _run(
+            make_write_tool(env), {"file_path": str(target), "content": "ok\n"},
+        )
+        assert target.read_text() == "ok\n"
+        assert "Created" in _text(result)
+
+    async def test_symlink_into_denied_subdir_rejected(self, tmp_path):
+        """The deny check resolves symlinks, like the root check above it."""
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        (carve / "credential-fetch").write_text("original\n")
+        link = ws / "link"
+        link.symlink_to(carve / "credential-fetch")
+        env = self._env(ws, [carve])
+        result = await _run(
+            make_write_tool(env), {"file_path": str(link), "content": "tampered\n"},
+        )
+        assert (carve / "credential-fetch").read_text() == "original\n"
+        assert "read-only" in _text(result).lower()
+
+    async def test_no_denied_roots_leaves_writes_alone(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        env = self._env(ws, [])
+        target = ws / "a.txt"
+        await _run(make_write_tool(env), {"file_path": str(target), "content": "x\n"})
+        assert target.read_text() == "x\n"
+
+    async def test_denied_even_when_unconfined(self, tmp_path):
+        """A deny root is a statement about a path, not about whether a root
+        allowlist happens to be configured. No caller does this today; the
+        point is that one who tries gets the refusal it looks like."""
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        env = ToolEnv(cwd=ws, write_denied_roots=(carve,))  # no read_roots
+        assert env.confined is False
+        target = carve / "credential-fetch"
+        result = await _run(
+            make_write_tool(env), {"file_path": str(target), "content": "x"},
+        )
+        assert not target.exists()
+        assert "read-only" in _text(result).lower()
+
+    async def test_denied_via_symlinked_parent_component(self, tmp_path):
+        """The check runs on the resolved path, so a symlink standing in for an
+        intermediate component does not route around the carve-out."""
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        (ws / "alias").symlink_to(carve)
+        env = self._env(ws, [carve])
+        result = await _run(
+            make_write_tool(env),
+            {"file_path": str(ws / "alias" / "credential-fetch"), "content": "x"},
+        )
+        assert not (carve / "credential-fetch").exists()
+        assert "read-only" in _text(result).lower()
+
+
+class TestResolveReturnsResolvedPath:
+    """resolve() hands back the symlink-free path it actually checked.
+
+    Returning the raw input would leave every caller re-walking the symlinks at
+    open() time — a different resolution from the one that was validated.
+    """
+
+    async def test_symlinked_parent_resolves(self, tmp_path):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real_dir)
+        env = ToolEnv(cwd=tmp_path, read_roots=(tmp_path,), write_roots=(tmp_path,))
+        got = env.resolve(str(link / "f.txt"), write=True)
+        assert got == (real_dir / "f.txt").resolve()
+
+    async def test_relative_path_resolves_against_cwd(self, tmp_path):
+        env = ToolEnv(cwd=tmp_path, read_roots=(tmp_path,), write_roots=(tmp_path,))
+        got = env.resolve("sub/f.txt", write=True)
+        assert got == (tmp_path / "sub" / "f.txt").resolve()
+
+    async def test_unconfined_also_resolves(self, tmp_path):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        (tmp_path / "link").symlink_to(real_dir)
+        env = ToolEnv(cwd=tmp_path)
+        assert env.resolve(str(tmp_path / "link" / "f.txt")) == (real_dir / "f.txt").resolve()

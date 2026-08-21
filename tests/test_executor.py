@@ -32,6 +32,7 @@ from istota.executor import (
 from istota import db as _db
 from istota.brain import BrainRequest, ClaudeCodeBrain
 from istota.brain._types import BrainResult
+import json
 from pathlib import Path
 
 from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, SecurityConfig, SiteConfig, UserConfig
@@ -486,7 +487,8 @@ class TestResolveUserTz:
 class TestSkillsFingerprintIntegration:
     def _make_config(self, tmp_path):
         db_path = tmp_path / "test.db"
-        db.init_db(db_path)
+        if not db_path.exists():
+            db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
@@ -622,16 +624,31 @@ class TestSkillsFingerprintIntegration:
 # TestDeveloperEnvVars
 # ---------------------------------------------------------------------------
 
-
 class TestDeveloperEnvVars:
-    def _make_config(self, tmp_path, developer_enabled=True):
+    """The developer skill's setup_env hook.
+
+    The hook used to generate `gitlab-api` / `github-api` shell scripts whose
+    bodies were a case statement built from an endpoint allowlist. Those are
+    gone: the model drives the real `gh` and `glab` through the wrapper in
+    src/istota/forge_cli.py. What is asserted here is what the hook installs
+    and what it hands back, not the contents of a generated script.
+    """
+
+    def _make_config(
+        self, tmp_path, developer_enabled=True, github=False,
+        skill_proxy_enabled=False, **dev_kw,
+    ):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
+        # exist_ok: a test may build two configs from one tmp_path to compare
+        # how the hook behaves across settings.
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "_index.toml").write_text(
+            '[files]\ndescription = "File ops"\nalways_include = true\n'
+        )
         (skills_dir / "files.md").write_text("File operations guide.")
-        dev = DeveloperConfig(
+        kw = dict(
             enabled=developer_enabled,
             repos_dir="/srv/repos",
             gitlab_url="https://gitlab.example.com",
@@ -639,578 +656,297 @@ class TestDeveloperEnvVars:
             gitlab_username="istotabot",
             gitlab_default_namespace="example",
         )
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            # Use the real bundled skills dir so the developer manifest +
-            # setup_env hook are loaded. Phase 2 moved env injection out of
-            # the executor and into manifests / hooks.
-            bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
-            developer=dev,
-            security=SecurityConfig(skill_proxy_enabled=False),
-        )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_developer_env_vars_set_when_enabled(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, developer_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        assert env["DEVELOPER_REPOS_DIR"] == "/srv/repos"
-        assert env["GITLAB_URL"] == "https://gitlab.example.com"
-        assert env["GITLAB_DEFAULT_NAMESPACE"] == "example"
-        assert "GITLAB_API_CMD" in env
-        # Token passed via env var (scripts read it, no secrets on disk)
-        assert env["GITLAB_TOKEN"] == "glpat-test"
-        # Git credential helper configured via GIT_CONFIG_ env vars
-        assert env["GIT_CONFIG_COUNT"] == "1"
-        assert "credential" in env["GIT_CONFIG_KEY_0"]
-        assert "gitlab.example.com" in env["GIT_CONFIG_KEY_0"]
-
-    @patch("istota.executor.subprocess.run")
-    def test_developer_helper_scripts_created(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, developer_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        from pathlib import Path
-        api_cmd = Path(env["GITLAB_API_CMD"])
-        assert api_cmd.exists()
-        assert api_cmd.stat().st_mode & 0o700
-        # Scripts reference env var, not literal token (no secrets on disk)
-        api_content = api_cmd.read_text()
-        assert "PRIVATE-TOKEN: $GITLAB_TOKEN" in api_content
-        assert "glpat-test" not in api_content
-
-        # Git credential helper reads from env var too
-        cred_helper = Path(env["GIT_CONFIG_VALUE_0"])
-        assert cred_helper.exists()
-        cred_content = cred_helper.read_text()
-        assert "$GITLAB_TOKEN" in cred_content
-        assert "glpat-test" not in cred_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_developer_api_wrapper_has_allowlist(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, developer_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        from pathlib import Path
-        api_content = Path(env["GITLAB_API_CMD"]).read_text()
-        # Allowlist case statement is present
-        assert "case" in api_content
-        assert "endpoint not allowed" in api_content
-        # Default allowlisted endpoints are present (bare paths — the
-        # ``/api/v4`` prefix is baked into the curl target instead, so the
-        # host-side wrapper and the devbox proxy share one allowlist).
-        assert "GET /projects/" in api_content
-        assert "POST /projects/" in api_content
-        assert "merge_requests" in api_content
-        # The curl target carries /api/v4 — keeps existing GitLab URLs
-        # reachable without changing every $GITLAB_API_CMD caller.
-        assert "/api/v4$ENDPOINT" in api_content
-        # Back-compat: callers that still pass `/api/v4/...` get the
-        # prefix stripped before matching.
-        assert "/api/v4/*" in api_content
-        # No exec — plain curl for reliable piping
-        assert "exec curl" not in api_content
-        assert "curl -s" in api_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_developer_api_wrapper_custom_allowlist(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, developer_enabled=True)
-        config.developer.gitlab_api_allowlist = ["GET /api/v4/projects/*"]
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        from pathlib import Path
-        api_content = Path(env["GITLAB_API_CMD"]).read_text()
-        assert "GET /api/v4/projects/" in api_content
-        # Custom list has only one entry — no merge_requests pattern
-        assert "merge_requests" not in api_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_developer_env_vars_not_set_when_disabled(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, developer_enabled=False)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        assert "DEVELOPER_REPOS_DIR" not in env
-        assert "GITLAB_API_CMD" not in env
-        assert "GITLAB_TOKEN" not in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_developer_env_vars_not_set_when_no_repos_dir(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, developer_enabled=True)
-        config.developer.repos_dir = ""
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        call_args = mock_run.call_args
-        env = call_args[1]["env"]
-        assert "DEVELOPER_REPOS_DIR" not in env
-
-
-# ---------------------------------------------------------------------------
-# TestGitHubEnvVars
-# ---------------------------------------------------------------------------
-
-
-class TestGitHubEnvVars:
-    def _make_config(self, tmp_path, github_token="ghp_test123", gitlab_token="", developer_enabled=True):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        dev = DeveloperConfig(
-            enabled=developer_enabled,
-            repos_dir="/srv/repos",
-            gitlab_url="https://gitlab.example.com",
-            gitlab_token=gitlab_token,
-            gitlab_username="gitlabbot",
-            gitlab_default_namespace="example",
-            github_url="https://github.com",
-            github_token=github_token,
-            github_username="githubbot",
-            github_default_owner="myorg",
-            github_reviewer="reviewer-user",
-        )
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            # Use the real bundled skills dir so the developer manifest +
-            # setup_env hook are loaded.
-            bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
-            developer=dev,
-            security=SecurityConfig(skill_proxy_enabled=False),
-        )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_env_vars_set_when_configured(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["GITHUB_URL"] == "https://github.com"
-        assert env["GITHUB_DEFAULT_OWNER"] == "myorg"
-        assert env["GITHUB_REVIEWER"] == "reviewer-user"
-        assert env["GITHUB_TOKEN"] == "ghp_test123"
-        assert "GITHUB_API_CMD" in env
-        # Git credential helper configured
-        assert "GIT_CONFIG_COUNT" in env
-        assert "github.com" in env["GIT_CONFIG_KEY_0"]
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_helper_scripts_created(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        from pathlib import Path
-        api_cmd = Path(env["GITHUB_API_CMD"])
-        assert api_cmd.exists()
-        assert api_cmd.stat().st_mode & 0o700
-        api_content = api_cmd.read_text()
-        assert "Authorization: Bearer $GITHUB_TOKEN" in api_content
-        assert "ghp_test123" not in api_content
-        # Uses api.github.com for github.com
-        assert "api.github.com" in api_content
-
-        # Git credential helper reads from env var
-        cred_helper = Path(env["GIT_CONFIG_VALUE_0"])
-        assert cred_helper.exists()
-        cred_content = cred_helper.read_text()
-        assert "$GITHUB_TOKEN" in cred_content
-        assert "ghp_test123" not in cred_content
-        # Username set in config
-        assert "githubbot" in cred_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_api_wrapper_has_allowlist(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        from pathlib import Path
-        api_content = Path(env["GITHUB_API_CMD"]).read_text()
-        assert "case" in api_content
-        assert "endpoint not allowed" in api_content
-        assert "GET /repos/" in api_content
-        assert "POST /repos/" in api_content
-        assert "pulls" in api_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_not_set_when_no_token(self, mock_run, tmp_path):
-        # Phase 3: build_skill_env runs over authorized_skills only. With
-        # neither GitLab nor GitHub tokens configured and ``developer``
-        # not selected, the skill is not authorized — none of its env
-        # vars (sensitive or not) flow into the subprocess env.
-        config = self._make_config(tmp_path, github_token="")
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert "GITHUB_API_CMD" not in env
-        assert "GITHUB_TOKEN" not in env
-        assert "GITHUB_URL" not in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_both_platforms_configured(self, mock_run, tmp_path):
-        """When both GitLab and GitHub tokens are set, GIT_CONFIG_COUNT=2."""
-        config = self._make_config(tmp_path, github_token="ghp_test123", gitlab_token="glpat-test")
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        assert env["GIT_CONFIG_COUNT"] == "2"
-        # Both API wrappers exist
-        assert "GITLAB_API_CMD" in env
-        assert "GITHUB_API_CMD" in env
-        # Both credential helpers configured at different indices
-        keys = {env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_KEY_1"]}
-        assert any("gitlab.example.com" in k for k in keys)
-        assert any("github.com" in k for k in keys)
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_enterprise_api_url(self, mock_run, tmp_path):
-        """GitHub Enterprise uses {url}/api/v3 instead of api.github.com."""
-        config = self._make_config(tmp_path)
-        config.developer.github_url = "https://github.example.com"
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        from pathlib import Path
-        api_content = Path(env["GITHUB_API_CMD"]).read_text()
-        assert "github.example.com/api/v3" in api_content
-        assert "api.github.com" not in api_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_default_username_x_access_token(self, mock_run, tmp_path):
-        """When github_username is empty, credential helper uses x-access-token."""
-        config = self._make_config(tmp_path)
-        config.developer.github_username = ""
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = mock_run.call_args[1]["env"]
-        from pathlib import Path
-        cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
-        assert "x-access-token" in cred_content
-
-
-# ---------------------------------------------------------------------------
-# TestDeveloperProxyAwareScripts
-# ---------------------------------------------------------------------------
-
-
-class TestDeveloperProxyAwareScripts:
-    """When skill_proxy_enabled, developer scripts use credential-fetch instead of env vars."""
-
-    def _make_config(self, tmp_path, proxy_enabled=True):
-        db_path = tmp_path / "test.db"
-        db.init_db(db_path)
-        skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "_index.toml").write_text('[files]\ndescription = "File ops"\nalways_include = true\n')
-        (skills_dir / "files.md").write_text("File operations guide.")
-        dev = DeveloperConfig(
-            enabled=True,
-            repos_dir="/srv/repos",
-            gitlab_url="https://gitlab.example.com",
-            gitlab_token="glpat-test",
-            gitlab_username="istotabot",
-            github_url="https://github.com",
-            github_token="ghp_test123",
-            github_username="githubbot",
-        )
-        return Config(
-            db_path=db_path,
-            skills_dir=skills_dir,
-            # Real bundled skills dir so the developer setup_env hook fires.
-            bundled_skills_dir=None,
-            temp_dir=tmp_path / "temp",
-            developer=dev,
-            security=SecurityConfig(
-                skill_proxy_enabled=proxy_enabled,
-                skill_proxy_timeout=30,
-            ),
-        )
-
-    def _make_task(self, conn):
-        task_id = db.create_task(conn, prompt="test", user_id="alice", source_type="talk")
-        return db.get_task(conn, task_id)
-
-    @staticmethod
-    def _get_claude_env(mock_run, result=None):
-        """Extract env dict from the claude subprocess.run call (the one with env kwarg)."""
-        for call in mock_run.call_args_list:
-            if "env" in call.kwargs:
-                return call.kwargs["env"]
-        extra = f", result={result}" if result else ""
-        pytest.fail(f"No subprocess.run call with env found (calls={mock_run.call_count}{extra})")
-
-    @patch("istota.executor.subprocess.run")
-    def test_credential_fetch_script_created(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, proxy_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        cred_fetch = tmp_path / "temp" / "alice" / ".developer" / "credential-fetch"
-        assert cred_fetch.exists()
-        assert cred_fetch.stat().st_mode & 0o700
-        content = cred_fetch.read_text()
-        assert "ISTOTA_SKILL_PROXY_SOCK" in content
-        assert "credential" in content
-
-    @patch("istota.executor.subprocess.run")
-    def test_gitlab_scripts_use_credential_fetch(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, proxy_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = self._get_claude_env(mock_run)
-        # Git credential helper uses credential-fetch
-        cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
-        assert "credential-fetch" in cred_content
-        assert "GITLAB_TOKEN" in cred_content
-        assert "$GITLAB_TOKEN" not in cred_content  # Not direct env var
-
-        # API wrapper uses credential-fetch
-        api_content = Path(env["GITLAB_API_CMD"]).read_text()
-        assert "credential-fetch" in api_content
-        assert "GITLAB_TOKEN" in api_content
-        # No literal token in scripts
-        assert "glpat-test" not in api_content
-        assert "glpat-test" not in cred_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_github_scripts_use_credential_fetch(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, proxy_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = self._get_claude_env(mock_run)
-        # Find the GitHub credential helper (may be index 0 or 1)
-        for i in range(int(env.get("GIT_CONFIG_COUNT", "0"))):
-            key = env.get(f"GIT_CONFIG_KEY_{i}", "")
-            if "github.com" in key:
-                gh_cred_content = Path(env[f"GIT_CONFIG_VALUE_{i}"]).read_text()
-                assert "credential-fetch" in gh_cred_content
-                assert "GITHUB_TOKEN" in gh_cred_content
-                break
-        else:
-            pytest.fail("No GitHub credential helper found")
-
-        # API wrapper uses credential-fetch
-        api_content = Path(env["GITHUB_API_CMD"]).read_text()
-        assert "credential-fetch" in api_content
-        assert "GITHUB_TOKEN" in api_content
-        assert "ghp_test123" not in api_content
-
-    @patch("istota.executor.subprocess.run")
-    def test_tokens_stripped_from_claude_env(self, mock_run, tmp_path):
-        """With proxy enabled, GITLAB_TOKEN and GITHUB_TOKEN should not be in Claude's env."""
-        config = self._make_config(tmp_path, proxy_enabled=True)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            result = execute_task(task, config, [], conn=conn)
-
-        env = self._get_claude_env(mock_run, result=result)
-        assert "GITLAB_TOKEN" not in env
-        assert "GITHUB_TOKEN" not in env
-        # Proxy socket should be set
-        assert "ISTOTA_SKILL_PROXY_SOCK" in env
-
-    @patch("istota.executor.subprocess.run")
-    def test_proxy_disabled_uses_env_vars(self, mock_run, tmp_path):
-        """Without proxy, scripts use $GITLAB_TOKEN and $GITHUB_TOKEN env vars directly."""
-        config = self._make_config(tmp_path, proxy_enabled=False)
-        (tmp_path / "temp" / "alice").mkdir(parents=True)
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-
-        with db.get_db(config.db_path) as conn:
-            task = self._make_task(conn)
-            from istota.executor import execute_task
-            execute_task(task, config, [], conn=conn)
-
-        env = self._get_claude_env(mock_run)
-        # Tokens present in env
-        assert env["GITLAB_TOKEN"] == "glpat-test"
-        assert env["GITHUB_TOKEN"] == "ghp_test123"
-
-        # Scripts use $TOKEN_NAME directly, not credential-fetch
-        api_content = Path(env["GITLAB_API_CMD"]).read_text()
-        assert "$GITLAB_TOKEN" in api_content
-        assert "credential-fetch" not in api_content
-
-        cred_content = Path(env["GIT_CONFIG_VALUE_0"]).read_text()
-        assert "$GITLAB_TOKEN" in cred_content
-        assert "credential-fetch" not in cred_content
-
-        # No credential-fetch script created
-        cred_fetch = tmp_path / "temp" / "alice" / ".developer" / "credential-fetch"
-        assert not cred_fetch.exists()
-
-
-class TestAllowlistPatternConversion:
-    def test_trailing_wildcard(self):
-        from istota.executor import _allowlist_pattern_to_case
-        assert _allowlist_pattern_to_case("GET /api/v4/projects/*") == '"GET /api/v4/projects/"*'
-
-    def test_middle_wildcard(self):
-        from istota.executor import _allowlist_pattern_to_case
-        result = _allowlist_pattern_to_case("POST /api/v4/projects/*/merge_requests")
-        assert result == '"POST /api/v4/projects/"*"/merge_requests"'
-
-    def test_multiple_wildcards(self):
-        from istota.executor import _allowlist_pattern_to_case
-        result = _allowlist_pattern_to_case("POST /api/v4/projects/*/merge_requests/*/notes")
-        assert result == '"POST /api/v4/projects/"*"/merge_requests/"*"/notes"'
-
-    def test_no_wildcard(self):
-        from istota.executor import _allowlist_pattern_to_case
-        result = _allowlist_pattern_to_case("GET /api/v4/version")
-        assert result == '"GET /api/v4/version"'
-
-    def test_shell_case_matching(self):
-        """Verify generated patterns actually work as shell case globs."""
-        import subprocess
-        from istota.executor import _allowlist_pattern_to_case
-
-        cases = [
-            # (pattern, input, should_match)
-            ("GET /api/v4/projects/*", "GET /api/v4/projects/123", True),
-            ("GET /api/v4/projects/*", "GET /api/v4/projects/123/merge_requests", True),
-            ("GET /api/v4/projects/*", "POST /api/v4/projects/123", False),
-            ("POST /api/v4/projects/*/merge_requests", "POST /api/v4/projects/123/merge_requests", True),
-            ("POST /api/v4/projects/*/merge_requests", "POST /api/v4/projects/123/merge_requests/456/merge", False),
-            ("POST /api/v4/projects/*/merge_requests/*/notes", "POST /api/v4/projects/123/merge_requests/456/notes", True),
-            ("POST /api/v4/projects/*/merge_requests/*/notes", "POST /api/v4/projects/123/merge_requests/456/merge", False),
-        ]
-        for pattern, input_str, should_match in cases:
-            case_glob = _allowlist_pattern_to_case(pattern)
-            script = f'case "{input_str}" in {case_glob}) echo match ;; *) echo no ;; esac'
-            result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
-            matched = result.stdout.strip() == "match"
-            assert matched == should_match, (
-                f"Pattern {pattern!r} vs {input_str!r}: expected {should_match}, "
-                f"case glob: {case_glob}"
+        if github:
+            kw.update(
+                github_url="https://github.com",
+                github_token="ghp-test",
+                github_username="istotabot",
             )
+        kw.update(dev_kw)
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=None,
+            temp_dir=tmp_path / "temp",
+            developer=DeveloperConfig(**kw),
+            security=SecurityConfig(skill_proxy_enabled=skill_proxy_enabled),
+        )
+
+    def _make_task(self, conn):
+        task_id = db.create_task(
+            conn, prompt="test", user_id="alice", source_type="talk",
+        )
+        return db.get_task(conn, task_id)
+
+    def _hook_env(self, config, tmp_path):
+        from istota.skills.developer import setup_env
+
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        class _Ctx:
+            pass
+
+        ctx = _Ctx()
+        ctx.config = config
+        ctx.user_temp_dir = str(user_temp)
+        return setup_env(ctx), user_temp
+
+    def test_disabled_developer_returns_nothing(self, tmp_path):
+        config = self._make_config(tmp_path, developer_enabled=False)
+        env, _ = self._hook_env(config, tmp_path)
+        assert env == {}
+
+    def test_git_credential_helper_written(self, tmp_path):
+        config = self._make_config(tmp_path)
+        env, user_temp = self._hook_env(config, tmp_path)
+        helper = user_temp / ".developer" / "git-credential-helper"
+        assert helper.exists()
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "credential.https://gitlab.example.com.helper"
+
+    def test_credential_helper_quotes_the_expansion(self, tmp_path):
+        """git wants the value verbatim; an unquoted expansion is word-split
+        by sh and rejoined by echo on single spaces."""
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        body = (user_temp / ".developer" / "git-credential-helper").read_text()
+        assert 'echo password="$GITLAB_TOKEN"' in body
+
+    def test_forge_wrappers_installed_under_every_name(self, tmp_path):
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        dev_bin = user_temp / ".developer"
+        canonical = (
+            Path(__file__).resolve().parent.parent / "src/istota/forge_cli.py"
+        ).read_bytes()
+        for name in ("gh", "glab", "github-api", "gitlab-api"):
+            installed = dev_bin / name
+            assert installed.exists(), name
+            assert installed.read_bytes() == canonical, name
+            assert installed.stat().st_mode & 0o777 == 0o700, name
+
+    def test_retired_api_cmd_vars_are_gone(self, tmp_path):
+        config = self._make_config(tmp_path, github=True)
+        env, _ = self._hook_env(config, tmp_path)
+        assert "GITLAB_API_CMD" not in env
+        assert "GITHUB_API_CMD" not in env
+
+    def test_path_prepend_is_the_only_env_var_the_wrapper_needs(self, tmp_path):
+        """Everything else travels in the policy file. The wrapper runs as a
+        child of the model's shell, so an env-supplied path is a path the model
+        chooses — an ISTOTA_FORGE_POLICY pointing at a toothless file would be
+        a one-token bypass of the whole rule set."""
+        config = self._make_config(tmp_path, github=True)
+        env, user_temp = self._hook_env(config, tmp_path)
+        assert env["ISTOTA_PATH_PREPEND"] == str(user_temp / ".developer")
+        for retired in (
+            "ISTOTA_FORGE_POLICY", "ISTOTA_GH_CONFIG_DIR",
+            "ISTOTA_GLAB_CONFIG_DIR", "ISTOTA_GH_URL", "ISTOTA_GITLAB_URL",
+            "ISTOTA_GH_REAL", "ISTOTA_GLAB_REAL", "ISTOTA_FORGE_STATE_DIR",
+        ):
+            assert retired not in env, retired
+
+    def test_policy_carries_the_settings_the_wrapper_must_not_trust(self, tmp_path):
+        config = self._make_config(
+            tmp_path, github=True, gh_bin_path="/opt/gh", glab_bin_path="/opt/glab",
+        )
+        _, user_temp = self._hook_env(config, tmp_path)
+        dev_bin = user_temp / ".developer"
+        policy = json.loads((dev_bin / "forge-policy.json").read_text())
+        gh = policy["github"]
+        assert gh["real_bin"] == "/opt/gh"
+        assert gh["url"] == "https://github.com"
+        assert gh["config_dir"] == str(dev_bin / "github-config")
+        assert gh["data_dir"] == str(dev_bin / "github-data")
+        assert Path(gh["state_dir"]).is_dir()
+        assert policy["gitlab"]["real_bin"] == "/opt/glab"
+        assert policy["gitlab"]["url"] == "https://gitlab.example.com"
+
+    def test_unconfigured_bin_path_resolves_from_the_daemon_path(self, tmp_path, monkeypatch):
+        """The binary and the config key ship separately: Ansible installs gh
+        into /usr/bin, but only a full play run rewrites config.toml, and the
+        auto-update cron pulls code without running Ansible. In that window the
+        key is absent, the code default stands, and nothing exists at it."""
+        import shutil as _shutil
+
+        from istota.skills import developer as _dev
+
+        monkeypatch.setattr(_dev.os.path, "exists", lambda p: False)
+        monkeypatch.setattr(
+            _shutil, "which", lambda name: f"/usr/bin/{name}",
+        )
+        config = self._make_config(tmp_path, github=True)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        assert policy["github"]["real_bin"] == "/usr/bin/gh"
+        assert policy["gitlab"]["real_bin"] == "/usr/bin/glab"
+
+    def test_explicit_bin_path_is_never_second_guessed(self, tmp_path, monkeypatch):
+        """An operator who named a path gets that path even when it is missing.
+        Silently exec'ing a different binary found on PATH is the wrong
+        surprise; the start-up warning is how a bad path gets reported."""
+        import shutil as _shutil
+
+        monkeypatch.setattr(_shutil, "which", lambda name: f"/usr/bin/{name}")
+        config = self._make_config(
+            tmp_path, github=True,
+            gh_bin_path="/opt/nonexistent/gh", glab_bin_path="/opt/nonexistent/glab",
+        )
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        assert policy["github"]["real_bin"] == "/opt/nonexistent/gh"
+        assert policy["gitlab"]["real_bin"] == "/opt/nonexistent/glab"
+
+    def test_policy_grants_direct_tokens_only_with_the_proxy_off(self, tmp_path):
+        """The permission lives in the policy file because that is the one
+        input the model cannot redirect. An env flag would let it opt itself
+        into reading whatever token it had planted."""
+        _, user_temp = self._hook_env(
+            self._make_config(tmp_path, skill_proxy_enabled=False), tmp_path,
+        )
+        off = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        assert off["github"]["direct_token"] is True
+
+        _, user_temp2 = self._hook_env(
+            self._make_config(tmp_path, skill_proxy_enabled=True), tmp_path,
+        )
+        on = json.loads(
+            (user_temp2 / ".developer" / "forge-policy.json").read_text()
+        )
+        assert on["github"]["direct_token"] is False
+
+    def test_data_dir_is_pinned_and_empty(self, tmp_path):
+        """gh execs gh-<name> from $XDG_DATA_HOME/gh/extensions for an unknown
+        first argument, which no argv rule can see."""
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        data = Path(policy["github"]["data_dir"])
+        assert data.is_dir()
+        assert list(data.iterdir()) == []
+
+    def test_policy_file_is_loadable_and_denies_the_baseline(self, tmp_path):
+        from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
+
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = load_policy(
+            str(user_temp / ".developer" / "forge-policy.json"), FORGE_GITHUB,
+        )
+        assert denied_reason(FORGE_GITHUB, ["repo", "delete", "x"], policy)
+        assert denied_reason(FORGE_GITHUB, ["pr", "create"], policy) is None
+
+    def test_operator_knobs_reach_the_policy_file(self, tmp_path):
+        from istota.forge_cli import FORGE_GITHUB, denied_reason, load_policy
+
+        config = self._make_config(
+            tmp_path,
+            forge_cli_extra_denied=["gh pr merge"],
+            forge_cli_permit=["gh repo delete"],
+        )
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = load_policy(
+            str(user_temp / ".developer" / "forge-policy.json"), FORGE_GITHUB,
+        )
+        assert denied_reason(FORGE_GITHUB, ["pr", "merge", "1"], policy)
+        assert denied_reason(FORGE_GITHUB, ["repo", "delete", "x"], policy) is None
+
+    def test_cli_config_dirs_seeded_at_the_mode_glab_demands(self, tmp_path):
+        """glab refuses any mode but 0600; gh accepts either. Measured against
+        glab 1.114 — see the integration tests in test_forge_cli_exec.py."""
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        for forge in ("github", "gitlab"):
+            config_yml = Path(policy[forge]["config_dir"]) / "config.yml"
+            assert config_yml.exists(), forge
+            assert config_yml.stat().st_mode & 0o777 == 0o600, forge
+
+    def test_no_token_means_no_forge_wrappers(self, tmp_path):
+        config = self._make_config(tmp_path, gitlab_token="", github_token="")
+        env, user_temp = self._hook_env(config, tmp_path)
+        assert "ISTOTA_PATH_PREPEND" not in env
+        assert not (user_temp / ".developer" / "gh").exists()
+
+    def test_credential_fetch_written_when_the_proxy_is_on(self, tmp_path):
+        """The proxy branch of setup_env. With the proxy on, the helper must
+        not hold the token itself — it shells out to credential-fetch, which
+        asks the proxy for it at call time."""
+        config = self._make_config(tmp_path, skill_proxy_enabled=True)
+        _, user_temp = self._hook_env(config, tmp_path)
+        dev_bin = user_temp / ".developer"
+        fetch = dev_bin / "credential-fetch"
+        assert fetch.exists()
+        assert fetch.stat().st_mode & 0o777 == 0o700
+        body = (dev_bin / "git-credential-helper").read_text()
+        assert f'echo password="$({fetch} GITLAB_TOKEN)"' in body
+        assert "glpat-test" not in body
+
+    def test_credential_fetch_absent_when_the_proxy_is_off(self, tmp_path):
+        config = self._make_config(tmp_path, skill_proxy_enabled=False)
+        _, user_temp = self._hook_env(config, tmp_path)
+        assert not (user_temp / ".developer" / "credential-fetch").exists()
+
+    def test_seeded_config_is_truncated_every_run(self, tmp_path):
+        """user_temp_dir persists across tasks. gh expands aliases from
+        config.yml before dispatch, so a file that survived one run would be
+        honoured by every later one."""
+        config = self._make_config(tmp_path)
+        _, user_temp = self._hook_env(config, tmp_path)
+        policy = json.loads(
+            (user_temp / ".developer" / "forge-policy.json").read_text()
+        )
+        cfg = Path(policy["github"]["config_dir"]) / "config.yml"
+        cfg.write_text("aliases:\n    pwn: repo delete\n")
+        self._hook_env(config, tmp_path)
+        assert cfg.read_text() == ""
+
+    def test_no_token_value_appears_in_the_returned_env(self, tmp_path):
+        config = self._make_config(tmp_path, github=True)
+        env, _ = self._hook_env(config, tmp_path)
+        joined = " ".join(env.values())
+        assert "glpat-test" not in joined
+        assert "ghp-test" not in joined
 
 
-# ---------------------------------------------------------------------------
-# TestWebsiteEnvVars
-# ---------------------------------------------------------------------------
+class TestPathPrependOrdering:
+    """A secondary guard on the *shape* of the ordering, not its effect.
+
+    The behavioural tests are TestForgeCliPathPrepend in
+    tests/test_sandbox_db_env.py: they run a real task and assert the model's
+    PATH carries .developer while the skill proxy's does not. Those are what
+    prove the property, and they do fail when the two statements are swapped.
+
+    This one exists because the property is easy to break by *moving code*
+    while keeping every behaviour test green in some future refactor that
+    also changes the fixtures. It asserts the merge loop still skips the key
+    and the application still sits after the snapshot. If it ever fights a
+    legitimate refactor, delete it — the behavioural tests are the contract.
+    """
+
+    def test_reserved_key_is_not_merged_into_env(self):
+        """The hook loop skips it, so it cannot ride into proxy_base_env."""
+        import inspect
+
+        from istota import executor
+
+        src = inspect.getsource(executor.execute_task)
+        assert "if k == HOOK_PATH_PREPEND_KEY:" in src
+        # ...and the application site is after the snapshot, not before.
+        assert src.index("proxy_base_env = {**env") < src.index(
+            "_path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY"
+        )
 
 
 class TestWebsiteEnvVars:
@@ -1795,7 +1531,9 @@ class TestCalDAVCredentialScoping:
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
+        # exist_ok: a test may build two configs from one tmp_path to compare
+        # how the hook behaves across settings.
+        skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n'
         )
@@ -2637,7 +2375,9 @@ class TestNotificationReplyContextScoping:
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
-        skills_dir.mkdir(parents=True)
+        # exist_ok: a test may build two configs from one tmp_path to compare
+        # how the hook behaves across settings.
+        skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n'
         )

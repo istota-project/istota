@@ -469,14 +469,31 @@ enabled: bool = False        repos_dir: str = ""
 gitlab_url: str = "https://gitlab.com"
 gitlab_token: str = ""       gitlab_username: str = ""
 gitlab_default_namespace: str = ""  # Default namespace for short repo names
-gitlab_reviewer_id: str = ""
-gitlab_api_allowlist: list[str] = [default safe set]  # Endpoint allowlist for API wrapper
+gitlab_reviewer_id: str = ""        # A GitLab *username*, despite the name
 github_url: str = "https://github.com"
 github_token: str = ""       github_username: str = ""
 github_default_owner: str = ""  # Default org/user for short repo names
 github_reviewer: str = ""
-github_api_allowlist: list[str] = [default safe set]  # Endpoint allowlist for API wrapper
+author_credit: str = ""
+forge_cli_extra_denied: list[str] = []   # Extra verbs the gh/glab wrapper refuses
+forge_cli_permit: list[str] = []         # Baseline deny entries to turn off
+gh_bin_path: str = "/usr/local/bin/gh"   # Ansible renders the installed path
+glab_bin_path: str = "/usr/local/bin/glab"
+devbox_proxy_enabled: bool = True
+devbox_proxy_socket_dir: str = "/var/run/istota"
+devbox_proxy_audit_log: str = ""
+review: ReviewConfig
 ```
+
+`gitlab_reviewer_id` is a **username**. `glab mr create --reviewer` takes usernames, not the numeric IDs the retired REST wrapper wanted; the name predates the CLI wrapper and renaming it would touch the env spec, the Ansible var and every rendered `config.toml`, so the comment carries the truth instead. An operator who configures a number gets an MR with no reviewer on it: `skill.md` tells the model to drop the flag and report the misconfiguration rather than send a value `glab` will reject.
+
+`gitlab_api_allowlist` / `github_api_allowlist` and `api_timeout_seconds` are **gone** (unified-forge-cli-wrapper spec). An endpoint allowlist cannot describe what a real `gh` invocation does — `gh pr create` is several calls, `gh pr checks` paginates — so the deny list moved into `forge_cli.py`'s argv policy, and `api_timeout_seconds` lost its last consumer when the devbox proxy's httpx client went. The loader ignores unknown keys by design, so a `config.toml` still carrying any of the three loads clean and inert; `config.toml.j2` no longer renders them, but a host keeps its last-rendered file until Ansible runs again.
+
+`forge_cli_permit` is documented as turning an accident guard *off*, because that is what it does. An entry matching no baseline rule and no `forge_cli_extra_denied` entry is warned about at startup (`_validate_forge_clis`): a hatch that silently stopped matching after a baseline rewording reads exactly like one that is still open. The same function warns when a configured `gh_bin_path` / `glab_bin_path` does not exist, and when tokens are set while `security.skill_proxy_enabled = false`. That second one is about posture, not breakage: `setup_env` writes `direct_token` into the policy file for that shape and the wrapper reads the ambient `GH_TOKEN` / `GITLAB_TOKEN`, so forge commands work — but the token sits in the environment the model's own shell inherits rather than being injected per call.
+
+**One instance per forge.** `gitlab_url` and `github_url` are single strings, and three separate things derive from each: the CONNECT allowlist entry (`_build_network_allowlist`, `executor.py:1030-1039`), the git credential helper (installed under a per-host `credential.{host}.helper` key), and the `GITLAB_HOST` / `GH_HOST` the wrapper writes into the real CLI. A repository on a *second* GitLab or GitHub instance therefore gets none of them. It fails safe — the CONNECT proxy refuses before anything authenticates — but opaquely, and adding the second host to `security.network.extra_hosts` buys reachability without buying credentials, so the clone still fails. There is no supported second-instance configuration.
+
+`git` itself is unwrapped and forge-agnostic: public reads work against any allowlisted host, authenticated pushes only against the two configured ones, and no policy gates `git` at all. Force-push protection is forge-side branch rules, for the same reason `pr merge` is left un-denied.
 
 ### `BriefingDefaultsConfig` — removed
 

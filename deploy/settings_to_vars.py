@@ -254,13 +254,15 @@ _DEVELOPER_KEYS = {
     "gitlab_username": "istota_developer_gitlab_username",
     "gitlab_default_namespace": "istota_developer_gitlab_default_namespace",
     "gitlab_reviewer_id": "istota_developer_gitlab_reviewer_id",
-    "gitlab_api_allowlist": "istota_developer_gitlab_api_allowlist",
     "github_url": "istota_developer_github_url",
     "github_token": "istota_developer_github_token",
     "github_username": "istota_developer_github_username",
     "github_default_owner": "istota_developer_github_default_owner",
     "github_reviewer": "istota_developer_github_reviewer",
-    "github_api_allowlist": "istota_developer_github_api_allowlist",
+    "forge_cli_extra_denied": "istota_developer_forge_cli_extra_denied",
+    "forge_cli_permit": "istota_developer_forge_cli_permit",
+    "gh_bin_path": "istota_developer_gh_bin_path",
+    "glab_bin_path": "istota_developer_glab_bin_path",
 }
 
 

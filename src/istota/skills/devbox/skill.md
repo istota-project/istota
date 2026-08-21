@@ -41,15 +41,16 @@ istota-skill devbox reset        # wipe volume, recreate from base image (destru
 
 ## What works inside the devbox
 
-- **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to a host-side daemon over `/run/istota-cred/sock`. Tokens never enter the container — the daemon injects `username=x-access-token` + `password=<token>` only for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
-- **`gh` and `glab`** curated CLI shims. The supported subcommands route through the proxy:
-  - `gh`: `pr create|view|list|close`, `issue create|view|list`, `repo view`, `auth status`.
-  - `glab`: `mr create|view|list|close`, `issue create|view|list`, `repo view`, `auth status`.
-  Anything else exits 2 with a message pointing at `github-api` / `gitlab-api` for raw REST access.
-- **`github-api` / `gitlab-api`** — raw REST wrappers (`$GITHUB_API_CMD` / `$GITLAB_API_CMD` env vars point at them). Same shape as the host-side wrappers: `--method`, `--endpoint`, optional `--body` / `--body-file` / `--body-stdin`, repeatable `--header KEY=VALUE`. Calls are validated against the operator-configured allowlist; endpoint mismatches return a `not_allowed` error, never reach the upstream.
+- **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to a host-side daemon over `/run/istota-cred/sock`. The daemon answers with `username=x-access-token` + `password=<token>` for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
+- **`gh` and `glab`** — the real CLIs, in full. They run behind a wrapper that fetches the token from the proxy, checks the argv against a policy, and execs the real binary; everything after that is the real CLI, so any subcommand and any flag works. Use them exactly as the developer skill documents them.
+  - A refused command exits 3 and says which rule refused it. The policy denies things that destroy (`repo delete`, `release delete`), print credentials (`auth`), grant persistence (`secret set`, `ssh-key add`), publish (`gist`, `snippet`), or run code elsewhere (`codespace ssh`, `runner`). It is an accident guard, not a security boundary — ask the user if you need one of them.
+  - Exit 4 means no credential proxy is configured; exit 5 means it could not be reached, or had no token for that forge; exit 7 means no forge URL was resolvable and it refused to guess one.
+  - `github-api` and `gitlab-api` are retired. They exit 2 with a pointer to `gh api` / `glab api`, which do the same job and more.
 - **`git commit`** works without first running `git config user.*`. The baked-in `/etc/gitconfig` carries placeholder `Istota Agent <istota@local>`; override per-repo if a project needs real identity.
 
-The proxy is host-side and per-user — the in-container scripts are thin clients that just frame JSON requests. Stale tokens are fixed by restarting the proxy unit on the host, not by anything inside the container.
+The proxy is host-side and per-user; the in-container helper is a thin client that frames JSON requests. Stale tokens are fixed by restarting the proxy unit on the host, not by anything inside the container.
+
+The forge token does enter the container — `gh` and `glab` need it in their own environment, and `git push` has always had one. Treat the devbox as trusted with that credential and scoped by it: what the token may do is what the box may do.
 
 ## Output format
 

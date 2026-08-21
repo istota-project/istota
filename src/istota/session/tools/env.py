@@ -77,6 +77,20 @@ class ToolEnv:
     - ``write_roots`` — the writable subset (Write/Edit). Reads are allowed in
       ``read_roots`` (which the constructor unions with ``write_roots``); writes
       only in ``write_roots``. Ignored when ``read_roots`` is ``None``.
+    - ``write_denied_roots`` — read-only carve-outs nested *inside* a write
+      root. A path under one of these is readable but never writable, which is
+      what ``build_bwrap_cmd`` gets for free by re-binding a subdirectory
+      ``--ro-bind`` after its parent's read-write bind. Containment alone can't
+      express that: ``.developer`` sits inside ``user_temp_dir``, so without
+      this the model could rewrite ``credential-fetch``. Unlike the two above,
+      this one is enforced whether or not confinement is active, and its empty
+      value is ``()`` rather than ``None`` — a deny set has no unconfined
+      meaning to signal.
+
+    The resolved forms of the three root lists are computed once, in
+    ``__post_init__``. The dataclass is not frozen (matching its neighbours),
+    so reassigning any of them after construction leaves the resolved copies
+    stale. Build a new ``ToolEnv`` instead; nothing mutates one today.
     """
 
     cwd: Path
@@ -90,6 +104,7 @@ class ToolEnv:
     max_read_bytes: int = 25_000_000
     read_roots: tuple[Path, ...] | None = None
     write_roots: tuple[Path, ...] | None = None
+    write_denied_roots: tuple[Path, ...] = ()
 
     # Where Bash spills full over-cap output (task-scoped ISTOTA_DEFERRED_DIR).
     # ``None`` falls back to the system temp dir. Kept in the write-root set on a
@@ -109,8 +124,16 @@ class ToolEnv:
     # Resolved (symlink-free) roots, populated in __post_init__. Not init args.
     _read_real: list[Path] | None = field(default=None, init=False, repr=False, compare=False)
     _write_real: list[Path] | None = field(default=None, init=False, repr=False, compare=False)
+    _write_denied_real: list[Path] = field(default_factory=list, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Resolved unconditionally, and consulted unconditionally: the deny
+        # check in ``resolve``/``contains`` runs ahead of the unconfined early
+        # return. No caller sets a deny root without confinement today, so this
+        # costs an empty-list scan; what it buys is that a future
+        # ``ToolEnv(cwd=…, write_denied_roots=…)`` with no ``read_roots``
+        # refuses the write it looks like it refuses.
+        self._write_denied_real = [_realpath(p) for p in self.write_denied_roots]
         if self.read_roots is None:
             self._read_real = None
             self._write_real = None
@@ -131,18 +154,37 @@ class ToolEnv:
     def resolve(self, path_str: str, *, write: bool = False) -> Path:
         """Resolve a possibly-relative path against ``cwd``.
 
-        When confinement is active, the resolved (symlink-free) target must lie
-        inside an allowed root — ``write_roots`` for writes, the union of
-        read+write roots for reads. Raises ``ToolPathError`` otherwise.
+        Returns the **symlink-resolved** path, which is what the checks below
+        ran against. Callers must operate on the returned value rather than on
+        what they passed in: checking one path and opening another lets an
+        intermediate component be swapped between the two.
+        ``skill_host_paths.resolve_host_path`` states the same rule for the
+        host-side skill CLIs.
+
+        When confinement is active, the target must lie inside an allowed root
+        — ``write_roots`` for writes, the union of read+write roots for reads.
+        A write into ``write_denied_roots`` is refused whether or not
+        confinement is active. Raises ``ToolPathError`` otherwise.
         """
         p = Path(path_str)
         candidate = p if p.is_absolute() else (self.cwd / p)
+        real = _realpath(candidate)
+
+        # Ahead of the unconfined return: a deny root is a statement about a
+        # path, not about whether a root allowlist happens to be configured.
+        if write and self._in_denied(real):
+            # Distinct from "outside": the path is inside the workspace and is
+            # readable. Reporting it as outside sends the caller looking for a
+            # missing root that is in fact present.
+            raise ToolPathError(
+                f"Cannot write to {candidate}: path is read-only in this workspace."
+            )
 
         if self._read_real is None:
-            return candidate  # unconfined
+            return real  # unconfined
 
-        if self._contains(candidate, write=write):
-            return candidate
+        if self._contains(real, write=write):
+            return real
         verb = "write to" if write else "read"
         raise ToolPathError(
             f"Cannot {verb} {candidate}: path is outside the allowed workspace."
@@ -155,13 +197,26 @@ class ToolEnv:
         via a symlink planted inside a root — ``resolve`` only guards the search
         root, not every file walked under it.
         """
+        if write and self._in_denied(path):
+            return False
         if self._read_real is None:
             return True
         return self._contains(path, write=write)
 
+    def _in_denied(self, path: Path) -> bool:
+        real = _realpath(path)
+        return any(
+            real == denied or real.is_relative_to(denied)
+            for denied in self._write_denied_real
+        )
+
     def _contains(self, path: Path, *, write: bool) -> bool:
         roots = self._write_real if write else self._read_real
         real = _realpath(path)
+        # Denied before allowed: a carve-out is always nested inside a root
+        # that would otherwise admit it, so order is the whole mechanism.
+        if write and self._in_denied(real):
+            return False
         for root in roots or ():
             if real == root or real.is_relative_to(root):
                 return True

@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Generate the devbox image's forge policy at build time.
+
+Build-time only — nothing calls this at runtime. It exists so the container's
+`/etc/istota-forge/policy.json` is produced from the vendored wrapper's own
+`build_policy` rather than written out by hand, which is the only way the
+container and the sandbox cannot drift apart about what is denied.
+
+Two things are deliberately absent from the generated sections:
+
+``url``
+    One image serves every user, so there is no per-user forge URL to bake.
+    It arrives with the token from the per-user devbox proxy instead — see
+    ``fetch_forge_credentials`` in the wrapper. Baking ``https://gitlab.com``
+    here would be worse than leaving it out, because a self-hosted deployment
+    would then look configured while sending its token to the wrong host.
+
+``direct_token``
+    False. The container always has ``ISTOTA_CRED_SOCK``; an ambient
+    ``GITLAB_TOKEN`` in the model's environment would mean something upstream
+    failed to strip it, and honouring it would hide that.
+
+The generated policy is the **baseline only**. ``build_policy`` is called
+without ``extra_denied`` / ``permit``, because those are per-deployment config
+(``developer.forge_cli_extra_denied`` / ``forge_cli_permit``) and this image is
+built once for every deployment. The sandbox path does pass them
+(``skills/developer/__init__.py``), so an operator's own additions apply there
+and not here. If that gap ever needs closing, these become build args the
+Ansible image build passes through.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+# Image defaults. The two overrides exist so the test suite can run this
+# against a tmpdir; the Dockerfile passes neither.
+DEFAULT_FORGE_LIB = "/usr/local/lib/istota_forge"
+DEFAULT_ETC = "/etc/istota-forge"
+
+
+def section(forge, name: str, forge_lib: str, etc: str) -> dict:
+    binary = "gh" if name == forge.FORGE_GITHUB else "glab"
+    # Baseline only — see the module docstring on extra_denied / permit.
+    built = forge.build_policy(name)
+    built["real_bin"] = f"{forge_lib}/{binary}"
+    built["config_dir"] = f"{etc}/{binary}"
+    # Pinned at an empty, root-owned directory: gh dispatches an unknown first
+    # argument to `gh-<name>` under $XDG_DATA_HOME/gh/extensions, which no argv
+    # rule can see. Left unset, gh derives it from HOME — the writable volume.
+    built["data_dir"] = f"{etc}/data"
+    # gh writes a device id under $XDG_STATE_HOME on every run, outside the
+    # config dir. Point it at the writable volume so a read-only config dir
+    # cannot turn a forge call into a filesystem error.
+    built["state_dir"] = "/home/dev/.local/state/istota-forge"
+    built["direct_token"] = False
+    return built
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--forge-lib", default=DEFAULT_FORGE_LIB)
+    parser.add_argument("--etc", default=DEFAULT_ETC)
+    args = parser.parse_args(argv)
+
+    sys.path.insert(0, args.forge_lib)
+    import istota_forge_cli as forge
+
+    out = f"{args.etc}/policy.json"
+    policy = {
+        forge.FORGE_GITHUB: section(forge, forge.FORGE_GITHUB, args.forge_lib, args.etc),
+        forge.FORGE_GITLAB: section(forge, forge.FORGE_GITLAB, args.forge_lib, args.etc),
+    }
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(policy, fh, indent=2, sort_keys=True)
+
+    # Read it back through the wrapper's own loader. load_policy falls back to
+    # the baseline on anything it cannot use, and it does so on stderr rather
+    # than by failing — so a malformed file written here would ship silently
+    # and only show up as an image whose policy came from somewhere else.
+    #
+    # `real_bin` is the tell: baseline_policy never sets it, so its presence
+    # proves the file was read rather than fallen back from. Checking
+    # path_rules alone would pass on a fallback, since the baseline has those.
+    for name in (forge.FORGE_GITHUB, forge.FORGE_GITLAB):
+        binary = "gh" if name == forge.FORGE_GITHUB else "glab"
+        loaded = forge.load_policy(out, name)
+        if loaded.get("real_bin") != f"{args.forge_lib}/{binary}":
+            print(
+                f"seed-forge-policy: {name} fell back to the baseline — "
+                f"the file just written did not load",
+                file=sys.stderr,
+            )
+            return 1
+        if not loaded.get("path_rules"):
+            print(f"seed-forge-policy: {name} has no path rules", file=sys.stderr)
+            return 1
+    print(f"seed-forge-policy: wrote {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

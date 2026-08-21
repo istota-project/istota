@@ -426,6 +426,33 @@ class TestFsConfinement:
         assert "classified" not in blocked.content[0].text
         assert "workspace" in blocked.content[0].text.lower()
 
+    def test_write_denied_roots_thread_through_to_the_tools(self, tmp_path):
+        """The seam the executor actually uses: BrainRequest → _build_tools →
+        ToolEnv. Dropping either plumbing line leaves the ToolEnv-level tests
+        green, so this is where the carve-out is proven to arrive."""
+        ws = tmp_path / "ws"
+        carve = ws / ".developer"
+        carve.mkdir(parents=True)
+        (carve / "credential-fetch").write_text("original\n")
+
+        req = _req("hi", tmp_path, tools=["Write"])
+        req.fs_read_roots = [ws]
+        req.fs_write_roots = [ws]
+        req.fs_write_denied_roots = [carve]
+        write = self._tool(_brain(MockProvider([])), req, "Write")
+
+        blocked = asyncio.run(write.execute(
+            "c", {"file_path": str(carve / "credential-fetch"), "content": "x"}, None, None,
+        ))
+        assert (carve / "credential-fetch").read_text() == "original\n"
+        assert "read-only" in blocked.content[0].text.lower()
+
+        ok = asyncio.run(write.execute(
+            "c", {"file_path": str(ws / "notes.txt"), "content": "fine\n"}, None, None,
+        ))
+        assert (ws / "notes.txt").read_text() == "fine\n"
+        assert "Created" in ok.content[0].text
+
     def test_no_roots_means_unconfined(self, tmp_path):
         secret = tmp_path / "secret.txt"
         secret.write_text("readable\n")

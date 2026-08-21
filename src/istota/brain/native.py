@@ -1331,6 +1331,7 @@ class NativeBrain:
         # under the user's own writable dir rather than the shared temp root.
         read_roots = tuple(req.fs_read_roots) if req.fs_read_roots else None
         write_roots = tuple(req.fs_write_roots) if req.fs_write_roots else None
+        write_denied_roots = tuple(req.fs_write_denied_roots or ())
         cwd = write_roots[0] if write_roots else Path(req.cwd)
 
         policy = self._web_fetch_policy()
@@ -1350,6 +1351,7 @@ class NativeBrain:
             bash_timeout_seconds=max(1, req.timeout_seconds),
             read_roots=read_roots,
             write_roots=write_roots,
+            write_denied_roots=write_denied_roots,
             web_fetch=policy,
             web_fetch_url_corpus=corpus,
             deferred_dir=Path(deferred) if deferred else None,

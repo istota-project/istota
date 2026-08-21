@@ -16,23 +16,31 @@ Work in git repositories, manage merge requests on GitLab and pull requests on G
 | `DEVELOPER_REPOS_DIR` | Base directory for repo clones and worktrees |
 | `GITLAB_URL` | GitLab instance URL (e.g., `https://gitlab.com`) |
 | `GITLAB_DEFAULT_NAMESPACE` | Default GitLab namespace (user/group) for resolving short repo names |
-| `GITLAB_REVIEWER_ID` | GitLab user ID to assign as reviewer on new merge requests |
-| `GITLAB_API_CMD` | Pre-authenticated wrapper script for GitLab API calls |
+| `GITLAB_REVIEWER_ID` | GitLab reviewer for new merge requests — a **username**, see below |
 | `GITHUB_URL` | GitHub instance URL (e.g., `https://github.com`) |
 | `GITHUB_DEFAULT_OWNER` | Default GitHub org/user for resolving short repo names |
 | `GITHUB_REVIEWER` | GitHub username to request as PR reviewer |
-| `GITHUB_API_CMD` | Pre-authenticated wrapper script for GitHub API calls |
 | `DEVELOPER_AUTHOR_CREDIT` | Optional text appended to every commit message (e.g., `Co-Authored-By: ...`) |
 
 Git credentials are configured automatically for both platforms — clone and push work without manual authentication.
 
-**Namespace resolution**: When the user gives a short repo name (e.g., "nebula" instead of "namespace/nebula"), use `$GITLAB_DEFAULT_NAMESPACE` or `$GITHUB_DEFAULT_OWNER` as the default namespace/owner depending on the platform. Always confirm the resolved path exists via the API before cloning.
+**Namespace resolution**: When the user gives a short repo name (e.g., "nebula" instead of "namespace/nebula"), use `$GITLAB_DEFAULT_NAMESPACE` or `$GITHUB_DEFAULT_OWNER` as the default namespace/owner depending on the platform. Always confirm the resolved path exists before cloning: `gh repo view OWNER/REPO` or `glab repo view NAMESPACE/PROJECT`.
 
-**Security**: Tokens are embedded in helper scripts and never exposed as environment variables. Do NOT attempt to read or extract credentials from helper scripts. Use `$GITLAB_API_CMD` / `$GITHUB_API_CMD` for API calls and plain `git` commands for repository operations.
+## The Forge CLIs
+
+`gh` and `glab` are the real GitHub and GitLab command-line tools. You reach them through a wrapper that fetches the token when you invoke them and then gets out of the way, so the whole flag surface is yours — `gh <command> --help` and `glab <command> --help` are accurate.
+
+**Credentials.** The wrapper hands the token to the CLI process and nowhere else: it is not in your environment, not written to disk, and not printed by anything. `git` authenticates through a credential helper the same way. Nothing this skill does needs the token itself, so do not go looking for it. That is a rule about conduct, not a claim that you would be stopped.
+
+**Refused verbs.** A small set of verbs is refused before anything is contacted: the destructive ones (`repo delete`, `repo archive`, `release delete`), the ones that print or mint credentials (`auth`, `glab token create`), the ones that publish (`gh gist create`, `glab snippet`), the ones that run code elsewhere (`gh codespace`, `glab runner`), `config`, `alias`, `extension`, and `gh api graphql`. Writing methods through `gh api` / `glab api` are refused too — an explicit `-X POST`, and any body flag (`-f`, `-F`, `--field`, `--raw-field`, `--form`, `--input`), which both CLIs treat as an implicit POST. Use the verb, not the raw endpoint. You get a one-line reason and exit status 3.
+
+This is an accident guard, not a security boundary. Hitting it means you are about to do something outside this skill's job, so stop and ask the user — do not look for another route to the same effect.
+
+**No terminal, and a 120-second budget.** These commands run non-interactively under a Bash tool that times out. Avoid every watch and follow mode: `gh pr checks --watch`, `gh run watch`, `glab ci status --live`, `glab ci status --wait`, `glab ci trace`, and `glab ci view` (a full-screen TUI). Run the plain command again instead of waiting inside one.
 
 **Pre-submission checks** (mandatory before every MR/PR):
-1. **Namespace verification**: Before creating any MR or PR, extract the resolved namespace/owner from the API response and confirm it matches the intended target. If the user said "submit to `cynium/istota`", verify the project resolves to `cynium`, not some other namespace. Abort and ask the user if there is any mismatch.
-2. **Response verification**: After creating an MR/PR, parse the API response to extract the URL and ID. If the response contains an error, treat it as failure. Then query the open MR/PR list to confirm it actually exists before reporting success.
+1. **Namespace verification**: Before creating any MR or PR, confirm the remote you are about to push to is the intended one — and read it from the worktree rather than from a path you retyped, because the worktree's `origin` is what will actually receive the push. From inside `$WORK_DIR`: `gh repo view --json nameWithOwner -q .nameWithOwner` or `glab repo view -F json --jq .path_with_namespace`. If the user said "submit to `acme/widget`", verify it resolves to `acme`. Abort and ask on any mismatch.
+2. **Response verification**: `gh pr create` and `glab mr create` exit non-zero on failure and print the URL on success, so check the exit status rather than scraping the output for error text. Then confirm the thing exists before reporting success: `gh pr view --json number,url,state` or `glab mr view -F json`.
 3. **No live source editing**: Never edit files under production installation paths (e.g., `/srv/app/*/src/`). All source changes must go through worktrees in `$DEVELOPER_REPOS_DIR` and be submitted as MRs/PRs.
 
 ## Directory Layout
@@ -256,109 +264,81 @@ Omit `Deferred` when there is nothing in it.
 
 ## GitLab: Pushing and Creating a Merge Request
 
-Push the branch (git credentials are configured automatically):
+Run these from inside `$WORK_DIR` — both CLIs read the repository from the worktree's `origin` remote.
 
 ```bash
 cd "$WORK_DIR"
-git push origin "$BRANCH"
+
+# REQUIRED: confirm the project before creating anything (pre-submission check 1).
+RESOLVED=$(glab repo view -F json --jq .path_with_namespace)
+if [ "$RESOLVED" != "namespace/project" ]; then
+    echo "ERROR: origin resolves to '$RESOLVED', not 'namespace/project'. Aborting."
+    exit 1
+fi
+
+git push -u origin "$BRANCH"
+
+# The reviewer variable is absent entirely unless the operator configured one,
+# and `--reviewer ""` is an error rather than a no-op — so build the flag
+# rather than interpolating it.
+REVIEWER_ARGS=""
+[ -n "${GITLAB_REVIEWER_ID:-}" ] && REVIEWER_ARGS="--reviewer $GITLAB_REVIEWER_ID"
+
+glab mr create \
+    --source-branch "$BRANCH" \
+    --target-branch "$DEFAULT_BRANCH" \
+    --title "Add user authentication" \
+    --description "Implements JWT auth. Created by {BOT_NAME} task $TASK_ID." \
+    --remove-source-branch \
+    $REVIEWER_ARGS \
+    --yes
 ```
 
-Create MR via GitLab API:
+`--yes` skips the confirmation prompt; without it the command waits for a terminal that is not there. **`--reviewer` takes a username**, despite the variable's name. If the configured value is numeric, create the MR without the flag and tell the user their `developer.gitlab_reviewer_id` needs to be the reviewer's username.
+
+Then verify it exists, and capture the id for later steps (pre-submission check 2):
 
 ```bash
-# Get project ID from path
-PROJECT_PATH="namespace/project"
-ENCODED_PATH=$(echo "$PROJECT_PATH" | sed 's|/|%2F|g')
-PROJECT_INFO=$($GITLAB_API_CMD GET "/api/v4/projects/$ENCODED_PATH")
-PROJECT_ID=$(echo "$PROJECT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-
-# REQUIRED: Verify the resolved namespace matches the intended target.
-# Extract the namespace from the project info and confirm it is correct
-# before creating any MR. Abort and ask the user if it doesn't match.
-RESOLVED_NS=$(echo "$PROJECT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['path_with_namespace'].split('/')[0])")
-if [ "$RESOLVED_NS" != "namespace" ]; then
-    echo "ERROR: Resolved namespace '$RESOLVED_NS' does not match expected 'namespace'. Aborting MR creation."
-    exit 1
-fi
-
-# Create merge request (assign configured reviewer)
-MR_RESPONSE=$($GITLAB_API_CMD POST "/api/v4/projects/$PROJECT_ID/merge_requests" \
-    --header "Content-Type: application/json" \
-    --data "{
-        \"source_branch\": \"$BRANCH\",
-        \"target_branch\": \"$DEFAULT_BRANCH\",
-        \"title\": \"Add user authentication\",
-        \"description\": \"Implements JWT auth.\\n\\nCreated by istota task $TASK_ID.\",
-        \"remove_source_branch\": true,
-        \"reviewer_ids\": [$GITLAB_REVIEWER_ID]
-    }")
-
-# REQUIRED: Verify the MR was actually created. Parse the response for
-# web_url and iid. If the response contains "error" or "message" fields
-# instead, treat it as a failure.
-MR_URL=$(echo "$MR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('web_url',''))")
-MR_IID=$(echo "$MR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('iid',''))")
-if [ -z "$MR_URL" ] || [ -z "$MR_IID" ]; then
-    echo "ERROR: MR creation failed. Response: $MR_RESPONSE"
-    exit 1
-fi
-echo "MR created: !$MR_IID — $MR_URL"
-
-# Verify the MR appears in the open MRs list
-$GITLAB_API_CMD GET "/api/v4/projects/$PROJECT_ID/merge_requests?state=opened" \
-    | python3 -c "import sys,json; mrs=json.load(sys.stdin); match=[m for m in mrs if m['iid']==$MR_IID]; assert match, 'MR !$MR_IID not found in open MRs'"
+MR_IID=$(glab mr view -F json --jq .iid)
+glab mr view -F json --jq '"!\(.iid) \(.web_url)"'
 ```
 
 ## GitHub: Pushing and Creating a Pull Request
 
-Push the branch:
-
 ```bash
 cd "$WORK_DIR"
-git push origin "$BRANCH"
-```
 
-Create PR via GitHub API:
-
-```bash
-OWNER="myorg"  # or $GITHUB_DEFAULT_OWNER
-REPO="project"
-
-# REQUIRED: Verify the owner/repo resolves to the intended target before creating a PR.
-REPO_INFO=$($GITHUB_API_CMD GET "/repos/$OWNER/$REPO")
-RESOLVED_OWNER=$(echo "$REPO_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['owner']['login'])")
-if [ "$RESOLVED_OWNER" != "$OWNER" ]; then
-    echo "ERROR: Resolved owner '$RESOLVED_OWNER' does not match expected '$OWNER'. Aborting PR creation."
+# REQUIRED: confirm the repository before creating anything.
+# Substitute the owner/repo the user actually asked for.
+RESOLVED=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+if [ "$RESOLVED" != "owner/repo" ]; then
+    echo "ERROR: origin resolves to '$RESOLVED', not 'owner/repo'. Aborting."
     exit 1
 fi
 
-PR_RESPONSE=$($GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls" \
-    --header "Content-Type: application/json" \
-    --data "{
-        \"head\": \"$BRANCH\",
-        \"base\": \"$DEFAULT_BRANCH\",
-        \"title\": \"Add user authentication\",
-        \"body\": \"Implements JWT auth.\\n\\nCreated by istota task $TASK_ID.\"
-    }")
+git push -u origin "$BRANCH"
 
-# REQUIRED: Verify the PR was actually created. Parse the response for
-# html_url and number. If missing, treat as failure.
-PR_URL=$(echo "$PR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('html_url',''))")
-PR_NUMBER=$(echo "$PR_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('number',''))")
-if [ -z "$PR_URL" ] || [ -z "$PR_NUMBER" ]; then
-    echo "ERROR: PR creation failed. Response: $PR_RESPONSE"
-    exit 1
-fi
-echo "PR created: #$PR_NUMBER — $PR_URL"
+REVIEWER_ARGS=""
+[ -n "${GITHUB_REVIEWER:-}" ] && REVIEWER_ARGS="--reviewer $GITHUB_REVIEWER"
+
+gh pr create \
+    --head "$BRANCH" \
+    --base "$DEFAULT_BRANCH" \
+    --title "Add user authentication" \
+    --body "Implements JWT auth. Created by {BOT_NAME} task $TASK_ID." \
+    $REVIEWER_ARGS
 ```
 
-Request a reviewer:
+`--reviewer` requests the review as part of creating the pull request — this is the whole reviewer step, not a follow-up call.
+
+Then verify, and capture the number for later steps:
 
 ```bash
-$GITHUB_API_CMD POST "/repos/$OWNER/$REPO/pulls/$PR_NUMBER/reviews" \
-    --header "Content-Type: application/json" \
-    --data "{\"reviewers\": [\"$GITHUB_REVIEWER\"]}"
+PR_NUMBER=$(gh pr view --json number -q .number)
+gh pr view --json number,url,state -q '"#\(.number) \(.state) \(.url)"'
 ```
+
+A one-line description keeps the shell quoting simple. For a real multi-paragraph body, write it to a file first and pass `gh pr create --body-file BODY.md`; on the GitLab side pass the file's contents with `glab mr create --description "$(cat BODY.md)"`. Do not build a multi-paragraph string inline — the escaping is where these recipes break.
 
 ## Follow-Up Work on Existing MRs/PRs
 
@@ -378,33 +358,54 @@ git push origin HEAD
 ## GitLab: Listing and Merging MRs
 
 ```bash
-# List open MRs
-$GITLAB_API_CMD GET "/api/v4/projects/$PROJECT_ID/merge_requests?state=opened" \
-    | python3 -c "import sys,json; [print(f'!{mr[\"iid\"]} {mr[\"title\"]} ({mr[\"web_url\"]})') for mr in json.load(sys.stdin)]"
+glab mr list                       # open MRs, human-readable
+glab mr list -F json --jq '.[] | "!\(.iid) \(.title)"'
+glab mr view "$MR_IID"             # description, discussions, pipeline state
+glab mr diff "$MR_IID"
 
-# Merge an MR
-$GITLAB_API_CMD PUT "/api/v4/projects/$PROJECT_ID/merge_requests/$MR_IID/merge"
+glab mr merge "$MR_IID" --yes
 ```
 
-Options: add `"squash": true` or `"should_remove_source_branch": true` via `--data '{"squash": true}'`.
+Merge options: `--squash`, `--rebase`, `--remove-source-branch`. `--yes` is required in a non-interactive context.
+
+**This may queue rather than merge.** When a pipeline is running, glab enables auto-merge by default and still exits 0 — so the MR is scheduled behind CI, not merged. Pass `--auto-merge=false` if you mean now, and read the command's output before reporting a merge as done.
 
 ## GitHub: Listing and Merging PRs
 
 ```bash
-OWNER="myorg"
-REPO="project"
+gh pr list                         # open PRs, human-readable
+gh pr list --json number,title -q '.[] | "#\(.number) \(.title)"'
+gh pr view "$PR_NUMBER"
+gh pr diff "$PR_NUMBER"
 
-# List open PRs
-$GITHUB_API_CMD GET "/repos/$OWNER/$REPO/pulls?state=open" \
-    | python3 -c "import sys,json; [print(f'#{pr[\"number\"]} {pr[\"title\"]} ({pr[\"html_url\"]})') for pr in json.load(sys.stdin)]"
-
-# Merge a PR
-$GITHUB_API_CMD PUT "/repos/$OWNER/$REPO/pulls/$PR_NUMBER/merge" \
-    --header "Content-Type: application/json" \
-    --data '{"merge_method": "squash"}'
+gh pr merge "$PR_NUMBER" --squash --delete-branch
 ```
 
-Merge methods: `"merge"`, `"squash"`, or `"rebase"`.
+Merge methods: `--merge`, `--squash`, `--rebase`. Whether the bot may merge at all is a forge-side branch-protection question — if the merge is refused, report it rather than looking for another way to land the change.
+
+## Watching CI
+
+This is the loop that makes a bot useful on a real repository: push, see what broke, fix it, push again.
+
+```bash
+# GitHub
+gh pr checks                       # one line per check
+gh run list --branch "$BRANCH" --limit 5
+RUN_ID=$(gh run list --branch "$BRANCH" --limit 1 --json databaseId -q '.[0].databaseId')
+gh run view "$RUN_ID" --log-failed  # only the failing steps
+
+# GitLab
+glab ci status                     # current branch's pipeline
+glab ci list --ref "$BRANCH"
+PIPELINE_ID=$(glab ci list --ref "$BRANCH" --per-page 1 -F json --jq '.[0].id')
+glab ci get -p "$PIPELINE_ID"
+```
+
+`gh pr checks` exits 0 when everything passed, 8 when checks are still pending, and non-zero otherwise — so treat 8 as "come back later", not as a failure.
+
+`gh run view --log-failed` is the one to reach for — it prints only the failing steps, where `--log` prints the whole run and will bury the transcript.
+
+**`gh run download` is not available.** Artifact downloads redirect to a per-request Azure Blob Storage shard, and the only network-allowlist entry that would cover it opens all of Azure Blob Storage to this sandbox. Logs carry what a fix needs; artifacts are not worth that trade. Do not try to route around it.
 
 ## Cleanup After Merge
 
@@ -415,54 +416,28 @@ git -C "$BARE_DIR" worktree remove "$WORK_DIR"
 git -C "$BARE_DIR" branch -d "istota/42-add-auth"
 ```
 
-## GitLab API Quick Reference
+## Quick Reference
 
-Use `$GITLAB_API_CMD METHOD ENDPOINT [extra curl args]` for all API calls.
-
-The API wrapper enforces an endpoint allowlist — only the operations below are permitted. Deleting and admin operations are blocked.
-
-| Action | Method | Endpoint |
+| Task | GitHub | GitLab |
 |---|---|---|
-| Get project by path | GET | `/api/v4/projects/:encoded_path` |
-| List branches | GET | `/api/v4/projects/:id/repository/branches` |
-| List open MRs | GET | `/api/v4/projects/:id/merge_requests?state=opened` |
-| Get single MR | GET | `/api/v4/projects/:id/merge_requests/:iid` |
-| Create MR | POST | `/api/v4/projects/:id/merge_requests` |
-| Merge MR | PUT | `/api/v4/projects/:id/merge_requests/:iid/merge` |
-| Add MR comment | POST | `/api/v4/projects/:id/merge_requests/:iid/notes` |
-| Create issue | POST | `/api/v4/projects/:id/issues` |
-| Add issue comment | POST | `/api/v4/projects/:id/issues/:iid/notes` |
-| Look up user by username | GET | `/api/v4/users?username=:name` |
+| Confirm the repo | `gh repo view --json nameWithOwner` | `glab repo view -F json` |
+| Create the change | `gh pr create` | `glab mr create --yes` |
+| List open | `gh pr list` | `glab mr list` |
+| Read one | `gh pr view N` | `glab mr view N` |
+| Its diff | `gh pr diff N` | `glab mr diff N` |
+| Comment on it | `gh pr comment N --body "..."` | `glab mr note create N -m "..."` |
+| Request a review | `gh pr edit N --add-reviewer USER` | `glab mr update N --reviewer USER` |
+| CI state | `gh pr checks` | `glab ci status` |
+| Failing CI logs | `gh run view ID --log-failed` | `glab ci get -p PIPELINE_ID` |
+| Merge it | `gh pr merge N --squash` | `glab mr merge N --yes` |
+| File an issue | `gh issue create --title ... --body ...` | `glab issue create --title ... --description ...` |
+| Look up a user | `gh api /users/USERNAME` | `glab api /users?username=USERNAME` |
 
-## GitHub API Quick Reference
+Both CLIs take `--json`/`-F json` plus `--jq`/`-q` for structured output, so there is no need to pipe through `python3` to read a field. Anything not covered here: `gh <command> --help`, `glab <command> --help`.
 
-Use `$GITHUB_API_CMD METHOD ENDPOINT [extra curl args]` for all API calls.
+Check the help before trusting a spelling from memory — the deployed CLIs may be older than the ones these examples were written against, and `glab mr note` in particular was restructured. Newer glab wants `glab mr note create N -m "..."`; older glab wants `glab mr note N -m "..."` with no subcommand. Run `glab mr note --help` and use whichever it shows.
 
-The API wrapper enforces an endpoint allowlist — only the operations below are permitted. Deleting and admin operations are blocked.
-
-| Action | Method | Endpoint |
-|---|---|---|
-| Get repo | GET | `/repos/:owner/:repo` |
-| List branches | GET | `/repos/:owner/:repo/branches` |
-| List open PRs | GET | `/repos/:owner/:repo/pulls?state=open` |
-| Get single PR | GET | `/repos/:owner/:repo/pulls/:number` |
-| Create PR | POST | `/repos/:owner/:repo/pulls` |
-| Merge PR | PUT | `/repos/:owner/:repo/pulls/:number/merge` |
-| Update PR | PATCH | `/repos/:owner/:repo/pulls/:number` |
-| Add PR comment | POST | `/repos/:owner/:repo/pulls/:number/comments` |
-| Request PR review | POST | `/repos/:owner/:repo/pulls/:number/reviews` |
-| Create issue | POST | `/repos/:owner/:repo/issues` |
-| Add issue comment | POST | `/repos/:owner/:repo/issues/:number/comments` |
-| Update issue | PATCH | `/repos/:owner/:repo/issues/:number` |
-| Search code | GET | `/search/code?q=...` |
-| Look up user | GET | `/users/:username` |
-| List org repos | GET | `/orgs/:org/repos` |
-
-**Important**: When piping API wrapper output, always redirect to a temp file first, then read:
-```bash
-$GITHUB_API_CMD GET "/repos/$OWNER/$REPO" > /tmp/result.json
-DEFAULT_BRANCH=$(python3 -c "import sys,json; print(json.load(sys.stdin)['default_branch'])" < /tmp/result.json)
-```
+`gh api` and `glab api` reach any read endpoint the token allows. Writes through them are refused — use the verb.
 
 ## Error Handling
 
@@ -477,5 +452,10 @@ DEFAULT_BRANCH=$(python3 -c "import sys,json; print(json.load(sys.stdin)['defaul
   ```
   **Never force-push a shared branch.** `--force-with-lease` is permitted on `$BRANCH`, the topic branch you created for this task, and nowhere else. A rejected push to `$DEFAULT_BRANCH` or any branch you did not create means someone else moved it: report it via the abort path and let the user decide. Do not resolve it.
 - **MR/PR has merge conflicts**: Rebase the worktree branch onto the latest target and force-push `$BRANCH`, subject to the same restriction.
-- **Endpoint not allowed**: The API wrappers enforce an allowlist. Deleting and admin actions are blocked.
-- **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive).
+- **Exit 3, "not permitted by this deployment"**: a refused verb. Stop and tell the user what you were about to do and why you wanted to. Do not reach for `gh api`, a raw `curl`, or the web UI to get the same effect.
+- **Exit 4 or 5 from `gh` / `glab`**: the credential path, not your command. Exit 4 means no credential proxy is reachable; exit 5 means the proxy refused or has no token for that forge. Both are deployment problems — report them, and note that only the affected forge is down (a missing GitLab token does not stop `gh`).
+- **Exit 2**: a usage error, or one of the retired `github-api` / `gitlab-api` names. Use `gh` / `glab`.
+- **Exit 7**: the wrapper is misconfigured (no CLI config directory). A deployment problem — report it.
+- **Exit 6**: the real CLI is missing or not executable on this host. Report the path in the message; the operator has to install it.
+- **`gh api` write refused**: writes through the raw API are blocked on purpose. There is a verb for it — `gh pr edit`, `gh issue comment`, and so on.
+- **Project not found**: Verify the namespace/project or owner/repo path matches exactly (case-sensitive), and that the token's scope covers it. A fine-grained token restricted to a repository list returns 404, not 403, for anything outside it — so "not found" can mean "not granted".

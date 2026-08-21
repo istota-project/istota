@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A task can no longer rewrite the helper scripts that fetch its own credentials. Those scripts are written into a `.developer` directory inside each task's scratch space, and the sandbox has always kept them read-only — but the in-process agent, which runs without the sandbox, treated the whole scratch space as writable. A task could therefore replace the script that asks for a forge token with one that did something else with it. That directory is now excluded from what a task may write on both paths.
+
 - The token the server uses to fetch its own updates is no longer written into the repository's git config or passed on a command line. It was stored there when the server was first set up, which also put it in the argument list of every update check — one every two minutes — where anyone with root on the box could read it in passing. A deploy now keeps it in a root-only file that git asks for it when needed, and rewrites the old value out of servers already set up this way; rotate the token afterwards, since anything provisioned before this had it sitting in a file and in process arguments.
 
 - Quoting a message the bot sent no longer gets your agent to run on the strength of one header. Any such mail was processed without asking you, on the reasoning that only the recipient would hold the identifier linking it to the thread — but that identifier travels to everyone copied in, to everyone the thread is forwarded to, and into any archive the thread reaches, and it never expired. Replies from the address the bot wrote to are unaffected; anyone else on the thread now waits for your approval, and `yes trust` lets them through for good.
@@ -39,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The bot now runs the real `gh` and `glab` command-line tools for GitLab and GitHub work, instead of the hand-written REST wrappers it used before. Those wrappers could only reach a fixed list of API endpoints, which is a list that cannot describe what a real command does — opening a merge request is several calls, and checking a pipeline pages through more — so ordinary work was blocked while anything matching a pattern went through unexamined. What the bot may run is now decided by a deny list over the command itself, extendable through `[developer] forge_cli_extra_denied`. **Reissue your forge tokens before deploying this**: the CLIs need wider scopes than the wrappers did (GitLab `api` plus `write_repository`, GitHub `repo`), and a token that was scoped for the old path will fail on every forge command. `gitlab_api_allowlist`, `github_api_allowlist` and `api_timeout_seconds` are gone; a config file still carrying them loads and ignores them.
+
 - The `#general`, `#logs` and `#alerts` rooms are created as private group rooms rather than public ones. A public room is joinable by anyone holding its link, which is the wrong default for rooms carrying your execution log and your security alerts. Rooms that already exist are reused untouched, so this only affects new installs.
 
 - Incoming mail now runs on the background queue instead of competing with your live chat. Email is the one way a stranger can create work, and nobody watches a mailbox for a reply the way they watch a chat window, so a burst of mail no longer takes the slots your own messages need. Mail turnaround is slower under load, which is the trade; `email_task_queue = "foreground"` restores the old behaviour.
@@ -46,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Very long messages and very large attachments are now capped before they are read. The whole body went into the prompt, so one long message was expensive on its own; it is now truncated with a note saying so, and the full message stays in the mailbox. Attachments have a size budget per message and per check, and anything skipped for size is named in the message the bot reads, so it never answers as though an attachment had never been sent.
 
 ### Fixed
+
+- The GitLab reviewer setting takes a username, and every place it was documented asked for a numeric user ID — including the example value, which was a number. The setting is handed to `glab mr create --reviewer`, which wants a username, so an operator who followed the example got merge requests with no reviewer on them and a note about the misconfiguration on each one. The setting itself is unchanged; check yours if it holds a number.
 
 - The server's own logs no longer fill its disk. Neither the system journal nor the audit log shipped with a working limit — the journal's was left to a default of a tenth of the whole disk, and the audit log was set to rotate forever and never delete, so it had kept every file since April. Both are now capped, the audit files stranded above the new limit are removed on the next deploy, and `istota_journald_manage` or `istota_auditd_manage` set to false hands either one back to you.
 

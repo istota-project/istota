@@ -161,6 +161,71 @@
     cache_valid_time: 3600
   when: not istota_update_only and not istota_web_only
 
+# ============================================================
+# Forge CLIs (developer skill)
+# ============================================================
+# The developer skill drives the real `gh` and `glab` through the wrapper in
+# src/istota/forge_cli.py. The sandbox binds / read-only, so a binary here is
+# visible inside it with no extra mount.
+#
+# From the Debian archive rather than the vendors' own apt repos: trixie ships
+# gh 2.46 and glab 1.53, both above the floors the skill's verbs need, so the
+# vendor repos would add two supply-chain sources and two GPG keys to buy
+# nothing the deployment uses. The floors are asserted below rather than
+# assumed, because a distro that ships something older would otherwise fail
+# later and less legibly — as a forge command that exits nonzero mid-task.
+- name: Install forge CLIs for the developer skill
+  apt:
+    name:
+      - gh                  # GitHub CLI, floor 2.40 (pr checks, run view --log-failed)
+      - glab                # GitLab CLI, floor 1.36 (ci trace)
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+- name: Read installed forge CLI versions
+  ansible.builtin.command: "{{ item }} --version"
+  register: istota_forge_cli_versions
+  changed_when: false
+  failed_when: false
+  loop:
+    - gh
+    - glab
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+# `gh version 2.46.0 (…)` and `glab 1.53.0 (…)` — take the first dotted triple
+# and compare it as a version, not as a string ("2.9" > "2.46" lexically).
+#
+# Deliberately not the capture-group form, `regex_search(RE, '\\1')`: on
+# ansible-core 2.21 that raises "'NoneType' object has no attribute 'group'"
+# even where the bare form matches cleanly. The whole match is the version
+# anyway, so the group buys nothing and costs portability across the ansible
+# versions a deployment might run.
+- name: Assert the forge CLIs clear their version floors
+  ansible.builtin.assert:
+    that:
+      - "(item.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+')) is version(istota_developer_cli_floors[item.item], '>=')"
+    fail_msg: >-
+      {{ item.item }} is below the floor this deployment needs
+      ({{ istota_developer_cli_floors[item.item] }}). Installed:
+      {{ item.stdout_lines[0] | default('not installed') }}.
+      The developer skill's documented verbs will fail at runtime.
+    success_msg: "{{ item.stdout_lines[0] | default('') }}"
+  loop: "{{ istota_forge_cli_versions.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
 - name: Enable unprivileged user namespaces for bubblewrap sandbox
   ansible.posix.sysctl:
     name: kernel.unprivileged_userns_clone
