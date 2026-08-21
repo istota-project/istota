@@ -14,7 +14,10 @@
  *     for c in CASES: print(c, _render_cost(c))
  *     PY
  *
- * A change to either side that is not made to both fails here.
+ * A change to either side that is not made to both fails here — but only if the
+ * table below is right about the CLI, which nothing in this file can check.
+ * `tests/test_cli_render_cost.py` holds the same cases against the real
+ * `_render_cost`; edit the two together.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -31,10 +34,10 @@ const PARITY: [Record<string, number>, string][] = [
   [{ api: 0.01 }, '$0.01'],
   [{ api: 1234.5 }, '$1234.50'],
   [{ api: 9.0 }, '$9.00'],
-  [{ estimated: 0 }, '— (estimated)'],
-  [{ subscription: 99 }, '— (subscription)'],
+  [{ estimated: 0 }, '—'],
+  [{ subscription: 99 }, '—'],
   [{ api: 1, subscription: 2 }, '$1.00 +subscription'],
-  [{ estimated: 0, subscription: 1, unknown: 2 }, '— (estimated+subscription+unknown)'],
+  [{ estimated: 0, subscription: 1, unknown: 2 }, '—'],
   [{ api: 1.5, estimated: 0, subscription: 9 }, '$1.50 +estimated+subscription'],
 ];
 
