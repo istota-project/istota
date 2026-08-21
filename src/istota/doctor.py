@@ -1421,7 +1421,22 @@ def render_json(results: list[CheckResult], *, secrets: Iterable[str]) -> str:
     forgot the argument would be fail-open. Pass ``config_secrets(config)``, or
     ``()`` to say deliberately that there is nothing to redact.
     """
-    payload = [
+    return json.dumps(check_payload(_redacted_results(results, secrets)), indent=2)
+
+
+def check_payload(results: list[CheckResult]) -> list[dict]:
+    """The wire shape of a result list — the one definition of it.
+
+    Both the CLI's ``--json`` and the admin endpoint go through here, so a key
+    added for the image test tier cannot reach one and miss the other. That
+    divergence is invisible to tests that assert each surface against its own
+    hardcoded dict, which is what they were doing.
+
+    Does **not** redact: callers pass results that already have been. Redaction
+    is not optional and so does not belong in a shape function, where an
+    argument could be forgotten.
+    """
+    return [
         {
             "name": r.name,
             "status": r.status,
@@ -1429,9 +1444,8 @@ def render_json(results: list[CheckResult], *, secrets: Iterable[str]) -> str:
             "remedy": r.remedy,
             "scope": r.scope,
         }
-        for r in _redacted_results(results, secrets)
+        for r in results
     ]
-    return json.dumps(payload, indent=2)
 
 
 _STATUS_ORDER = {FAIL: 0, WARN: 1, OK: 2, SKIP: 3}

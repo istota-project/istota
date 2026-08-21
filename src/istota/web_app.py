@@ -19,6 +19,7 @@ import signal
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -3227,6 +3228,129 @@ async def admin_config(_: dict = Depends(_require_admin)):
     from . import admin_config_view
 
     return await asyncio.to_thread(admin_config_view.build_config_view, _config)
+
+
+# The deep doctor run spawns a bubblewrap namespace. One at a time, bounded, and
+# on a thread pool of its own. Three separate problems, and the obvious
+# one-liner for each is wrong in a way worth writing down.
+#
+# **The slot is released by the worker thread, not by the awaiting request.**
+# `asyncio.wait_for` cancels the *await*; it cannot cancel the OS thread that
+# `to_thread` submitted. Releasing an `asyncio.Lock` in an `except TimeoutError`
+# therefore reports "nothing is running" while `subprocess.run(bwrap, ...)` is
+# still going, and the next request sails through the gate into a second
+# concurrent namespace spawn — the exact thing the gate exists to prevent. So
+# the gate is a semaphore the *thread* releases in its own `finally`.
+#
+# **A non-blocking acquire, not a `.locked()` pre-check.** That pre-check is
+# safe today only because CPython's uncontended `Lock.acquire` fast path has no
+# suspension point: incidental, unstated, and gone the moment anyone replaces
+# the pre-check with a bounded acquire. `acquire(blocking=False)` is one atomic
+# operation and needs no such reasoning.
+#
+# **A dedicated executor.** An abandoned deep thread pins a worker for as long
+# as its subprocess runs. On the default executor that worker is shared with
+# every other `to_thread` caller in this module, and production runs a single
+# uvicorn process — so repeated timeouts would degrade unrelated admin
+# endpoints. With one worker of its own the deep probe can only starve itself.
+_doctor_deep_slot = threading.Semaphore(1)
+_doctor_deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-deep")
+
+# What the deep phase may take. Derived from doctor's own bound rather than
+# restated, so the two cannot drift, and it covers only the deep checks because
+# that is all the deep phase runs. The earlier shape put the whole registry
+# under one 30s bound while `doctor.DEEP_TIMEOUT` was itself 30s, so a healthy
+# host with several probing checks ahead of the deep one (10s each, worst case)
+# could blow the outer timer with nothing wrong.
+_DOCTOR_DEEP_HEADROOM = 10.0
+
+
+def _doctor_deep_timeout() -> float:
+    from . import doctor
+
+    return doctor.DEEP_TIMEOUT + _DOCTOR_DEEP_HEADROOM
+
+
+@api_router.get("/admin/doctor")
+async def admin_doctor(deep: int = 0, _: dict = Depends(_require_admin)):
+    """The runtime self-check, as the dashboard's Health pane reads it.
+
+    Same payload shape as `istota doctor --json` — both go through
+    `doctor.check_payload`, so a key added for the image test tier cannot reach
+    one surface and miss the other — plus a summary and one overall status the
+    pane can colour a header with.
+
+    Redacted before it leaves the process, like `admin_config_view`: doctor's
+    `detail` carries observed paths and raw exception text, and check authors
+    being told not to put a credential there is not the same as it never
+    happening.
+
+    A deep request runs in two phases rather than one: the ordinary registry,
+    then the namespace-spawning checks on their own. So a deep probe that
+    overruns costs the operator the deep result and nothing else, rather than
+    discarding twenty findings they may have opened the page to read.
+    """
+    from . import doctor
+
+    # Snapshot the module global once. `_reload_config` rebinds it wholesale on
+    # SIGHUP, and a run that built its details against one config and then
+    # redacted them against another would be scanning for a credential list that
+    # no longer holds the value sitting in the text.
+    config = _config
+
+    def _run(**kwargs):
+        return doctor.redact(doctor.run_checks(config, **kwargs), config)
+
+    # Every probing check bounds its own subprocess (`doctor.PROBE_TIMEOUT`), so
+    # the shallow phase needs no outer timer — only to be off the event loop,
+    # which it would otherwise stall for a dozen `--version` spawns.
+    results = await asyncio.to_thread(_run, deep=False)
+
+    if deep:
+        if not _doctor_deep_slot.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="a deep run is in flight")
+
+        def _run_deep():
+            try:
+                return _run(only=tuple(doctor.DEEP_CHECKS), deep=True)
+            finally:
+                # Released here, not by the caller: see the note by the semaphore.
+                _doctor_deep_slot.release()
+
+        loop = asyncio.get_running_loop()
+        try:
+            deep_results = await asyncio.wait_for(
+                loop.run_in_executor(_doctor_deep_executor, _run_deep),
+                timeout=_doctor_deep_timeout(),
+            )
+        except TimeoutError:
+            # Named outside the registry deliberately. `sandbox.masks` is a real
+            # check, and reporting the run's failure under its name asserts a
+            # verdict on something that may never have been reached.
+            deep_results = [
+                doctor.CheckResult(
+                    "doctor.deep_run",
+                    doctor.FAIL,
+                    f"the deep checks did not finish within {_doctor_deep_timeout():.0f}s",
+                    remedy="Run `istota doctor --deep` on the host to see where it sticks.",
+                )
+            ]
+        results = results + deep_results
+
+    summary = doctor.summarize(results)
+    if summary[doctor.FAIL]:
+        overall = doctor.FAIL
+    elif summary[doctor.WARN]:
+        overall = doctor.WARN
+    else:
+        overall = doctor.OK
+
+    return {
+        "status": overall,
+        "summary": summary,
+        "deep": bool(deep),
+        "checks": doctor.check_payload(results),
+    }
 
 
 # ---- Web chat surface ----
