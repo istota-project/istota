@@ -75,34 +75,15 @@ _WEB_START_TIME = time.time()
 # field" (explicit null) from "leave it untouched" in _chat_update_room.
 _UNSET = object()
 
-# Resolve static build directory. Precedence:
-#   1. ISTOTA_WEB_STATIC_DIR env override (Docker runtime / explicit).
-#   2. Repo-relative web/build (editable installs from the repo root).
-#   3. Packaged static tree at istota/web_static (non-editable wheel installs —
-#      the release build copies web/build there; see pyproject packaging).
-def _pick_static_dir(env_dir: str, repo_build: Path, packaged: Path) -> Path:
-    """Pick the static dir from candidates (pure — unit-testable).
-
-    Precedence: env override > repo-relative build > packaged. Falls back to
-    the repo-relative path when neither build exists, preserving the existing
-    "missing build" behaviour (StaticFiles mount is guarded on ``.is_dir()``).
-    """
-    if env_dir.strip():
-        return Path(env_dir.strip())
-    if repo_build.is_dir():
-        return repo_build
-    if packaged.is_dir():
-        return packaged
-    return repo_build
-
-
-def _resolve_static_dir() -> Path:
-    here = Path(__file__).resolve()
-    return _pick_static_dir(
-        os.environ.get("ISTOTA_WEB_STATIC_DIR", ""),
-        here.parent.parent.parent / "web" / "build",
-        here.parent / "web_static",
-    )
+# Static build directory resolution lives in `istota.static_dir`, a stdlib-only
+# leaf, so `doctor`'s `web.static` check can ask the same question without
+# importing this module — which would cost it the whole FastAPI stack and a
+# nested `load_config()`. Aliased under the old private names because this
+# module's own call sites and its tests use them.
+from .static_dir import (  # noqa: F401 - re-export, see above
+    pick_static_dir as _pick_static_dir,
+    resolve_static_dir as _resolve_static_dir,
+)
 
 
 # SvelteKit emits two classes of asset and they need opposite caching. Bare

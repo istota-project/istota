@@ -49,10 +49,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # binaries every one of them exits 6 at exec, while git clone/branch/push keep
 # working, so the skill looks configured and dies at the point it would publish.
 #
-# Not from apt: this is bookworm, whose gh is 2.23 — below the 2.40 floor the
-# skill's verbs need — and which ships no glab at all. Same reasoning and the
-# same versions as docker/devbox/Dockerfile; a test asserts the two stay in
-# step.
+# Not from apt: this is bookworm, whose gh is 2.23 — far behind the 2.98 these
+# verbs have actually been exercised against — and which ships no glab at all.
+# No floor has ever been derived from the verbs the skill uses, so 2.98/1.114
+# is a known-good mark rather than a minimum; `istota doctor` WARNs below it
+# and names both numbers (forge_cli.GH_KNOWN_GOOD / GLAB_KNOWN_GOOD, which must
+# be bumped with these pins). Same reasoning and the same versions as
+# docker/devbox/Dockerfile; a test asserts the two stay in step.
 #
 # Unlike the devbox image — amd64-only regardless, since its Go toolchain is a
 # hardcoded linux-amd64 tarball — this one builds on arm64 too, so the asset is

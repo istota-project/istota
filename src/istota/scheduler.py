@@ -3473,6 +3473,145 @@ def check_db_health(config: Config) -> list[CheckReport]:
     return reports
 
 
+def _doctor_alert_recipients(config: Config) -> list[str]:
+    """Who a doctor alert goes to: the admin allowlist, and nobody else.
+
+    Deliberately not :func:`_operator_alert_user`, which falls back to the first
+    configured user, and deliberately not ``Config.is_admin``, which reads an
+    empty allowlist as "everyone is an admin". A doctor ``FAIL`` names install
+    paths, binary locations and remedies; broadcasting that to every user on a
+    multi-user deployment leaks the operator's layout to non-admins.
+
+    Failing closed and saying so is the safer default, and it matches
+    ``_user_is_web_admin``'s posture.
+    """
+    return sorted(config.admin_users)
+
+
+def _alert_doctor_failures(config: Config, failures: list, *, context: str) -> None:
+    """Send one alert per admin naming every failing check. Never raises.
+
+    One message, not one per check: a boot that fails five checks is one
+    problem, and five notifications is how an operator learns to mute them.
+    """
+    if not failures:
+        return
+    recipients = _doctor_alert_recipients(config)
+    if not recipients:
+        logger.warning(
+            "doctor_alert_undeliverable checks=%d reason=no admin users configured "
+            "(set ISTOTA_ADMINS_FILE); the alert names install paths and remedies, "
+            "so it is not broadcast to every user",
+            len(failures),
+        )
+        return
+
+    lines = [f"{config.bot_name} runtime check failed ({context}):", ""]
+    for result in failures:
+        lines.append(f"- {result.name}: {result.detail}")
+        if result.remedy:
+            lines.append(f"  {result.remedy}")
+    message = "\n".join(lines)
+
+    for user_id in recipients:
+        try:
+            _send_operator_alert(config, user_id, message)
+        except Exception as exc:  # noqa: BLE001 - the alert path must not take the daemon down
+            logger.error("doctor_alert_send_failed user=%s err=%s", user_id, exc)
+
+
+def run_startup_checks(config: Config) -> list:
+    """Run the doctor registry once at boot, log it, and alert on any failure.
+
+    **Never aborts, whatever it finds.** Both deployment shapes restart
+    automatically — ``restart: unless-stopped`` in compose, systemd on bare
+    metal — so a daemon that exited on a ``FAIL`` would not fail loudly, it
+    would crash-loop, and in the container shape that locks the operator out of
+    the box they need to exec into. Degraded-but-running is strictly more
+    diagnosable. It also matches ``_validate_forge_clis``'s existing posture and
+    does not preempt ``check_db_health``'s self-repair, which already handles the
+    one condition that looked like a candidate for fatal.
+
+    Deep checks are not run: spawning a bubblewrap namespace is not something a
+    boot path should do unattended.
+    """
+    from . import doctor
+
+    try:
+        results = doctor.run_checks(config)
+        # Redact before anything is logged or sent. `detail` carries observed
+        # paths and raw exception text, and the log file and the Talk room are
+        # boundaries in exactly the way the admin dashboard is.
+        results = doctor.redact(results, config)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not become an outage
+        logger.error("doctor_startup_failed err=%s", exc, exc_info=True)
+        return []
+
+    for result in results:
+        if result.status == doctor.FAIL:
+            logger.error("doctor %s: %s %s", result.name, result.detail, result.remedy)
+        elif result.status == doctor.WARN:
+            logger.warning("doctor %s: %s %s", result.name, result.detail, result.remedy)
+
+    counts = doctor.summarize(results)
+    logger.info(
+        "STARTUP doctor: %d ok, %d warn, %d fail, %d skip",
+        counts[doctor.OK], counts[doctor.WARN], counts[doctor.FAIL], counts[doctor.SKIP],
+    )
+    _alert_doctor_failures(config, doctor.failing(results), context="start-up")
+    return results
+
+
+# Checks the interval sweep leaves alone, and why. `runtime.framework_db` runs
+# `PRAGMA quick_check`, which reads the whole database — `check_db_health` owns
+# that job and does it once a day. Running it hourly here would be the same
+# full-DB scan 24 times over, for a second opinion nobody asked for. It still
+# runs at boot and whenever an operator types `istota doctor`.
+SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
+
+
+def check_doctor(config: Config, state: dict) -> list:
+    """Re-run the doctor registry on the scheduler's interval.
+
+    This matters more than the boot run. The drift we actually saw happens
+    *after* boot: the production auto-update cron pulls code and restarts
+    services every two minutes without running Ansible, so what is installed
+    changes under a config the daemon already loaded. A boot-only check is blind
+    to exactly that, and ``developer.forge_config_drift`` is the check that sees
+    it.
+
+    Alerts on the *transition* into failure rather than on every sweep, with the
+    previously-failing set held in ``state`` — the caller's dict, so there is no
+    process-global. A check that is still failing produces no second alert; one
+    that is newly failing does.
+    """
+    from . import doctor
+
+    try:
+        results = doctor.run_checks(config, skip=SWEEP_SKIPPED_CHECKS)
+        results = doctor.redact(results, config)
+    except Exception as exc:  # noqa: BLE001 - a periodic diagnostic must not kill the loop
+        logger.error("doctor_sweep_failed err=%s", exc, exc_info=True)
+        return []
+
+    failures = doctor.failing(results)
+    failing_names = {r.name for r in failures}
+    previously_failing = state.get("failing", set())
+
+    for result in failures:
+        logger.error("doctor %s: %s %s", result.name, result.detail, result.remedy)
+
+    newly_failing = failing_names - previously_failing
+    if newly_failing:
+        _alert_doctor_failures(
+            config,
+            [r for r in failures if r.name in newly_failing],
+            context="periodic check",
+        )
+    state["failing"] = failing_names
+    return results
+
+
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
@@ -5292,6 +5431,12 @@ def run_daemon(
     logger.info("STARTUP Heartbeat check interval: %ds", config.scheduler.heartbeat_check_interval)
     logger.info("STARTUP DB health check interval: %ds", config.scheduler.db_health_check_interval)
     logger.info(
+        "STARTUP Doctor check interval: %s",
+        f"{config.scheduler.doctor_check_interval}s"
+        if config.scheduler.doctor_check_interval
+        else "disabled",
+    )
+    logger.info(
         "STARTUP Host pressure breadcrumb: %s",
         f"{config.scheduler.host_pressure_breadcrumb_interval_seconds}s"
         if config.scheduler.host_pressure_enabled
@@ -5346,6 +5491,25 @@ def run_daemon(
             )
     logger.info("SECURITY Skill proxy: %s", "enabled" if config.security.skill_proxy_enabled else "disabled")
     logger.info("SECURITY Network proxy: %s", "enabled" if config.security.network.enabled else "disabled")
+
+    # The runtime self-check. Logs every non-OK result and alerts the admin
+    # allowlist on any failure; never aborts, whatever it finds (see the
+    # function's own docstring for why a crash-loop is worse than degraded).
+    #
+    # On a thread, and its results carried to the loop rather than discarded.
+    # Two reasons for the thread: `runtime.writable_dirs` and
+    # `runtime.mount_liveness` stat the rclone FUSE mount with no timeout, where
+    # a *hung* (as opposed to dropped) mount blocks uninterruptibly — the same
+    # reason every other mount-touching sweep in this file is backgrounded — and
+    # the alert fans out one 30s-timeout send per admin behind it. Neither
+    # belongs between here and the loop starting.
+    startup_doctor_results: list = []
+    startup_doctor_thread = threading.Thread(
+        target=lambda: startup_doctor_results.extend(run_startup_checks(config)),
+        name="doctor-startup",
+        daemon=True,
+    )
+    startup_doctor_thread.start()
 
     # Hydrate user configs from Nextcloud API (display name, email, timezone)
     try:
@@ -5480,6 +5644,30 @@ def run_daemon(
     last_travel_tz_check = 0.0
     last_heartbeat_check = 0.0
     last_db_health_check = 0.0
+    # Seeded to now, not 0: the boot run above already swept, so a 0 here would
+    # re-run the whole registry on the first tick seconds later.
+    last_doctor_check = time.time()
+    # Which checks were failing at the last sweep, so the alert fires on the
+    # transition into failure rather than once per interval forever. Owned by
+    # the loop rather than by the module, matching `background_checks`.
+    #
+    # Seeded from the boot run: without it every failure the boot alert already
+    # named counts as "newly failing" at the first sweep and alerts a second
+    # time an hour later. Joined with a short deadline because the boot check
+    # can be stuck on a hung mount, and the loop must start regardless — an
+    # unseeded state costs one duplicate alert, which is much cheaper than
+    # delaying dispatch.
+    doctor_state: dict = {}
+    startup_doctor_thread.join(timeout=30.0)
+    if not startup_doctor_thread.is_alive():
+        from . import doctor as _doctor
+
+        doctor_state["failing"] = {r.name for r in _doctor.failing(startup_doctor_results)}
+    else:
+        logger.warning(
+            "doctor_startup_slow: boot check still running after 30s; the first "
+            "sweep may repeat its alert"
+        )
     # Seed the backup clock from the persisted last-run timestamp so it survives
     # restarts: an overdue backup (or one that never ran) fires promptly, a
     # recent one waits out the remaining interval. Without this the clock reset
@@ -5674,6 +5862,21 @@ def run_daemon(
                 "db-health", lambda: check_db_health(config), background_checks,
             )
             last_db_health_check = now
+
+        # Re-run the runtime self-check. The drift this catches happens *after*
+        # boot — the auto-update cron changes what is installed under a config
+        # the daemon already loaded — so a boot-only check is blind to it.
+        # Backgrounded like the sweeps above: `runtime.model_cli` and the forge
+        # version checks each spawn a `--version`, and a wedged binary on the
+        # loop thread would starve dispatch.
+        if (
+            config.scheduler.doctor_check_interval
+            and now - last_doctor_check >= config.scheduler.doctor_check_interval
+        ):
+            _spawn_background_check(
+                "doctor", lambda: check_doctor(config, doctor_state), background_checks,
+            )
+            last_doctor_check = now
 
         # Snapshot local DBs to the mount for off-host durability (they left the
         # Nextcloud-synced workspaces when they moved to local disk). Also off

@@ -1342,7 +1342,12 @@ gh_bin_path = "{tmp_path / 'no-such-gh'}"
 """)
         with caplog.at_level("WARNING", logger="istota.config"):
             load_config(config_file)
-        assert any("gh not found" in r.getMessage() for r in caplog.records)
+        # Asserted as the condition rather than the phrasing: the wording now
+        # comes from the doctor check, and a test that pins a sentence breaks on
+        # every rewording while saying nothing about behaviour.
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "forge_binaries.gh" in messages
+        assert str(tmp_path / "no-such-gh") in messages
 
     def test_no_binary_warning_without_a_token(self, tmp_path, caplog):
         """No token means no forge calls, so a missing binary is not yet a
@@ -2604,3 +2609,188 @@ class TestBriefingEmailHtmlFor:
     def test_opt_out(self):
         cfg = Config(users={"carol": UserConfig(briefing_email_html=False)})
         assert cfg.briefing_email_html_for("carol") is False
+
+
+class TestValidateForgeClis:
+    """`_validate_forge_clis` runs inside every `load_config`, which means the
+    daemon, the web app, the webhook receiver, every CLI invocation, and every
+    host-side skill CLI the skill proxy spawns *per call*.
+
+    These tests pin the two properties that must survive its reduction onto the
+    doctor registry: which deployment shapes warn at all, and that none of them
+    spawns a subprocess to find out. They are written to pass against both the
+    original implementation and the reduced one — an equivalence test that only
+    passes after the change is just a test of the new code.
+    """
+
+    @staticmethod
+    def _warnings(caplog, config):
+        from istota.config import _validate_forge_clis
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            _validate_forge_clis(config)
+        return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @staticmethod
+    def _dev(tmp_path, **overrides):
+        repos = tmp_path / "repos"
+        repos.mkdir(exist_ok=True)
+        fields = {
+            "enabled": True,
+            "repos_dir": str(repos),
+            "gitlab_token": "NOT-A-REAL-TOKEN-" + "x" * 12,
+            "gh_bin_path": str(tmp_path / "nowhere" / "gh"),
+            "glab_bin_path": str(tmp_path / "nowhere" / "glab"),
+        }
+        fields.update(overrides)
+        return DeveloperConfig(**fields)
+
+    def test_skill_disabled_is_silent(self, caplog, tmp_path):
+        config = Config(developer=DeveloperConfig(enabled=False))
+        assert self._warnings(caplog, config) == []
+
+    def test_enabled_without_repos_dir_is_silent(self, caplog, tmp_path):
+        config = Config(developer=self._dev(tmp_path, repos_dir=""))
+        assert self._warnings(caplog, config) == []
+
+    def test_enabled_with_repos_dir_but_no_token_is_silent(self, caplog, tmp_path):
+        """A skill that is not wired is not a failure. Without this gate a
+        tokenless developer deployment goes from silent to alerting."""
+        config = Config(developer=self._dev(tmp_path, gitlab_token="", github_token=""))
+        assert self._warnings(caplog, config) == []
+
+    def test_token_with_a_missing_binary_warns_naming_both(self, caplog, tmp_path):
+        config = Config(developer=self._dev(tmp_path))
+        messages = " ".join(self._warnings(caplog, config))
+        assert str(tmp_path / "nowhere" / "gh") in messages
+        assert str(tmp_path / "nowhere" / "glab") in messages
+
+    def test_token_with_present_binaries_does_not_warn_about_them(self, caplog, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        for name in ("gh", "glab"):
+            path = bindir / name
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        config = Config(
+            developer=self._dev(
+                tmp_path,
+                gh_bin_path=str(bindir / "gh"),
+                glab_bin_path=str(bindir / "glab"),
+            )
+        )
+        messages = " ".join(self._warnings(caplog, config))
+        assert "does not exist" not in messages
+        assert "not found" not in messages
+
+    def test_delivers_only_the_three_facts_it_owned(self, caplog, tmp_path):
+        """The registry has grown four other checks. This path runs once per
+        *call* in a skill CLI, so a warning from here repeats for as long as the
+        condition holds; the boot run and the hourly sweep say each one once."""
+        config = Config(developer=self._dev(tmp_path))
+        messages = " ".join(self._warnings(caplog, config))
+        assert "forge_config_drift" not in messages
+        assert "forge_wrapper_shadowing" not in messages
+        assert "forge_versions" not in messages
+        assert "security.skill_proxy:" not in messages
+
+    def test_proxy_off_with_tokens_warns_about_the_posture(self, caplog, tmp_path):
+        from istota.config import SecurityConfig
+
+        config = Config(
+            developer=self._dev(tmp_path),
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+        messages = " ".join(self._warnings(caplog, config))
+        assert "readable by anything else the task runs" in messages
+
+    def test_proxy_off_without_tokens_is_silent_about_the_posture(self, caplog, tmp_path):
+        from istota.config import SecurityConfig
+
+        config = Config(
+            developer=self._dev(tmp_path, gitlab_token="", github_token=""),
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+        messages = " ".join(self._warnings(caplog, config))
+        assert "readable by anything else" not in messages
+
+    def test_unmatched_permit_warns_naming_the_entry(self, caplog, tmp_path):
+        config = Config(developer=self._dev(tmp_path, forge_cli_permit=["gh not-a-real-verb"]))
+        messages = " ".join(self._warnings(caplog, config))
+        assert "not-a-real-verb" in messages
+
+    def test_spawns_no_subprocess(self, caplog, tmp_path, monkeypatch):
+        """The whole reason `run_checks` takes `probe`. Five `--version` spawns
+        per skill-CLI invocation is not a refactor.
+
+        Counted with a spy, not asserted by raising: `_validate_forge_clis`
+        wraps the call in `except Exception` so a raising stub is swallowed into
+        a "forge CLI validation failed" warning and the test passes regardless.
+        That warning is asserted absent for the same reason.
+        """
+        import subprocess
+
+        from istota.config import _validate_forge_clis
+
+        spawns = []
+
+        def _spy(*args, **kwargs):
+            spawns.append(args[0] if args else kwargs.get("args"))
+            raise OSError("no subprocesses in this test")
+
+        monkeypatch.setattr(subprocess, "run", _spy)
+        monkeypatch.setattr(subprocess, "Popen", _spy)
+        monkeypatch.setattr(subprocess, "check_output", _spy)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            _validate_forge_clis(Config(developer=self._dev(tmp_path)))
+        assert spawns == [], f"config load spawned: {spawns}"
+        assert not any(
+            "forge CLI validation failed" in r.getMessage() for r in caplog.records
+        ), "the run raised and was swallowed, so the spawn assertion proved nothing"
+
+    def test_a_resolvable_fallback_no_longer_warns_here(self, caplog, tmp_path):
+        """The one deliberate narrowing against the old behaviour.
+
+        The old code checked the *configured* path directly, so a `config.toml`
+        naming a stale path warned even when resolution fell back successfully —
+        the `30bb7c83` shape. That condition is now reported by
+        `developer.forge_config_drift`, which the boot run and the hourly sweep
+        deliver; this per-call path stays quiet about it.
+        """
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        real = bindir / "gh"
+        real.write_text("#!/bin/sh\nexit 0\n")
+        real.chmod(0o755)
+        monkeypatch_path = str(bindir)
+
+        import os
+
+        from istota.config import _validate_forge_clis
+
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = monkeypatch_path + os.pathsep + old_path
+        try:
+            # gh_bin_path left at the dataclass default, which does not exist;
+            # resolution falls through to the `gh` now on PATH.
+            config = Config(
+                developer=self._dev(tmp_path, gh_bin_path="/usr/local/bin/gh")
+            )
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                _validate_forge_clis(config)
+            messages = " ".join(r.getMessage() for r in caplog.records)
+        finally:
+            os.environ["PATH"] = old_path
+        assert "forge_binaries.gh" not in messages
+        assert "forge_config_drift" not in messages
+
+    def test_never_raises(self, tmp_path):
+        """It is on the config-load path; an exception there is an outage."""
+        from istota.config import _validate_forge_clis
+
+        broken = self._dev(tmp_path)
+        broken.forge_cli_permit = None  # a shape nothing should produce
+        _validate_forge_clis(Config(developer=broken))

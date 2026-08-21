@@ -44,6 +44,38 @@ def cmd_init(args):
     print(f"Database initialized at {config.db_path}")
 
 
+def cmd_doctor(args):
+    """Run the runtime self-check and report.
+
+    The operator-facing half of :mod:`istota.doctor`. Always probes: an operator
+    on a host wants the binaries actually executed, unlike the config-load path
+    that the ``probe`` flag exists for.
+
+    Returns 1 if any check failed, so a script can branch on it. Warnings and
+    skips are not failures — a skill that is not wired is not a broken install.
+    """
+    from . import doctor
+
+    config = load_config(Path(args.config) if args.config else None)
+    results = doctor.run_checks(
+        config,
+        only=tuple(args.only or ()),
+        scope=args.scope or "",
+        deep=bool(args.deep),
+        probe=True,
+    )
+    # The renderers redact configured credential values out of `detail` and
+    # `remedy` before anything is printed. `detail` carries observed paths and
+    # raw exception text, and terminal output is where a pasted credential ends
+    # up in a bug report.
+    secrets = doctor.config_secrets(config)
+    if args.json:
+        print(doctor.render_json(results, secrets=secrets))
+    else:
+        print(doctor.render_text(results, secrets=secrets))
+    return doctor.exit_code(results)
+
+
 def cmd_task(args):
     """Submit a task directly."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1817,6 +1849,31 @@ def main():
     # init
     subparsers.add_parser("init", help="Initialize database")
 
+    # doctor
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Check the runtime this deployment actually has"
+    )
+    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    doctor_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Include checks that spawn a sandbox namespace (slower)",
+    )
+    doctor_parser.add_argument(
+        "--only",
+        action="append",
+        metavar="PREFIX",
+        help="Run only checks whose name starts with PREFIX (repeatable)",
+    )
+    doctor_parser.add_argument(
+        "--scope",
+        choices=["image", "deployment"],
+        help=(
+            "Narrow to facts about the image (answerable by a bare `docker run`) "
+            "or about the deployment (needs a mount, a database, a network)"
+        ),
+    )
+
     # task
     task_parser = subparsers.add_parser("task", help="Submit a task")
     task_parser.add_argument("prompt", nargs="?", help="Task prompt (or read from stdin)")
@@ -2305,6 +2362,7 @@ def main():
 
     commands = {
         "init": cmd_init,
+        "doctor": cmd_doctor,
         "task": cmd_task,
         "run": cmd_run,
         "list": cmd_list,
