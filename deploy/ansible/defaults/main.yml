@@ -1027,6 +1027,15 @@ istota_nodejs_enabled: false
 istota_developer_enabled: false
 istota_developer_repos_dir: ""                    # Base directory for repo clones/worktrees
 istota_developer_author_credit: ""                # Appended to every commit (e.g., "Co-Authored-By: Name <email>")
+# Minimum forge CLI versions the skill's documented verbs need. Asserted after
+# install rather than assumed: below these, a command fails mid-task instead of
+# at deploy time. Debian 13 ships gh 2.46 and glab 1.53, both clear.
+#   gh 2.40  — `pr checks`, `run view --log-failed`
+#   glab 1.36 — `ci trace`
+# Raise these if the skill document starts depending on a newer verb.
+istota_developer_cli_floors:
+  gh: "2.40.0"
+  glab: "1.36.0"
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
 istota_developer_gitlab_token: ""                 # API token (read_api + write_repository scope)
