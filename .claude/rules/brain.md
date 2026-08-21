@@ -196,8 +196,10 @@ Wraps the `claude` CLI subprocess. Owns:
 
 1. **Command construction** — `claude -p - --disallowedTools Agent Workflow
    --dangerously-skip-permissions`, plus optional `--model`, `--effort`,
-   `--system-prompt-file`, and (in streaming mode) `--output-format stream-json
-   --verbose --include-partial-messages`. The last flag makes the CLI emit
+   `--system-prompt-file`, and an `--output-format` that depends on the mode:
+   `stream-json --verbose --include-partial-messages` when streaming,
+   plain `json` otherwise (see §11 — the non-streaming shape is
+   CLI-version-dependent). `--include-partial-messages` makes the CLI emit
    answer / reasoning text token-by-token as `stream_event` frames *before* the
    whole `assistant` block lands — without it the final response would arrive as
    one block and dump all at once on stream surfaces. There is **no
@@ -310,7 +312,40 @@ Wraps the `claude` CLI subprocess. Owns:
     subscription's list-price equivalent must never render as spend. Only the
     final in-brain retry attempt's usage is captured (a documented limitation),
     but a retry that exhausts its attempts still records that attempt rather
-    than nothing.
+    than nothing. Both retry loops carry that attempt's usage onto the results
+    they build themselves (`last_usage`), so an exhausted ladder or a cancel
+    during the backoff still writes a row.
+
+11. **Non-streaming usage capture** — the simple path gets
+    `--output-format json` (no `--verbose`, no partials) and parses its usage
+    out of stdout rather than off a stream, which is what measures the daemon's
+    seven task-less origins. **What that flag emits is CLI-version-dependent
+    and both shapes are live** (ISSUE-271): 2.1.227 emits a JSON *array* of the
+    same frames the streaming path produces, 2.1.238 emits the bare terminal
+    `result` frame as a single object. `_parse_simple_json_output` reads
+    either, wrapping the object as a one-element frame list so the array loop
+    is the only implementation.
+
+    An object counts as the terminal frame **only** when its `type` is
+    `result` — several daemon callers ask the model for a JSON answer, so
+    `{`-leading stdout is not on its own evidence of an envelope. Anything
+    matching neither shape returns `(None, None)` and the caller keeps raw
+    stdout as the answer: that fallback is load-bearing, not defensive, since
+    roughly ninety tests across six files patch `subprocess.run` with
+    plain-text stdout and a CLI ignoring the flag behaves identically. Output
+    that *did* come from the CLI (a known frame `type`, or an envelope-only key
+    like `modelUsage`) but carries no terminal frame logs one WARNING — the
+    silent fallback is why ISSUE-271 survived three weeks, reading as success
+    at every layer above.
+
+    The single-object shape carries no `init` frame, so two fields degrade:
+    `cost_basis` is `unknown` (deliberate — inferring it from config is exactly
+    the guess `cost_basis_from_api_key_source` refuses) and `model_hint` is
+    empty, so `usage.model` comes from `modelUsage`'s dominant child and a
+    costed frame with no children lands model-less. Totals and cost are
+    unaffected; `modelUsage` is present in both shapes. There are no
+    `message_delta` frames on this path either way, so these runs carry totals
+    and NULL context columns.
 
 `_compose_full_result()` does NOT live in the brain — both brains will
 produce `(result_text, execution_trace)` and the executor reconciles them.
