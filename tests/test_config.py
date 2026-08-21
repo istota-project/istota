@@ -1611,6 +1611,44 @@ class TestWorkerConcurrencyConfig:
         assert cfg.scheduler.user_max_foreground_workers == 2
         assert cfg.scheduler.user_max_background_workers == 1
 
+    def test_long_task_slot_defaults(self):
+        cfg = Config()
+        assert cfg.scheduler.long_task_threshold_minutes == 10
+        assert cfg.scheduler.user_max_long_workers == 1
+        assert cfg.scheduler.max_long_workers == 2
+
+    def test_long_task_slot_keys_from_toml(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[scheduler]\n'
+            'long_task_threshold_minutes = 25\n'
+            'user_max_long_workers = 2\n'
+            'max_long_workers = 3\n'
+        )
+        cfg = load_config(p)
+        assert cfg.scheduler.long_task_threshold_minutes == 25
+        assert cfg.scheduler.user_max_long_workers == 2
+        assert cfg.scheduler.max_long_workers == 3
+
+    def test_long_task_slot_keys_are_coerced_to_int(self, tmp_path, monkeypatch):
+        """These reach arithmetic that decides how many worker threads exist.
+        A TOML string would compare against an int rather than raise anywhere
+        a reader would look — the same reason the admission gate's keys are
+        coerced rather than passed through."""
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[scheduler]\n'
+            'long_task_threshold_minutes = "25"\n'
+            'user_max_long_workers = "2"\n'
+            'max_long_workers = "3"\n'
+        )
+        cfg = load_config(p)
+        assert cfg.scheduler.long_task_threshold_minutes == 25
+        assert cfg.scheduler.user_max_long_workers == 2
+        assert cfg.scheduler.max_long_workers == 3
+
     def test_load_config_user_worker_defaults_match_dataclass(self, tmp_path, monkeypatch):
         """load_config() without explicit settings should match Config() defaults."""
         monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))

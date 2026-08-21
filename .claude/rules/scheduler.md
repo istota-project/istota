@@ -252,6 +252,7 @@ class WorkerPool:
     def admission_open(self) -> bool  # pure predicate; what workers consult before claiming
     def _admission_open(self) -> bool # same answer + closed-since clock + cooldown log; dispatch only
     def _admission_decision(self) -> tuple[bool, PressureSample | None]
+    def _retire_surplus_foreground_workers(self, fg_threads, discounts) -> None  # takes back a lapsed long loan
     def _on_worker_exit(self, user_id: str, queue_type: str, slot: int) -> None
     def shutdown(self) -> None         # request_stop + join(10s)
     @property active_count -> int
@@ -262,6 +263,42 @@ class WorkerPool:
 - Background cap: `max_background_workers` (default 3)
 - Per-user caps: `effective_user_max_fg_workers(user_id)` / `effective_user_max_bg_workers(user_id)` (global default via `user_max_foreground_workers`/`user_max_background_workers`, overridable per user)
 - Workers only spawned up to `min(per_user_cap, pending_task_count)` to avoid idle workers
+
+### Long-task slot reclassification (foreground only)
+
+There is a third foreground slot class. A **running** foreground task whose `started_at` is older than `long_task_threshold_minutes` (default 10) stops counting against the user's interactive cap and counts against a separate long allowance. The task is not touched: it keeps running, in place, on the same worker. Nothing is preempted, migrated or killed anywhere in this feature.
+
+Two module-level pure functions carry the rule, so it can be read and tested without a pool around it:
+
+```python
+def plan_foreground_slots(*, threads, discounted, pending, user_fg_cap, user_max_long_workers) -> ForegroundSlotPlan
+def allocate_long_discounts(long_by_user, *, priority, user_cap, instance_cap) -> dict[str, int]
+```
+
+Per tick, `dispatch` adds one grouped query to its existing pre-lock scan — `db.count_long_running_tasks_by_user(conn, "foreground", threshold)` — then allocates discounts once and plans each user's slots from them:
+
+```
+discounted  = allocate_long_discounts(...)[user]      # <= user_max_long_workers, <= max_long_workers instance-wide
+interactive = max(0, threads - discounted)
+may_spawn   = min(user_fg_cap - interactive,
+                  (user_fg_cap + user_max_long_workers) - threads,
+                  claimable_pending)
+slot index drawn from range(user_fg_cap + user_max_long_workers)
+```
+
+- **Reactive, not predictive.** Nothing at enqueue time separates "flex the developer skill on a worktree" from "what time is my meeting" — the task behind the 2026-08-20 head-of-line block arrived as an ordinary chat message. Elapsed time is the only signal that is always right. No completed foreground task crossed ten minutes in the seven days to 2026-08-20, so the default cannot misfire on an ordinary turn.
+- **`max_long_workers` bounds discounts, not long tasks.** A task becomes long while it is already running, so the cap cannot refuse it retroactively; long tasks beyond the cap keep counting as ordinary interactive occupancy. Read the other way it would either require killing work or would let the allowance grow without bound as more tasks aged past the threshold.
+- **Per user additive, instance-wide partitioned.** A user's thread ceiling becomes `user_max_foreground_workers + user_max_long_workers` (2 + 1 = 3), so one person's long job cannot consume their own interactivity. `max_foreground_workers` stays the *hard* ceiling on total foreground threads, with at most `max_long_workers` of them discounted — the box's worst-case memory exposure is the subject of this whole feature and does not grow to buy fairness. The spec's Track C text also said instance-wide interactive spawns should gate on `total_fg_threads - total_discounted < max_foreground_workers`, which would raise the ceiling from 5 to 7; that is the "both additive" option its own rejected-alternatives entry turns down, and the hard ceiling is what shipped.
+- **The instance budget is allocated over every user holding a long task**, not only those with pending work, ordered `fg_users` (longest-waiting) first and the rest sorted. A user with an extra thread and an empty queue never reaches dispatch's loop but still occupies the exposure the budget bounds.
+- **`max(0, threads - discounted)` is required, not defensive.** The counts are read before `_lock` is taken, so a task can complete in between and leave the discount momentarily larger than the thread count.
+- **NULL `started_at` counts as short** (the conservative reading: it keeps the interactive cap tight rather than loose), and pending tasks never count however long they have waited — they hold no worker to discount.
+- **Only a user already at their interactive cap is eligible for a discount.** `dispatch` filters `fg_long` on `threads >= effective_user_max_fg_workers` before allocating. Anyone below the cap spawns on the ordinary cap regardless, so a discount buys them nothing — and charging them the budget is how the user this feature exists for gets refused. `fg_users` is oldest-pending-first and does not correlate with "at cap", so without the filter two users with a free slot each can take the whole budget and leave the genuinely blocked user with `may_spawn = 0`.
+- **The extra thread is a loan, and `_retire_surplus_foreground_workers` takes it back.** `dispatch` only ever adds threads, and a `UserWorker` re-claims on its own without rechecking its slot, so once a long task ended while its user still had backlog the borrowed thread went on serving ordinary interactive work — "2 interactive + 1 long" silently becoming "3 interactive" for as long as the queue stayed non-empty. Each tick, any user whose *interactive* count now exceeds their cap has the highest-index surplus workers asked to stop. `request_stop` is graceful (`UserWorker.run` checks the event at the top of its loop), so a worker mid-task finishes that task and exits — nothing is preempted, the same rule the long task itself is held to. The sweep also retires a worker stranded at an index outside the range by a cap lowered under a live pool, which was a pre-existing gap.
+- **The discount is derived from DB rows, not from live threads.** `count_long_running_tasks_by_user` counts `running` rows, and a stale one — worker died, the liveness reclaim has not run yet, or a second process is draining the queue with no pool at all — spends a user's allowance with no thread behind it, giving that user one extra thread on ordinary interactive work. Clamping the discount to the thread count looks like the fix and is arithmetically inert: it changes `interactive` in no case the existing `max(0, …)` does not already cover, and it cannot tell a ghost row from a real one. The over-grant is bounded instead by the two ceilings that do hold unconditionally — the additive per-user ceiling and the hard `max_foreground_workers`, both counted off `_workers` — and clears itself when the reclaim clears the row.
+- **A follow-up in the *same conversation* is not unblocked, by design.** `fg_pending` comes from `count_claimable_tasks_for_user_queue`, which applies `_CLAIM_CHANNEL_GATE_SQL` on the foreground queue, so a pending task in the same room as a running one counts as 0 and `may_spawn` collapses to 0 with it. Freeing a slot cannot help when nothing may claim it. That gate is deliberate and older than this feature — it is what answers "Still working on a previous request". What the allowance fixes is a long job in one room blocking a question in *another*, which is the case where a slot really was the binding constraint.
+- **Off switch.** Any of `long_task_threshold_minutes`, `user_max_long_workers` or `max_long_workers` at 0 restores the pre-change behaviour exactly, and all three skip the extra query rather than running it and discarding the result. Background dispatch is untouched in every configuration: scheduled work has no head-of-line question to unblock.
+- **The long allowance is global-only.** `user_max_foreground_workers` has a per-user override (`effective_user_max_fg_workers`, backed by `user_profiles.max_foreground_workers`); `user_max_long_workers` has none, so a user with a raised foreground cap gets `their_cap + 1` and still exactly one discount. The mixed scope is deliberate — the allowance exists to unblock a queue, not to scale with a user's cap — but note `allocate_long_discounts` is passed the global for every user, so adding an override later means changing the call site as well as the config.
+- Index: `idx_tasks_queue_started ON tasks(queue, status, started_at, user_id)` is *covering* — the scan is answered without touching the table. It does not order the `GROUP BY`, which still builds a temp b-tree over one row per long task.
 
 ### Memory admission gate
 
@@ -361,6 +398,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `max_foreground_workers` | 5 | Instance-level fg worker cap. `dispatch` walks `get_users_with_pending_*_queue_tasks` and **breaks** here, so the scan order decides who gets a slot when more users have pending work than there are slots — with these defaults three users saturate the five foreground slots, which is ordinary volume, not an attack. Both scans are `ORDER BY MIN(created_at)` (longest-waiting user first) since ISSUE-250; they used to be a bare `SELECT DISTINCT user_id` with no ordering, so a user late in whatever order SQLite returned could get zero workers tick after tick. Oldest-pending-first rather than round-robin because dispatch keeps no scan state between its ~0.5s ticks, and it ages naturally: a user passed over has an older oldest-task next tick |
 | `max_background_workers` | 3 | Instance-level bg worker cap |
 | `user_max_foreground_workers` | 2 | Global per-user fg default |
+| `long_task_threshold_minutes` / `user_max_long_workers` / `max_long_workers` | 10min / 1 / 2 | Elapsed-time slot reclassification — see "Long-task slot reclassification" above. A *running* foreground task older than the threshold stops counting against its user's interactive cap; `user_max_long_workers` is the per-user discount allowance (additive, so the per-user thread ceiling becomes 3) and `max_long_workers` is the instance-wide discount budget (partitioned *inside* `max_foreground_workers`, which stays the hard thread ceiling). Both caps bound *discounts*, never long tasks: a task becomes long while already running, so long tasks beyond the allowance keep counting as interactive occupancy. `0` on the threshold or the per-user allowance restores the pre-change behaviour and skips the extra per-tick query |
 | `user_max_background_workers` | 1 | Global per-user bg default |
 | `task_timeout_minutes` | 30 | Claude Code timeout |
 | `confirmation_timeout_minutes` | 120 | Confirmation expiry |
