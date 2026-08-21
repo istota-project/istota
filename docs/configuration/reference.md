@@ -355,8 +355,8 @@ output = "talk"
 | `author_credit` | `""` | Name credited as author on commits the bot makes |
 | `forge_cli_extra_denied` | `[]` | Extra verbs the `gh` / `glab` wrapper refuses, written as typed (`"gh repo delete"`); no binary name applies to both |
 | `forge_cli_permit` | `[]` | Baseline deny entries to turn off — each one removes a guard |
-| `gh_bin_path` | `"/usr/local/bin/gh"` | Real `gh` the wrapper execs (Ansible renders the installed path) |
-| `glab_bin_path` | `"/usr/local/bin/glab"` | Real `glab` the wrapper execs |
+| `gh_bin_path` | `"/usr/local/bin/gh"` | Real `gh` the wrapper execs. Both deploy shapes render the path they installed to, since neither matches this default: Ansible `/usr/bin/gh` (Debian archive), docker `/usr/local/lib/istota_forge/gh` (off PATH, so the wrapper stays the only `gh` a task can resolve) |
+| `glab_bin_path` | `"/usr/local/bin/glab"` | Real `glab` the wrapper execs, rendered the same way |
 | `devbox_proxy_enabled` | `true` | Keep tokens host-side behind the devbox proxy |
 | `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
 | `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |

@@ -48,6 +48,15 @@ _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
 # renders that path into config.toml.
 _FALLBACK_BIN = {"gh": "/usr/local/bin/gh", "glab": "/usr/local/bin/glab"}
 
+# Where the docker image puts them (`docker/istota/Dockerfile`). Deliberately
+# not a PATH directory, so `shutil.which` below cannot find them and the probe
+# has to name the location. Checked ahead of PATH because it is the binary this
+# image shipped and verified at build time.
+_IMAGE_BIN = {
+    "gh": "/usr/local/lib/istota_forge/gh",
+    "glab": "/usr/local/lib/istota_forge/glab",
+}
+
 
 def _resolve_real_bin(configured: str, name: str) -> str:
     """Absolute path to the real forge binary the wrapper should exec.
@@ -67,12 +76,23 @@ def _resolve_real_bin(configured: str, name: str) -> str:
     pulls code without running Ansible at all. In that window ``gh_bin_path``
     is absent from the file, the dataclass default stands, and every forge
     command would otherwise exec a path that does not exist.
+
+    The docker image has the same gap and cannot close it from its side: the
+    entrypoint writes ``config.toml`` only on a first boot with a fresh volume,
+    so a container upgraded into a version whose image ships the binaries still
+    has a ``[developer]`` block that predates them. ``_IMAGE_BIN`` is probed for
+    that case — an install shape whose binaries are off PATH by design has no
+    other way to be found, and unlike the Ansible one it cannot be repaired by
+    rerunning anything.
     """
     default = _FALLBACK_BIN[name]
     if configured and configured != default:
         return configured
     if os.path.exists(default):
         return default
+    shipped = _IMAGE_BIN[name]
+    if os.path.exists(shipped):
+        return shipped
     return shutil.which(name) or default
 
 

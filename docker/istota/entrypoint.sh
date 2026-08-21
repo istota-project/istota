@@ -649,6 +649,8 @@ github_token = "${ISTOTA_DEVELOPER_GITHUB_TOKEN:-}"
 github_username = "${ISTOTA_DEVELOPER_GITHUB_USERNAME:-}"
 github_default_owner = "${ISTOTA_DEVELOPER_GITHUB_DEFAULT_OWNER:-}"
 github_reviewer = "${ISTOTA_DEVELOPER_GITHUB_REVIEWER:-}"
+gh_bin_path = "${ISTOTA_DEVELOPER_GH_BIN_PATH:-/usr/local/lib/istota_forge/gh}"
+glab_bin_path = "${ISTOTA_DEVELOPER_GLAB_BIN_PATH:-/usr/local/lib/istota_forge/glab}"
 TOML
         if [ -n "${ISTOTA_DEVELOPER_AUTHOR_CREDIT:-}" ]; then
             echo "author_credit = \"${ISTOTA_DEVELOPER_AUTHOR_CREDIT}\"" >> "$CONFIG_FILE"

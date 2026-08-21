@@ -43,6 +43,79 @@ RUN npm install -g @anthropic-ai/claude-code
 # uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# Forge CLIs (developer skill). The skill's forge verbs — MR/PR creation,
+# review, ci/run status, repo view — exec a real `gh` or `glab` through
+# src/istota/forge_cli.py, which the daemon writes per task. Without the
+# binaries every one of them exits 6 at exec, while git clone/branch/push keep
+# working, so the skill looks configured and dies at the point it would publish.
+#
+# Not from apt: this is bookworm, whose gh is 2.23 — below the 2.40 floor the
+# skill's verbs need — and which ships no glab at all. Same reasoning and the
+# same versions as docker/devbox/Dockerfile; a test asserts the two stay in
+# step.
+#
+# Unlike the devbox image — amd64-only regardless, since its Go toolchain is a
+# hardcoded linux-amd64 tarball — this one builds on arm64 too, so the asset is
+# chosen per architecture and each has its own pinned checksum. The arch comes
+# from dpkg rather than BuildKit's TARGETARCH: dpkg's names are already the
+# ones these two projects use for their assets, and it is correct under the
+# legacy builder, where TARGETARCH is simply empty. An architecture with no
+# pinned checksum fails the build rather than going unverified.
+#
+# Under /usr/local/lib rather than /usr/local/bin, and deliberately: the only
+# `gh` resolvable *by name* must be the wrapper, which is what applies the deny
+# policy and injects the token. Note the limit of that — the sandbox binds /usr
+# read-only (`build_bwrap_cmd`), so the real binary is still reachable at its
+# absolute path. What this placement buys is that nothing reaches it by
+# accident or habit; it is not a containment boundary. The boundary is the
+# skill proxy, which keeps the token out of the model's environment entirely,
+# so a direct exec gets an unauthenticated `gh`. With the proxy turned off the
+# token is ambient and a direct exec is unpoliced — the same exposure a host
+# install already has at /usr/bin/gh, which is why this matches rather than
+# worsens the Ansible shape.
+#
+# The daemon cannot find an off-PATH binary by name, so it is named twice:
+# entrypoint.sh renders gh_bin_path / glab_bin_path into the [developer] block
+# on a first boot, and `_resolve_real_bin` probes this location for containers
+# upgraded past a config.toml that predates it.
+#
+# Extracted from the .deb rather than installed with it: dpkg would put a
+# second, real `gh` at /usr/bin/gh, which is the same bypass by another route.
+#
+# The `dpkg-deb | tar` pipeline has no pipefail under Docker's default /bin/sh
+# (dash), so a dpkg-deb that fails partway leaves tar exiting 0 over a
+# truncated stream. The `--version` calls at the end are what actually catch
+# that — a truncated ELF cannot exec — so do not remove them thinking they are
+# decorative.
+ARG GH_VERSION=2.98.0
+ARG GH_DEB_SHA256_AMD64=f65a3fa2fa0eb2e97c445ee3f5e087a40aae03b64847f45a8f13805e504535d6
+ARG GH_DEB_SHA256_ARM64=bbc4ac7964c2a091fd555cd1758d10a7cfcfdc472e405f0b0fb958f05d535cb6
+ARG GLAB_VERSION=1.114.0
+ARG GLAB_DEB_SHA256_AMD64=6df680f88a2a45700d1dd6a08a44a74838473ef3dcc5cb1ad243f4d1fd704ad0
+ARG GLAB_DEB_SHA256_ARM64=c2bcb44cc10d849cccb879e687f3b9e102a3415c3d02f0cecfd9ce1442519350
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) gh_sha="${GH_DEB_SHA256_AMD64}"; glab_sha="${GLAB_DEB_SHA256_AMD64}" ;; \
+        arm64) gh_sha="${GH_DEB_SHA256_ARM64}"; glab_sha="${GLAB_DEB_SHA256_ARM64}" ;; \
+        *) echo "no pinned gh/glab checksum for ${arch}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /usr/local/lib/istota_forge; \
+    curl -fsSL -o /tmp/gh.deb \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.deb"; \
+    echo "${gh_sha}  /tmp/gh.deb" | sha256sum -c -; \
+    dpkg-deb --fsys-tarfile /tmp/gh.deb \
+        | tar -xO ./usr/bin/gh > /usr/local/lib/istota_forge/gh; \
+    curl -fsSL -o /tmp/glab.deb \
+        "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}/glab_${GLAB_VERSION}_linux_${arch}.deb"; \
+    echo "${glab_sha}  /tmp/glab.deb" | sha256sum -c -; \
+    dpkg-deb --fsys-tarfile /tmp/glab.deb \
+        | tar -xO ./usr/bin/glab > /usr/local/lib/istota_forge/glab; \
+    rm -f /tmp/gh.deb /tmp/glab.deb; \
+    chmod 0755 /usr/local/lib/istota_forge/gh /usr/local/lib/istota_forge/glab; \
+    /usr/local/lib/istota_forge/gh --version; \
+    /usr/local/lib/istota_forge/glab --version
+
 # Project files
 WORKDIR /app
 COPY pyproject.toml uv.lock schema.sql README.md ./
