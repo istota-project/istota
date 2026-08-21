@@ -2,6 +2,9 @@
 
 import json
 import sqlite3
+import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -173,6 +176,88 @@ class TestEmbedding:
         result = embed_batch(["hello", "world"])
         assert result is not None
         assert len(result) == 2
+
+
+class TestModelLoadIsSerialized:
+    """ISSUE-273.
+
+    `WorkerPool` workers are threads in the daemon, so several tasks can finish
+    memory-indexing in the same second. With no lock they all saw `_model is
+    None`, all built a `SentenceTransformer`, and the last assignment won — the
+    journal showed three `BertModel LOAD REPORT` blocks within two seconds, and
+    80 MB resident against 34 MB for a single load, 46 MB of which survived gc
+    and `malloc_trim`. The orphaned copies are unreachable, so nothing ever
+    frees them.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_singleton(self):
+        from istota.memory import search as search_mod
+
+        before = search_mod._model
+        search_mod._model = None
+        yield search_mod
+        search_mod._model = None if before is None else before
+
+    def _fake_sentence_transformers(self, loads):
+        """A stand-in module whose constructor is slow enough to overlap.
+
+        Injected rather than patched so the test never imports torch — the
+        280 MB the real import costs is the thing under discussion.
+        """
+        import types
+
+        module = types.ModuleType("sentence_transformers")
+
+        class SentenceTransformer:
+            def __init__(self, name):
+                loads.append(name)
+                # Every thread arrives here only if the lock let it through.
+                # Waiting widens the window a second caller would need.
+                time.sleep(0.05)
+                self.name = name
+
+        module.SentenceTransformer = SentenceTransformer
+        return module
+
+    def test_concurrent_callers_construct_the_model_once(self, _reset_singleton):
+        search_mod = _reset_singleton
+        loads = []
+        fake = self._fake_sentence_transformers(loads)
+
+        start = threading.Barrier(8)
+        results = []
+
+        def worker():
+            start.wait(timeout=10)
+            results.append(search_mod._get_model())
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake}):
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+        assert loads == ["all-MiniLM-L6-v2"], f"model built {len(loads)} times"
+        assert len(results) == 8
+        assert all(r is results[0] for r in results), "callers got different model objects"
+
+    def test_a_failed_load_does_not_wedge_later_callers(self, _reset_singleton):
+        """The lock must not turn a transient import failure into a permanent
+        one — `_get_model` has always retried, and it still does."""
+        search_mod = _reset_singleton
+
+        broken = MagicMock()
+        broken.SentenceTransformer.side_effect = RuntimeError("no weights")
+        with patch.dict(sys.modules, {"sentence_transformers": broken}):
+            assert search_mod._get_model() is None
+
+        loads = []
+        fake = self._fake_sentence_transformers(loads)
+        with patch.dict(sys.modules, {"sentence_transformers": fake}):
+            assert search_mod._get_model() is not None
+        assert loads == ["all-MiniLM-L6-v2"]
 
 
 class TestInsertAndSearch:
