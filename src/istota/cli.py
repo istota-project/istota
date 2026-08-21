@@ -36,6 +36,21 @@ from .tasks_file_poller import (
 )
 
 
+def _installed_version() -> str:
+    """The installed distribution's version, or a placeholder.
+
+    `importlib.metadata.version` raises `PackageNotFoundError` when istota is
+    importable but not installed — running straight off a source tree on
+    `PYTHONPATH`, which is what `scripts/test-linux.sh` does. That raise
+    happened while *building the parser*, so it took down every command rather
+    than only `--version`.
+    """
+    try:
+        return importlib.metadata.version("istota")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown (not installed)"
+
+
 def cmd_init(args):
     """Initialize the database."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1841,8 +1856,7 @@ def main():
     parser.add_argument("-c", "--config", help="Path to config file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose (DEBUG) logging")
     parser.add_argument(
-        "--version", action="version",
-        version=f"istota {importlib.metadata.version('istota')}",
+        "--version", action="version", version=f"istota {_installed_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

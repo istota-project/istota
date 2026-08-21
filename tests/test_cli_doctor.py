@@ -211,3 +211,21 @@ class TestParser:
         args = self._parse(["doctor", "--json", "--deep"], monkeypatch)
         assert args.json is True
         assert args.deep is True
+
+    def test_the_parser_builds_without_installed_package_metadata(self, monkeypatch):
+        """`--version` is built while the parser is, so its failure took everything.
+
+        `importlib.metadata.version` raises when istota is importable but not
+        installed — running off a source tree on PYTHONPATH, which is what
+        `scripts/test-linux.sh` does. That raise happened during
+        `add_argument`, so no subcommand could parse at all, not even `--help`.
+        """
+        import importlib.metadata
+
+        def _absent(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "version", _absent)
+
+        assert cli._installed_version() == "unknown (not installed)"
+        assert self._parse(["doctor"], monkeypatch).command == "doctor"
