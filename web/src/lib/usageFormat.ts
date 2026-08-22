@@ -10,7 +10,7 @@
  * The CLI applies the same rule in `cli._render_cost`. The two are deliberately
  * separate implementations of one stated rule rather than a shared artifact —
  * they render into different media — but they must not disagree about *when* a
- * dollar sign appears.
+ * dollar sign appears, or about what follows it.
  */
 
 import type { AdminStatsUser } from '$lib/api';
@@ -24,25 +24,24 @@ export function formatNumber(n: number): string {
 /**
  * One rule: no currency unless it is money.
  *
- * A group spanning bases is marked, never summed: an operator switching the
- * CLI's auth mid-window has rows of both kinds, and adding a plan-equivalent to
- * real spend is the misread this design refuses. That `+` marker is keyed on
- * which bases are *present*, not on their magnitude — a catalog estimate is
- * routinely 0.0, and dropping it on magnitude would let a partial dollar figure
- * read as the whole of a group's spend.
+ * A group spanning bases shows its `api` total and nothing else. Nothing is
+ * summed across bases — an operator switching the CLI's auth mid-window has
+ * rows of both kinds, and adding a plan-equivalent to real spend is the misread
+ * this design refuses.
  *
- * With no `api` rows there is nothing to qualify, so the placeholder stands on
- * its own: naming the bases behind it made a column of dashes noisier without
- * changing what it says, which is that no money was spent here.
+ * The other bases are not named. A `+estimated+subscription+unknown` suffix
+ * used to follow the figure, and it was wrong on two counts: it overflowed a
+ * fixed-width column into the one beside it, and it asked the reader to act on
+ * a distinction they have no way to act on. What a cost column is for is the
+ * money; the rest of the breakdown is still on the wire in `cost_by_basis` for
+ * anything that wants it.
+ *
+ * With no `api` rows at all there is no money to report, so the placeholder
+ * stands alone — which on a subscription deployment is most of the time.
  */
 export function formatCost(byBasis: Record<string, number> | undefined): string {
-  const bases = byBasis ?? {};
-  const real = bases['api'];
-  const other = Object.keys(bases)
-    .filter((b) => b !== 'api')
-    .sort();
-  if (real !== undefined && other.length === 0) return `$${formatMoney(real)}`;
-  if (real !== undefined) return `$${formatMoney(real)} +${other.join('+')}`;
+  const real = (byBasis ?? {})['api'];
+  if (real !== undefined) return `$${formatMoney(real)}`;
   return COST_PLACEHOLDER;
 }
 

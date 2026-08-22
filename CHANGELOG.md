@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The cost column now shows the money and nothing else. It used to trail the figure with the names of the other bases it had rows for — `$0.18 +subscription+unknown` — which overflowed the column into the one beside it, and named a distinction there is nothing to do about. The full breakdown is still in `istota usage --json` and the dashboard's own payload.
+
+- The bot's own model calls are no longer filed under an unknown cost basis. The nightly memory pass, the code reviewer and shared briefing blocks each ask the command-line tool for its result in a structured form, and newer versions of it answer without the section naming which credential was used — so those calls were recorded as uncategorized spend while the tasks beside them, on the same credential, were recorded correctly. They are now asked for the fuller form that carries it.
+
 - Ordinary command-line tools are no longer missing from inside a task. Debian installs `awk`, `cc`, `vi`, `editor`, `pager`, `which` and `nc` as links into a system directory the sandbox did not carry across, so each of them failed with "No such file or directory" for a program that plainly exists on the machine — and only when the sandbox was on, which made it read as the command being wrong rather than the sandbox being incomplete. Anything reaching for one of them broke the same way: the assistant's own shell commands, and any script in a repository it was working on.
 
 - A self-hosted GitLab reached over plain `http://` now works, including on a non-standard port or a sub-path. The GitLab CLI ignores the scheme in the address it is given and always tries HTTPS, so every forge command against such a server died on the TLS handshake with an error naming a protocol nobody had configured. The bot now tells the CLI which protocol to use for that address. `istota doctor` warns while this is in effect, because a forge token then crosses the network in the clear — treat an HTTPS address as the default and plain HTTP as something you chose.
