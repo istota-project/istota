@@ -1,6 +1,9 @@
 """Tests for the devbox skill CLI."""
 
+import argparse
 import json
+import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -499,4 +502,184 @@ class TestExcludeSkills:
         assert meta is not None
         assert "devbox" not in meta.exclude_skills, (
             f"{skill} must NOT exclude devbox — the proxy is the boundary now"
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-284: the shipped body and the CLI have to agree, and the executor must
+# not export a name nothing reads.
+
+_REPO = Path(__file__).resolve().parents[1]
+_SKILL_DIR = _REPO / "src" / "istota" / "skills" / "devbox"
+_EXECUTOR = _REPO / "src" / "istota" / "executor.py"
+
+# Both forms a name can be read back in. A plain substring search over the CLI
+# source would be satisfied by a mention in a docstring, and the module
+# docstring already names env vars in prose.
+_READ_FORM = re.compile(
+    r"""(?:environ\.get|getenv)\(\s*['"](ISTOTA_DEVBOX_[A-Z_]+)['"]"""
+    r"""|environ\[\s*['"](ISTOTA_DEVBOX_[A-Z_]+)['"]\s*\]"""
+)
+
+
+def _documented_argv() -> list[tuple[int, list[str]]]:
+    """Every `istota-skill devbox …` line in the shipped body, as argv.
+
+    The body is what the model reads and copies verbatim, so each line is
+    parsed rather than restated here — a body edited back to a form the CLI
+    refuses fails this instead of quietly passing against a copy.
+    """
+    out = []
+    body = (_SKILL_DIR / "skill.md").read_text()
+    for i, line in enumerate(body.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped.startswith("istota-skill devbox "):
+            continue
+        tokens = shlex.split(stripped, comments=True)
+        out.append((i, tokens[2:]))
+    return out
+
+
+def _subparser_for(verb: str) -> argparse.ArgumentParser:
+    """The subparser `verb` dispatches to, so a test can read its flags."""
+    for action in devbox.build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices[verb]
+    raise AssertionError("devbox parser declares no subcommands")
+
+
+class TestDocumentedCommandsMatchTheCLI:
+    """ISSUE-284: `skill.md` listed `reset` with no `--yes`, which the CLI
+    refuses. The model read the doc, ran the documented form, got an error and
+    retried."""
+
+    def test_the_scraper_finds_every_documented_line(self):
+        """A parity test that silently matched nothing is the failure mode this
+        class exists to prevent, so count the lines a second, independent way
+        and require the two to agree."""
+        body = (_SKILL_DIR / "skill.md").read_text()
+        expected = sum(
+            1 for line in body.splitlines()
+            if line.strip().startswith("istota-skill devbox ")
+        )
+        assert expected >= 5, "skill.md documents almost nothing — body gutted?"
+        assert len(_documented_argv()) == expected
+
+    def test_every_documented_verb_parses(self):
+        """Catches a documented verb the CLI does not have, and wrong
+        positional arity. It does *not* catch ISSUE-284 itself — see
+        `test_documented_forms_carry_their_confirmation_flags`."""
+        parser = devbox.build_parser()
+        for lineno, argv in _documented_argv():
+            assert argv, f"skill.md:{lineno} names no verb"
+            assert argv[0] in devbox._DISPATCH, (
+                f"skill.md:{lineno} documents verb {argv[0]!r}, which the CLI "
+                f"does not dispatch (has: {sorted(devbox._DISPATCH)})"
+            )
+            try:
+                parser.parse_args(argv)
+            except SystemExit as exc:  # argparse exits rather than raising
+                raise AssertionError(
+                    f"skill.md:{lineno} does not parse: istota-skill devbox "
+                    f"{' '.join(argv)}"
+                ) from exc
+
+    def test_documented_forms_carry_their_confirmation_flags(self):
+        """The reported bug class, for every verb rather than just `reset`.
+
+        A confirmation flag is `store_true` and so optional as far as argparse
+        is concerned: the documented form parses cleanly and is then refused at
+        runtime. Parsing alone would not have caught ISSUE-284, and would not
+        catch the same drift if `cp-out` grew a gate tomorrow.
+        """
+        checked = 0
+        for lineno, argv in _documented_argv():
+            sub = _subparser_for(argv[0])
+            for action in sub._actions:
+                if action.const is not True or not action.option_strings:
+                    continue
+                if "required" not in (action.help or "").lower():
+                    continue
+                checked += 1
+                assert any(opt in argv for opt in action.option_strings), (
+                    f"skill.md:{lineno} documents `istota-skill devbox "
+                    f"{' '.join(argv)}`, but {argv[0]} refuses without "
+                    f"{action.option_strings[0]} — the documented form cannot run"
+                )
+        assert checked, (
+            "no documented verb has a confirmation flag; this test found "
+            "nothing to check and would pass against anything"
+        )
+
+    def test_documented_reset_actually_runs(self, monkeypatch):
+        """End to end through the real `cmd_reset`, with docker stubbed: the
+        documented argv reaches the wipe rather than the refusal."""
+        resets = [argv for _, argv in _documented_argv() if argv[0] == "reset"]
+        assert resets, "skill.md no longer documents reset"
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),   # mountpoint -q /home/dev
+            (0, b"", b""),   # find … -exec rm -rf
+            (0, b"", b""),   # restart
+        ]))
+        args = devbox.build_parser().parse_args(resets[0])
+        result = devbox.cmd_reset(args)
+        assert result["status"] == "ok", (
+            f"the documented reset form was refused: {result.get('error')}"
+        )
+
+    def test_reset_description_does_not_promise_image_recreation(self):
+        """`reset` wipes /home/dev and restarts the container. It recreates
+        nothing from the base image, and the old wording said it did."""
+        body = (_SKILL_DIR / "skill.md").read_text()
+        for line in body.splitlines():
+            if "devbox reset" not in line:
+                continue
+            assert "base image" not in line, (
+                f"reset does not recreate from the base image: {line.strip()!r}"
+            )
+
+
+class TestExecutorExportsNothingTheCLIIgnores:
+    """ISSUE-284: `ISTOTA_DEVBOX_DOCKER_SOCKET` was written into the model's
+    own environment and read by nothing. The name is the path of the *real*
+    root-equivalent socket, and `build_bwrap_cmd` uses the same config field as
+    the in-sandbox mount point for the allowlist proxy — one field, two
+    meanings. A name in the model's environment invites a later reader to treat
+    it as "the socket you may use"."""
+
+    def _exported(self) -> set[str]:
+        """Both routes a var can take into the task env: the imperative block
+        in `execute_task`, and the manifest `env:` block — which is the
+        sanctioned route per `.claude/rules/skills.md`, and so the likelier way
+        this comes back."""
+        from istota.skills._loader import load_skill_index
+        imperative = set(re.findall(
+            r"""env\[\s*['"](ISTOTA_DEVBOX_[A-Z_]+)['"]\s*\]\s*=""",
+            _EXECUTOR.read_text(),
+        ))
+        meta = load_skill_index(Path("config/skills")).get("devbox")
+        declared = {
+            spec.var for spec in (getattr(meta, "env_specs", None) or [])
+            if spec.var and spec.var.startswith("ISTOTA_DEVBOX_")
+        }
+        return imperative | declared
+
+    def _read_by_cli(self) -> set[str]:
+        source = (_SKILL_DIR / "__init__.py").read_text()
+        return {name for pair in _READ_FORM.findall(source) for name in pair if name}
+
+    def test_the_scans_find_something(self):
+        assert self._exported(), "found no devbox env exports — regex stale?"
+        assert self._read_by_cli(), "found no devbox env reads — regex stale?"
+
+    def test_every_exported_devbox_var_has_a_reader(self):
+        unread = sorted(self._exported() - self._read_by_cli())
+        assert not unread, (
+            f"{unread} reach the sandboxed task environment and the devbox "
+            f"skill CLI reads none of these. Give each a reader, drop it, or "
+            f"— if the reader legitimately lives elsewhere (docker/devbox/lib, "
+            f"a setup_env hook, another skill CLI) — widen this search and say "
+            f"where it went."
         )

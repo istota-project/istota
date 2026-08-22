@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resetting the dev container no longer costs the assistant a failed attempt first. Its own reference listed the command without the confirmation flag the command requires, so the documented form was refused and had to be retried; the reference now shows the form that runs, and says accurately what it does — it wipes the container's home directory and restarts it, rather than rebuilding it from the base image.
+
 - A self-hosted GitLab reached over plain `http://` now works, including on a non-standard port or a sub-path. The GitLab CLI ignores the scheme in the address it is given and always tries HTTPS, so every forge command against such a server died on the TLS handshake with an error naming a protocol nobody had configured. The bot now tells the CLI which protocol to use for that address. `istota doctor` warns while this is in effect, because a forge token then crosses the network in the clear — treat an HTTPS address as the default and plain HTTP as something you chose.
 
 - `istota doctor` now warns when a forge address has a username and password written into it. That is not where a credential belongs — put the token in the `gitlab_token` or `github_token` setting instead, and rotate it, because an address ends up in logs, in git remotes and in process listings. A plain-HTTP address written that way also cannot connect at all: the fix above is deliberately not applied to it, since applying it would mean writing the password into a file the assistant itself can read.

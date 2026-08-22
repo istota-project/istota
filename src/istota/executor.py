@@ -3948,12 +3948,19 @@ def execute_task(
 
         # Devbox: the agent's persistent dev container. Skill CLI shells
         # into ``devbox-<user_id>`` via the host docker socket.
+        #
+        # ``config.devbox.docker_socket`` is deliberately not exported here
+        # (ISSUE-284). Nothing read it — the CLI invokes ``docker`` and lets
+        # the client resolve its own socket — and the field carries two
+        # meanings: the real root-equivalent socket ``docker_proxy`` connects
+        # to upstream, and the in-sandbox mount point ``build_bwrap_cmd`` binds
+        # the allowlist proxy at. Putting that name in the model's own
+        # environment invites a later reader to treat it as a socket it may use.
         if config.devbox.enabled:
             env["ISTOTA_DEVBOX_CONTAINER"] = (
                 f"{config.devbox.container_prefix}{task.user_id}"
             )
             env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
-            env["ISTOTA_DEVBOX_DOCKER_SOCKET"] = config.devbox.docker_socket
             env["ISTOTA_DEVBOX_EXEC_TIMEOUT"] = str(
                 config.devbox.exec_timeout_seconds
             )

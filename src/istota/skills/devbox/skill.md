@@ -35,8 +35,8 @@ istota-skill devbox cp-in  /local/file.csv     /workspace/file.csv
 istota-skill devbox cp-out /workspace/out.json /local/out.json
 
 # State + maintenance
-istota-skill devbox status       # running? uptime? disk? image?
-istota-skill devbox reset        # wipe volume, recreate from base image (destructive)
+istota-skill devbox status         # running? uptime? disk? image?
+istota-skill devbox reset --yes    # wipe /home/dev, restart the container (destructive)
 ```
 
 ## What works inside the devbox
