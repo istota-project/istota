@@ -198,8 +198,9 @@ Wraps the `claude` CLI subprocess. Owns:
    --dangerously-skip-permissions`, plus optional `--model`, `--effort`,
    `--system-prompt-file`, and an `--output-format` that depends on the mode:
    `stream-json --verbose --include-partial-messages` when streaming,
-   plain `json` otherwise (see §11 — the non-streaming shape is
-   CLI-version-dependent). `--include-partial-messages` makes the CLI emit
+   `json --verbose` otherwise (see §11 — `--verbose` is what makes the
+   non-streaming shape predictable across CLI versions, and with it the
+   `init` frame that carries `apiKeySource`). `--include-partial-messages` makes the CLI emit
    answer / reasoning text token-by-token as `stream_event` frames *before* the
    whole `assistant` block lands — without it the final response would arrive as
    one block and dump all at once on stream surfaces. There is **no
@@ -317,14 +318,23 @@ Wraps the `claude` CLI subprocess. Owns:
     during the backoff still writes a row.
 
 11. **Non-streaming usage capture** — the simple path gets
-    `--output-format json` (no `--verbose`, no partials) and parses its usage
+    `--output-format json --verbose` (no partials) and parses its usage
     out of stdout rather than off a stream, which is what measures the daemon's
-    eight task-less origins. **What that flag emits is CLI-version-dependent
-    and both shapes are live** (ISSUE-271): 2.1.227 emits a JSON *array* of the
-    same frames the streaming path produces, 2.1.238 emits the bare terminal
-    `result` frame as a single object. `_parse_simple_json_output` reads
-    either, wrapping the object as a one-element frame list so the array loop
-    is the only implementation.
+    eight task-less origins. **What `json` emits on its own is
+    CLI-version-dependent and both shapes are live** (ISSUE-271): 2.1.227 emits
+    a JSON *array* of the same frames the streaming path produces, 2.1.238
+    emits the bare terminal `result` frame as a single object.
+    `_parse_simple_json_output` reads either, wrapping the object as a
+    one-element frame list so the array loop is the only implementation.
+
+    `--verbose` is what makes the shape predictable: measured against both
+    deployed versions, 2.1.227 and 2.1.239 each emit the array *with* the
+    `system`/`init` frame when it is passed. Without it the newer CLI drops
+    that frame, and the `cost_basis` degradation below stopped being a rare
+    fallback and became every row this path wrote — `sleep_cycle`,
+    `code_review` and `shared_blocks` all landing on `unknown` while carrying
+    real reported cost, split off from the identically-credentialled `task`
+    rows for no reason visible to a reader of the dashboard.
 
     An object counts as the terminal frame **only** when its `type` is
     `result` — several daemon callers ask the model for a JSON answer, so
@@ -338,9 +348,11 @@ Wraps the `claude` CLI subprocess. Owns:
     silent fallback is why ISSUE-271 survived three weeks, reading as success
     at every layer above.
 
-    The single-object shape carries no `init` frame, so two fields degrade:
-    `cost_basis` is `unknown` (deliberate — inferring it from config is exactly
-    the guess `cost_basis_from_api_key_source` refuses) and `model_hint` is
+    The single-object shape carries no `init` frame, so two fields degrade —
+    reachable now only on a CLI that ignores `--verbose`, not in a current
+    deployment. `cost_basis` is `unknown` (deliberate — inferring it from
+    config is exactly the guess `cost_basis_from_api_key_source` refuses) and
+    `model_hint` is
     empty, so `usage.model` comes from `modelUsage`'s dominant child and a
     costed frame with no children lands model-less. Totals and cost are
     unaffected; `modelUsage` is present in both shapes. There are no

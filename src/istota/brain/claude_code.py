@@ -193,11 +193,18 @@ def _parse_simple_json_output(stdout: str):
 
     Non-streaming output carries no `message_delta` frames, so these runs get
     totals and NULL context columns. The single-object shape additionally
-    carries no `system` init frame, which costs two fields sniffed off it.
-    `cost_basis` lands on `unknown`, deliberately: totals and cost come from
-    `modelUsage`, which is present either way, and inferring the basis from
-    config would be exactly the guess `cost_basis_from_api_key_source` refuses
-    to make — labelling a subscription's list-price equivalent as real spend.
+    carries no `system` init frame, which costs two fields sniffed off it, and
+    `cost_basis` then lands on `unknown` — deliberately, since totals and cost
+    come from `modelUsage`, which is present either way, and inferring the
+    basis from config would be exactly the guess
+    `cost_basis_from_api_key_source` refuses to make.
+
+    `_build_command` now passes `--verbose`, which makes both deployed CLI
+    versions emit the array shape with the init frame, so the single-object
+    branch should no longer be reached in production. It stays because it costs
+    nothing and the flag's effect is the CLI's behaviour rather than ours: a
+    version that ignores `--verbose` degrades to an honest `unknown` instead of
+    losing the answer.
     `model_hint` is likewise empty, so `usage.model` falls to whichever model
     `modelUsage` says carried the cost; a costed frame with no `modelUsage`
     children lands model-less rather than mislabelled. A blank `model` on one
@@ -1129,7 +1136,19 @@ class ClaudeCodeBrain:
             # `_parse_simple_json_output` reads either. There are no
             # `message_delta` frames on this path, so these runs carry totals
             # and NULL context.
-            cmd += ["--output-format", "json"]
+            #
+            # `--verbose` is what pins that version-dependence down: with it,
+            # both 2.1.227 and 2.1.239 emit the frame array including the
+            # `system`/`init` frame. Without it the newer CLI drops that frame,
+            # and with it goes `apiKeySource` — so every call on this path
+            # recorded `cost_basis = "unknown"` while carrying real reported
+            # cost. On a subscription deployment that split the daemon's own
+            # spend off from the identically-credentialled task rows for no
+            # reason a reader could see. The flag asks the CLI to report the
+            # credential it used; the alternative was inferring one from
+            # config, which is the guess `cost_basis_from_api_key_source`
+            # exists to refuse.
+            cmd += ["--output-format", "json", "--verbose"]
         return cmd
 
     # --- non-streaming path ---
