@@ -1269,6 +1269,17 @@ def _gather_admin_stats() -> dict:
     payload["runtime"] = _admin_runtime_section()
     payload["models"] = _admin_models_section()
     payload["brain_status"] = _admin_brain_status_section()
+    # Best-effort like every other section, and with more reason than most: this
+    # one can make a network request. A failure is an error string in the
+    # payload, not a 500 on the whole dashboard. It is legal here at all only
+    # because the endpoint dispatches `_gather_admin_stats` through
+    # `asyncio.to_thread` — a blocking fetch on the event loop would stall every
+    # other request in the process.
+    try:
+        payload["subscription"] = _admin_subscription_section(_config, now)
+    except Exception as exc:  # noqa: BLE001 — never fail the stats payload
+        logger.exception("admin subscription section failed")
+        payload["subscription"] = {"error": str(exc)}
     return payload
 
 
@@ -1326,6 +1337,103 @@ def _admin_brain_status_section() -> dict:
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin brain status section failed")
         return {"error": str(exc)}
+
+
+def _admin_subscription_section(config, now: datetime) -> dict:
+    """Claude Code plan utilization for the admin dashboard.
+
+    On a subscription deployment the Token usage card's cost column is
+    deliberately blank — a plan-equivalent list price is not spend — so these
+    rate-limit windows are the only budget there is, and the deployment
+    otherwise learns it is out of plan headroom at the moment a task fails over.
+
+    Everything here comes from ``subscription_usage.get_snapshot``, which holds
+    the credential resolution, the fetch, the parse and the deployment-wide disk
+    cache. This function renders; it knows nothing about the endpoint's shape.
+    The doctor check reads the same snapshot, and the two agree on both words
+    that matter: *available* means there are windows to draw, and *stale* means
+    the numbers are real but came from an earlier fetch than the one that just
+    failed.
+
+    ``available: false`` is a rendering state, not an absence — it always
+    carries an ``error``, so the card can say why instead of vanishing. Disabled,
+    no credential, a refused credential and a shape change all land here, and an
+    operator who expects the reading and does not get it has to learn the
+    reason.
+
+    ``token_source`` is the resolver's branch name (``env`` / ``file`` /
+    ``keychain``) and never the token. Nothing downstream would catch a leak:
+    this credential is not in the config, so the redaction pass that covers
+    configured secrets has never seen it.
+    """
+    from . import subscription_usage
+
+    # The payload's own clock, not a fresh reading of the wall clock: the
+    # countdowns and the cache age have to be measured against the same moment
+    # as every other timestamp on this dashboard.
+    snapshot = subscription_usage.get_snapshot(config, now_ts=now.timestamp())
+
+    # Windows *and* an error is the stale-cache branch and the only way to be
+    # stale — an old real reading, plus the failure that made it old. Doctor
+    # renders the same pair off the same condition.
+    stale = bool(snapshot.error) and snapshot.has_data
+    return {
+        "available": snapshot.has_data,
+        "windows": [
+            {
+                "key": window.key,
+                "label": window.label,
+                "percent": window.percent,
+                "resets_at": _iso_utc(window.resets_at),
+                "resets_in_seconds": window.resets_in_seconds,
+                "severity": window.severity,
+                "is_active": window.is_active,
+            }
+            for window in snapshot.windows
+        ],
+        "spend": _admin_subscription_spend(snapshot.spend),
+        "fetched_at": _iso_utc_from_epoch(snapshot.fetched_at),
+        "stale": stale,
+        "token_source": snapshot.token_source,
+        "error": snapshot.error,
+    }
+
+
+def _admin_subscription_spend(spend) -> dict | None:
+    """Pay-as-you-go credits, or ``None`` when the payload carried none.
+
+    This is real money the account has committed, reported in minor units with
+    an explicit currency — not a token count priced at list — so it does not
+    contradict the rule that keeps a dollar figure off the Token usage card on a
+    subscription deployment.
+    """
+    if spend is None:
+        return None
+    return {
+        "enabled": spend.enabled,
+        "used_minor": spend.used_minor,
+        "limit_minor": spend.limit_minor,
+        "currency": spend.currency,
+        "exponent": spend.exponent,
+        "percent": spend.percent,
+    }
+
+
+def _iso_utc_from_epoch(ts: float) -> str | None:
+    """Epoch seconds as ISO 8601 UTC, or ``None`` when there is no such moment.
+
+    A snapshot carrying no data has ``fetched_at = 0.0``, and rendering that as
+    1970 would put a timestamp on a card that has nothing to timestamp. The
+    guard is wider than that one case on purpose: this number comes back out of
+    a JSON file on disk, and ``fromtimestamp`` raises on a NaN, an infinity and
+    anything past the year 9999.
+    """
+    try:
+        if not ts or ts <= 0:
+            return None
+        return _iso_utc(datetime.fromtimestamp(ts, tz=timezone.utc).isoformat())
+    except (OverflowError, OSError, ValueError, TypeError):
+        return None
 
 
 def _admin_models_section() -> dict:
