@@ -731,6 +731,21 @@ class TestTheCloneEnablesTheRepositorysOwnHooks:
 
         assert _git(tree, "config", "--get", "core.hooksPath").strip() == ".githooks"
 
+    def test_an_existing_clone_gets_it_on_a_later_pass(self, bare_clone):
+        """`docs/development/secret-scanning.md` tells the reader that a clone
+        predating this step repairs itself rather than needing the config
+        applied by hand. That holds only because the line sits outside the
+        `if [ ! -d "$BARE_DIR" ]` guard, which the fragment test above cannot
+        see — so run the whole block against a directory that already exists."""
+        assert subprocess.run(
+            ["git", "-C", str(bare_clone), "config", "--get", "core.hooksPath"],
+            capture_output=True,
+        ).returncode != 0, "precondition: the fixture clone has no hooksPath set"
+
+        _run_fragment(_extract('FRESH=""', "config core.hooksPath"), bare_clone)
+
+        assert _git(bare_clone, "config", "--get", "core.hooksPath").strip() == ".githooks"
+
 
 class TestBareCloneRecipe:
     """Two shell defects that shipped in the body and that no test could see,
