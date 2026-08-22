@@ -8,7 +8,7 @@ this file closes, and it closes it with the smallest thing that spans it: submit
 a task through the shipped CLI, let the real scheduler pick it up, and read the
 row back.
 
-The model is scripted (`tests/support/model_endpoint.py`), so no credential and
+The model is scripted (`testbed/services/model_endpoint.py`), so no credential and
 no network are involved. Its wire format is pinned separately in
 `tests/test_model_endpoint.py`, which runs in the default suite.
 

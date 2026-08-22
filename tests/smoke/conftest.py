@@ -9,35 +9,39 @@ slowly:
   image ships, so the container never enters the provisioning branch and its
   120-second Nextcloud polling loop;
 - the model is a scripted HTTP endpoint in the pytest process, reached through
-  `base_url`, so no credential and no network are involved;
+  `[brain.native] base_url`, so no credential and no network are involved;
 - the stack is one service.
+
+The machinery underneath lives in `testbed/` — `Stack`, the `Service` protocol,
+the compose helpers, the probe. What stays here is the part that is specific to
+the *lean shape*: which compose file, which image tag, and running the render
+script on the host.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import re
 import subprocess
-import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from ..support import compose as compose_support
-from ..support.model_endpoint import serve_script
-from ..support.probe import Probe
-from . import fake_gitlab
+from testbed import stack as stack_support
+from testbed.profiles import BASE, FORGE, NO_FORGE, Profile
+from testbed.services import Service, gitlab
+from testbed.services.model_endpoint import serve_script
+from testbed.stack import Stack
 
 # Imported rather than re-derived. `--platform amd64` is a rootdir-level option
-# (tests/conftest.py) that both Docker tiers honour, and the normalization —
-# a bare `amd64` becoming `linux/amd64` — is the part that is easy to get
-# subtly wrong. A second copy here would drift, and the symptom of drift is a
-# native build wearing an amd64 label.
+# that both Docker tiers honour, and the normalization — a bare `amd64`
+# becoming `linux/amd64` — is the part that is easy to get subtly wrong. A
+# second copy here would drift, and the symptom of drift is a native build
+# wearing an amd64 label.
+from ..conftest import resolve_platform
 from ..image import conftest as image_support
-from ..image.conftest import resolve_platform
 
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
@@ -55,13 +59,12 @@ _XDIST_MESSAGE = (
 # session-start sweep able to find leftovers without touching anything else.
 PROJECT_PREFIX = "istota-smoke-"
 
-# The non-terminal task statuses, from AGENTS.md's "Task Status" ladder
-# (pending -> locked -> running -> completed / failed / pending_confirmation /
-# cancelled). A task in one of these may still call the model.
-# `pending_confirmation` is deliberately absent: it is suspended waiting for a
-# human and will not move on its own, so treating it as in-flight would make
-# `script` wait out its whole timeout.
-_IN_FLIGHT = frozenset({"pending", "locked", "running"})
+# The credential the endpoint is bound with. It authenticates nothing — the
+# daemon sends whatever `docker-compose.test.yml` hardcodes as
+# `ISTOTA_BRAIN_NATIVE_API_KEY`, and this endpoint answers regardless — but
+# `HttpStub.start` requires one for a non-loopback bind, so that the tier knows
+# the name of every value it has published on a shared network.
+ENDPOINT_CREDENTIAL = "unused-by-the-scripted-endpoint"
 
 
 def lean_image_tag() -> str:
@@ -123,7 +126,7 @@ def _require_no_xdist(config) -> None:
 
 
 def require_docker() -> None:
-    if not compose_support.docker_available():
+    if not stack_support.docker_available():
         pytest.skip("no Docker daemon available")
 
 
@@ -137,24 +140,23 @@ def _sweep_leftover_stacks():
     sweep at session start closes that, and it is scoped by the prefix so it can
     never touch a developer's own stack.
     """
-    if compose_support.docker_available():
-        compose_support.sweep_projects(PROJECT_PREFIX)
+    if stack_support.docker_available():
+        stack_support.sweep_projects(PROJECT_PREFIX)
     yield
 
 
-def _render_config(
-    destination: Path, base_url: str, extra: dict[str, str] | None = None
-) -> Path:
+def _render_config(destination: Path, services: dict[str, Service]) -> Path:
     """Run the shipped render script on the host.
 
     This is the property that makes the shortcut legitimate: the file the lean
     stack boots from is produced by the same script the container would have
     run, not by a fixture that approximates it.
 
-    `extra` adds `ISTOTA_*` variables the script reads — how the forge stack
-    turns the `[developer]` block on. It is merged over the base rather than
-    replacing it, and it goes through the same script, so a block that the
-    render script would not have produced cannot be smuggled in here.
+    Each service contributes its own `config_env()` — the variables that point
+    the daemon at it — merged over the base. Every one of those is a variable
+    `render-config.sh` already reads, so a block the shipped script would not
+    have produced cannot be smuggled in here, and this environment is left with
+    nothing subsystem-specific in it.
     """
     config_file = destination / "config.toml"
     # An explicit environment, NOT `**os.environ`. render-config.sh reads
@@ -175,14 +177,9 @@ def _render_config(
         "APP_PASSWORD": "app-password-value",
         "BOT_USER": "istota",
         "USER_TIMEZONE": "UTC",
-        "ISTOTA_BRAIN_KIND": "native",
-        "ISTOTA_BRAIN_NATIVE_BASE_URL": base_url,
-        "ISTOTA_BRAIN_NATIVE_MODEL": "scripted-test-model",
-        # One turn is all the scripted endpoint has; a loop that asked for more
-        # should fail loudly rather than grind through a hundred attempts.
-        "ISTOTA_BRAIN_NATIVE_MAX_TURNS": "4",
     }
-    environment.update(extra or {})
+    for service in services.values():
+        environment.update(service.config_env())
     result = subprocess.run(
         ["bash", str(RENDER_CONFIG)],
         capture_output=True,
@@ -200,27 +197,21 @@ def _render_config(
     return config_file
 
 
-@pytest.fixture
-def lean_stack(pytestconfig, tmp_path, request):
-    """A running daemon and the endpoint it talks to.
+def _start_stack(
+    pytestconfig,
+    tmp_path: Path,
+    profile: Profile,
+    services: dict[str, Service],
+):
+    """Render, bring the stack up, hand back a `Stack`, tear it down.
 
-    Function-scoped on purpose. The scripted turns differ per test, and the
-    endpoint's `base_url` is baked into the rendered config, so a shared stack
-    would have to be reconfigured and restarted between tests anyway — at which
-    point the sharing saves nothing and couples the tests to each other's
-    scripts.
+    A generator rather than a fixture so the three fixtures below can each
+    decide what to start *before* calling it — the services have to be
+    listening before the config that names their ports is rendered.
     """
-    _require_no_xdist(pytestconfig)
-    require_docker()
-
-    turns = getattr(request, "param", None) or [{"text": "the scripted answer"}]
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
-    # All interfaces, explicitly. The default is loopback so an ordinary
-    # `uv run pytest` never opens a listener beyond it; this tier is the one
-    # caller that genuinely needs the container to reach back in.
-    endpoint = serve_script(turns, host="0.0.0.0")
     # A fresh project name per test, so a stack left behind by an interrupted
     # run is never adopted (and then torn down) by the next one. The session
     # sweep above is what reclaims those leftovers.
@@ -235,38 +226,59 @@ def lean_stack(pytestconfig, tmp_path, request):
     # An --env-file rides along in the argument list, so every subcommand gets
     # it and no caller has to remember.
     env_file = tmp_path / "compose.env"
-    env_file.write_text(
-        f"ISTOTA_TEST_CONFIG_DIR={config_dir}\n"
-        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}\n"
-    )
-    args = compose_support.compose_args(
-        COMPOSE_FILE, project=project, env_file=env_file
+    lines = [
+        f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
+        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}",
+    ]
+    overlays = []
+    if profile.image:
+        # Both the overlay and the variable it interpolates, for the same
+        # every-subcommand reason as the config dir above.
+        lines.append(f"ISTOTA_TEST_IMAGE={profile.image}")
+        overlays.append(PREBUILT_OVERLAY)
+    env_file.write_text("\n".join(lines) + "\n")
+    args = stack_support.compose_args(
+        COMPOSE_FILE, project=project, env_file=env_file, overlays=overlays
     )
 
-    # Inside the `try` from here on. `_render_config` calls `pytest.fail` on a
-    # non-zero render, and an endpoint started outside it would leak a bound
-    # port and a live thread for the rest of the session on every failed setup.
     try:
-        _render_config(config_dir, endpoint.container_base_url)
-        compose_support.up(args, platform=resolve_platform(pytestconfig))
-        compose_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
-        yield LeanStack(args=args, endpoint=endpoint, config_dir=config_dir)
+        _render_config(config_dir, services)
+        stack_support.up(args, platform=resolve_platform(pytestconfig))
+        stack_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
+        yield Stack(
+            profile=profile, args=args, services=services, config_dir=config_dir
+        )
     finally:
         # Volumes too: the DB is a named volume, and leaving it behind would
         # make the next run's assertions depend on this one's rows.
-        compose_support.down(args, volumes=True)
+        stack_support.down(args, volumes=True)
+
+
+@pytest.fixture
+def lean_stack(pytestconfig, tmp_path, request):
+    """A running daemon and the endpoint it talks to.
+
+    Function-scoped on purpose, until Stage 2 of the deployment-testbed spec
+    replaces this with a session-scoped pool. The scripted turns differ per
+    test, and the endpoint's base URL is baked into the rendered config, so a
+    shared stack would have to be reconfigured and restarted between tests
+    anyway — at which point the sharing saves nothing and couples the tests to
+    each other's scripts.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+
+    turns = getattr(request, "param", None) or [{"text": "the scripted answer"}]
+
+    # All interfaces, explicitly. The default is loopback so an ordinary
+    # `uv run pytest` never opens a listener beyond it; this tier is the one
+    # caller that genuinely needs the container to reach back in.
+    endpoint = serve_script(turns, host="0.0.0.0", credential=ENDPOINT_CREDENTIAL)
+    try:
+        yield from _start_stack(pytestconfig, tmp_path, BASE, {"model": endpoint})
+    finally:
         endpoint.close()
 
-
-# The token the forge stack configures. Fabricated, and deliberately not
-# wearing a real forge prefix: the pre-commit scanner objects to `glpat-` on
-# exactly the reasoning that a fake value with a real prefix is
-# indistinguishable from a leak to anything reading the diff. Its *length* is
-# what the assertions use, via `ForgeCall.auth`.
-FORGE_TOKEN = "forge-token-for-the-smoke-tier"
-
-# The project the stub seeds and the scenarios work against.
-FORGE_PROJECT = "istota-test/smoke-project"
 
 
 NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
@@ -339,17 +351,17 @@ def forge_stack(pytestconfig, tmp_path, request):
     Two things here are worth not rediscovering.
 
     The stub binds all interfaces, because the daemon reaching it lives in a
-    container. `serve` defaults to loopback for the same reason
-    `model_endpoint.serve_script` does — this listener runs `git http-backend`,
-    and publishing one on every `uv run pytest` is not a thing to do by
-    default.
+    container. `gitlab.serve` defaults to loopback for the same reason
+    `serve_script` does — this listener runs `git http-backend`, and publishing
+    one on every `uv run pytest` is not a thing to do by default.
 
-    The `[developer]` block is produced by `render-config.sh` from
-    `ISTOTA_DEVELOPER_*` variables, not written by this fixture. So the config
-    the scenarios exercise is one the shipped script can actually generate, and
-    a change that breaks that generation fails here rather than in production.
+    The `[developer]` block is produced by `render-config.sh` from the
+    `ISTOTA_DEVELOPER_*` variables in `GitLabService.config_env()`, not written
+    by this fixture. So the config the scenarios exercise is one the shipped
+    script can actually generate, and a change that breaks that generation fails
+    here rather than in production.
     """
-    yield from _forge_stack(pytestconfig, tmp_path, request)
+    yield from _forge_stack(pytestconfig, tmp_path, request, FORGE)
 
 
 @pytest.fixture
@@ -362,13 +374,19 @@ def broken_forge_stack(pytestconfig, tmp_path, request, no_forge_image):
     if the daemon never ran a forge command. This reproduces ISSUE-263 exactly:
     a config naming `/usr/local/lib/istota_forge/glab`, and nothing at that
     path.
+
+    The tag is filled into the profile here rather than written into
+    `profiles.py`, because it is derived from whichever image the session built.
     """
     yield from _forge_stack(
-        pytestconfig, tmp_path, request, image=no_forge_image
+        pytestconfig,
+        tmp_path,
+        request,
+        replace(NO_FORGE, image=no_forge_image),
     )
 
 
-def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
+def _forge_stack(pytestconfig, tmp_path, request, profile: Profile):
     """The body both forge fixtures share.
 
     A plain generator rather than a third fixture: the two differ only in which
@@ -379,243 +397,32 @@ def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
     require_docker()
 
     turns = getattr(request, "param", None) or [{"text": "nothing scripted"}]
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
 
-    # Both listeners are started inside the `try`, not before it. `lean_stack`
-    # carries the same rule and the reason it gives applies twice over here:
-    # `fake_gitlab.serve` does a `mkdir` and a bind, either of which can raise,
-    # and the endpoint started on the line above would then never be closed —
-    # leaking a bound port and a live thread for the rest of the session. Both
-    # bind all interfaces, so the leak is a publicly-bound socket.
+    # Both listeners are started inside the `try`, not before it: `gitlab.serve`
+    # does a `mkdir` and a bind, either of which can raise, and an endpoint
+    # started on the line above would then never be closed — leaking a bound
+    # port and a live thread for the rest of the session. Both bind all
+    # interfaces, so the leak is a publicly-bound socket.
     endpoint = None
     stub = None
-    project = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:8]}"
-
-    env_file = tmp_path / "compose.env"
-    lines = [
-        f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
-        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}",
-    ]
-    overlays = []
-    if image:
-        # Both the overlay and the variable it interpolates. Compose reads the
-        # env-file when it interpolates *every* subcommand, so a value supplied
-        # only to `up` makes `ps`, `logs` and `down` fail before they reach a
-        # container — the failure mode that once left two stacks running.
-        lines.append(f"ISTOTA_TEST_IMAGE={image}")
-        overlays.append(PREBUILT_OVERLAY)
-    env_file.write_text("\n".join(lines) + "\n")
-    args = compose_support.compose_args(
-        COMPOSE_FILE, project=project, env_file=env_file, overlays=overlays
-    )
-
     try:
-        endpoint = serve_script(turns, host="0.0.0.0")
-        # The expected git credential, which is what makes
+        endpoint = serve_script(turns, host="0.0.0.0", credential=ENDPOINT_CREDENTIAL)
+        # The token is both what the daemon is configured with and what this
+        # listener challenges for, which is what makes
         # `authenticated_git_calls()` mean "the helper produced the right
-        # token". It is also the access control: this listener is bound to all
+        # token". It is also the access control: the listener is bound to all
         # interfaces so the container can reach it, and it serves a real
         # `git http-backend`.
-        stub = fake_gitlab.serve(
-            tmp_path / "forge", host="0.0.0.0", expect_git_password=FORGE_TOKEN
+        stub = gitlab.serve(
+            tmp_path / "forge", host="0.0.0.0", token=gitlab.FORGE_TOKEN
         )
-        clone_url = stub.seed_repo(FORGE_PROJECT)
-        _render_config(
-            config_dir,
-            endpoint.container_base_url,
-            {
-                "ISTOTA_DEVELOPER_ENABLED": "true",
-                # A tmpfs the compose file already declares. The developer
-                # skill binds it read-write into the sandbox, which is where
-                # the scenarios clone.
-                "ISTOTA_DEVELOPER_REPOS_DIR": "/data/repos",
-                "ISTOTA_DEVELOPER_GITLAB_URL": stub.container_url,
-                "ISTOTA_DEVELOPER_GITLAB_TOKEN": FORGE_TOKEN,
-                "ISTOTA_DEVELOPER_GITLAB_USERNAME": "istota-test",
-                "ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE": FORGE_PROJECT.split("/")[0],
-            },
-        )
-        compose_support.up(args, platform=resolve_platform(pytestconfig))
-        compose_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
-        yield ForgeStack(
-            args=args,
-            endpoint=endpoint,
-            config_dir=config_dir,
-            stub=stub,
-            clone_url=clone_url,
+        stub.seed_repo(stub.project)
+        yield from _start_stack(
+            pytestconfig, tmp_path, profile, {"model": endpoint, "gitlab": stub}
         )
     finally:
-        compose_support.down(args, volumes=True)
         # Guarded, because either may be None if the other's construction raised.
         if stub is not None:
             stub.close()
         if endpoint is not None:
             endpoint.close()
-
-
-class LeanStack:
-    """What a smoke test is handed."""
-
-    def __init__(self, *, args: list[str], endpoint, config_dir: Path):
-        self.args = args
-        self.endpoint = endpoint
-        self.config_dir = config_dir
-        self.probe = Probe(compose_args=args, service="istota")
-
-    def submit(self, prompt: str, *, user_id: str = "testuser") -> int:
-        """Enqueue a task through the shipped CLI and return its id.
-
-        Through `istota task` rather than by writing a row directly: inserting
-        into `tasks` would assert nothing about the image, and the point of this
-        tier is that the artifact works.
-
-        The id is parsed out and returned because the caller needs it: the
-        daemon queues tasks of its own for the same user at startup, so an
-        assertion filtered on `user_id` alone can land on the wrong row.
-        """
-        result = subprocess.run(
-            self.args
-            + [
-                "exec",
-                "-T",
-                "istota",
-                "uv",
-                "run",
-                "istota",
-                "-c",
-                "/data/config/config.toml",
-                "task",
-                prompt,
-                "-u",
-                user_id,
-                "--source-type",
-                "cli",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            pytest.fail(
-                f"submitting a task exited {result.returncode}\n"
-                f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
-                pytrace=False,
-            )
-        match = re.search(r"Task created:\s*(\d+)", result.stdout)
-        if not match:
-            pytest.fail(
-                "could not read a task id out of `istota task` output; the CLI "
-                f"prints 'Task created: N'\n--- stdout ---\n{result.stdout}",
-                pytrace=False,
-            )
-        return int(match.group(1))
-
-    def logs(self, tail: int = 60) -> str:
-        return compose_support.logs(self.args, "istota", tail=tail)
-
-
-class ForgeStack(LeanStack):
-    """A `LeanStack` plus the forge it was pointed at.
-
-    A subclass rather than a second class: everything a forge scenario does to
-    the daemon — submit a task, read the row back, pull the logs on failure — is
-    what `LeanStack` already does, and duplicating it would let the two drift on
-    the parts that are genuinely shared.
-    """
-
-    def __init__(self, *, stub, clone_url: str, **kwargs):
-        super().__init__(**kwargs)
-        self.stub = stub
-        self.clone_url = clone_url
-
-    def script(self, turns: list[dict], *, timeout: float = 60) -> None:
-        """Install a script, once the daemon is not going to consume it.
-
-        `rescript` rewinds the endpoint, and the endpoint routes by call order
-        alone — it has no notion of which task a request belongs to. The daemon
-        queues work of its own at startup (`LeanStack.submit` says as much), so
-        a task still in flight when a scenario rewinds would take turn 0, and
-        the submitted task would get turn 1. The symptom is either an assertion
-        about a merge request opened on behalf of a different task, or the
-        exhausted-script error frame that rewinding exists to prevent — and
-        both read as forge problems.
-
-        So: wait for the task table to hold nothing non-terminal, then rewind.
-        `wait_for_task` cannot express this — it waits for *a* task to reach a
-        status, and what is wanted here is the absence of any that have not.
-        """
-        deadline = time.monotonic() + timeout
-        busy: list = []
-        while time.monotonic() < deadline:
-            busy = [
-                task
-                for task in self.probe.tasks()
-                if task.get("status") in _IN_FLIGHT
-            ]
-            if not busy:
-                self.endpoint.rescript(turns)
-                return
-            time.sleep(0.5)
-
-        pytest.fail(
-            "the daemon still had work in flight after "
-            f"{timeout}s, so a scripted turn would have gone to it rather than "
-            f"to this scenario: {[(t.get('id'), t.get('status')) for t in busy]}",
-            pytrace=False,
-        )
-
-    def doctor(self, *, scope: str = "") -> list[dict]:
-        """`istota doctor --json` inside the running container.
-
-        Through the shipped CLI in the shipped image, which is the whole point:
-        a doctor run on the host would be asking about the developer's laptop.
-
-        The exit code is deliberately ignored — `doctor.exit_code` is non-zero
-        when a check FAILs, and the negative control exists to produce exactly
-        that. What matters is the payload, and it is valid JSON either way by
-        construction (`render_json`).
-        """
-        argv = self.args + [
-            "exec", "-T", "istota",
-            "uv", "run", "istota", "-c", "/data/config/config.toml",
-            "doctor", "--json",
-        ]
-        if scope:
-            argv += ["--scope", scope]
-        result = subprocess.run(
-            argv, capture_output=True, text=True, timeout=180
-        )
-        try:
-            return json.loads(result.stdout or "[]")
-        except ValueError:
-            pytest.fail(
-                f"`istota doctor --json` did not print JSON (exit "
-                f"{result.returncode})\n--- stdout ---\n{result.stdout}\n"
-                f"--- stderr ---\n{result.stderr}",
-                pytrace=False,
-            )
-
-    def merge_requests(self) -> list:
-        """The MRs opened against the stub, which is the happy path's assertion."""
-        return self.stub.rest_calls("POST", "/merge_requests")
-
-    def diagnostics(self, task: dict) -> str:
-        """One string carrying everything a failed forge scenario needs.
-
-        Assembled in one place because the useful context is spread over four
-        sources — the task row, the daemon log, the REST calls and the git
-        calls — and a scenario that printed only the first reports "the task
-        failed" for a wrapper that was denied, a token that never arrived and a
-        stub endpoint that answered 501, all identically.
-        """
-        rest = "\n".join(f"  {call}" for call in self.stub.calls) or "  (none)"
-        git = "\n".join(f"  {call}" for call in self.stub.git_calls) or "  (none)"
-        return (
-            f"task {task.get('id')} ended {task.get('status')!r}: "
-            f"{task.get('error')!r}\n"
-            f"--- result ---\n{task.get('result')}\n"
-            f"--- rest calls ---\n{rest}\n"
-            f"--- git calls ---\n{git}\n"
-            f"--- daemon logs ---\n{self.logs(150)}"
-        )

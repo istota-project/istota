@@ -28,8 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from .support import compose as compose_support
-from .support.probe import Probe
+from testbed import stack as compose_support
+from testbed.probe import Probe
 
 REPO = Path(__file__).resolve().parents[1]
 PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"

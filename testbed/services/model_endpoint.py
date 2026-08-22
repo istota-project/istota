@@ -21,9 +21,9 @@ that failed for an unrelated-looking reason.
 from __future__ import annotations
 
 import json
-import threading
-from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from ..httpstub import FROM_CONTAINER, LOOPBACK, HttpStub
 
 # Deliberately small, so a multi-character payload always arrives as more than
 # one delta. Streaming reassembly is most of what `_parse_sse_lines` does, and a
@@ -32,27 +32,91 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TEXT_CHUNK = 4
 ARGS_CHUNK = 8
 
-# The host side connects over loopback; a container reaches the same listener by
-# the Docker Desktop / Docker Engine alias. Both names are offered rather than
-# guessed at the call site, because the two are needed at once: the smoke test
-# asserts against `requests` in-process while the daemon it is driving talks to
-# `container_base_url`.
-LOOPBACK = "127.0.0.1"
-FROM_CONTAINER = "host.docker.internal"
+# What `config_env` renders as the model name and the turn ceiling. Named
+# because a scenario asserts on the first (`test_lean_stack.py` checks the
+# request carried it) and because the second is a bound the agent loop is
+# supposed to hit loudly rather than grind past.
+SCRIPTED_MODEL = "scripted-test-model"
+MAX_TURNS = 4
 
 
-@dataclass
-class ScriptedEndpoint:
-    """A running endpoint and the record of what it was asked."""
+class ScriptedEndpoint(HttpStub):
+    """A running endpoint and the record of what it was asked.
 
-    port: int
-    host_bound: str
-    requests: list[dict] = field(default_factory=list)
-    turns: list[dict] = field(default_factory=list)
-    served: int = 0
-    _server: ThreadingHTTPServer | None = None
-    _thread: threading.Thread | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    `requests` stays its own list rather than becoming `HttpStub.calls`: a chat
+    completion is a JSON body a scenario reads whole, not a method-and-path
+    tuple, and forcing it into `ServiceCall` would lose the shape every
+    assertion here uses. The protocol admits that — call recording is on
+    `HttpStub`, not on `Service`.
+    """
+
+    name = "model"
+
+    def __init__(self, turns: list[dict] | None = None) -> None:
+        super().__init__()
+        self.requests: list[dict] = []
+        self.turns: list[dict] = list(turns or [])
+        self.served: int = 0
+
+    # -- the `Service` members --------------------------------------------
+
+    def config_env(self) -> dict[str, str]:
+        """Point the daemon's native brain at this endpoint.
+
+        All four are read by `docker/istota/render-config.sh` and passed
+        through by `docker/docker-compose.yml`, which is the rule every service
+        is held to. They were hardcoded in the smoke fixture's render
+        environment; on the service is where they belong, and moving them
+        leaves that environment with nothing subsystem-specific in it.
+        """
+        return {
+            "ISTOTA_BRAIN_KIND": "native",
+            "ISTOTA_BRAIN_NATIVE_BASE_URL": self.container_url,
+            "ISTOTA_BRAIN_NATIVE_MODEL": SCRIPTED_MODEL,
+            # A handful of turns is all a scripted scenario has; a loop that
+            # asked for more should fail loudly rather than grind through a
+            # hundred attempts.
+            "ISTOTA_BRAIN_NATIVE_MAX_TURNS": str(MAX_TURNS),
+        }
+
+    def reset(self) -> None:
+        """Empty the script and forget what was asked.
+
+        Deliberately not a *useful* script: the stack's own reset installs the
+        real turns immediately afterwards, and leaving the previous test's
+        script in place between the two would let a poller's task consume it.
+        """
+        super().reset()
+        self.rescript([])
+
+    def describe(self) -> str:
+        """Counts, not content, for `Stack.diagnostics`.
+
+        The bodies are the whole conversation — system prompt, memory, tool
+        results — and dumping them into every failure report would bury the
+        three lines that say what went wrong. A scenario that needs the content
+        has `transcript()`.
+        """
+        with self._lock:
+            served, scripted, seen = self.served, len(self.turns), len(self.requests)
+        return f"  {served} turn(s) served of {scripted} scripted, {seen} request(s) recorded"
+
+    # -- addresses --------------------------------------------------------
+    #
+    # `/v1` on the end, because the provider appends `/chat/completions` to
+    # whatever `base_url` it is given.
+
+    @property
+    def url(self) -> str:
+        """For a caller in this process."""
+        return f"http://{LOOPBACK}:{self.port}/v1"
+
+    @property
+    def container_url(self) -> str:
+        """For a caller inside a container on this host."""
+        return f"http://{FROM_CONTAINER}:{self.port}/v1"
+
+    # -- scripting --------------------------------------------------------
 
     def rescript(self, turns: list[dict]) -> None:
         """Replace the script, and rewind.
@@ -87,34 +151,6 @@ class ScriptedEndpoint:
             for message in body.get("messages") or []:
                 parts.append(str(message.get("content")))
         return "\n".join(parts)
-
-    @property
-    def base_url(self) -> str:
-        """For a caller in this process."""
-        return f"http://{LOOPBACK}:{self.port}/v1"
-
-    @property
-    def container_base_url(self) -> str:
-        """For a caller inside a container on this host."""
-        return f"http://{FROM_CONTAINER}:{self.port}/v1"
-
-    def close(self) -> None:
-        if self._server is not None:
-            # `shutdown` before `server_close`: the former stops the serve loop
-            # and blocks until it has, the latter releases the socket. Reversed,
-            # the loop can be mid-`accept` on a closed fd.
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def __enter__(self) -> ScriptedEndpoint:
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -217,7 +253,11 @@ def _exhausted_frame(served: int, scripted: int) -> bytes:
 
 
 def serve_script(
-    turns: list[dict], *, port: int = 0, host: str = LOOPBACK
+    turns: list[dict],
+    *,
+    port: int = 0,
+    host: str = LOOPBACK,
+    credential: str | None = None,
 ) -> ScriptedEndpoint:
     """Start an endpoint replaying `turns`, one per request, in order.
 
@@ -226,16 +266,25 @@ def serve_script(
     lets the OS choose, which is what keeps concurrent test sessions from
     colliding — the chosen port is on the returned object.
 
-    `host` defaults to loopback and only the smoke tier overrides it. Binding
-    all interfaces unconditionally would publish an unauthenticated POST
+    `host` defaults to loopback and only the deployment tiers override it.
+    Binding all interfaces unconditionally would publish an unauthenticated POST
     listener on every `uv run pytest`, which the ten default-suite tests here
-    have no use for — they connect over `base_url`, which is loopback. It also
-    raises the macOS incoming-connections prompt, where the run appears to hang
-    on a dialog nobody is looking at.
+    have no use for — they connect over `url`, which is loopback. It also raises
+    the macOS incoming-connections prompt, where the run appears to hang on a
+    dialog nobody is looking at.
+
+    `credential` is therefore required whenever `host` is not loopback, per
+    `HttpStub.start`. This endpoint does not *check* it: the daemon sends
+    whatever `ISTOTA_BRAIN_NATIVE_API_KEY` the compose file hardcodes, and a 401
+    from here would surface as a task that failed for an unrelated-looking
+    reason — which is the failure mode this whole module exists to avoid. What
+    the value buys is that the tier knows the name of every secret it has
+    published, which is what the secret-isolation scenario scans a transcript
+    for.
     """
     # The script lives on the endpoint rather than in this closure, so
     # `rescript` can replace it after the server is listening.
-    endpoint = ScriptedEndpoint(port=0, host_bound=host, turns=list(turns))
+    endpoint = ScriptedEndpoint(turns=list(turns))
 
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -276,9 +325,10 @@ def serve_script(
                     # `AttributeError` on `.get` below — in a handler thread
                     # whose `handle_error` is deliberately silent, so the client
                     # sees a dropped connection. `transcript()` would raise the
-                    # same way later. `fake_gitlab._read_body` guards this; the
-                    # asymmetry between two files added together is what bites
-                    # when someone points a different client at one of them.
+                    # same way later. `ServiceCall.payload` carries the same
+                    # guard for the stubs that record a body rather than
+                    # replaying one, which is what it bites on when someone
+                    # points a different client at either.
                     raise ValueError("body was not a JSON object")
             except (ValueError, OSError):
                 # A 400 the caller can see beats a traceback in someone else's
@@ -309,23 +359,5 @@ def serve_script(
             self.end_headers()
             self.wfile.write(payload)
 
-    server = ThreadingHTTPServer((host, port), _Handler)
-    # `block_on_close` is `not daemon_threads`, so leaving daemon_threads True
-    # means `server_close` does not join handler threads — an in-flight handler
-    # could then append to `requests` after `close()` returned, and a keep-alive
-    # thread parked in `handle_one_request` would outlive the endpoint.
-    server.daemon_threads = False
-    endpoint.port = server.server_address[1]
-    # Read the bound address back off the socket rather than trusting what we
-    # asked for. `host_bound` is asserted against, and an assertion on the
-    # argument we passed in would stay green if the bind itself changed.
-    endpoint.host_bound = server.server_address[0]
-    endpoint._server = server
-    # A short poll interval: `serve_forever`'s default is 0.5s and `shutdown`
-    # waits for the current poll to finish, so every teardown paid up to half a
-    # second — which was most of this file's runtime.
-    endpoint._thread = threading.Thread(
-        target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
-    )
-    endpoint._thread.start()
+    endpoint.start(_Handler, host=host, port=port, credential=credential)
     return endpoint

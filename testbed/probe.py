@@ -1,8 +1,9 @@
 """Reading the framework DB back, from wherever it happens to live.
 
 Two access modes, because the two callers genuinely differ. A local path is
-direct `sqlite3` and is what a host-side or bind-mounted deployment gets. The
-lean stack keeps its DB on a named volume (so Layer 4 can retain it across an
+direct `sqlite3` and is what a host-side or bind-mounted deployment gets — the
+in-process wire suite reads that way, with no container at all. The lean stack
+keeps its DB on a named volume (so the upgrade tier can retain it across an
 upgrade), and a named volume has no host path, so those rows come back through
 `docker compose exec`.
 

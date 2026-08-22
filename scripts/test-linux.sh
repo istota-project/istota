@@ -213,5 +213,5 @@ pytest_args=(-o cache_dir=/tmp/pytest_cache "${pytest_args[@]}")
 
 # ruff first: a lint failure is cheaper to read before a suite's worth of output,
 # and this is the run that sees the tree as Linux sees it.
-run_in_container sh -c 'ruff check --output-format concise src tests && exec pytest "$@"' \
+run_in_container sh -c 'ruff check --output-format concise src tests testbed && exec pytest "$@"' \
     -- "${pytest_args[@]}"

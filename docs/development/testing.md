@@ -62,16 +62,18 @@ A clean run there is the failure.
 
 ### Shared machinery, and how to add a tier
 
-The pieces under `tests/support/` are general, not forge-specific. The forge chain is the first thing to use them, and it should not be the last:
+The pieces under `testbed/` are general, not forge-specific. The forge chain is the first thing to use them, and it should not be the last:
 
-- `compose.py` — bringing a compose stack up and down, waiting for a service to report healthy, and sweeping leftovers from an interrupted run.
-- `probe.py` — reading the framework database of a stack that is currently running.
-- `model_endpoint.py` — a deterministic model endpoint that serves canned turns over HTTP, so a task's path through the daemon is reproducible without an LLM.
-- `upgrade.py` — capturing an older release's `config.toml` and schema.
+- `stack.py` — bringing a compose stack up and down, waiting for a service to report healthy, sweeping leftovers from an interrupted run, and `Stack`, which is what a scenario is handed: `submit`, `script`, `exec`, `doctor`, `restart`, `logs`, `diagnostics`.
+- `probe.py` — reading the framework database of a stack that is currently running, or of a local file.
+- `httpstub.py` and `services/` — the `Service` protocol every external the daemon talks to conforms to, and the shared `ThreadingHTTPServer` base under the ones we wrote. `services/model_endpoint.py` is a deterministic model endpoint serving canned turns over HTTP, so a task's path through the daemon is reproducible without an LLM; `services/gitlab.py` answers enough REST v4 for `glab` plus a real git over HTTP.
+- `profiles.py` — what a scenario declares it needs: a shape, a set of services, and any extra config.
 
-They are written as plain functions taking explicit paths: no pytest fixtures with logic baked in, no repo-relative assumptions, and `tests/support/` is a separate package from `tests/smoke/` on purpose. A planned follow-up extracts the first three into a standalone `testbed/` package once there is a second real consumer to design the API against, and keeping them in this shape is what makes that a directory move rather than a rewrite. So when a new subsystem needs an end-to-end tier, extend `docker/docker-compose.test.yml` and reuse these — don't build a second stack alongside them.
+`tests/support/upgrade.py` — capturing an older release's `config.toml` and schema — deliberately stayed where it is. It belongs to the upgrade tier, and `scripts/test-upgrade.sh` reaches it by string path.
 
-`tests/support/model_endpoint.py`'s wire format has its own tests in the default suite (`tests/test_model_endpoint.py`), pinned against the real provider over a real socket. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
+`testbed/` sits beside `src/` rather than inside `tests/` because it is not part of the shipped application and two repos outside this one consume it. It has its own `pyproject.toml` and imports no pytest, so a failure surfaces as a raised `StackError` rather than as a call into a test runner that is not installed. Two rules bind anything added to it: a service may only point the daemon at itself through a variable `docker/istota/render-config.sh` reads **and** `docker/docker-compose.yml` passes through (add one to both as a reviewed product change if it is missing — never side-load config from the fixture), and a stub bound to anything but loopback must be given a credential to expect. Both are enforced in `tests/test_testbed_services.py`. So when a new subsystem needs an end-to-end tier, extend `docker/docker-compose.test.yml`, write a service, and reuse these — don't build a second stack alongside them.
+
+`testbed/services/model_endpoint.py`'s wire format has its own tests in the default suite (`tests/test_model_endpoint.py`), pinned against the real provider over a real socket. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
 
 ### The upgrade tier's two anchors
 
@@ -146,5 +148,5 @@ For new features:
 3. Run tests to confirm they fail
 4. Implement the feature
 5. Run tests and iterate until all pass
-6. Run `ruff check --output-format concise src tests`, plus the `web/` checks above if the change touched the frontend
+6. Run `ruff check --output-format concise src tests testbed`, plus the `web/` checks above if the change touched the frontend
 7. Commit

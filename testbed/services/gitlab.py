@@ -21,19 +21,12 @@ per-host `api_protocol` in glab's own config — which the developer skill write
 entry works: if it stops being written, nothing here is reachable and every
 scenario fails on a TLS handshake.
 
-**No credential reaches the report.** `ForgeCall.auth` records the *shape* of
+**No credential reaches the report.** `ServiceCall.auth` records the *shape* of
 the `Authorization` / `PRIVATE-TOKEN` header — scheme and length — never its
 value, and everything this tier needs to assert ("a token was injected", "it was
-not the ambient one") is satisfiable from that.
-
-The query and the body *are* kept whole, because assertions need them, so the
-guarantee is about rendering rather than about storage: `ForgeCall` overrides
-`__repr__`, since pytest's assertion rewriting prints the repr of whatever a
-failing comparison touched and a dataclass's generated one would carry both
-fields. GitLab REST accepts `?private_token=` and a live write verb can put a
-secret in a body; under `--live` that is a real token going to the terminal, in
-a repo whose pre-commit hook exists because pasted terminal output is where
-credentials land.
+not the ambient one") is satisfiable from that. The query and the body *are*
+kept whole, because assertions need them, so the guarantee is about rendering
+rather than about storage — see `ServiceCall.__repr__`.
 """
 
 from __future__ import annotations
@@ -42,19 +35,14 @@ import base64
 import binascii
 import json
 import secrets
+import shutil
 import subprocess
-import threading
-from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-# The host side connects over loopback; a container reaches the same listener by
-# the Docker alias. Both are offered rather than guessed at the call site,
-# because a smoke test needs them at once — it asserts against `calls`
-# in-process while the daemon it drives talks to `container_url`.
-LOOPBACK = "127.0.0.1"
-FROM_CONTAINER = "host.docker.internal"
+from ..httpstub import LOOPBACK, HttpStub
+from . import ServiceCall
 
 # `git http-backend` streams a packfile; a clone of a seeded repo is tiny, but
 # the bound keeps a wedged child from holding a handler thread for the session.
@@ -63,33 +51,18 @@ GIT_TIMEOUT = 120
 # Whatever the stub answers for "who am I". glab asks before most write verbs.
 STUB_USER = {"id": 1, "username": "istota-test", "name": "Istota Test"}
 
-
-@dataclass
-class ForgeCall:
-    """One REST request, with the credential reduced to its shape.
-
-    `auth` is the only field deliberately lossy, but it is not the only field
-    that can carry a secret: GitLab REST accepts `?private_token=`, and a live
-    write verb can put one in the body. Both are kept, because assertions need
-    them — so the *rendering* is what has to be safe.
-    """
-
-    method: str
-    path: str
-    query: dict
-    body: dict
-    auth: str
-
-    def __str__(self) -> str:  # pragma: no cover - diagnostic
-        return f"{self.method} {self.path} auth={self.auth}"
-
-    # `repr`, not just `str`. pytest's assertion rewriting renders the *repr* of
-    # whatever a failing comparison touched, so a dataclass's generated one is
-    # what reaches the report and the terminal — and it prints `query` and
-    # `body` in full. Under `--live` that is a real token in a repo whose
-    # pre-commit hook exists because pasted terminal output is where credentials
-    # land. The path is query-stripped for the same reason.
-    __repr__ = __str__
+# The project the deployment tiers seed and work against, and the token they
+# configure. Both live here rather than in a fixture: a service's own credential
+# belongs to the service, and the tier that consumes it should not have to know
+# how to spell one.
+#
+# The token is fabricated and deliberately does not wear a real forge prefix.
+# The pre-commit scanner objects to `glpat-` on exactly the reasoning that a
+# fake value with a real prefix is indistinguishable from a leak to anything
+# reading the diff. Its *length* is what the assertions use, via
+# `ServiceCall.auth`.
+FORGE_TOKEN = "forge-token-for-the-smoke-tier"
+FORGE_PROJECT = "istota-test/smoke-project"
 
 
 def _auth_shape(headers) -> str:
@@ -139,48 +112,120 @@ def _password_accepted(headers, expected: str | None) -> bool:
     return secrets.compare_digest(password, expected)
 
 
-@dataclass
-class FakeGitLab:
+class GitLabService(HttpStub):
     """A running stub and the record of what it was asked."""
 
-    port: int = 0
-    host_bound: str = LOOPBACK
-    calls: list[ForgeCall] = field(default_factory=list)
-    # Git-over-HTTP requests, kept apart from `calls` because they are a
-    # different protocol answered by a different program. A scenario asserting
-    # "one merge request was opened" must not have to filter out the dozen
-    # ref-advertisement requests a clone makes.
-    git_calls: list[ForgeCall] = field(default_factory=list)
-    require_git_auth: bool = True
-    # When set, a git request must carry *this* password or it is challenged
-    # again. Two things turn on it.
-    #
-    # It is what makes `authenticated_git_calls()` mean "the credential helper
-    # produced the right token" rather than "something sent a header" — the
-    # helper shells out to `credential-fetch`, which asks the skill proxy, and
-    # only comparing the value proves that round trip happened.
-    #
-    # It is also the access control. The smoke fixture binds this listener to
-    # all interfaces so a container can reach it, and it serves a real
-    # `git http-backend` with GIT_HTTP_EXPORT_ALL — accepting any header at all
-    # would let anyone on the same network clone from and push to the seeded
-    # repos for the length of a run. `None` keeps the permissive behaviour for
-    # the loopback-bound default-suite tests, which have no token to expect.
-    expect_git_password: str | None = None
-    repo_root: Path | None = None
-    _server: ThreadingHTTPServer | None = None
-    _thread: threading.Thread | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    name = "gitlab"
+
+    def __init__(
+        self,
+        repo_root: Path,
+        *,
+        token: str = FORGE_TOKEN,
+        project: str = FORGE_PROJECT,
+        require_git_auth: bool = True,
+    ) -> None:
+        super().__init__()
+        self.repo_root = repo_root
+        self.token = token
+        self.project = project
+        self.require_git_auth = require_git_auth
+        # Git-over-HTTP requests, kept apart from `calls` because they are a
+        # different protocol answered by a different program. A scenario
+        # asserting "one merge request was opened" must not have to filter out
+        # the dozen ref-advertisement requests a clone makes.
+        self.git_calls: list[ServiceCall] = []
+        # Which repos `seed_repo` created, so `reset` can rebuild exactly those.
+        self.seeded: list[str] = []
 
     @property
-    def url(self) -> str:
-        """For a caller in this process."""
-        return f"http://{LOOPBACK}:{self.port}"
+    def expect_git_password(self) -> str | None:
+        """The password a git request must carry, or `None` to accept any.
 
-    @property
-    def container_url(self) -> str:
-        """For a caller inside a container on this host."""
-        return f"http://{FROM_CONTAINER}:{self.port}"
+        This is `HttpStub.start(credential=...)` under its original name, and
+        two things turn on it.
+
+        It is what makes `authenticated_git_calls()` mean "the credential helper
+        produced the right token" rather than "something sent a header" — the
+        helper shells out to `credential-fetch`, which asks the skill proxy, and
+        only comparing the value proves that round trip happened.
+
+        It is also the access control. The deployment tiers bind this listener
+        to all interfaces so a container can reach it, and it serves a real
+        `git http-backend` with GIT_HTTP_EXPORT_ALL — accepting any header at
+        all would let anyone on the same network clone from and push to the
+        seeded repos for the length of a run. `None` keeps the permissive
+        behaviour for the loopback-bound default-suite tests, which have no
+        token to expect, and `HttpStub.start` is what stops a non-loopback bind
+        from reaching that state.
+        """
+        return self.credential
+
+    # -- the `Service` members --------------------------------------------
+
+    def config_env(self) -> dict[str, str]:
+        """Turn the `[developer]` block on and point it at this stub.
+
+        All six are read by `docker/istota/render-config.sh` and passed through
+        by `docker/docker-compose.yml`. The block is therefore produced by the
+        shipped generator rather than written by a fixture, so a change that
+        breaks that generation fails in this tier rather than in production.
+        """
+        return {
+            "ISTOTA_DEVELOPER_ENABLED": "true",
+            # A tmpfs the compose file already declares. The developer skill
+            # binds it read-write into the sandbox, which is where the scenarios
+            # clone.
+            "ISTOTA_DEVELOPER_REPOS_DIR": "/data/repos",
+            "ISTOTA_DEVELOPER_GITLAB_URL": self.container_url,
+            "ISTOTA_DEVELOPER_GITLAB_TOKEN": self.token,
+            "ISTOTA_DEVELOPER_GITLAB_USERNAME": STUB_USER["username"],
+            "ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE": self.project.split("/")[0],
+        }
+
+    def reset(self) -> None:
+        """Forget the calls, and rebuild the seeded repositories.
+
+        Rebuilt rather than merely cleared: the happy path pushes a branch, and
+        the next test asserting "the branch landed" would pass on the previous
+        test's push. `shutil.rmtree` then `seed_repo` is total in a way that
+        deleting refs would not be — a scenario is free to create a tag, a note
+        or a second branch, and none of that has to be enumerated here.
+        """
+        super().reset()
+        with self._lock:
+            self.git_calls.clear()
+            seeded = list(self.seeded)
+            self.seeded.clear()
+        for path in seeded:
+            bare = self.repo_root / f"{path}.git"
+            shutil.rmtree(bare, ignore_errors=True)
+            shutil.rmtree(bare.parent / f"{bare.stem}-seed", ignore_errors=True)
+            self.seed_repo(path)
+
+    def describe(self) -> str:
+        """Both call lists, rendered apart.
+
+        The default would fold the git traffic in with the REST traffic, and a
+        failing forge scenario needs to tell "glab was never reached" from "git
+        was never credentialed" — which are the same length of list and very
+        different faults.
+        """
+        with self._lock:
+            rest = list(self.calls)
+            git = list(self.git_calls)
+        return (
+            "  -- rest --\n"
+            + ("\n".join(f"    {call}" for call in rest) or "    (none)")
+            + "\n  -- git --\n"
+            + ("\n".join(f"    {call}" for call in git) or "    (none)")
+        )
+
+    # -- repositories -----------------------------------------------------
+
+    def clone_url(self, path: str) -> str:
+        """The address a container clones a seeded repo from."""
+        return f"{self.container_url}/{path}.git"
 
     def seed_repo(self, path: str) -> str:
         """Create a bare repo with one commit and return its container clone URL.
@@ -191,8 +236,6 @@ class FakeGitLab:
         helper. A stub that only answered REST would asserts nothing about the
         half of the chain that carries the token through git.
         """
-        if self.repo_root is None:
-            raise RuntimeError("FakeGitLab was not started with a repo root")
         bare = self.repo_root / f"{path}.git"
         bare.parent.mkdir(parents=True, exist_ok=True)
         _git(["init", "--bare", "--initial-branch=main", str(bare)])
@@ -202,29 +245,29 @@ class FakeGitLab:
         _git(["-C", str(bare), "config", "http.receivepack", "true"])
         _git(["-C", str(bare), "config", "receive.denyCurrentBranch", "ignore"])
         _seed_initial_commit(bare)
-        return f"{self.container_url}/{path}.git"
+        with self._lock:
+            if path not in self.seeded:
+                self.seeded.append(path)
+        return self.clone_url(path)
 
     def branches(self, path: str) -> list[str]:
         """Branch names in a seeded repo, for asserting a push landed."""
-        if self.repo_root is None:
-            return []
         bare = self.repo_root / f"{path}.git"
         out = _git(
             ["-C", str(bare), "for-each-ref", "--format=%(refname:short)", "refs/heads/"]
         )
         return [line.strip() for line in out.splitlines() if line.strip()]
 
-    def rest_calls(self, method: str = "", contains: str = "") -> list[ForgeCall]:
-        """Recorded calls, narrowed. `calls` itself stays the whole record."""
-        with self._lock:
-            snapshot = list(self.calls)
-        return [
-            call
-            for call in snapshot
-            if (not method or call.method == method) and contains in call.path
-        ]
+    def rest_calls(self, method: str = "", contains: str = "") -> list[ServiceCall]:
+        """The REST half of `calls_matching`, under the name the scenarios use.
 
-    def authenticated_git_calls(self) -> list[ForgeCall]:
+        Kept as its own name rather than folded into the base: on this stub
+        "calls" and "git calls" are two protocols on one listener, and a
+        scenario reading `rest_calls` is saying which one it means.
+        """
+        return self.calls_matching(method, contains)
+
+    def authenticated_git_calls(self) -> list[ServiceCall]:
         """Git requests that carried a credential.
 
         The one that matters is the push: git sends nothing until challenged,
@@ -234,23 +277,6 @@ class FakeGitLab:
         """
         with self._lock:
             return [call for call in self.git_calls if call.auth]
-
-    def close(self) -> None:
-        if self._server is not None:
-            # `shutdown` before `server_close`: the former stops the serve loop
-            # and blocks until it has, the latter releases the socket.
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def __enter__(self) -> FakeGitLab:
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 def _git(argv: list[str], **kwargs) -> str:
@@ -295,7 +321,7 @@ class _Handler(BaseHTTPRequestHandler):
     # held by a client that connected and went quiet.
     timeout = 30
 
-    stub: FakeGitLab = None  # set on the subclass built in `serve`
+    stub: GitLabService = None  # set on the subclass built in `serve`
 
     # Stdlib hook names, so they are not ours to rename. No `noqa` codes: the
     # project pins ruff to E4/E7/E9/F, so a suppression for N802 would name a
@@ -331,31 +357,30 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- REST -------------------------------------------------------------
 
-    def _read_body(self) -> tuple[bytes, dict]:
+    def _read_body(self) -> bytes:
         length = int(self.headers.get("content-length") or 0)
-        raw = self.rfile.read(length) if length else b""
-        try:
-            parsed = json.loads(raw or b"{}")
-        except ValueError:
-            # A form-encoded body is legal and glab uses one for some verbs.
-            # Recorded as a flat dict so an assertion does not have to know
-            # which encoding the CLI happened to pick.
-            parsed = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
-        return raw, parsed if isinstance(parsed, dict) else {"_body": parsed}
+        return self.rfile.read(length) if length else b""
 
     def _rest(self, method: str, path: str, query: dict) -> None:
-        _, body = self._read_body()
-        call = ForgeCall(
+        raw = self._read_body()
+        call = ServiceCall(
             method=method,
             path=path,
-            query={k: v[0] if len(v) == 1 else v for k, v in query.items()},
-            body=body,
             auth=_auth_shape(self.headers),
+            body=raw,
+            # `headers` is left empty deliberately. `ServiceCall` carries the
+            # field for a stub whose assertion is about header bytes; here the
+            # header block is where the credential is, `auth` already records
+            # the only part of it an assertion needs, and storing the rest would
+            # put the token back into a list that gets printed.
+            query={k: v[0] if len(v) == 1 else v for k, v in query.items()},
         )
-        with self.stub._lock:
-            self.stub.calls.append(call)
+        self.stub.record(call)
 
-        status, payload = _route_rest(method, path, body)
+        # `payload()` rather than a second parse here: a form-encoded body is
+        # legal and glab uses one for some verbs, and the routing table and the
+        # assertions must not disagree about which encoding arrived.
+        status, payload = _route_rest(method, path, call.payload())
         self._json(status, payload)
 
     def _json(self, status: int, payload) -> None:
@@ -368,6 +393,18 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(encoded)
 
     # -- git over HTTP ----------------------------------------------------
+
+    def _record_git(self, method: str, path: str, auth: str) -> None:
+        """Append to `git_calls`, which is not `HttpStub.calls`.
+
+        The body is deliberately not kept: a `git-receive-pack` POST is a
+        packfile, and a scenario asserting on a push reads the repository
+        itself (`branches`) rather than the bytes that produced it.
+        """
+        with self.stub._lock:
+            self.stub.git_calls.append(
+                ServiceCall(method=method, path=path, auth=auth)
+            )
 
     def _git_http(self, method: str, path: str, query: str) -> None:
         """Hand the request to `git http-backend`, which is a CGI program.
@@ -402,19 +439,13 @@ class _Handler(BaseHTTPRequestHandler):
 
         if self.stub.require_git_auth and not accepted:
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="fake-gitlab"')
+            self.send_header("WWW-Authenticate", 'Basic realm="istota-testbed-gitlab"')
             self.send_header("content-length", "0")
             self.end_headers()
-            with self.stub._lock:
-                self.stub.git_calls.append(
-                    ForgeCall(method=method, path=path, query={}, body={}, auth="")
-                )
+            self._record_git(method, path, "")
             return
 
-        with self.stub._lock:
-            self.stub.git_calls.append(
-                ForgeCall(method=method, path=path, query={}, body={}, auth=shape)
-            )
+        self._record_git(method, path, shape)
 
         # After the body read, for the same keep-alive reason as the 401 above.
         root = self.stub.repo_root
@@ -573,7 +604,7 @@ def _route_rest(method: str, path: str, body: dict) -> tuple[int, object]:
         "error": "not implemented by the stub",
         "method": method,
         "path": path,
-        "hint": "add it to tests/smoke/fake_gitlab.py:_route_rest",
+        "hint": "add it to testbed/services/gitlab.py:_route_rest",
     }
 
 
@@ -590,7 +621,7 @@ def _project(identifier: str) -> dict:
 
     So this is a payload to extend rather than trim. `_route_rest` answers 501
     for a missing *endpoint*, which reports itself; a missing *field* has no
-    such courtesy, and `tests/test_fake_gitlab.py` covers `mr create` in the
+    such courtesy, and `tests/test_gitlab_service.py` covers `mr create` in the
     default suite precisely so a regression here costs two seconds rather than
     a compose stack.
     """
@@ -638,42 +669,30 @@ def serve(
     *,
     host: str = LOOPBACK,
     port: int = 0,
+    token: str | None = None,
+    project: str = FORGE_PROJECT,
     require_git_auth: bool = True,
-    expect_git_password: str | None = None,
-) -> FakeGitLab:
+) -> GitLabService:
     """Start the stub. Port 0 lets the OS choose, which is what keeps
     concurrent sessions from colliding.
 
-    `host` defaults to loopback and only the smoke tier overrides it. Binding
-    all interfaces unconditionally would publish an unauthenticated listener —
-    one that runs `git http-backend` — on every `uv run pytest`.
+    `host` defaults to loopback and only the deployment tiers override it.
+    Binding all interfaces unconditionally would publish an unauthenticated
+    listener — one that runs `git http-backend` — on every `uv run pytest`.
+
+    `token` is both the credential the daemon is configured with and the git
+    password this stub challenges for; they are one value because the whole
+    point of the git assertion is that the credential helper produced *the*
+    token rather than something. `None` means "accept any credential on the git
+    path", which `HttpStub.start` allows only on a loopback bind.
     """
     repo_root.mkdir(parents=True, exist_ok=True)
-    stub = FakeGitLab(
-        host_bound=host,
-        repo_root=repo_root,
+    stub = GitLabService(
+        repo_root,
+        token=token or FORGE_TOKEN,
+        project=project,
         require_git_auth=require_git_auth,
-        expect_git_password=expect_git_password,
     )
-
     handler = type("_BoundHandler", (_Handler,), {"stub": stub})
-    server = ThreadingHTTPServer((host, port), handler)
-    # Set explicitly, and it is `daemon_threads` that matters here rather than
-    # `block_on_close`: in `socketserver.ThreadingMixIn` the two are
-    # independent class attributes, not derived from each other. What joins
-    # handler threads on `server_close` is `block_on_close`, left at its
-    # default True — and that default only takes effect while `daemon_threads`
-    # is False. Leave this True and an in-flight handler could append to
-    # `calls` after `close()` returned.
-    server.daemon_threads = False
-    # Read the bound address back off the socket rather than trusting what we
-    # asked for: `host_bound` is asserted against, and an assertion on the
-    # argument we passed in would stay green if the bind itself changed.
-    stub.host_bound = server.server_address[0]
-    stub.port = server.server_address[1]
-    stub._server = server
-    stub._thread = threading.Thread(
-        target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
-    )
-    stub._thread.start()
+    stub.start(handler, host=host, port=port, credential=token)
     return stub

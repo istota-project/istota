@@ -8,7 +8,7 @@ they are wired to each other, which is precisely what ISSUE-263 was — every
 component correct, the composition broken, and the failure arriving at the one
 point in a task where it would publish.
 
-The model is scripted (`tests/support/model_endpoint.py`), so the "decisions"
+The model is scripted (`testbed/services/model_endpoint.py`), so the "decisions"
 here are fixed Bash calls rather than anything an LLM chose. That is the point:
 this is a wiring test, and a real model would make it non-deterministic without
 asserting anything extra.
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from .conftest import FORGE_PROJECT, FORGE_TOKEN
+from testbed.services.gitlab import FORGE_PROJECT, FORGE_TOKEN
 
 pytestmark = pytest.mark.smoke
 
@@ -81,7 +81,7 @@ def _script(*commands: str) -> list[dict]:
 class TestTheHappyPath:
     """Clone, branch, commit, push, open a merge request.
 
-    The script is installed with `ForgeStack.script` rather than through the
+    The script is installed with `Stack.script` rather than through the
     fixture's `param`, because the clone URL carries the stub's port and that
     is not known until something is listening. The alternative — a second
     endpoint — would mean re-rendering the config that names the first one's
@@ -91,9 +91,10 @@ class TestTheHappyPath:
     """
 
     def test_a_merge_request_is_opened_against_the_forge(self, forge_stack):
+        forge = forge_stack.service("gitlab")
         forge_stack.script(
             _script(
-                _CLONE_AND_PUSH.format(clone_url=forge_stack.clone_url),
+                _CLONE_AND_PUSH.format(clone_url=forge.clone_url(FORGE_PROJECT)),
                 _OPEN_MR,
             )
         )
@@ -104,10 +105,13 @@ class TestTheHappyPath:
         )
 
         assert task["status"] == "completed", forge_stack.diagnostics(task)
-        opened = forge_stack.merge_requests()
+        opened = forge.rest_calls("POST", "/merge_requests")
         assert len(opened) == 1, forge_stack.diagnostics(task)
-        assert opened[0].body.get("source_branch") == BRANCH, opened[0].body
-        assert opened[0].body.get("target_branch") == "main", opened[0].body
+        # `payload()` rather than `body`, which is the raw bytes the client
+        # sent: a REST client may form-encode or JSON-encode the same verb, and
+        # an assertion should not have to know which it picked.
+        assert opened[0].payload().get("source_branch") == BRANCH, opened[0].payload()
+        assert opened[0].payload().get("target_branch") == "main", opened[0].payload()
 
     def test_the_branch_really_landed_in_the_repository(self, forge_stack):
         """The git half, asserted from the server's side.
@@ -118,8 +122,9 @@ class TestTheHappyPath:
         assertion that the credential helper, the proxy and `git http-backend`
         all did their part.
         """
+        forge = forge_stack.service("gitlab")
         forge_stack.script(
-            _script(_CLONE_AND_PUSH.format(clone_url=forge_stack.clone_url))
+            _script(_CLONE_AND_PUSH.format(clone_url=forge.clone_url(FORGE_PROJECT)))
         )
         task_id = forge_stack.submit("branch and push")
 
@@ -128,9 +133,7 @@ class TestTheHappyPath:
         )
 
         assert task["status"] == "completed", forge_stack.diagnostics(task)
-        assert BRANCH in forge_stack.stub.branches(FORGE_PROJECT), (
-            forge_stack.diagnostics(task)
-        )
+        assert BRANCH in forge.branches(FORGE_PROJECT), forge_stack.diagnostics(task)
 
 
 class TestTheDenyPolicy:
@@ -158,7 +161,7 @@ class TestTheDenyPolicy:
             "the wrapper did not exit EXIT_DENIED\n"
             + forge_stack.diagnostics(task)
         )
-        assert not forge_stack.stub.rest_calls(contains="/issues"), (
+        assert not forge_stack.service("gitlab").rest_calls(contains="/issues"), (
             "a denied verb reached the forge\n" + forge_stack.diagnostics(task)
         )
 
@@ -225,7 +228,7 @@ class TestTokenIsolation:
             "the forge token reached the model's transcript\n"
             + forge_stack.diagnostics(task)
         )
-        reached = [call for call in forge_stack.stub.calls if call.auth]
+        reached = [call for call in forge_stack.service("gitlab").calls if call.auth]
         assert reached, (
             "no credential reached the forge; the wrapper never injected one\n"
             + forge_stack.diagnostics(task)
@@ -242,15 +245,16 @@ class TestTokenIsolation:
         out to `credential-fetch`, which asks the same proxy. Two paths, and
         only the stub's challenge makes the second observable at all.
         """
+        forge = forge_stack.service("gitlab")
         forge_stack.script(
-            _script(_CLONE_AND_PUSH.format(clone_url=forge_stack.clone_url))
+            _script(_CLONE_AND_PUSH.format(clone_url=forge.clone_url(FORGE_PROJECT)))
         )
         task_id = forge_stack.submit("branch and push")
         task = forge_stack.probe.wait_for_task(
             status="completed", task_id=task_id, timeout=300
         )
 
-        assert forge_stack.stub.authenticated_git_calls(), (
+        assert forge.authenticated_git_calls(), (
             "git never answered the stub's challenge; the credential helper "
             "did not reach the skill proxy\n" + forge_stack.diagnostics(task)
         )
@@ -344,7 +348,8 @@ class TestTheNegativeControl:
             "the failure reached the model without saying what could not be run\n"
             + broken_forge_stack.diagnostics(task)
         )
-        assert not broken_forge_stack.stub.rest_calls(contains="/projects/"), (
+        forge = broken_forge_stack.service("gitlab")
+        assert not forge.rest_calls(contains="/projects/"), (
             "a forge call reached the stub from an image with no forge binary\n"
             + broken_forge_stack.diagnostics(task)
         )
