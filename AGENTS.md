@@ -154,6 +154,8 @@ ruff check --output-format concise src tests
 scripts/qtest uv run pytest      # pyproject deselects every marker below; `-n auto`
 ```
 
+**What to install: `uv sync --extra test`.** A bare `uv sync` is never right — everything the suite needs from `[project.optional-dependencies]` is left out, and the result is hundreds of `ModuleNotFoundError` collection errors that read as a code regression. `--all-extras` works and costs about 1.1 GB in the venv; the `test` extra is `all` minus the two heavy ML ones and costs 291 MB, which matters because the venv is per-worktree and per-container. It is what `scripts/setup.sh` and `docker/test/Dockerfile` install. The difference is `memory-search` (torch, sentence-transformers) and `whisper` (faster-whisper, av, onnxruntime); every heavy import in `src/` is inside a function, deliberately, so nothing needs them to collect, and the one test that needs them at run time carries the `ml` marker. Use `--all-extras` when you want that test or the real libraries to hand-test against. Test-only dependencies belong in the `dev` group, never in an extra — `jinja2` and `psutil` used to arrive as somebody else's transitive, and `tests/test_lean_install.py` is what keeps that from happening again.
+
 Web, from the repo root (needs `npm ci` in `web/` first):
 
 ```bash
@@ -163,7 +165,7 @@ scripts/qtest npm --prefix web run test    # vitest run
 npm --prefix web run format:check
 ```
 
-**Five markers are deselected by default, and none of them runs unless you ask.** Each has a different prerequisite, so they are selectable independently: `integration` (a live Nextcloud or Garmin credentials), `live` (a real LLM key; costs money), `linux` (a real kernel and a usable bubblewrap), `image` and `smoke` (a Docker daemon). A sixth, `requires_dac`, is not deselected — it skips itself where the process can bypass permission bits, which is what happens as root inside the Linux runner. The four discretionary tiers, none automatic:
+**Six markers are deselected by default, and none of them runs unless you ask.** Each has a different prerequisite, so they are selectable independently: `integration` (a live Nextcloud or Garmin credentials), `live` (a real LLM key; costs money), `linux` (a real kernel and a usable bubblewrap), `image` and `smoke` (a Docker daemon), `ml` (one of the two heavy ML extras). A seventh, `requires_dac`, is not deselected — it skips itself where the process can bypass permission bits, which is what happens as root inside the Linux runner. The four discretionary tiers, none automatic:
 
 ```bash
 scripts/test-linux.sh            # the suite + the linux tests, on a real kernel
