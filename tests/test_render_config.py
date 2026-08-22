@@ -576,7 +576,8 @@ class TestTheEntrypointStillOwnsWhatItKept:
             "boot while every test in this file still passes."
         )
 
-    def test_every_developer_var_the_render_reads_is_passed_by_compose(self):
+    @pytest.mark.parametrize("prefix", ["ISTOTA_DEVELOPER_", "ISTOTA_EMAIL_"])
+    def test_every_var_the_render_reads_is_passed_by_compose(self, prefix):
         """The other half of the hand-off, which nothing checked.
 
         The test above excludes ``ISTOTA_*`` on the grounds that compose puts
@@ -585,12 +586,20 @@ class TestTheEntrypointStillOwnsWhatItKept:
         setting is simply absent from the config, in production, with the suite
         green.
 
-        Scoped to ``ISTOTA_DEVELOPER_*`` because those are wholly operator-set
-        — no other layer assigns one, so any name the render reads has to come
-        through compose. ISSUE-289 is why the scope is worth having: the
-        reviewer setting existed in the Ansible role and the render for months,
-        and adding one to the render without adding it to compose costs nothing
-        until an MR opens with nobody on it.
+        Scoped by prefix rather than run over every ``ISTOTA_*`` name, because
+        both of these families are wholly operator-set — no other layer assigns
+        one, so any name the render reads has to arrive through compose. Names
+        the entrypoint itself computes (``LOCATION_INGEST_TOKEN`` and friends)
+        would fail a blanket scan for the wrong reason.
+
+        Both prefixes are here because both have been out of step, months apart.
+        ISSUE-289 was the reviewer setting, present in the Ansible role and the
+        render and absent from compose, which cost nothing until an MR opened
+        with nobody on it. The email pair was ``ISTOTA_EMAIL_AUTHSERV_ID`` and
+        ``ISTOTA_EMAIL_CONFIRM_SENDER_MATCH``, both documented in
+        ``docker/.env.example`` and read by the render — so an operator asking
+        for ``confirm_sender_match = "gate"`` on a Docker deploy silently got
+        ``off``, which is the gate switched off rather than a setting ignored.
         """
         code = "\n".join(
             line
@@ -599,12 +608,12 @@ class TestTheEntrypointStillOwnsWhatItKept:
         )
         read = {
             name
-            for name in re.findall(r"\$\{?(ISTOTA_DEVELOPER_[A-Z0-9_]*)", code)
+            for name in re.findall(r"\$\{?(" + prefix + r"[A-Z0-9_]*)", code)
         }
-        assert read, "the scan found no ISTOTA_DEVELOPER_* reads; the regex has rotted"
+        assert read, f"the scan found no {prefix}* reads; the regex has rotted"
 
         compose = (REPO / "docker" / "docker-compose.yml").read_text()
-        passed = set(re.findall(r"^\s*(ISTOTA_DEVELOPER_[A-Z0-9_]*):", compose, re.M))
+        passed = set(re.findall(r"^\s*(" + prefix + r"[A-Z0-9_]*):", compose, re.M))
 
         missing = sorted(read - passed)
         assert not missing, (

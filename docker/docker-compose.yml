@@ -258,6 +258,14 @@ services:
       ISTOTA_EMAIL_SMTP_PORT: ${ISTOTA_EMAIL_SMTP_PORT:-587}
       ISTOTA_EMAIL_POLL_FOLDER: ${ISTOTA_EMAIL_POLL_FOLDER:-INBOX}
       ISTOTA_EMAIL_BOT_ADDRESS: ${ISTOTA_EMAIL_BOT_ADDRESS:-}
+      # The authserv-id whose Authentication-Results header the DMARC canary
+      # will read — your own MTA's, as it stamps it. Left empty the canary reads
+      # only the topmost header, whoever wrote it, which on a mailbox with
+      # nothing upstream stamping is the sender.
+      ISTOTA_EMAIL_AUTHSERV_ID: ${ISTOTA_EMAIL_AUTHSERV_ID:-}
+      # off | verify | gate — what happens when a sender claims to be the user.
+      # `verify` needs ISTOTA_EMAIL_AUTHSERV_ID set to mean anything.
+      ISTOTA_EMAIL_CONFIRM_SENDER_MATCH: ${ISTOTA_EMAIL_CONFIRM_SENDER_MATCH:-off}
       ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR: ${ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR:-untrusted}
       # Sleep cycle
       ISTOTA_SLEEP_CYCLE_ENABLED: ${ISTOTA_SLEEP_CYCLE_ENABLED:-true}
