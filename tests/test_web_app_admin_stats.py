@@ -233,10 +233,55 @@ class TestSubscriptionSection:
             "fetched_at": "2026-08-22T16:35:12Z",
             "stale": False,
             "token_source": "env",
+            "warn_percent": 80.0,
+            "high_percent": 95.0,
             "error": "",
         }
         # It rides a JSON endpoint: a tuple or a dataclass here is a 500 there.
         json.dumps(section)
+
+    def test_the_operator_s_own_thresholds_reach_the_card(
+        self, tmp_path, monkeypatch
+    ):
+        """The tint is the operator's rule, not a literal in the TypeScript.
+
+        The card colours each tile by these two numbers, so a threshold set in
+        the TOML and not carried here is a threshold the dashboard ignores
+        without ever saying it did.
+        """
+        from istota import web_app
+
+        _patch_snapshot(monkeypatch, _snapshot())
+        config = _config(tmp_path)
+        config.brain.claude_code.subscription_usage_warn_percent = 55.0
+        config.brain.claude_code.subscription_usage_high_percent = 70.0
+
+        section = web_app._admin_subscription_section(config, NOW)
+
+        assert section["warn_percent"] == 55.0
+        assert section["high_percent"] == 70.0
+
+    @pytest.mark.parametrize("value", ["80", None, True, float("nan"), 400.0, -5.0])
+    def test_an_unusable_threshold_never_reaches_the_card_as_one(
+        self, tmp_path, monkeypatch, value
+    ):
+        """A number the card can act on, always.
+
+        The loader clamps and corrects these, so this is the second line: a
+        config assembled in code bypasses it, and `null` on the wire would put
+        the frontend back to inventing a literal. `True` is the pointed case —
+        it is an `int`, and it would tint every tile amber at 1%.
+        """
+        from istota import web_app
+
+        _patch_snapshot(monkeypatch, _snapshot())
+        config = _config(tmp_path)
+        config.brain.claude_code.subscription_usage_warn_percent = value
+
+        section = web_app._admin_subscription_section(config, NOW)
+
+        assert isinstance(section["warn_percent"], float)
+        assert 0.0 <= section["warn_percent"] <= 100.0
 
     def test_it_reads_the_payload_s_own_clock(self, tmp_path, monkeypatch):
         """One clock for the whole payload.

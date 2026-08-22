@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -1364,10 +1365,17 @@ def _admin_subscription_section(config, now: datetime) -> dict:
     that matter: *available* means there are windows to draw, and *stale* means
     the numbers are real but came from an earlier fetch than the one that just
     failed. They part company on the *verdict*: doctor weighs the age against
-    ``subscription_usage_stale_after_seconds`` and the percentages against the
-    warn/high pair to reach a status, and none of those three thresholds is on
-    the wire here. That is deliberate — this payload reports the reading, and
-    `istota doctor` and the Health pane are where it is judged.
+    ``subscription_usage_stale_after_seconds`` to decide whether a stale reading
+    is worth a status of its own, and that threshold is not on the wire — the
+    card says how old the reading is and lets the operator judge, while `istota
+    doctor` and the Health pane are where a status is reached.
+
+    ``warn_percent`` and ``high_percent`` *are* on the wire, because the card
+    tints each tile by them. The alternatives were both worse: literals in the
+    TypeScript would ignore a configured threshold without saying so, and a
+    second endpoint would let the tint and the number it tints come from two
+    different reads. They are configuration rather than credentials, and the
+    only person who sees this dashboard is the one who set them.
 
     ``available: false`` is a rendering state, not an absence — it always
     carries an ``error``, so the card can say why instead of vanishing. Disabled,
@@ -1381,6 +1389,8 @@ def _admin_subscription_section(config, now: datetime) -> dict:
     configured secrets has never seen it.
     """
     from . import subscription_usage
+
+    settings = getattr(getattr(config, "brain", None), "claude_code", None)
 
     # The payload's own clock, not a fresh reading of the wall clock: the
     # countdowns and the cache age have to be measured against the same moment
@@ -1419,8 +1429,37 @@ def _admin_subscription_section(config, now: datetime) -> dict:
         "fetched_at": _iso_utc_from_epoch(snapshot.fetched_at),
         "stale": stale,
         "token_source": snapshot.token_source,
+        "warn_percent": _subscription_threshold(
+            settings, "subscription_usage_warn_percent", 80.0
+        ),
+        "high_percent": _subscription_threshold(
+            settings, "subscription_usage_high_percent", 95.0
+        ),
         "error": error,
     }
+
+
+def _subscription_threshold(settings, field: str, default: float) -> float:
+    """A percentage threshold for the card, or `default` for a non-number.
+
+    Second line behind the loader, which clamps these to ``[0, 100]`` and
+    corrects an inverted pair. A value arriving past the loader — a config built
+    in code, an older TOML — must not reach the wire as a `null` the card would
+    have to invent a literal for. ``bool`` is excluded explicitly: it is an
+    ``int``, and ``True`` would tint every tile amber at 1%.
+
+    Doctor's ``_setting_float`` is the same rule for the same fields, restated
+    rather than imported — that module is imported from inside every
+    ``load_config``, and the web app has no business dragging it in for four
+    lines.
+    """
+    value = getattr(settings, field, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    as_float = float(value)
+    if not math.isfinite(as_float):
+        return default
+    return min(100.0, max(0.0, as_float))
 
 
 def _admin_subscription_spend(spend) -> dict | None:
