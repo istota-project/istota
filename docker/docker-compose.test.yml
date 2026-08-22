@@ -40,6 +40,28 @@ services:
         uv run istota -c /data/config/config.toml init &&
         exec uv run istota-scheduler --daemon -c /data/config/config.toml
 
+    # bubblewrap needs to create a user namespace, and Docker's default seccomp
+    # profile blocks the `unshare(CLONE_NEWUSER)` that takes — measured on
+    # Docker Desktop 29.x: `bwrap --unshare-user` reports "No permissions to
+    # create new namespace, likely because the kernel does not allow
+    # non-privileged user namespaces", which reads as a host misconfiguration
+    # rather than as a container policy. Without this, every task that runs a
+    # Bash tool call fails, and the forge scenarios below cannot reach the
+    # wrapper at all.
+    #
+    # This is the *whole* grant: `--cap-add=SYS_ADMIN` is not needed and is not
+    # given. `/proc/sys` stays read-only, so `--disable-userns` is unavailable
+    # here — `executor._bwrap_supports_disable_userns` probes for it and omits
+    # it, which is the same accommodation `tests/linux/` documents. So the
+    # sandbox this tier exercises is the real one minus one hardening flag, and
+    # nothing here may assert about nested-userns behaviour.
+    #
+    # A test-harness concession, not a deployment recipe. The supported
+    # production shape is bare metal via Ansible, where nothing blocks the
+    # syscall; docker-compose.yml deliberately does not carry this line.
+    security_opt:
+      - seccomp:unconfined
+
     environment:
       # Config generation already happened on the host, so almost nothing is
       # needed here. What remains is what the daemon reads from the environment
