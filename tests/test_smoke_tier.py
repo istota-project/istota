@@ -32,6 +32,7 @@ from .support import compose as compose_support
 from .support.probe import Probe
 
 REPO = Path(__file__).resolve().parents[1]
+PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
 COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
 
 # Deliberately not `os.environ`: these checks are about what rides in the
@@ -244,6 +245,84 @@ class TestTheComposeFileIsAddressable:
         body = COMPOSE_FILE.read_text()
 
         assert "${ISTOTA_TEST_CONFIG_DIR:?" in body, body[:400]
+
+
+class TestThePrebuiltOverlay:
+    """The overlay that points the stack at an image somebody else built.
+
+    Its only caller is the negative control, and the control is the one thing
+    proving the smoke tier can see a broken deployment — so an overlay that
+    silently failed to apply would disarm the tier's own falsification while
+    every test still passed.
+    """
+
+    def test_the_merged_model_runs_the_named_image_and_builds_nothing(self, tmp_path):
+        """`build: !reset null` is the whole point, so it is what is asserted.
+
+        A service carrying both `build` and `image` is one compose rebuilds,
+        tagging the result over the name we asked it to run — the control would
+        then test the *correct* image and pass. `config` renders the merged
+        model, which is the only place that outcome is visible before a
+        container exists.
+        """
+        _require_compose_cli()
+        env_file = tmp_path / "compose.env"
+        env_file.write_text(
+            f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n"
+            "ISTOTA_TEST_IMAGE=istota-test/no-forge:pinned\n"
+        )
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
+        )
+
+        result = subprocess.run(
+            args + ["config"], capture_output=True, text=True, timeout=60,
+            env=_MINIMAL_ENV,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "istota-test/no-forge:pinned" in result.stdout, result.stdout
+        assert "build:" not in result.stdout, (
+            "the overlay left a build section in the merged model, so compose "
+            "would rebuild and retag over the image the control asked for\n"
+            + result.stdout
+        )
+
+    def test_the_image_is_required_rather_than_defaulted(self, tmp_path):
+        """`:?` not `:-`. An empty default renders a service with no image at
+        all, and the failure arrives as a compose error about a malformed
+        service rather than as "the harness forgot to say which image"."""
+        _require_compose_cli()
+        env_file = tmp_path / "compose.env"
+        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
+        )
+
+        result = subprocess.run(
+            args + ["config"], capture_output=True, text=True, timeout=60,
+            env=_MINIMAL_ENV,
+        )
+
+        assert result.returncode != 0
+
+    def test_the_base_file_still_builds_when_no_overlay_is_applied(self, tmp_path):
+        """The control for the control. Without this, the assertion above
+        would pass on a base file that had stopped declaring a build at all."""
+        _require_compose_cli()
+        env_file = tmp_path / "compose.env"
+        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p", env_file=env_file
+        )
+
+        result = subprocess.run(
+            args + ["config"], capture_output=True, text=True, timeout=60,
+            env=_MINIMAL_ENV,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "build:" in result.stdout, result.stdout
 
 
 class TestTheStackStartsTheWayTheDeploymentDoes:
