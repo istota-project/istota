@@ -148,6 +148,31 @@ export async function refreshCounts(): Promise<void> {
   }
 }
 
+/** Adopt a count the room stream pushed, rather than one this module fetched.
+ *
+ * The `/chat` route already holds an SSE connection open, and its
+ * `notifications` frame carries the same `{open, actionable}` pair this
+ * module's poll asks for — so a question parked while the user is reading a
+ * room lights the bell in about a second instead of thirty. The poll stays the
+ * contract: the frame rides the room-check tick, which
+ * `room_stream_room_check_seconds = 0` disables outright, so nothing here may
+ * be tuned down on its account.
+ *
+ * **Ignored unless the poll is running**, which is the same guard `generation`
+ * gives a request already on the wire. A stream frame is not authenticated by
+ * this module, and an EventSource outliving a logout by a tick would otherwise
+ * publish a badge over a page that has logged out. It does not touch
+ * `consecutiveFailures` either: a frame arriving says nothing about whether the
+ * endpoint the poll backed off from has recovered.
+ */
+export function applyNotificationCounts(next: NotificationCounts): void {
+  if (!polling) return;
+  counts.set({
+    open: Math.max(0, Math.trunc(next?.open ?? 0)) || 0,
+    actionable: Math.max(0, Math.trunc(next?.actionable ?? 0)) || 0,
+  });
+}
+
 /** Fetch the panel's rows. Also corrects the badge, because it can.
  *
  * `total_open` is the post-sweep count of the whole open set, so writing it
