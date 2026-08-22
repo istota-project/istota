@@ -987,7 +987,10 @@ async def cmd_usage(ctx: CommandContext):
         snapshot = await asyncio.to_thread(
             subscription_usage.get_snapshot, config, now_ts=now
         )
-        lines += _usage_plan_section(snapshot, config, user_id, now)
+        # `ctx.conn` on the loop thread, where this runs — the resolver reads
+        # the live profile row and should reuse the connection already open
+        # rather than making its own.
+        lines += _usage_plan_section(snapshot, config, user_id, now, ctx.conn)
 
     return "\n".join(lines)
 
@@ -1099,7 +1102,11 @@ def _compact_tokens(value) -> str:
 
 
 def _usage_plan_section(
-    snapshot: "UsageSnapshot", config: Config, user_id: str, now_ts: float
+    snapshot: "UsageSnapshot",
+    config: Config,
+    user_id: str,
+    now_ts: float,
+    conn: sqlite3.Connection | None = None,
 ) -> list[str]:
     """Section 3 — the plan windows — or nothing at all.
 
@@ -1113,7 +1120,7 @@ def _usage_plan_section(
     if not snapshot.has_data:
         return []
 
-    zone, zone_is_fallback = _usage_timezone(config, user_id)
+    zone, zone_is_fallback = _usage_timezone(config, user_id, conn)
     lines = ["", "**Claude Code subscription**", ""]
     for window in snapshot.windows:
         # Sanitized once and read twice. Formatting `window.percent` directly
@@ -1228,18 +1235,36 @@ def _usage_reset(window: "UsageWindow", zone: tzinfo, zone_is_fallback: bool) ->
     return f" (resets {stamp})"
 
 
-def _usage_timezone(config: Config, user_id: str) -> tuple[tzinfo, bool]:
-    """`(zone, is_utc_fallback)` for the invoking user.
+def _usage_timezone(
+    config: Config, user_id: str, conn: sqlite3.Connection | None = None
+) -> tuple[tzinfo, bool]:
+    """`(zone, say_utc)` for the invoking user.
 
-    A user with no profile, or one whose configured `timezone` does not parse,
-    gets UTC — and the caller says "UTC" on the line rather than silently
-    rendering another zone's clock time as if it were theirs.
+    `Config.resolve_user_timezone`, not `config.get_user(...).timezone`, and the
+    difference is user-visible: the resolver prefers the live `user_profiles`
+    row over the in-memory `UserConfig` precisely so a web-UI timezone edit takes
+    effect without a scheduler restart (ISSUE-099). Reading the in-memory config
+    would render every reset stamp in the zone the daemon booted with, which is
+    the staleness that issue exists to have fixed — and `cmd_export` below
+    already resolves it the live way, so two commands in this file would
+    disagree about what time it is for the same user.
+
+    `conn` is threaded through for the reason the resolver's own signature gives:
+    a caller already holding a framework-DB connection should not make it open
+    another, which on the FUSE-backed mount is per-call FD churn.
+
+    The resolver never returns empty and never validates — it hands back a
+    string, and wrapping it in `ZoneInfo` is the caller's job, invalid names
+    included. So the second element is not "did we find a profile" but the
+    simpler and more honest "are these times UTC": true when the resolver landed
+    on its own `"UTC"` fallback, when the user set UTC deliberately, and when the
+    name does not parse. All three render a UTC clock, and the line's job is to
+    say which zone it is showing rather than why that zone was picked.
     """
     from zoneinfo import ZoneInfo
 
-    user = config.get_user(user_id)
-    name = str(getattr(user, "timezone", "") or "") if user is not None else ""
-    if name:
+    name = config.resolve_user_timezone(user_id, conn=conn)
+    if name.strip().upper() != "UTC":
         try:
             return ZoneInfo(name), False
         except Exception:

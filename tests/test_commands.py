@@ -2773,9 +2773,92 @@ class TestCmdUsage:
         assert "UTC" not in result
 
     @pytest.mark.asyncio
+    async def test_reset_uses_the_live_profile_row_not_the_booted_config(
+        self, make_config, db_path, monkeypatch
+    ):
+        """The DB row wins over the in-memory `UserConfig`, and must.
+
+        `Config.resolve_user_timezone` prefers the live `user_profiles` row so a
+        web-UI timezone edit takes effect without a scheduler restart
+        (ISSUE-099). Pinned at the resolver rather than at a rendered string: the
+        two sources are deliberately set to *different* zones, so swapping back
+        to `config.get_user(user_id).timezone` renders 03:00 and fails here.
+        """
+        from istota import user_profiles
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        # What the daemon booted with...
+        config.users = {"bob": UserConfig(timezone="America/Denver")}
+        # ...and what the user has since set in the web UI. +08:45.
+        user_profiles.ensure_profile(db_path, "bob", timezone="Australia/Eucla")
+
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 17:45)" in result
+        assert "03:00" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_resolver_is_given_the_connection_already_open(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A caller holding a framework-DB connection must not make it open
+        another — per-call FD churn on the FUSE-backed mount is why
+        `resolve_user_timezone` takes a `conn` at all."""
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+
+        seen = []
+        real = config.resolve_user_timezone
+
+        def _spy(user_id, *, conn=None):
+            seen.append(conn)
+            return real(user_id, conn=conn)
+
+        config.resolve_user_timezone = _spy
+
+        with db.get_db(db_path) as conn:
+            await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert seen == [conn]
+
+    @pytest.mark.asyncio
+    async def test_an_explicitly_configured_utc_is_labelled_too(
+        self, make_config, db_path, monkeypatch
+    ):
+        """The line says which zone it rendered in, not why that zone was
+        picked. A UTC clock is labelled UTC however it was arrived at."""
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        config.users = {"bob": UserConfig(timezone="UTC")}
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 09:00 UTC)" in result
+
+    @pytest.mark.asyncio
     async def test_reset_falls_back_to_utc_for_a_missing_profile(
         self, make_config, db_path, monkeypatch
     ):
+        """No profile row and no `UserConfig`, so the resolver returns its own
+        `"UTC"` fallback and the line says so."""
         from istota.commands import cmd_usage
 
         config = make_config()
