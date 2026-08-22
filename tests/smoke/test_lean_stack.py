@@ -57,17 +57,36 @@ class TestTheStackAnswersATask:
         prompt = "a question the model must be asked"
         task_id = lean_stack.submit(prompt)
 
-        lean_stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=120)
+        task = lean_stack.probe.wait_for_task(
+            status="completed", task_id=task_id, timeout=120
+        )
+        # `wait_for_task` returns on any terminal status, so without this the
+        # test passes on a task that failed: an exhausted-script error frame
+        # still leaves a recorded request with the right model on it.
+        assert task["status"] == "completed", (
+            f"task {task_id} ended {task['status']!r}: {task.get('error')!r}\n"
+            f"--- daemon logs ---\n{lean_stack.logs()}"
+        )
 
         assert lean_stack.endpoint.requests, (
             "the daemon never reached the scripted endpoint\n"
             f"--- daemon logs ---\n{lean_stack.logs()}"
         )
-        body = lean_stack.endpoint.requests[0]
-        assert body["model"] == "scripted-test-model", body["model"]
-        assert any(
-            prompt in str(message.get("content")) for message in body["messages"]
-        ), body["messages"]
+        # Searched, not `requests[0]`. Today the daemon's own startup work
+        # (a feeds poll) runs as a skill subprocess and makes no model call, so
+        # index 0 happens to be this task's — but any future daemon-side call at
+        # startup would break that, and the failure would read as "the prompt
+        # was not assembled" rather than "the ordering assumption was wrong".
+        matching = [
+            body
+            for body in lean_stack.endpoint.requests
+            if any(prompt in str(m.get("content")) for m in body["messages"])
+        ]
+        assert matching, (
+            f"no request carried the submitted prompt; the endpoint saw "
+            f"{len(lean_stack.endpoint.requests)} request(s)"
+        )
+        assert matching[0]["model"] == "scripted-test-model", matching[0]["model"]
 
 
 class TestTheProbeReadsTheRealSchema:

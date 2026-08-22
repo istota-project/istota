@@ -1,8 +1,14 @@
-"""The smoke tier's own wiring, held down without a Docker daemon.
+"""The smoke tier's own wiring, held down without bringing a stack up.
 
 `tests/smoke/` needs Docker and is deselected by default, so everything it
 depends on that *can* be checked cheaply is checked here instead — the same
 split, and for the same reason, as `tests/test_image_tier.py` one tier below.
+
+Two tests in `TestTheComposeFileIsAddressable` do shell out to
+`docker compose config`, which is compose's own parser and the only thing that
+applies the interpolation and schema rules a real invocation will. It parses
+locally and needs no daemon, so it is fast and always runs. Nothing here builds
+an image or starts a container.
 
 The parts worth guarding are the ones whose failure mode is silence: a marker
 that stops deselecting (so `uv run pytest` starts building images), a
@@ -14,6 +20,7 @@ a WHERE clause ignoring its filters and therefore matches every row.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -30,6 +37,21 @@ COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
 # Deliberately not `os.environ`: these checks are about what rides in the
 # argument list, and an inherited environment would satisfy them either way.
 _MINIMAL_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+
+
+def _require_compose_cli() -> None:
+    """Skip only when the compose CLI is genuinely absent.
+
+    Not `docker_available()`, which runs `docker info` — a round trip of up to
+    15 seconds that gates on a *daemon*. `docker compose config` is a local
+    parse: verified against an unreachable `DOCKER_HOST`, it still resolves and
+    exits 0. Gating on the daemon would make these two tests both slower and
+    stricter than what they actually need.
+    """
+    import shutil
+
+    if shutil.which("docker") is None:
+        pytest.skip("the docker CLI is not installed")
 
 
 class TestTheMarkerIsWired:
@@ -63,6 +85,20 @@ class TestTheMarkerIsWired:
         assert result.returncode == 5, f"{result.stdout}\n{result.stderr}"
         assert "deselected" in result.stdout, result.stdout
 
+    def test_the_linux_driver_deselects_smoke_too(self):
+        """Parity with the tier below, and for the same reason.
+
+        `scripts/test-linux.sh` runs the suite with its own `-m`, which
+        *replaces* addopts rather than composing with it. A marker deselected in
+        one and not the other runs inside the Linux runner and nowhere else —
+        so a stack build would fire in a container with no Docker socket.
+        """
+        driver = (REPO / "scripts" / "test-linux.sh").read_text()
+
+        assert "not smoke" in driver, (
+            "scripts/test-linux.sh does not deselect the smoke marker"
+        )
+
     def test_every_smoke_test_carries_the_marker(self):
         # A file added without `pytestmark` would run in the default suite and
         # hang on a Docker build. The marker is applied at module level, so this
@@ -71,6 +107,78 @@ class TestTheMarkerIsWired:
         assert files, "no smoke tests found; this guard would pass vacuously"
         for path in files:
             assert "pytestmark = pytest.mark.smoke" in path.read_text(), path
+
+
+class TestTheXdistGuard:
+    """Two halves, because neither covers the other.
+
+    The collection hook catches the `--collect-only` and `--dist` spellings
+    before anything is built; `_require_no_xdist` catches a real parallel run,
+    which the hook structurally cannot see.
+    """
+
+    def test_the_collection_hook_rejects_the_collect_only_spelling(self):
+        result = _collect(["-m", "smoke", "-n", "2"])
+
+        assert result.returncode == 4, (
+            f"expected a usage error, got {result.returncode}\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+        assert "must run with -n0" in result.stdout + result.stderr
+
+    def test_the_guard_does_not_fire_on_the_default_run(self):
+        # The direction that would break every ordinary `uv run pytest`: the
+        # hook is `trylast` so `-m` deselection has already emptied the smoke
+        # items by the time it runs.
+        result = _collect([])
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+    def test_a_real_xdist_run_is_refused_before_anything_is_built(self):
+        """The scenario the collection hook structurally cannot see.
+
+        Under a real `-n 2` the controller never calls
+        `pytest_collection_modifyitems` — it holds no items — and xdist clears
+        `numprocesses` in the workers so they do not re-fan-out. Every reading
+        available to that hook says "not parallel". The refusal happens at
+        fixture setup, before `require_docker()` and before any build, so this
+        test needs no Docker daemon and costs a fraction of a second.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+                "-q", "--no-header", "-m", "smoke", "-n", "2",
+                "tests/smoke/test_lean_stack.py::TestTheStackAnswersATask",
+            ],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        output = result.stdout + result.stderr
+
+        assert result.returncode != 0, f"a real xdist run was not refused\n{output}"
+        assert "must run with -n0" in output, output
+        assert "xdist worker" in output, output
+
+
+def _collect(args: list[str]) -> subprocess.CompletedProcess:
+    """A nested `--collect-only` pytest, from the repo root.
+
+    `-p no:cacheprovider` because the cacheprovider writes nodeids during
+    collection, and these run concurrently with an outer `-n auto` session
+    writing the same file.
+    """
+    return subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+            "--collect-only", "-q", *args,
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
 
 
 class TestTheComposeFileIsAddressable:
@@ -87,8 +195,7 @@ class TestTheComposeFileIsAddressable:
         )
 
     def test_the_compose_file_is_valid_and_names_one_service(self, tmp_path):
-        if not compose_support.docker_available():
-            pytest.skip("no Docker daemon available")
+        _require_compose_cli()
         env_file = tmp_path / "compose.env"
         env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
         args = compose_support.compose_args(
@@ -115,8 +222,7 @@ class TestTheComposeFileIsAddressable:
         whether or not the variable rides in the argument list, which is the
         exact distinction that broke.
         """
-        if not compose_support.docker_available():
-            pytest.skip("no Docker daemon available")
+        _require_compose_cli()
         env_file = tmp_path / "compose.env"
         env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
 
@@ -192,11 +298,16 @@ class TestComposeArgs:
 class TestServiceStateParsing:
     """`compose ps --format json` changed shape between compose versions."""
 
-    def _with_ps_output(self, monkeypatch, stdout: str):
+    def _with_ps_output(self, monkeypatch, stdout: str, returncode: int = 0):
+        # Patched on the module under test, not on the stdlib `subprocess`
+        # module object — the latter replaces `subprocess.run` process-wide for
+        # the duration, which is shared mutable state in an `-n auto` suite.
         def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout, "")
+            if returncode != 0:
+                raise compose_support.ComposeError("ps failed")
+            return stdout
 
-        monkeypatch.setattr(compose_support.subprocess, "run", fake_run)
+        monkeypatch.setattr(compose_support, "_run", fake_run)
 
     def test_a_json_array_is_understood(self, monkeypatch):
         self._with_ps_output(
@@ -207,12 +318,70 @@ class TestServiceStateParsing:
         assert compose_support._service_state([], "istota") == ("running", "healthy")
 
     def test_one_object_per_line_is_understood(self, monkeypatch):
+        """Genuine NDJSON — two objects, one per line.
+
+        The first version of this test fed a *single* JSON object, which
+        `json.loads` parses successfully, so it returned through the array
+        branch and the newline-delimited fallback it is named for never ran.
+        Two objects separated by a newline are not valid JSON as a whole, which
+        is what forces the fallback.
+        """
         self._with_ps_output(
             monkeypatch,
-            json.dumps({"Service": "istota", "State": "running", "Health": ""}),
+            json.dumps({"Service": "other", "State": "exited", "Health": ""})
+            + "\n"
+            + json.dumps({"Service": "istota", "State": "running", "Health": ""}),
         )
 
+        # And the requested service is selected, not merely the first row.
         assert compose_support._service_state([], "istota") == ("running", "")
+
+    def test_an_exited_container_is_reported_as_exited(self, monkeypatch):
+        # `wait_ready`'s fast-fail keys on this exact string. It only ever
+        # arrives because `ps` is invoked with `--all`; without that flag
+        # compose omits stopped containers entirely.
+        self._with_ps_output(
+            monkeypatch,
+            json.dumps([{"Service": "istota", "State": "exited", "Health": ""}]),
+        )
+
+        assert compose_support._service_state([], "istota") == ("exited", "")
+
+    def test_ps_is_invoked_with_all_so_stopped_containers_are_visible(self, monkeypatch):
+        """The flag whose absence made the dead-container path unreachable.
+
+        Without `--all`, a service that crashed at boot reads as absent rather
+        than as `exited`, so `wait_ready` cannot fast-fail and instead spends
+        its whole 120s timeout before reporting `state='' health=''` — the least
+        informative possible description of "it exited immediately".
+        """
+        seen = {}
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            return "[]"
+
+        monkeypatch.setattr(compose_support, "_run", fake_run)
+        compose_support._service_state(["docker", "compose"], "istota")
+
+        assert "--all" in seen["args"], seen["args"]
+
+    def test_a_failing_ps_reads_as_empty_rather_than_raising(self, monkeypatch):
+        # The branch that turned the env-file bug into a silent timeout: a
+        # compose command that fails during interpolation is indistinguishable
+        # here from "no container yet". Deliberate — the polling loop must not
+        # die on one bad `ps` — but it must not raise either.
+        self._with_ps_output(monkeypatch, "", returncode=1)
+
+        assert compose_support._service_state([], "istota") == ("", "")
+
+    def test_unparseable_output_reads_as_empty_rather_than_raising(self, monkeypatch):
+        # A deprecation notice on stdout is neither JSON nor JSON-lines. A
+        # decode error escaping into `wait_ready`'s polling loop would replace
+        # the timeout-with-logs this module works to produce.
+        self._with_ps_output(monkeypatch, "WARNING: something on stdout")
+
+        assert compose_support._service_state([], "istota") == ("", "")
 
     def test_no_container_reads_as_empty_not_as_a_crash(self, monkeypatch):
         self._with_ps_output(monkeypatch, "")
@@ -220,7 +389,64 @@ class TestServiceStateParsing:
         assert compose_support._service_state([], "istota") == ("", "")
 
 
+class TestTheChildEnvironmentIsExtendedNotReplaced:
+    def test_a_platform_override_keeps_path(self):
+        """The bug that made `up(platform=…)` unable to find docker at all.
+
+        `subprocess.run(env={...})` substitutes rather than extends, so building
+        the child environment from the override alone leaves no `PATH` — and the
+        failure is `FileNotFoundError: docker`, which reads as "Docker is not
+        installed" rather than as a harness bug. `HOME` matters too: it is where
+        the Docker CLI finds its context and therefore the daemon socket.
+        """
+        child = compose_support._child_env({"DOCKER_DEFAULT_PLATFORM": "linux/amd64"})
+
+        assert child["DOCKER_DEFAULT_PLATFORM"] == "linux/amd64"
+        assert child.get("PATH"), "the override replaced the environment"
+        assert child.get("PATH") == os.environ.get("PATH")
+
+    def test_no_override_still_yields_the_real_environment(self):
+        assert compose_support._child_env(None).get("PATH") == os.environ.get("PATH")
+
+    def test_up_passes_the_platform_without_dropping_the_environment(self, monkeypatch):
+        captured = {}
+
+        def fake_run(args, *, timeout, env=None):
+            captured["env"] = compose_support._child_env(env)
+            return ""
+
+        monkeypatch.setattr(compose_support, "_run", fake_run)
+        compose_support.up(["docker", "compose"], platform="linux/amd64")
+
+        assert captured["env"]["DOCKER_DEFAULT_PLATFORM"] == "linux/amd64"
+        assert captured["env"].get("PATH"), "up() would not find docker"
+
+
+class TestComposeErrorNamesTheSubcommand:
+    def test_the_header_says_which_call_failed(self):
+        # `args[:4]` is always `docker compose -f <file>`, so every error read
+        # identically and none of them said what had actually been run.
+        described = compose_support._describe(
+            ["docker", "compose", "-f", "/x.yml", "--project-name", "p", "ps", "--all"]
+        )
+
+        assert described == "docker compose ps --all", described
+
+
 class TestWaitReady:
+    def test_healthy_is_ready(self, monkeypatch):
+        # The only path the lean stack actually takes — its service declares a
+        # healthcheck, so the `running`-with-no-health arm never applies to it.
+        # Left untested, a change to the literal (or compose renaming the field)
+        # would surface only as a 120s timeout in the Docker tier.
+        monkeypatch.setattr(
+            compose_support,
+            "_service_state",
+            lambda args, service, env=None: ("running", "healthy"),
+        )
+
+        compose_support.wait_ready([], "istota", timeout=5)
+
     def test_running_without_a_health_check_is_ready(self, monkeypatch):
         """The case that would otherwise hang for the full timeout.
 
@@ -228,7 +454,7 @@ class TestWaitReady:
         waiting for "healthy" waits forever on a stack that came up correctly.
         """
         monkeypatch.setattr(
-            compose_support, "_service_state", lambda args, service: ("running", "")
+            compose_support, "_service_state", lambda args, service, env=None: ("running", "")
         )
 
         compose_support.wait_ready([], "istota", timeout=5)
@@ -238,7 +464,7 @@ class TestWaitReady:
         # "state == running": a container with a health check that is still
         # starting is `running` and not yet usable.
         monkeypatch.setattr(
-            compose_support, "_service_state", lambda args, service: ("running", "starting")
+            compose_support, "_service_state", lambda args, service, env=None: ("running", "starting")
         )
         monkeypatch.setattr(compose_support, "logs", lambda *a, **k: "(logs)")
 
@@ -253,7 +479,7 @@ class TestWaitReady:
         raised.
         """
         monkeypatch.setattr(
-            compose_support, "_service_state", lambda args, service: ("exited", "")
+            compose_support, "_service_state", lambda args, service, env=None: ("exited", "")
         )
         monkeypatch.setattr(
             compose_support, "logs", lambda *a, **k: "Traceback: config is malformed"
@@ -268,7 +494,7 @@ class TestWaitReady:
         import time
 
         monkeypatch.setattr(
-            compose_support, "_service_state", lambda args, service: ("exited", "")
+            compose_support, "_service_state", lambda args, service, env=None: ("exited", "")
         )
         monkeypatch.setattr(compose_support, "logs", lambda *a, **k: "")
 
@@ -374,6 +600,28 @@ class TestProbe:
         task = probe.wait_for_task(status="completed", user_id="alice", source_type="talk")
 
         assert task["status"] == "failed"
+
+    def test_a_suspended_task_counts_as_terminal(self, framework_db):
+        """`pending_confirmation` parks a task waiting for a human.
+
+        It will not move on its own, so treating it as non-terminal makes the
+        wait burn its whole timeout and then report "nothing reached completed"
+        — the exact failure mode the terminal set exists to prevent. The status
+        list is in AGENTS.md under "Task Status".
+        """
+        connection = sqlite3.connect(framework_db)
+        connection.execute(
+            "INSERT INTO tasks (source_type, user_id, prompt, status) VALUES (?,?,?,?)",
+            ("cli", "carol", "awaiting a human", "pending_confirmation"),
+        )
+        connection.commit()
+        connection.close()
+
+        task = Probe(local=framework_db).wait_for_task(
+            status="completed", user_id="carol", timeout=5
+        )
+
+        assert task["status"] == "pending_confirmation"
 
     def test_wait_for_task_times_out_when_nothing_is_terminal(self, framework_db):
         probe = Probe(local=framework_db)

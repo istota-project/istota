@@ -27,6 +27,13 @@ from ..support import compose as compose_support
 from ..support.model_endpoint import serve_script
 from ..support.probe import Probe
 
+# Imported rather than re-derived. `--platform amd64` is a rootdir-level option
+# (tests/conftest.py) that both Docker tiers honour, and the normalization —
+# a bare `amd64` becoming `linux/amd64` — is the part that is easy to get
+# subtly wrong. A second copy here would drift, and the symptom of drift is a
+# native build wearing an amd64 label.
+from ..image.conftest import resolve_platform
+
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
 RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
@@ -34,20 +41,50 @@ RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
 READY_TIMEOUT = 120
 
 _XDIST_MESSAGE = (
-    "the smoke tier must run with -n0. The stack is a single compose project "
-    "with a fixed name, so N workers would bring up, exec against and tear "
-    "down each other's containers."
+    "the smoke tier must run with -n0. Each test builds and tears down a whole "
+    "compose stack, so N workers would race the same daemon, exhaust it, and "
+    "sweep each other's projects."
 )
+
+# Every project this tier creates starts with it, which is what makes the
+# session-start sweep able to find leftovers without touching anything else.
+PROJECT_PREFIX = "istota-smoke-"
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Fail early when the tier is selected under xdist.
+
+    Ported from `tests/image/conftest.py`, and load-bearing for the same narrow
+    reason: this hook is the only place that can see the `--collect-only` and
+    `--dist` spellings, and it turns them into an error before anything is
+    built. `trylast` matters because this hook is also where `-m` deselection
+    happens — without it the unfiltered item list is what arrives, and an
+    ordinary `uv run pytest` fails with a usage error about a tier it had
+    already deselected.
+
+    **It cannot see a real parallel run**, which is the actual scenario. Under
+    `-n 2` the controller never calls this (it holds no items) and xdist clears
+    `numprocesses` in the workers so they do not re-fan-out. `_require_no_xdist`
+    is the check that binds.
+    """
+    if not any(item.get_closest_marker("smoke") for item in items):
+        return
+
+    workers = getattr(config.option, "numprocesses", None)
+    distribution = config.getoption("dist", "no")
+    if workers or distribution not in ("no", None):
+        raise pytest.UsageError(
+            f"{_XDIST_MESSAGE} (saw -n {workers}, --dist {distribution})"
+        )
 
 
 def _require_no_xdist(config) -> None:
     """Refuse inside an xdist worker.
 
-    The same shape, and for the same reason, as `tests/image/conftest.py`:
-    `pytest_collection_modifyitems` cannot see a real parallel run at all — the
-    controller holds no items and the workers have `numprocesses` cleared — so
-    the check that binds has to live where the damage would happen, keyed on
-    `config.workerinput`.
+    `workerinput` is set by xdist on the worker's config and absent in a
+    single-process run — the only signal that survives into the place where the
+    damage would be done.
     """
     if hasattr(config, "workerinput"):
         worker = config.workerinput.get("workerid", "?")
@@ -57,6 +94,21 @@ def _require_no_xdist(config) -> None:
 def require_docker() -> None:
     if not compose_support.docker_available():
         pytest.skip("no Docker daemon available")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_leftover_stacks():
+    """Reclaim stacks an earlier run was killed before tearing down.
+
+    A unique project name per test stops one run from adopting another's
+    containers mid-flight, but it also means nothing ever reclaims them: a
+    killed session leaves a container and a named volume behind for good. One
+    sweep at session start closes that, and it is scoped by the prefix so it can
+    never touch a developer's own stack.
+    """
+    if compose_support.docker_available():
+        compose_support.sweep_projects(PROJECT_PREFIX)
+    yield
 
 
 def _render_config(destination: Path, base_url: str) -> Path:
@@ -126,10 +178,14 @@ def lean_stack(pytestconfig, tmp_path, request):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
-    endpoint = serve_script(turns)
+    # All interfaces, explicitly. The default is loopback so an ordinary
+    # `uv run pytest` never opens a listener beyond it; this tier is the one
+    # caller that genuinely needs the container to reach back in.
+    endpoint = serve_script(turns, host="0.0.0.0")
     # A fresh project name per test, so a stack left behind by an interrupted
-    # run is never adopted (and then torn down) by the next one.
-    project = f"istota-smoke-{uuid.uuid4().hex[:8]}"
+    # run is never adopted (and then torn down) by the next one. The session
+    # sweep above is what reclaims those leftovers.
+    project = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:8]}"
 
     # The config directory travels in an --env-file, not in our environment.
     # Compose interpolates the compose file on *every* subcommand, so a
@@ -145,10 +201,12 @@ def lean_stack(pytestconfig, tmp_path, request):
         COMPOSE_FILE, project=project, env_file=env_file
     )
 
-    _render_config(config_dir, endpoint.container_base_url)
-
+    # Inside the `try` from here on. `_render_config` calls `pytest.fail` on a
+    # non-zero render, and an endpoint started outside it would leak a bound
+    # port and a live thread for the rest of the session on every failed setup.
     try:
-        compose_support.up(args)
+        _render_config(config_dir, endpoint.container_base_url)
+        compose_support.up(args, platform=resolve_platform(pytestconfig))
         compose_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
         yield LeanStack(args=args, endpoint=endpoint, config_dir=config_dir)
     finally:

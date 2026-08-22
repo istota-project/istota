@@ -66,9 +66,9 @@ class TestATextTurnSurvivesTheRealParser:
         )
 
     async def test_the_text_is_streamed_as_deltas_not_one_lump(self):
-        # The lean stack asserts on streamed progress, so a single-chunk
-        # endpoint would pass this file while failing to exercise the
-        # reassembly path that the parser's whole complexity is about.
+        # Streaming reassembly is most of what `_parse_sse_lines` does, and a
+        # fixture that always sent each turn whole would leave that path
+        # unexercised by everything built on this module.
         with serve_script([{"text": "abcdef"}]) as endpoint:
             events = await _drive(endpoint)
 
@@ -168,19 +168,33 @@ class TestTheEndpointRecordsWhatItWasAsked:
 
 
 class TestTheEndpointIsAddressableFromAnotherProcess:
-    def test_the_base_url_is_a_concrete_port_on_all_interfaces(self):
-        """The property the container depends on, asserted directly.
+    def test_the_default_bind_is_loopback_only(self):
+        """The default must not publish a listener beyond this machine.
 
-        `serve_script` binds port 0 and the caller cannot know the port until
-        the server exists — but `base_url` also has to be reachable from
-        *inside* a container, which `127.0.0.1` is not. Binding a loopback-only
-        socket would pass every other test in this file and fail the entire
-        smoke tier with a connection error.
+        Only the smoke tier needs a container to reach back in. Binding all
+        interfaces unconditionally would open an unauthenticated POST endpoint
+        on every `uv run pytest`, and on macOS raise the incoming-connections
+        prompt — a run that appears to hang on a dialog nobody is looking at.
         """
         with serve_script([{"text": "ok"}]) as endpoint:
             assert endpoint.port > 0
             assert endpoint.base_url.endswith(f":{endpoint.port}/v1")
+            assert endpoint.host_bound == "127.0.0.1"
+
+    def test_the_bind_address_is_read_off_the_socket_not_the_argument(self):
+        """Asserted against the live socket, which is the whole point.
+
+        `host_bound` used to be the value passed in, so an assertion on it was
+        satisfied by the *request* to bind rather than the bind — change the
+        `ThreadingHTTPServer` call to hardcode loopback and the smoke tier would
+        break while this file stayed green. That is the wrong-reason pass this
+        class exists to prevent, so the field is now populated from
+        `server_address` and cross-checked here.
+        """
+        with serve_script([{"text": "ok"}], host="0.0.0.0") as endpoint:
             assert endpoint.host_bound == "0.0.0.0"
+            assert endpoint._server.server_address[0] == "0.0.0.0"
+            assert endpoint._server.server_address[1] == endpoint.port
 
     def test_the_server_stops_when_the_context_exits(self):
         with serve_script([{"text": "ok"}]) as endpoint:

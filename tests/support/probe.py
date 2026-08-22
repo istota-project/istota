@@ -112,7 +112,7 @@ class Probe:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(f"SELECT * FROM tasks{where} ORDER BY id", params)
 
-    def task_logs(self, task_id: str) -> list[dict]:
+    def task_logs(self, task_id: int) -> list[dict]:
         return self.query(
             "SELECT * FROM task_logs WHERE task_id = ? ORDER BY id", [task_id]
         )
@@ -125,8 +125,14 @@ class Probe:
         immediately with the failure, rather than spending the whole timeout and
         then reporting "no task reached completed" — which says nothing about
         why. The caller's assertion on `status` is what still fails.
+
+        `pending_confirmation` is in that set even though it is a *suspended*
+        rather than a finished state: the task is parked waiting for a human and
+        will not move on its own, so treating it as non-terminal reintroduces
+        exactly the full-timeout-with-no-explanation this exists to prevent. The
+        full list is in AGENTS.md under "Task Status".
         """
-        terminal = {status, "completed", "failed", "cancelled"}
+        terminal = {status, "completed", "failed", "cancelled", "pending_confirmation"}
         deadline = time.monotonic() + timeout
         seen: list[dict] = []
         while time.monotonic() < deadline:

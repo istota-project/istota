@@ -157,6 +157,12 @@ def _exhausted_frame(served: int, scripted: int) -> bytes:
     call the test did not describe, and answering it with a stale response turns
     an unplanned control flow into a pass. The parser surfaces this as a
     `StreamError`, which the daemon records as a failed task.
+
+    The message says where *not* to look, because this frame is a common second
+    cause. `tasks.max_attempts` defaults to 3, so a first attempt that failed
+    for an unrelated reason consumes the script and the retry lands here — and
+    the error the row ends up carrying then names the harness rather than the
+    original fault, on exactly the path a maintainer would be debugging.
     """
     return _frame(
         {
@@ -164,39 +170,75 @@ def _exhausted_frame(served: int, scripted: int) -> bytes:
                 "code": 500,
                 "message": (
                     f"scripted endpoint exhausted: request {served + 1} arrived "
-                    f"but only {scripted} turn(s) were scripted"
+                    f"but only {scripted} turn(s) were scripted. If this is a "
+                    "retry, the first attempt failed for another reason and "
+                    "this message has replaced it — read the daemon log."
                 ),
             }
         }
     )
 
 
-def serve_script(turns: list[dict], *, port: int = 0) -> ScriptedEndpoint:
+def serve_script(
+    turns: list[dict], *, port: int = 0, host: str = LOOPBACK
+) -> ScriptedEndpoint:
     """Start an endpoint replaying `turns`, one per request, in order.
 
     A turn is ``{"text": str}`` or ``{"tool_calls": [{"id", "name",
     "arguments"}]}``, optionally with ``finish_reason`` and ``usage``. Port 0
     lets the OS choose, which is what keeps concurrent test sessions from
     colliding — the chosen port is on the returned object.
+
+    `host` defaults to loopback and only the smoke tier overrides it. Binding
+    all interfaces unconditionally would publish an unauthenticated POST
+    listener on every `uv run pytest`, which the ten default-suite tests here
+    have no use for — they connect over `base_url`, which is loopback. It also
+    raises the macOS incoming-connections prompt, where the run appears to hang
+    on a dialog nobody is looking at.
     """
-    endpoint = ScriptedEndpoint(port=0, host_bound="0.0.0.0")
+    endpoint = ScriptedEndpoint(port=0, host_bound=host)
     state = {"index": 0}
     lock = threading.Lock()
 
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # Bounds a parked keep-alive connection. `server_close` now joins
+        # handler threads (see `daemon_threads` below), and HTTP/1.1 keeps the
+        # socket open between requests — so a client that connected and went
+        # quiet would block `handle_one_request`, and the join behind it, for as
+        # long as it liked. Five seconds is far longer than any scripted turn.
+        timeout = 5
 
-        def log_message(self, *args) -> None:  # noqa: A003 - stdlib hook name
+        # Stdlib hook names, so they are not ours to rename. No `noqa` codes:
+        # the project pins ruff to E4/E7/E9/F (AGENTS.md), so a suppression for
+        # A003 or N802 would name a rule that is not enabled and read as though
+        # it were doing something.
+        def log_message(self, *args) -> None:
             """Silence. The server logs one line per request to stderr
             otherwise, and pytest attaches all of it to unrelated failures."""
 
-        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+        def handle_error(self, request, client_address) -> None:
+            """Silence too, and for the same reason.
+
+            `log_message` alone is not enough: an unhandled exception in a
+            handler thread — a malformed body, a client that hung up mid-write —
+            goes to `handle_error`, which prints a full traceback to stderr that
+            pytest then attaches to whichever test happens to be running.
+            """
+
+        def do_POST(self) -> None:
             if not self.path.endswith("/chat/completions"):
                 self.send_error(404, "only /chat/completions is scripted")
                 return
 
             length = int(self.headers.get("content-length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, OSError):
+                # A 400 the caller can see beats a traceback in someone else's
+                # test output.
+                self.send_error(400, "expected a JSON body")
+                return
 
             with lock:
                 index = state["index"]
@@ -220,10 +262,23 @@ def serve_script(turns: list[dict], *, port: int = 0) -> ScriptedEndpoint:
             self.end_headers()
             self.wfile.write(payload)
 
-    server = ThreadingHTTPServer((endpoint.host_bound, port), _Handler)
-    server.daemon_threads = True
+    server = ThreadingHTTPServer((host, port), _Handler)
+    # `block_on_close` is `not daemon_threads`, so leaving daemon_threads True
+    # means `server_close` does not join handler threads — an in-flight handler
+    # could then append to `requests` after `close()` returned, and a keep-alive
+    # thread parked in `handle_one_request` would outlive the endpoint.
+    server.daemon_threads = False
     endpoint.port = server.server_address[1]
+    # Read the bound address back off the socket rather than trusting what we
+    # asked for. `host_bound` is asserted against, and an assertion on the
+    # argument we passed in would stay green if the bind itself changed.
+    endpoint.host_bound = server.server_address[0]
     endpoint._server = server
-    endpoint._thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # A short poll interval: `serve_forever`'s default is 0.5s and `shutdown`
+    # waits for the current poll to finish, so every teardown paid up to half a
+    # second — which was most of this file's runtime.
+    endpoint._thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
+    )
     endpoint._thread.start()
     return endpoint

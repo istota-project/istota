@@ -44,9 +44,12 @@ services:
       # Config generation already happened on the host, so almost nothing is
       # needed here. What remains is what the daemon reads from the environment
       # at load time rather than from the file.
-      ISTOTA_BRAIN_NATIVE_API_KEY: ${ISTOTA_BRAIN_NATIVE_API_KEY:-unused-by-the-scripted-endpoint}
-      # Real deployments resolve this from the host; on Docker Engine (Linux)
-      # it is not automatic, so the harness maps it explicitly below.
+      # A fixed literal, NOT `${ISTOTA_BRAIN_NATIVE_API_KEY:-…}`. Interpolating
+      # from the ambient environment would ship a developer's real key into a
+      # test container that then POSTs to a listener on their own machine.
+      # Nothing in this tier can use a real key: the endpoint is scripted and
+      # ignores the Authorization header entirely.
+      ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint
       PYTHONUNBUFFERED: "1"
 
     volumes:
