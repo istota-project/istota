@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When the main model is unavailable and the bot switches to the backup one, web chat and the local console now say so as it happens, instead of sitting on a "working on it" verb for the minutes the switch and the retry take. That silence was indistinguishable from a hung task, and if your room pinned a model the backup cannot run, the answer you then read came from a different model with nothing saying so until it was over. The notice names what failed, why, what took over and which model it is running; it is shown live, so reloading the page afterwards leaves the reply without it.
+
 - The admin dashboard's Users table is readable on a phone again. Adding the token and cost columns pushed the row past the width of a phone screen, and because the table was told never to overflow, the 24h activity column — the stacked bar and the per-source chips — was the one that gave way, ending up exactly zero pixels wide with its headings overlapping its neighbours. The table now scrolls sideways the way the other wide tables in the app do, so every column keeps a legible width, and the three columns that used to be hidden on a narrow screen are back.
 
 - Mail you send to your own bot no longer turns up twice. A message to the bot's address was answered by email and also copied, question and answer, into whichever room your notifications go to — so an exchange already sitting in your inbox appeared a second time in a room it had nothing to do with, and counted as context for every later task there. Mail from anyone else still lands in that room, which is what the copy is for.

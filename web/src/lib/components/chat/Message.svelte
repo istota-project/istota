@@ -633,17 +633,31 @@
             <!-- A chip sandwiched between paragraphs needs room to breathe;
 						     the first group sits tight under the meta, like a no-tool
 						     text answer. Spacing is neighbour-aware (chips never abut —
-						     tool runs coalesce — so a chip's neighbours are prose or the
-						     message edge). -->
+						     tool runs coalesce — so a chip's neighbours are prose, a run
+						     notice, or the message edge). -->
             <div
               class="chip-slot"
-              class:gap-above={groups[gi - 1]?.kind === 'prose'}
-              class:gap-below={groups[gi + 1]?.kind === 'prose'}
+              class:gap-above={groups[gi - 1] && groups[gi - 1].kind !== 'activity'}
+              class:gap-below={groups[gi + 1] && groups[gi + 1].kind !== 'activity'}
             >
               <ActivityTrace
                 steps={g.steps}
                 streaming={message.streaming && gi === lastActivityIdx}
               />
+            </div>
+          {:else if g.kind === 'notice'}
+            <!-- A notice about the run itself (ISSUE-278: the primary brain
+					       failed and the answer below it came from elsewhere). The
+					       tinted box is the shared `.banner warn` primitive; `.run-notice`
+					       adds only what is specific to sitting in a transcript. Rendered
+					       through the markdown pipeline because the executor's sentence
+					       backticks the brain and model names. Not `.body` — that owns the
+					       answer's type size and colour, both of which the notice overrides.
+					       `role="status"` marks what the element is; note that a live
+					       region inserted already-populated is not reliably announced, so
+					       this is semantics rather than a guarantee of an announcement. -->
+            <div class="markdown banner warn run-notice" role="status">
+              {@html renderMarkdown(g.text)}
             </div>
           {:else}
             <div class="body markdown">
@@ -652,9 +666,15 @@
           {/if}
         {/each}
 
-        {#if message.streaming && groups.length === 0}
+        {#if message.streaming && groups.every((g) => g.kind === 'notice')}
           <!-- Work-phase cue: the ack verb + pulsing dot, shown while the
-					     model reasons / before the first tool or answer text. -->
+					     model reasons / before the first tool or answer text.
+					     A `notice` group does NOT count as content here (ISSUE-278):
+					     it is a static sentence, and a brain fallback emits one and
+					     then runs for as long as the fallback takes. Counting it
+					     would retire the only live cue in the turn at the exact
+					     moment the wait gets longest. `every` on an empty array is
+					     true, so the no-groups case is unchanged. -->
           <div class="progress">
             <span class="dot"></span>
             <span class="status-text">{message.progress || 'Thinking…'}</span>
@@ -1153,6 +1173,28 @@
     word-break: break-word;
     max-width: var(--chat-body-max);
   }
+  /* A notice about the run rather than about its content (ISSUE-278): the
+	   primary brain failed and the rest of the turn came from the fallback,
+	   possibly on a different model. The tint, padding and radius come from the
+	   `.banner warn` primitive (web/AGENTS.md: use the shared blocks, don't
+	   re-declare them); only the transcript-specific parts are here — the body
+	   width it shares with prose, the leading rule, and a smaller type size so
+	   the aside doesn't compete with the answer for prominence. */
+  .run-notice {
+    max-width: var(--chat-body-max);
+    margin: var(--space-2) 0;
+    border-left: 2px solid var(--status-warn-fg);
+    font-size: var(--text-xs);
+    line-height: 1.45;
+  }
+  /* The executor backticks the brain and model names; the default `code` run
+	   is sized off body text and would out-weigh the notice around it. */
+  .run-notice :global(code) {
+    font-size: inherit;
+    background: none;
+    padding: 0;
+  }
+
   /* On the inner span, not the wrapper: the wrapper also holds the copy
 	   button, and under `pre-wrap` the markup whitespace around that button
 	   would render as real blank space around the message text. */

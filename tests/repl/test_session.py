@@ -293,3 +293,52 @@ class TestTerminalSubscriberStreaming:
         # The narration was shown inline once but is not concatenated onto the
         # answer line.
         assert "Let me check the file.The file says hello." not in text
+
+
+class TestBrainFallbackNotice:
+    """ISSUE-278 — the repl is a stream surface too, so the reroute has to be
+    visible there and not only in web chat. It renders the executor's own
+    sentence verbatim; composing a second one here is how two surfaces end up
+    telling the user different things."""
+
+    def _sub(self):
+        out = io.StringIO()
+        return TerminalSubscriber(color=False, stream=out), out
+
+    def test_notice_printed(self):
+        sub, out = self._sub()
+        sub.on_event(_ev("brain_fallback", {
+            "primary": "claude_code",
+            "reason": "transient_api_error",
+            "fallback": "native",
+            "model": "",
+            "dropped_pin": "claude-opus-5",
+            "text": "`claude_code` is unavailable. Continuing on `native`.",
+        }))
+        printed = out.getvalue()
+        assert "`claude_code` is unavailable. Continuing on `native`." in printed
+
+    def test_notice_terminates_an_open_delta_line(self):
+        # A fallback can land mid-answer (the primary streamed before failing).
+        # The notice must not run onto the end of that line.
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "partial"}, seq=1))
+        sub.on_event(_ev("brain_fallback", {"text": "switched"}, seq=2))
+        assert out.getvalue().startswith("partial\n")
+
+    def test_empty_text_prints_nothing(self):
+        sub, out = self._sub()
+        sub.on_event(_ev("brain_fallback", {"primary": "claude_code"}))
+        assert out.getvalue() == ""
+
+    def test_answer_printed_once_when_the_fallback_lands_mid_answer(self):
+        # The primary streamed some words and then failed. `result` reconciles
+        # against what streamed; without dropping the failed brain's text at the
+        # boundary the comparison never matches and the whole answer is printed
+        # a second time underneath.
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "primary partial"}, seq=1))
+        sub.on_event(_ev("brain_fallback", {"text": "switched"}, seq=2))
+        sub.on_event(_ev("text_delta", {"text": "the real answer"}, seq=3))
+        sub.on_event(_ev("result", {"text": "the real answer"}, seq=4))
+        assert out.getvalue().count("the real answer") == 1
