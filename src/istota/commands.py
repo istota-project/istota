@@ -25,9 +25,10 @@ from .config import Config
 # each other by a parity test; a third, inside a surface, is exactly what those
 # tests exist to prevent. `usage_render` is a stdlib-only leaf, so it costs this
 # module (imported on the Talk polling path) nothing to take at import time.
-from .usage_render import COST_PLACEHOLDER, fmt_int, fmt_money, render_cost
+from .usage_render import COST_PLACEHOLDER, fmt_int, render_cost
 
 if TYPE_CHECKING:
+    from .subscription_usage import Spend, UsageSnapshot, UsageWindow
     from .transport.registry import TransportRegistry
 
 logger = logging.getLogger("istota.commands")
@@ -902,6 +903,12 @@ _USAGE_BAR_WIDTH = 20
 # start a long run deserves to know how old it is.
 _USAGE_FRESH_SECONDS = 60
 
+# The `user_id` filter for a non-admin whose id is empty. `task_usage.user_id`
+# is `TEXT NOT NULL` and every writer stamps a real id, so this matches nothing
+# — which is the right answer for a caller we cannot attribute, and the opposite
+# of what passing the empty string through would do.
+_NO_SUCH_USER = "\x00"
+
 
 @command("usage", "Show token usage, and plan limits on a subscription")
 async def cmd_usage(ctx: CommandContext):
@@ -972,8 +979,13 @@ def _usage_token_sections(config: Config, user_id: str, is_admin: bool) -> list[
     day_since = _usage_since(now, 1)
     month_since = _usage_since(now, 30)
     # A non-admin is filtered to their own rows and learns nothing about anyone
-    # else's consumption; an admin gets the fleet.
-    scope = None if is_admin else user_id
+    # else's consumption; an admin gets the fleet. `None` is the *only* way to
+    # ask for the fleet, so the non-admin branch must never produce a value
+    # `db._usage_filters` would treat as absent — it gates on truthiness, and an
+    # empty `user_id` would silently drop the WHERE clause and hand a member the
+    # whole deployment's totals. No caller passes one today; this is one
+    # expression rather than a promise about every future transport.
+    scope = None if is_admin else (user_id or _NO_SUCH_USER)
 
     try:
         with db.get_db(config.db_path) as conn:
@@ -1059,7 +1071,9 @@ def _compact_tokens(value) -> str:
     return f"{total:,}"
 
 
-def _usage_plan_section(snapshot, config: Config, user_id: str, now_ts: float) -> list[str]:
+def _usage_plan_section(
+    snapshot: "UsageSnapshot", config: Config, user_id: str, now_ts: float
+) -> list[str]:
     """Section 3 — the plan windows — or nothing at all.
 
     Omitted silently when there is nothing to show. A *stale* reading is not
@@ -1069,7 +1083,7 @@ def _usage_plan_section(snapshot, config: Config, user_id: str, now_ts: float) -
     would have bought without spending the command name on it (and `!cc-usage` is
     unspellable anyway — `parse_command`'s `\\w` excludes hyphens).
     """
-    if not getattr(snapshot, "has_data", False):
+    if not snapshot.has_data:
         return []
 
     zone, zone_is_fallback = _usage_timezone(config, user_id)
@@ -1118,14 +1132,14 @@ def _usage_bar(percent: float) -> str:
     return "#" * filled + "-" * (_USAGE_BAR_WIDTH - filled)
 
 
-def _usage_reset(window, zone: tzinfo, zone_is_fallback: bool) -> str:
+def _usage_reset(window: "UsageWindow", zone: tzinfo, zone_is_fallback: bool) -> str:
     """`" (resets Aug 22 17:40)"` in the reader's own clock, or nothing.
 
     Absolute, where the admin card's sub-line is relative: a chat reply is read
     once and possibly hours later, while the card re-renders every 60 seconds.
     Both derive from the one `resets_at`.
     """
-    raw = getattr(window, "resets_at", None)
+    raw = window.resets_at
     if not raw:
         return ""
     try:
@@ -1168,23 +1182,32 @@ def _usage_timezone(config: Config, user_id: str) -> tuple[tzinfo, bool]:
     return timezone.utc, True
 
 
-def _usage_money(minor: int, spend) -> str:
+def _usage_money(minor: int, spend: "Spend") -> str:
     """A pay-as-you-go amount, in major units of its own currency.
 
-    The divisor comes from the payload's own `exponent`, never a hardcoded 100:
-    that is wrong for every currency that is not two-decimal, and it is the bug
-    the removed implementation carried.
+    Both the divisor *and* the precision come from the payload's own `exponent`,
+    never a hardcoded 100 — that is wrong for every currency that is not
+    two-decimal, and it is the bug the removed implementation carried. Taking the
+    precision from the same place is what keeps a zero-decimal currency from
+    rendering `500.00`, which is two digits the account never had.
+
+    Not routed through `usage_render.fmt_money`, and the distinction is the whole
+    reason this line is allowed to carry a currency symbol at all: that rule
+    formats a *token cost*, where a sub-cent figure has to stay visible rather
+    than round to `$0.00`. This is a credit balance already quantized to its own
+    smallest unit, so it is exact at `exponent` places and never sub-unit.
     """
     try:
-        exponent = int(spend.exponent)
+        exponent = max(0, int(spend.exponent))
     except (AttributeError, TypeError, ValueError):
         exponent = 2
     try:
-        major = float(minor) / (10 ** max(0, exponent))
+        major = float(minor) / (10**exponent)
     except (TypeError, ValueError):
         return COST_PLACEHOLDER
-    currency = str(getattr(spend, "currency", "") or "USD")
-    return f"${fmt_money(major)}" if currency == "USD" else f"{fmt_money(major)} {currency}"
+    text = f"{major:.{exponent}f}"
+    currency = str(spend.currency or "USD")
+    return f"${text}" if currency == "USD" else f"{text} {currency}"
 
 
 def _usage_age(seconds: float) -> str:

@@ -2650,6 +2650,32 @@ class TestCmdUsage:
         assert calls == []
 
     @pytest.mark.asyncio
+    async def test_an_unattributable_caller_gets_nobodys_rows(
+        self, make_config, db_path, monkeypatch
+    ):
+        """An empty `user_id` must not read as "no filter".
+
+        `db._usage_filters` gates the `WHERE u.user_id = ?` clause on
+        truthiness, so passing a falsy id straight through would drop the clause
+        and hand a caller `is_admin` just refused the whole deployment's totals.
+        """
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        calls = self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
+            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=5_000_000)
+            result = await cmd_usage(_ctx(config, conn, ""))
+
+        assert "No usage recorded." in result
+        assert "1,000 tokens" not in result
+        assert "5.0M" not in result
+        assert "**By brain**" not in result
+        assert calls == []
+
+    @pytest.mark.asyncio
     async def test_admin_gets_all_three_sections_fleet_wide(
         self, make_config, db_path, monkeypatch
     ):
@@ -2827,7 +2853,9 @@ class TestCmdUsage:
         result = await self._render(
             make_config, db_path, monkeypatch, _snapshot(spend=spend)
         )
-        assert "**Extra usage:** 500.00 JPY / 2000.00 JPY (25%)" in result
+        # Zero-decimal, so no fabricated ".00" either: the exponent sets the
+        # divisor and the precision, and 500 yen is 500 yen.
+        assert "**Extra usage:** 500 JPY / 2000 JPY (25%)" in result
 
     @pytest.mark.asyncio
     async def test_staleness_footer_only_on_an_old_reading(
@@ -2994,6 +3022,87 @@ class TestCmdUsage:
         assert opened == []
         assert "- 5-hour: [########------------] 40%" in first
         assert first == second
+
+    # -- the credential ------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_the_token_value_never_reaches_the_reply(
+        self, make_config, db_path, tmp_path, monkeypatch
+    ):
+        """A sentinel in every resolvable source, absent from the returned text.
+
+        Nothing downstream would catch a leak here: this credential is not in the
+        config, so the redaction pass covering configured secrets has never seen
+        it. Driven through the *real* `get_snapshot` against a stub host, so the
+        resolver and the fetch both actually run — a stubbed snapshot cannot leak
+        a token it was never given, and the test would prove nothing.
+
+        A stale cache is seeded deliberately. Without one, a refused credential
+        produces no windows, section 3 is omitted, and "the token is absent" is
+        true of a reply that rendered nothing at all. With one, the 403 lands on
+        the stale-cache branch, so the section *and* the footer built beside
+        `snapshot.error` both render — which is the only place a leak could go.
+        """
+        import json as _json
+        import subprocess as _subprocess
+
+        from istota import subscription_usage as su
+        from istota.commands import cmd_usage
+
+        sentinel = "sk-ant-oat01-" + "z" * 40
+        blob = _json.dumps({"claudeAiOauth": {"accessToken": sentinel}})
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / ".credentials.json").write_text(blob)
+
+        sent_headers = []
+
+        def _transport(url, headers, timeout):
+            sent_headers.append(headers)
+            # A 403 is the branch that has an error string to render, which is
+            # where a leak would surface if one were going to. The body echoes
+            # the token back, as a hostile endpoint could.
+            return 403, b'{"error":{"message":"' + sentinel.encode() + b'"}}'
+
+        # Darwin too, so the keychain branch is a resolvable source rather than
+        # one skipped on a Linux runner: all three carry the sentinel.
+        monkeypatch.setattr(su.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            su.subprocess,
+            "run",
+            lambda *a, **k: _subprocess.CompletedProcess(a[0] if a else [], 0, blob, ""),
+        )
+
+        def _real(config, *, now_ts, **kwargs):
+            return _REAL_GET_SNAPSHOT(
+                config, now_ts=now_ts, transport=_transport,
+                env={"CLAUDE_CODE_OAUTH_TOKEN": sentinel, "USER": "someone"},
+                home=home,
+            )
+
+        monkeypatch.setattr(su, "get_snapshot", _real)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        # Older than the 300s TTL, so it is not served instead of the fetch, but
+        # still there for the stale fallback the 403 takes.
+        su.write_cache(
+            su.cache_path(config.db_path.parent),
+            _snapshot([_window(percent=40.0)], age=4000.0),
+        )
+
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "**Claude Code subscription**" in result, "the leak-prone branch never ran"
+        assert "_Reading is 1h 06m old._" in result
+        assert sentinel not in result
+        assert "sk-ant" not in result
+        assert "403" not in result
+        assert sent_headers, "the fetch never ran, so this proves nothing"
+        assert sentinel in sent_headers[0]["Authorization"], (
+            "the token belongs in the header and nowhere else"
+        )
 
     # -- registration --------------------------------------------------------
 
