@@ -1288,7 +1288,13 @@ def _gather_admin_stats() -> dict:
     # request, so a server dripping bytes holds a pool thread for longer than
     # the configured seconds.
     try:
-        payload["subscription"] = _admin_subscription_section(config, now)
+        # Omitted entirely rather than sent as null when there is no card to
+        # draw — Claude Code is not in play here, or the reading could not be
+        # obtained. The frontend's `{#if stats.subscription}` is the only gate
+        # it needs, and an absent key cannot be mistaken for a failed one.
+        section = _admin_subscription_section(config, now)
+        if section is not None:
+            payload["subscription"] = section
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin subscription section failed")
         payload["subscription"] = {"error": str(exc)}
@@ -1351,7 +1357,31 @@ def _admin_brain_status_section() -> dict:
         return {"error": str(exc)}
 
 
-def _admin_subscription_section(config, now: datetime) -> dict:
+def _claude_code_is_in_play(config) -> bool:
+    """Whether this deployment can spend a Claude Code subscription at all.
+
+    Not ``brain.kind == "claude_code"``. A deployment running ``kind =
+    "native"`` with ``fallback = "claude_code"`` burns the plan on every
+    failover — that is the motivating case for reporting the windows in the
+    first place — so gating on the primary alone would hide a working reading
+    on exactly the shape that most needs it. The fallback counts.
+
+    Read defensively: a config predating either field behaves as "not in play",
+    which errs toward hiding a card rather than drawing an empty one.
+    """
+    brain = getattr(config, "brain", None)
+    if brain is None:
+        return False
+    for field in ("kind", "fallback"):
+        try:
+            if str(getattr(brain, field, "") or "").strip().lower() == "claude_code":
+                return True
+        except Exception:  # noqa: BLE001 — a stats section never raises on config shape
+            continue
+    return False
+
+
+def _admin_subscription_section(config, now: datetime) -> dict | None:
     """Claude Code plan utilization for the admin dashboard.
 
     On a subscription deployment the Token usage card's cost column is
@@ -1391,6 +1421,9 @@ def _admin_subscription_section(config, now: datetime) -> dict:
     """
     from . import subscription_usage
 
+    if not _claude_code_is_in_play(config):
+        return None
+
     settings = getattr(getattr(config, "brain", None), "claude_code", None)
 
     # The payload's own clock, not a fresh reading of the wall clock: the
@@ -1398,22 +1431,28 @@ def _admin_subscription_section(config, now: datetime) -> dict:
     # as every other timestamp on this dashboard.
     snapshot = subscription_usage.get_snapshot(config, now_ts=now.timestamp())
 
+    # No windows, no card. This section used to emit `available: false` with a
+    # reason so an operator who expected the reading learned why it was absent,
+    # and that was right while a missing reading meant something was wrong. It
+    # is not right now: the endpoint does not serve the long-lived setup-token
+    # credential that both server shapes deploy, so on those deployments the
+    # note was permanent and told the operator nothing they could act on. A
+    # reading that cannot be obtained is reported by `runtime.subscription_usage`
+    # as a SKIP, which is where a diagnostic belongs.
+    if not snapshot.has_data:
+        return None
+
     # Windows *and* an error is the stale-cache branch and the only way to be
     # stale — an old real reading, plus the failure that made it old. Doctor
-    # renders the same pair off the same condition.
+    # renders the same pair off the same condition. A stale reading still draws
+    # the card: an old real number outranks no card at all.
     stale = bool(snapshot.error) and snapshot.has_data
-
-    # `available: false` with a blank reason is the one payload this section
-    # must not emit, and `get_snapshot` already promises not to produce it — a
-    # windowless success carries NO_WINDOWS_ERROR. Restated here rather than
-    # inherited, exactly as doctor restates it, because the failure mode is a
-    # card that says nothing and there is nowhere downstream to notice.
     error = snapshot.error
-    if not snapshot.has_data and not error:
-        error = subscription_usage.NO_WINDOWS_ERROR
 
     return {
-        "available": snapshot.has_data,
+        # Always true where the key is present at all — kept so the shape does
+        # not change under a client that still reads it.
+        "available": True,
         "windows": [
             {
                 "key": window.key,

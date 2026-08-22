@@ -200,6 +200,71 @@ def _drive_real_snapshot(monkeypatch, transport, env):
 
 
 @_needs_web_deps
+class TestClaudeCodeInPlay:
+    """The card is drawn only where the deployment can spend the plan.
+
+    Not `brain.kind == "claude_code"`. A deployment running `kind = "native"`
+    with `fallback = "claude_code"` burns the subscription on every failover —
+    the case that motivated reporting the windows at all — so gating on the
+    primary alone would hide a working reading on the shape that most needs it.
+    """
+
+    def _section(self, tmp_path, monkeypatch, *, kind, fallback, calls=None):
+        from istota import web_app
+
+        def _spy(config, **kwargs):
+            if calls is not None:
+                calls.append(config)
+            return _snapshot()
+
+        monkeypatch.setattr(su, "get_snapshot", _spy)
+        config = _config(tmp_path)
+        config.brain.kind = kind
+        config.brain.fallback = fallback
+        return web_app._admin_subscription_section(config, NOW)
+
+    def test_claude_code_as_the_primary_brain_draws_the_card(self, tmp_path, monkeypatch):
+        section = self._section(tmp_path, monkeypatch, kind="claude_code", fallback="")
+        assert section is not None
+        assert section["available"] is True
+
+    def test_claude_code_as_the_fallback_draws_the_card(self, tmp_path, monkeypatch):
+        """The motivating case, and the reason this is not a `kind` check."""
+        section = self._section(
+            tmp_path, monkeypatch, kind="native", fallback="claude_code"
+        )
+        assert section is not None
+        assert section["available"] is True
+
+    def test_a_deployment_that_cannot_use_the_plan_draws_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        calls: list = []
+        section = self._section(
+            tmp_path, monkeypatch, kind="native", fallback="", calls=calls
+        )
+        assert section is None
+        # And spends no request finding out. A deployment that cannot use the
+        # subscription has no business polling Anthropic about it once a minute,
+        # which is what an availability-only gate would have done.
+        assert calls == [], "the gate must short-circuit before the fetch"
+
+    @pytest.mark.parametrize("value", ["CLAUDE_CODE", " claude_code ", "Claude_Code"])
+    def test_the_brain_name_is_matched_case_and_space_insensitively(
+        self, tmp_path, monkeypatch, value
+    ):
+        assert self._section(tmp_path, monkeypatch, kind=value, fallback="") is not None
+
+    def test_a_config_with_no_brain_block_draws_nothing(self, tmp_path, monkeypatch):
+        """Read defensively: erring toward no card beats erring toward an empty one."""
+        from istota import web_app
+
+        monkeypatch.setattr(su, "get_snapshot", lambda config, **kw: _snapshot())
+        config = _config(tmp_path)
+        config.brain = None
+        assert web_app._admin_subscription_section(config, NOW) is None
+
+
 class TestSubscriptionSection:
     """`_admin_subscription_section` — the payload the card is typed against."""
 
@@ -374,13 +439,19 @@ class TestSubscriptionSection:
             ("the usage endpoint returned HTTP 403", "env"),
         ],
     )
-    def test_the_unavailable_cases_still_render_with_a_reason(
+    def test_the_unavailable_cases_draw_no_card_at_all(
         self, tmp_path, monkeypatch, error, token_source
     ):
         """Disabled, no credential and a dead fetch with no cache behind it.
 
-        All three are `available: false` *with* an error, so the card renders a
-        one-line note instead of disappearing.
+        All three return `None`, so `_gather_admin_stats` omits the key and the
+        card is absent. This used to emit `available: false` with the reason, so
+        an operator who expected the reading learned why it was missing — right
+        while a missing reading meant something was wrong. It is not right on the
+        deployment shapes that run: the endpoint does not serve the long-lived
+        setup-token credential Ansible and Docker deploy, so that note was
+        permanent and named nothing anyone could act on. The reason now lives on
+        `runtime.subscription_usage`, as a SKIP.
         """
         from istota import web_app
 
@@ -391,25 +462,16 @@ class TestSubscriptionSection:
             ),
         )
 
-        section = web_app._admin_subscription_section(_config(tmp_path), NOW)
+        assert web_app._admin_subscription_section(_config(tmp_path), NOW) is None
 
-        assert section["available"] is False
-        assert section["error"] == error
-        assert section["windows"] == []
-        assert section["spend"] is None
-        assert section["stale"] is False
-        # No data means no fetch time: a `fetched_at` of 0 rendered as 1970 is
-        # worse than an absent one.
-        assert section["fetched_at"] is None
-        assert section["token_source"] == token_source
-
-    def test_a_successful_request_that_named_no_window_is_unavailable(
+    def test_a_successful_request_that_named_no_window_draws_no_card(
         self, tmp_path, monkeypatch
     ):
-        """A shipped shape change reads as unavailable, not as 0% utilization.
+        """A shipped shape change draws nothing, not an empty grid or a 0%.
 
-        The fetch time survives — the endpoint did answer — but there is nothing
-        to render, so the card must not draw an empty grid.
+        The endpoint answered, so this is not a fault the operator can act on
+        from the dashboard; `runtime.subscription_usage` reports the shape change
+        as a SKIP naming what happened.
         """
         from istota import web_app
 
@@ -422,14 +484,9 @@ class TestSubscriptionSection:
             ),
         )
 
-        section = web_app._admin_subscription_section(_config(tmp_path), NOW)
+        assert web_app._admin_subscription_section(_config(tmp_path), NOW) is None
 
-        assert section["available"] is False
-        assert section["stale"] is False
-        assert section["error"] == su.NO_WINDOWS_ERROR
-        assert section["fetched_at"] == "2026-08-22T16:35:12Z"
-
-    def test_unavailable_is_never_rendered_without_a_reason(
+    def test_a_windowless_snapshot_never_draws_an_empty_card(
         self, tmp_path, monkeypatch
     ):
         """The one payload this section must not emit.
@@ -444,10 +501,9 @@ class TestSubscriptionSection:
 
         _patch_snapshot(monkeypatch, _snapshot(windows=(), source="fetch", error=""))
 
-        section = web_app._admin_subscription_section(_config(tmp_path), NOW)
-
-        assert section["available"] is False
-        assert section["error"] == su.NO_WINDOWS_ERROR
+        # Windowless is windowless however it got that way: no card, no empty
+        # grid, and no `available: false` note to render without a reason.
+        assert web_app._admin_subscription_section(_config(tmp_path), NOW) is None
 
     def test_a_window_with_no_reset_keeps_its_nulls(self, tmp_path, monkeypatch):
         """`resets_at: null` is a real state — the card says "no reset
@@ -570,13 +626,17 @@ class TestSubscriptionOnTheStatsEndpoint:
         assert "usage" in payload
         assert "error" not in payload
 
-    async def test_the_key_is_always_present(self, tmp_path, monkeypatch):
-        """Present rather than absent, on the branch that has nothing to report.
+    async def test_the_key_is_absent_when_there_is_nothing_to_report(
+        self, tmp_path, monkeypatch
+    ):
+        """Absent rather than present-and-empty, on the nothing-to-report branch.
 
-        There are two shapes on the wire, not one: this section's full dict, and
-        the `{"error": ...}` the best-effort wrapper substitutes when it raises
-        (above). Whatever the card is typed against has to tolerate both, and
-        the key itself is the only thing common to them.
+        The inverse of what this asserted before. The key used to be guaranteed
+        so a card typed against it could always render its one-line reason; the
+        card no longer draws at all in that case, and an omitted key cannot be
+        confused with a failed one. The `{"error": ...}` shape the best-effort
+        wrapper substitutes when the section *raises* is unchanged and still
+        present — that one is a bug worth surfacing, not a missing reading.
         """
         config = _config(tmp_path)
         _patch_snapshot(
@@ -593,9 +653,7 @@ class TestSubscriptionOnTheStatsEndpoint:
             cookies = await _login(client, "alice")
             resp = await client.get("/istota/api/admin/stats", cookies=cookies)
 
-        section = resp.json()["subscription"]
-        assert section["available"] is False
-        assert section["error"] == su.NO_CREDENTIAL_ERROR
+        assert "subscription" not in resp.json()
 
     @pytest.mark.parametrize("status", [200, 403])
     async def test_the_token_value_is_never_in_the_response(
@@ -626,9 +684,15 @@ class TestSubscriptionOnTheStatsEndpoint:
         assert resp.status_code == 200
         assert _TOKEN_SENTINEL not in resp.text
         assert "sk-ant" not in resp.text
-        section = resp.json()["subscription"]
-        assert section["token_source"] == "env", "the branch name, not the token"
-        assert section["available"] is (status == 200)
+        # A 403 draws no card, so the key is absent on that branch — the leak
+        # assertions below run against the whole response body either way, which
+        # is the stronger check and the point of this test.
+        if status == 200:
+            section = resp.json()["subscription"]
+            assert section["token_source"] == "env", "the branch name, not the token"
+            assert section["available"] is True
+        else:
+            assert "subscription" not in resp.json()
         assert transport.calls, "a resolvable credential should have been tried"
         assert (
             _TOKEN_SENTINEL in transport.calls[0][1]["Authorization"]
@@ -672,12 +736,21 @@ class TestSubscriptionOnTheStatsEndpoint:
             resp = await client.get("/istota/api/admin/stats", cookies=cookies)
 
         assert resp.status_code == 200
-        section = resp.json()["subscription"]
-        assert section["available"] is False
+        # No card on a failed fetch; the credential must not be anywhere in the
+        # body regardless, which is what this test exists for.
+        assert "subscription" not in resp.json()
         assert _TOKEN_SENTINEL not in resp.text
         assert "sk-ant" not in resp.text
-        # The class name, not the message: that substitution is the mechanism,
-        # and an error reading "an unreachable endpoint" with nothing in it
-        # would satisfy the two assertions above just as well.
-        assert "ValueError" in section["error"]
-        assert "Invalid header value" not in section["error"]
+        # The two assertions above are now satisfied trivially — the card draws
+        # nothing on a failed fetch, so nothing about the failure reaches the
+        # body at all. That is a stronger guarantee but a weaker test, and it
+        # would pass just as well against a module that put the credential
+        # straight into its error string. So the mechanism is asserted where it
+        # still exists: the snapshot itself, which the doctor check renders.
+        # The class name, not the message.
+        snapshot = su.fetch_snapshot(
+            _TOKEN_SENTINEL, timeout=1.0, now_ts=0.0, transport=transport
+        )
+        assert "ValueError" in snapshot.error
+        assert "Invalid header value" not in snapshot.error
+        assert _TOKEN_SENTINEL not in snapshot.error

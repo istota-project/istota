@@ -227,7 +227,9 @@ export interface AdminStats {
   };
   modules: Record<string, Record<string, unknown>>;
   usage: AdminStatsUsage;
-  subscription: AdminSubscription;
+  /** Absent unless there is a card to draw: Claude Code is the brain or the
+   *  fallback, and the endpoint returned windows. See `_admin_subscription_section`. */
+  subscription?: AdminSubscription;
   tasks: {
     total: number;
     last_24h: number;
