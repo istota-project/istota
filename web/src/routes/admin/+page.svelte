@@ -378,7 +378,7 @@
               >
               <th
                 class="num col-cost"
-                title="A currency figure only where the cost is real money. A subscription's list-price equivalent and a catalog estimate show a dash."
+                title="Money actually spent in the last 24h. A subscription's list-price equivalent and a catalog estimate are not spend, so they show a dash rather than a figure."
                 >Cost 24h</th
               >
               <th

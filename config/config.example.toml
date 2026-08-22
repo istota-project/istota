@@ -782,7 +782,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # gitlab_token = "glpat-xxxxxxxxxxxxxxxxxxxx"        # API token (api + write_repository)
 # gitlab_username = "botuser"                        # GitLab username for HTTPS auth
 # gitlab_default_namespace = "example"                # default namespace for short repo names
-# gitlab_reviewer_id = "reviewer-user"               # GitLab *username* to assign as MR reviewer
+# gitlab_reviewer = "reviewer-user"                  # GitLab username to assign as MR reviewer
+# gitlab_reviewer_id = "1234567"                     # that user's numeric id — recorded, read by nothing
 #
 # # GitHub settings
 # github_url = "https://github.com"                 # GitHub instance URL, or GitHub Enterprise (one instance only)

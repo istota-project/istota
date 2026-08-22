@@ -182,6 +182,91 @@ def _fenced_lines(body: str):
         yield from block.splitlines()
 
 
+class TestReviewerEnvWiring:
+    """ISSUE-289. The env manifest is what puts a value in front of the model,
+    and the value `glab mr create --reviewer` needs is a username. The old
+    `GITLAB_REVIEWER_ID` spec was fed by `developer.gitlab_reviewer_id`, whose
+    name asked operators for the numeric user id `glab` rejects."""
+
+    def _specs(self, bundled_index):
+        return {spec.var: spec for spec in bundled_index["developer"].env_specs}
+
+    def test_the_reviewer_variable_is_named_for_a_username(self, bundled_index):
+        specs = self._specs(bundled_index)
+        assert "GITLAB_REVIEWER_ID" not in specs
+        assert "GITLAB_REVIEWER" in specs
+
+    def test_the_reviewer_variable_reads_the_username_field(self, bundled_index):
+        spec = self._specs(bundled_index)["GITLAB_REVIEWER"]
+        assert spec.source == "config"
+        assert spec.config_path == "developer.gitlab_reviewer"
+
+    def test_the_reviewer_variable_is_gated_on_being_configured(self, bundled_index):
+        """`--reviewer ""` is an error rather than a no-op, so an unconfigured
+        reviewer has to be an absent variable, not an empty one."""
+        spec = self._specs(bundled_index)["GITLAB_REVIEWER"]
+        when = spec.when if isinstance(spec.when, list) else [spec.when]
+        assert "developer.enabled" in when
+        assert "developer.gitlab_reviewer" in when
+
+    def test_the_retired_id_field_is_no_longer_exported(self, bundled_index):
+        """`gitlab_reviewer_id` survives as config — it holds the numeric id,
+        which is what its name always claimed — but nothing puts it in the
+        model's environment any more."""
+        paths = {spec.config_path for spec in bundled_index["developer"].env_specs}
+        assert "developer.gitlab_reviewer_id" not in paths
+
+
+class TestReviewerReachesTheTaskEnvironment:
+    """The seam, rather than another read of the manifest.
+
+    Every other test here asserts against the frontmatter or the body text.
+    Neither proves the value arrives: the resolution runs through
+    ``build_skill_env``, which applies the ``when`` gates and stringifies, and
+    that is the path an MR actually depends on.
+    """
+
+    def _env(self, bundled_index, tmp_path, **developer_overrides):
+        from unittest.mock import MagicMock
+
+        from istota.config import Config, DeveloperConfig
+        from istota.skills._env import EnvContext, build_skill_env
+
+        fields = {"enabled": True, "repos_dir": str(tmp_path)}
+        fields.update(developer_overrides)
+        config = Config()
+        config.developer = DeveloperConfig(**fields)
+        ctx = EnvContext(
+            config=config,
+            task=MagicMock(id=1, user_id="alice", conversation_token="room1"),
+            user_resources=[],
+            user_config=None,
+            user_temp_dir=tmp_path / "temp",
+            is_admin=True,
+        )
+        return build_skill_env(["developer"], bundled_index, ctx)
+
+    def test_a_configured_username_arrives_as_gitlab_reviewer(
+        self, bundled_index, tmp_path
+    ):
+        env = self._env(bundled_index, tmp_path, gitlab_reviewer="reviewer-user")
+        assert env["GITLAB_REVIEWER"] == "reviewer-user"
+
+    def test_an_unset_reviewer_leaves_the_variable_absent(self, bundled_index, tmp_path):
+        """Not empty — absent. `glab mr create --reviewer ""` is an error rather
+        than a no-op, and the recipe tests the variable to decide whether to
+        build the flag at all."""
+        env = self._env(bundled_index, tmp_path, gitlab_reviewer="")
+        assert "GITLAB_REVIEWER" not in env
+
+    def test_the_retired_id_reaches_nothing(self, bundled_index, tmp_path):
+        env = self._env(
+            bundled_index, tmp_path, gitlab_reviewer="", gitlab_reviewer_id="1234567"
+        )
+        assert "GITLAB_REVIEWER" not in env
+        assert "GITLAB_REVIEWER_ID" not in env
+
+
 class TestBodiesDoNotContradict:
     """The three bodies arrive in one response, so a rule stated in one and
     broken in another is a live contradiction the model has to resolve. These
@@ -260,6 +345,21 @@ class TestBodiesDoNotContradict:
             assert "/reviews" not in line, (
                 f"developer still posts to the pull-request reviews endpoint: {line!r}"
             )
+
+    def test_the_mr_recipe_reads_the_username_reviewer_variable(self):
+        """ISSUE-289. `glab mr create --reviewer` resolves by username, and the
+        variable the recipe read was called `GITLAB_REVIEWER_ID`, so operators
+        set a numeric user id in it. `glab` answers `failed to find user by
+        name` and — because the recipe builds the flag rather than failing —
+        every agent-authored MR opened with nobody assigned. The variable now
+        carries a username and is named for one."""
+        body = self._body("developer")
+        assert "GITLAB_REVIEWER_ID" not in body, (
+            "developer still reads $GITLAB_REVIEWER_ID, which the executor no "
+            "longer exports; the flag would be built from an empty value"
+        )
+        assert "${GITLAB_REVIEWER:-}" in body
+        assert "--reviewer $GITLAB_REVIEWER" in body
 
     def test_does_not_advertise_run_download(self):
         """`gh run download` redirects to a per-request Azure blob shard, and

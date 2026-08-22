@@ -4,6 +4,27 @@ Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 13,
 
 Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The four discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
 
+## What to install
+
+A bare `uv sync` is never right. It installs the base dependencies only, and everything the suite needs from `[project.optional-dependencies]` is left out — `click` from `money`, `fastapi` from `location` and `web`, and six other groups. The result is several hundred `ModuleNotFoundError` collection errors, which is a big enough number to read as a catastrophic regression from whatever change is under test rather than as a missing package. A full run that comes back with hundreds of failures is an environment fault until proven otherwise: read one traceback before touching the diff.
+
+`uv sync --all-extras` is the simple answer, and costs about 1.1 GB in the venv. The suite does not need most of that. It runs clean, every marker deselected, on the `test` extra, which is `all` minus the two heavy ML ones, at 291 MB:
+
+```bash
+uv sync --extra test
+```
+
+That is what `scripts/setup.sh` and `docker/test/Dockerfile` install. It is defined once in `pyproject.toml` because there is no way to subtract an extra from `all`, and a nine-item list repeated across a setup script, a Dockerfile and two documents is a list that drifts.
+
+The difference is `memory-search` (torch, sentence-transformers) and `whisper` (faster-whisper, av, onnxruntime). Every heavy import in `src/` sits inside a function rather than at module scope, deliberately — `memory/search.py` imports `sentence_transformers` and `sqlite_vec` in the functions that use them, and the whisper skill goes further and imports `faster_whisper` in a subprocess — so nothing needs either extra to collect. The one test that needs one at run time carries the `ml` marker.
+
+Prefer `--extra test` wherever the venv is per-worktree or per-container, since the difference is paid again on every checkout. Prefer `--all-extras` on a long-lived developer host, where it buys the `ml` test and the real libraries for hand-testing at a cost you pay once. `istota[test]` is not a deployment shape: `local` and `all` are the ones to install the bot with.
+
+Two rules keep this from decaying, both enforced by `tests/test_lean_install.py`:
+
+- **A test-only dependency goes in the `dev` group, never in an extra.** `jinja2` (the ansible-template tests) and `psutil` (`emit_scheduler_stats`, `test_talk_leak`) used to arrive as a transitive of mkdocs, torch and faster-whisper. They looked declared from inside a full install and were missing from every lean one, so a lean install reported eight collection errors and two failures with no visible connection to a missing package.
+- **No test imports a heavy package at module scope.** A marker is applied during collection; a module-scope import fails *at* collection, so the `ml` marker cannot rescue it. The sweep in `test_lean_install.py` names the offending file instead.
+
 ## Running tests
 
 ```bash
@@ -16,7 +37,7 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
-Five marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
+Six marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
 |---|---|---|
@@ -25,8 +46,9 @@ Five marker sets are deselected by default (also via `addopts`), each with a dif
 | `linux` | a real Linux kernel and a usable bubblewrap | `scripts/test-linux.sh` |
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
 | `smoke` | a Docker daemon | `uv run pytest -m smoke -n0` |
+| `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
 
-A sixth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
+A seventh marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
 `image` and `smoke` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it. The conftest fails the session with that reason rather than letting it happen.
 

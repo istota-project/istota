@@ -358,7 +358,8 @@ output = "talk"
 | `gitlab_token` | `""` | API token |
 | `gitlab_username` | `""` | GitLab username for HTTPS auth |
 | `gitlab_default_namespace` | `""` | Default namespace for short repo names |
-| `gitlab_reviewer_id` | `""` | GitLab **username** for MR reviewer (`glab mr create --reviewer` takes a username, not the numeric ID the name suggests) |
+| `gitlab_reviewer` | `""` | GitLab username to assign as MR reviewer. `glab mr create --reviewer` resolves by username |
+| `gitlab_reviewer_id` | `""` | That user's numeric id. Recorded for reference; read by nothing |
 | `github_url` | `"https://github.com"` | GitHub instance URL |
 | `github_token` | `""` | Personal access token |
 | `github_username` | `""` | GitHub username |

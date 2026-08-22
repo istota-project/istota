@@ -35,23 +35,25 @@ describe('formatCost', () => {
     expect(formatCost(undefined)).toBe(COST_PLACEHOLDER);
   });
 
-  it('marks a group spanning bases rather than summing it', () => {
+  it('shows the api figure alone on a group spanning bases, never the sum', () => {
     // 1.5 + 99 = 100.5, which is what an operator switching auth mid-window
-    // would otherwise be shown as their spend.
+    // would otherwise be shown as their spend. The column reports the 1.5 and
+    // says nothing about the 99 — naming it was noise a reader could not act on,
+    // and it overflowed the fixed-width cell.
     const out = formatCost({ api: 1.5, subscription: 99 });
 
-    expect(out).toContain('$1.50');
-    expect(out).toContain('subscription');
+    expect(out).toBe('$1.50');
     expect(out).not.toContain('100.5');
+    expect(out).not.toContain('subscription');
   });
 
-  it('marks every non-api basis on a mixed group, in a stable order', () => {
-    // `estimated: 0` is still named: the marker is keyed on which bases are
-    // present, not on their magnitude, so a partial dollar figure cannot read
-    // as the whole of the group's spend.
-    expect(formatCost({ api: 1.5, unknown: 2, estimated: 0, subscription: 1 })).toBe(
-      '$1.50 +estimated+subscription+unknown',
-    );
+  it('never puts a basis name in the column', () => {
+    // The `+estimated+subscription+unknown` suffix is gone. A dollar figure now
+    // means one thing: money actually spent, on rows we can account for.
+    const out = formatCost({ api: 1.5, unknown: 2, estimated: 0, subscription: 1 });
+
+    expect(out).toBe('$1.50');
+    expect(out).not.toContain('+');
   });
 
   it('renders a genuine zero of real money as currency', () => {

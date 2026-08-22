@@ -48,25 +48,31 @@ def test_api_only_renders_a_dollar_figure():
     assert _render_cost({"api": 1.5}) == "$1.50"
 
 
-def test_mixed_group_is_marked_never_summed():
-    """1.0 + 2.0 = 3.0 is the misread the ``+`` marker exists to prevent.
+def test_mixed_group_shows_the_api_figure_alone_never_summed():
+    """1.0 + 2.0 = 3.0 is the misread this refuses; naming the other basis is
+    not how it refuses it.
 
-    An operator who switched the CLI's auth mid-window has rows of both kinds,
-    and a plan-equivalent added to real spend reads as an invoice.
+    An operator who switched the CLI's auth mid-window has rows of both kinds.
+    The column reports the money — 1.0 — and stays silent about the
+    plan-equivalent rather than appending its name.
     """
     out = _render_cost({"api": 1.0, "subscription": 2.0})
 
-    assert out == "$1.00 +subscription"
+    assert out == "$1.00"
     assert "3.00" not in out
+    assert "subscription" not in out
 
 
-def test_mixed_group_names_every_basis_including_a_zero_one():
-    """The marker is keyed on presence, not magnitude.
+def test_no_basis_name_ever_reaches_the_column():
+    """The ``+estimated+subscription+unknown`` suffix is gone.
 
-    Dropping ``estimated`` here because it is 0.0 would let ``$1.50`` read as
-    the whole of the group's spend when it is only the measured part of it.
+    It overflowed a fixed-width column, and the bases it named are not
+    something a reader can act on. The dollar figure means one thing now: money
+    actually spent, on rows we can account for.
     """
-    assert (
-        _render_cost({"api": 1.5, "unknown": 2.0, "estimated": 0.0, "subscription": 1.0})
-        == "$1.50 +estimated+subscription+unknown"
+    out = _render_cost(
+        {"api": 1.5, "unknown": 2.0, "estimated": 0.0, "subscription": 1.0}
     )
+
+    assert out == "$1.50"
+    assert "+" not in out

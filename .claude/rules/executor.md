@@ -119,7 +119,7 @@ Not covered by any of this: a deployment where bwrap is unavailable (Docker with
 | Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
 | Developer | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` (if enabled + set) |
-| Developer | `GITLAB_REVIEWER_ID` | `config.developer.gitlab_reviewer_id` (if enabled + set) — a GitLab *username*, despite the name |
+| Developer | `GITLAB_REVIEWER` | `config.developer.gitlab_reviewer` (if enabled + set) — the reviewer's GitLab username |
 | Developer | `GITHUB_URL` | `config.developer.github_url` (if enabled) |
 | Developer | `GITHUB_DEFAULT_OWNER` | `config.developer.github_default_owner` (if enabled + set) |
 | Developer | `GITHUB_REVIEWER` | `config.developer.github_reviewer` (if enabled + set) |

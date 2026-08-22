@@ -1432,6 +1432,29 @@ money = [
     { name = "weasyprint" },
     { name = "yfinance" },
 ]
+test = [
+    { name = "aiohttp" },
+    { name = "authlib" },
+    { name = "beancount" },
+    { name = "beanquery" },
+    { name = "bleach" },
+    { name = "caldav" },
+    { name = "click" },
+    { name = "fastapi" },
+    { name = "feedparser" },
+    { name = "garminconnect", marker = "python_full_version >= '3.12'" },
+    { name = "geopy" },
+    { name = "icalendar" },
+    { name = "imap-tools" },
+    { name = "itsdangerous" },
+    { name = "pytesseract" },
+    { name = "python-multipart" },
+    { name = "timezonefinder" },
+    { name = "tomli-w" },
+    { name = "uvicorn" },
+    { name = "weasyprint" },
+    { name = "yfinance" },
+]
 transcribe = [
     { name = "pytesseract" },
 ]
@@ -1449,6 +1472,8 @@ whisper = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "jinja2" },
+    { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-testmon" },
@@ -1478,19 +1503,28 @@ requires-dist = [
     { name = "imap-tools", marker = "extra == 'email'", specifier = ">=1.0.0" },
     { name = "istota", extras = ["calendar"], marker = "extra == 'all'" },
     { name = "istota", extras = ["calendar"], marker = "extra == 'local'" },
+    { name = "istota", extras = ["calendar"], marker = "extra == 'test'" },
     { name = "istota", extras = ["email"], marker = "extra == 'all'" },
     { name = "istota", extras = ["email"], marker = "extra == 'local'" },
+    { name = "istota", extras = ["email"], marker = "extra == 'test'" },
     { name = "istota", extras = ["feeds"], marker = "extra == 'all'" },
     { name = "istota", extras = ["feeds"], marker = "extra == 'local'" },
+    { name = "istota", extras = ["feeds"], marker = "extra == 'test'" },
     { name = "istota", extras = ["garmin"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["garmin"], marker = "extra == 'test'" },
     { name = "istota", extras = ["location"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["location"], marker = "extra == 'test'" },
     { name = "istota", extras = ["markets"], marker = "extra == 'all'" },
     { name = "istota", extras = ["markets"], marker = "extra == 'local'" },
+    { name = "istota", extras = ["markets"], marker = "extra == 'test'" },
     { name = "istota", extras = ["memory-search"], marker = "extra == 'all'" },
     { name = "istota", extras = ["money"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["money"], marker = "extra == 'test'" },
     { name = "istota", extras = ["transcribe"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["transcribe"], marker = "extra == 'test'" },
     { name = "istota", extras = ["web"], marker = "extra == 'all'" },
     { name = "istota", extras = ["web"], marker = "extra == 'local'" },
+    { name = "istota", extras = ["web"], marker = "extra == 'test'" },
     { name = "istota", extras = ["whisper"], marker = "extra == 'all'" },
     { name = "itsdangerous", marker = "extra == 'web'", specifier = ">=2.1.0" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6.0" },
@@ -1515,10 +1549,12 @@ requires-dist = [
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
     { name = "yfinance", marker = "extra == 'money'", specifier = ">=0.2.0" },
 ]
-provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "location", "web", "money", "feeds", "garmin", "docs", "local", "all"]
+provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "location", "web", "money", "feeds", "garmin", "docs", "local", "all", "test"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "psutil", specifier = ">=5.9.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-testmon", specifier = ">=2.2.0" },

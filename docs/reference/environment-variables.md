@@ -97,7 +97,7 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` |
 | `GITLAB_URL` | `config.developer.gitlab_url` |
 | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` |
-| `GITLAB_REVIEWER_ID` | `config.developer.gitlab_reviewer_id` (a username, despite the name) |
+| `GITLAB_REVIEWER` | `config.developer.gitlab_reviewer` |
 | `GITHUB_URL` | `config.developer.github_url` |
 | `GITHUB_DEFAULT_OWNER` | `config.developer.github_default_owner` |
 | `GITHUB_REVIEWER` | `config.developer.github_reviewer` |

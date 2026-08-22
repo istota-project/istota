@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 
 from istota.skills._loader import (
     _get_attachment_extensions,
@@ -1475,15 +1476,38 @@ class TestUntrustedInputCompanion:
         companions = expand_companions(["browse"], index)
         assert "untrusted_input" in companions
 
+    @pytest.mark.ml
     def test_ingest_skill_via_attachment_pulls_in_untrusted_input(self):
         # whisper selects on an audio attachment (a retained file_type selector)
         # and pulls its untrusted_input companion in eagerly.
+        #
+        # `ml`, because this goes through the selection path rather than the
+        # index: `_check_dependencies` really imports `faster_whisper`, so
+        # without the `whisper` extra the skill drops out of the result and the
+        # assertion below fails for a reason that has nothing to do with the
+        # companion wiring. The wiring itself is covered at index level by
+        # `test_whisper_lists_untrusted_input_as_companion` above, and the same
+        # eager-companion selection path is covered without a heavy dependency
+        # by `test_ingest_skill_via_extension_pulls_in_untrusted_input`.
         index = self._bundled_index()
         result = select_skills(
             "", "talk", set(), index,
             attachments=["/path/to/memo.mp3"],
         )
         assert "whisper" in result
+        assert "untrusted_input" in result
+
+    def test_ingest_skill_via_extension_pulls_in_untrusted_input(self):
+        # The same path as the test above, through transcribe instead of
+        # whisper, so the default suite still covers eager companion expansion
+        # off a file_type selector. transcribe's dependency (pytesseract) is in
+        # the light `transcribe` extra, so this holds on a lean install.
+        index = self._bundled_index()
+        result = select_skills(
+            "", "talk", set(), index,
+            attachments=["/path/to/receipt.png"],
+        )
+        assert "transcribe" in result
         assert "untrusted_input" in result
 
     def test_no_ingest_skill_no_untrusted_input(self):

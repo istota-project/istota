@@ -940,6 +940,116 @@ class TestForgePolicy:
         assert run_checks(config, only=("developer.forge_policy",))[0].status != FAIL
 
 
+class TestGitlabReviewer:
+    """ISSUE-289. The setting was silent in both directions: a numeric value
+    produced `failed to find user by name` inside the task, and an unset one
+    produced nothing at all. Neither reached the operator, so every MR for
+    weeks opened with no reviewer on it. A boot-time line is the only thing
+    that closes that loop."""
+
+    def test_a_username_is_ok(self, make_config, tmp_path):
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer="reviewer-user")
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == OK
+
+    def test_an_all_digits_username_warns_naming_the_value(self, make_config, tmp_path):
+        """`glab mr create --reviewer` resolves by username. A GitLab username
+        cannot be all digits, so this value can only be the numeric user id."""
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer="1234567")
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == WARN
+        assert "1234567" in r.detail
+        assert r.remedy
+
+    def test_the_old_id_key_alone_warns(self, make_config, tmp_path):
+        """The upgrade shape. A host that set only `gitlab_reviewer_id` used to
+        get a reviewer flag built from it; it now gets none, and the operator
+        has no other way to find out."""
+        config = _dev_config(
+            make_config, tmp_path, gitlab_reviewer="", gitlab_reviewer_id="1234567"
+        )
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == WARN
+        assert "gitlab_reviewer" in r.detail
+        assert "username" in r.remedy
+
+    def test_a_username_left_in_the_old_key_is_named_as_one(self, make_config, tmp_path):
+        """The narrow population the remedy would otherwise mislead.
+
+        `gitlab_reviewer_id` was documented as a username for one day before
+        ISSUE-289 was filed, so a host that followed those docs has a working
+        username sitting in the retired key. Telling that operator the value is
+        "the id" and to go find the username sends them looking for something
+        they already have.
+        """
+        config = _dev_config(
+            make_config, tmp_path, gitlab_reviewer="", gitlab_reviewer_id="reviewer-user"
+        )
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == WARN
+        assert "reviewer-user" in r.remedy
+        assert "copy it verbatim" in r.remedy
+
+    def test_a_non_string_value_does_not_crash_the_check(self, make_config, tmp_path):
+        """TOML types its scalars, so an unquoted `gitlab_reviewer = 1234567`
+        arrives as an int. `run_checks` reports a raising check as FAIL — the
+        one status that alerts — so a crash here would page the operator in
+        precisely the misconfiguration the check exists to describe."""
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer=1234567)
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == WARN
+        assert "user id" in r.detail
+
+    def test_a_non_string_value_in_the_old_key_does_not_crash_either(
+        self, make_config, tmp_path
+    ):
+        config = _dev_config(
+            make_config, tmp_path, gitlab_reviewer="", gitlab_reviewer_id=1234567
+        )
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == WARN
+
+    def test_a_value_with_whitespace_warns(self, make_config, tmp_path):
+        """The recipe expands `--reviewer $GITLAB_REVIEWER` unquoted, so a
+        display name hands `glab` a stray positional argument."""
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer="First Last")
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert r.status == WARN
+        assert "whitespace" in r.detail
+
+    def test_non_ascii_digits_are_not_called_a_user_id(self, make_config, tmp_path):
+        """`str.isdigit` is Unicode-wide. Arabic-Indic digits are not a GitLab
+        user id, so the WARN must not claim they are — it may still warn, but
+        not with that wording."""
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer="\u0661\u0662\u0663")
+        r = run_checks(config, only=("developer.gitlab_reviewer",))[0]
+        assert "user id" not in r.detail
+
+    def test_neither_key_set_is_ok(self, make_config, tmp_path):
+        """Not configuring a reviewer is a choice, not a misconfiguration."""
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer="")
+        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status == OK
+
+    def test_an_id_recorded_beside_a_username_is_ok(self, make_config, tmp_path):
+        config = _dev_config(
+            make_config,
+            tmp_path,
+            gitlab_reviewer="reviewer-user",
+            gitlab_reviewer_id="1234567",
+        )
+        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status == OK
+
+    def test_skips_when_the_developer_skill_is_off(self, make_config):
+        from istota.config import DeveloperConfig
+
+        config = make_config(developer=DeveloperConfig(enabled=False))
+        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status == SKIP
+
+    def test_never_fails(self, make_config, tmp_path):
+        config = _dev_config(make_config, tmp_path, gitlab_reviewer="1234567")
+        assert run_checks(config, only=("developer.gitlab_reviewer",))[0].status != FAIL
+
+
 class TestForgeTransport:
     """A forge token sent over plain HTTP.
 

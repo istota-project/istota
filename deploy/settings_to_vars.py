@@ -253,6 +253,7 @@ _DEVELOPER_KEYS = {
     "gitlab_token": "istota_developer_gitlab_token",
     "gitlab_username": "istota_developer_gitlab_username",
     "gitlab_default_namespace": "istota_developer_gitlab_default_namespace",
+    "gitlab_reviewer": "istota_developer_gitlab_reviewer",
     "gitlab_reviewer_id": "istota_developer_gitlab_reviewer_id",
     "github_url": "istota_developer_github_url",
     "github_token": "istota_developer_github_token",
