@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The web chat composer now takes a `!command` while a task is running. Every command was refused for the whole duration of a turn, which put `!steer` — the one way to say something to a task already in progress — out of reach on the surface where you are watching it work, and `!status` with it. An ordinary message is still held until the turn finishes, because a second one would start a second task in the same room.
+
 - A self-hosted GitHub reachable on a port other than the usual one is now actually reached on it. The port was dropped from the address before every `gh` call, so the request went to the default port instead — either to whatever answered there, or, inside a task, to a refusal from the network allowlist, which had the port right all along. Nothing warned, and the code alongside claimed gh could not do this at all, which turned out to be untrue when measured. GitLab was never affected.
 
 - A GitHub Enterprise Cloud account at the bare `ghe.com` address now authenticates. It was handed the wrong one of the two credentials `gh` reads — the rule covers subdomains of that address rather than the address itself, and the code had taken it one word too broadly, so every call went out unauthenticated and failed as though the token's permissions were wrong. Subdomains were always correct and are unchanged.
