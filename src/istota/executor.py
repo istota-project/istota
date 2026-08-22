@@ -1002,6 +1002,13 @@ def _release_task_cgroup(task_id: int, path: Path) -> None:
     reported as an opaque killed child with nothing anywhere mentioning a cap —
     a task told it was killed, and an operator with no way to find out why.
 
+    Both limits that can end a task are named, not just memory. A task that
+    hits ``pids.max`` gets ``fork: Resource temporarily unavailable`` out of
+    whatever it was running, which mentions no cgroup and reads like a broken
+    toolchain; ``pids.events``'s ``max`` counter is the only place that says
+    otherwise. Neither counter moved before placement worked (ISSUE-285) — the
+    cgroup held one sleeping process, so nothing in it ever reached a limit.
+
     Never raises: this runs from an ``ExitStack`` callback on the task's exit
     path, where an exception would replace the task's real result with this
     one's.
@@ -1014,6 +1021,14 @@ def _release_task_cgroup(task_id: int, path: Path) -> None:
                 "(scheduler.task_memory_max_mb) — the task exceeded its memory "
                 "cap; the rest of the host was unaffected",
                 task_id, events["oom_kill"],
+            )
+        pids_events = task_cgroup.read_events(path, "pids.events")
+        if pids_events.get("max"):
+            logger.warning(
+                "task %d: %d fork(s) refused by the task's own cgroup "
+                "(scheduler.task_pids_max) — the task hit its process limit and "
+                "will have reported it as a fork failure",
+                task_id, pids_events["max"],
             )
         task_cgroup.destroy(path)
     except Exception:  # noqa: BLE001
@@ -4454,6 +4469,15 @@ def execute_task(
             # Placement first, DB second. `update_task_pid` can block on the
             # SQLite write lock, and the whole value of the cgroup is in the
             # window before the child's own work starts.
+            #
+            # This is the after-the-fact form, and it only reaches the pid's own
+            # thread group — not the children it already forked (ISSUE-285). The
+            # brains that spawn their own subprocess place it from `preexec_fn`
+            # instead, off `req.task_cgroup`, and by the time they call back
+            # here the pid is already a member and this write is a no-op. What
+            # it is still load-bearing for is TmuxClaudeBrain, which reports a
+            # pane pid the tmux server spawned: there is no `preexec_fn` to
+            # reach, so containing the group leader is all that path can do.
             if _task_cg is not None:
                 task_cgroup.place(pid, _task_cg)
             try:

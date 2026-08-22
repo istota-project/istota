@@ -43,10 +43,12 @@ Six marker sets are deselected by default (also via `addopts`), each with a diff
 |---|---|---|
 | `integration` | a live Nextcloud instance, or Garmin credentials | `uv run pytest -m integration` |
 | `live` | a real LLM API key; costs money | `uv run pytest -m live` |
-| `linux` | a real Linux kernel and a usable bubblewrap | `scripts/test-linux.sh` |
+| `linux` | a real Linux kernel, a usable bubblewrap, and — for the cgroup tests — a delegated cgroup v2 subtree | `scripts/test-linux.sh` |
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
 | `smoke` | a Docker daemon | `uv run pytest -m smoke -n0` |
 | `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
+
+**The cgroup tests need a subtree the driver builds.** `task_cgroup.resolve_root()` reads `/proc/self/cgroup` and truncates at the `.service` / `.scope` component; under Docker's default private cgroup namespace that file reads `0::/`, so it answers `None` however writable the tree is, and the `linux`-marked cgroup tests would skip inside the one runner meant to execute them. `scripts/dev/linux-tier-cgroup.sh`, sourced by the driver, remounts `/sys/fs/cgroup` read-write, empties the container's own cgroup into a `supervisor/` leaf (the `DelegateSubgroup=` shape — cgroup v2 will not let one cgroup both hold processes and enable controllers for its children), turns on the controllers, and exports `ISTOTA_TEST_CGROUP_ROOT` only after proving a `memory.max` write succeeds. The tests treat that variable as a promise: set and unusable is a failure, unset is an honest skip. So a Docker without `SYS_ADMIN` or with a read-only cgroup2 mount loses those tests and keeps the rest of the tier.
 
 A seventh marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
@@ -75,7 +77,7 @@ When to run each:
 
 | Tier | Run it when | Cost |
 |---|---|---|
-| `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
+| `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, per-task cgroups, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
 | `-m image` | you touched `docker/istota/Dockerfile`, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache |
 | `-m image --platform amd64` | before a release | about ten minutes under emulation, and it is the only thing that ever executes the amd64-only devbox image |
 | `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about three minutes |

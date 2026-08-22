@@ -237,14 +237,19 @@ class TestBashTaskCgroup:
     async def test_places_the_child_pid_in_the_task_cgroup(self, tmp_path):
         cg = tmp_path / "task-5"
         cg.mkdir()
+        # The kernel makes this file; `placement` opens it without O_CREAT, so a
+        # fixture that leaves it out is not a cgroup as far as the module cares.
+        (cg / "cgroup.procs").write_text("")
         env = _env(tmp_path, task_cgroup=cg)
 
         result = await _run(make_bash_tool(env), {"command": "echo placed"})
 
         assert "placed" in _text(result)
-        # cgroup v2 membership is inherited across fork, so placing `bash`
-        # places everything the command goes on to spawn.
-        assert (cg / "cgroup.procs").read_text().strip().isdigit()
+        # `0`, not a pid: the child writes itself in from `preexec_fn`, before it
+        # execs, so everything it goes on to fork inherits the group (ISSUE-285).
+        # A pid here would mean the parent moved it after the fact, which is the
+        # ordering that left the real work outside the cgroup.
+        assert (cg / "cgroup.procs").read_text().strip() == "0"
 
     async def test_writes_nothing_when_no_cgroup_was_created(self, tmp_path):
         # The fail-open path: no `Delegate=` on the deployment, so the executor

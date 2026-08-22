@@ -320,6 +320,22 @@ class TestPlace:
         assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 2
 
 
+def _probe_dir_name() -> str:
+    """The scratch directory `probe` will use in this process."""
+    return f"task-probe-{os.getpid()}"
+
+
+def _seed_probe_procs(root: Path) -> None:
+    """Pre-make the scratch group's `cgroup.procs`, which on a real cgroup2fs
+    the kernel would have made. `probe` uses `mkdir(exist_ok=True)`, so an
+    existing directory is the supported way to stage this. The name carries the
+    pid because `probe` names it that way — a fixed name is not reentrant, and
+    the suite probes concurrently under `-n auto`."""
+    scratch = root / _probe_dir_name()
+    scratch.mkdir(exist_ok=True)
+    (scratch / "cgroup.procs").write_text("")
+
+
 class TestProbe:
     """The startup report has to be a measurement, not a restatement.
 
@@ -331,9 +347,26 @@ class TestProbe:
     """
 
     def test_returns_none_when_containment_will_work(self, cgroup_root, cgroupfs):
+        # The scratch group has to look like one the kernel made: `probe` now
+        # also opens `cgroup.procs`, and it opens it without O_CREAT, because a
+        # probe that fabricates the file it is measuring answers yes on any
+        # writable directory.
+        _seed_probe_procs(cgroup_root)
+
         assert task_cgroup.probe(cgroup_root) is None
         # And leaves nothing behind.
-        assert not (cgroup_root / "task-probe").exists()
+        assert not (cgroup_root / _probe_dir_name()).exists()
+
+    def test_names_the_reason_when_the_group_cannot_be_joined(
+        self, cgroup_root, cgroupfs
+    ):
+        """Delegation is not placement — ISSUE-285 was a host where every write
+        `probe` used to make succeeded and no task was ever contained."""
+        reason = task_cgroup.probe(cgroup_root)
+
+        assert reason is not None
+        assert "cgroup.procs" in reason
+        assert not (cgroup_root / _probe_dir_name()).exists()
 
     def test_names_the_reason_when_the_memory_controller_is_absent(
         self, cgroup_root, cgroupfs, monkeypatch
@@ -351,7 +384,7 @@ class TestProbe:
 
         assert reason is not None
         assert "memory" in reason
-        assert not (cgroup_root / "task-probe").exists()
+        assert not (cgroup_root / _probe_dir_name()).exists()
 
     @pytest.mark.requires_dac
     def test_names_the_reason_when_the_root_is_not_writable(self, tmp_path):
@@ -636,7 +669,7 @@ class TestResolveRoot:
         assert task_cgroup.resolve_root(proc_root=proc, cgroup_root=cg) is None
 
 
-@pytest.mark.integration
+@pytest.mark.linux
 class TestAgainstARealCgroupFs:
     """The one test that can disagree with the fixture.
 
@@ -648,23 +681,30 @@ class TestAgainstARealCgroupFs:
     behaviour ("a successful `memory.max` write proves the controller is
     delegated"), so it is worth one test that asks the kernel.
 
-    Deselected by default (`-m 'not integration'`) and skipped unless it finds a
-    writable delegated subtree, which in practice means running it as the
-    service user on a deployed host:
+    Deselected by default and skipped unless it finds a writable delegated
+    subtree. `scripts/test-linux.sh` selects the marker but runs in a container,
+    where `/proc/self/cgroup` is usually `0::/` and `resolve_root` returns None —
+    so in practice this means running it as the service user on a deployed host:
 
-        uv run pytest tests/test_task_cgroup.py -m integration -n0
+        uv run pytest tests/test_task_cgroup.py -m linux -n0
     """
 
     @pytest.fixture
     def live_root(self):
+        from .test_task_cgroup_placement import _unavailable
+
         if not sys.platform.startswith("linux"):
-            pytest.skip("cgroup v2 is Linux-only")
-        root = task_cgroup.resolve_root()
+            _unavailable("cgroup v2 is Linux-only")
+        # See the sibling fixture in tests/test_task_cgroup_placement.py: inside
+        # `scripts/test-linux.sh` the root is built by the driver and named
+        # here, because a container's `/proc/self/cgroup` names no systemd unit.
+        env_root = os.environ.get("ISTOTA_TEST_CGROUP_ROOT")
+        root = Path(env_root) if env_root else task_cgroup.resolve_root()
         if root is None:
-            pytest.skip("no delegated unit cgroup (needs Delegate= on the unit)")
+            _unavailable("no delegated unit cgroup (needs Delegate= on the unit)")
         reason = task_cgroup.probe(root)
         if reason is not None:
-            pytest.skip(f"delegation not usable here: {reason}")
+            _unavailable(f"delegation not usable here: {reason}")
         return root
 
     def test_create_place_and_destroy_against_the_kernel(self, live_root):
