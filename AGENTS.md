@@ -92,7 +92,7 @@ src/istota/
 └── logging_setup.py
 ```
 
-Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `schema.sql`.
+Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `tests/`, `testbed/` (the deployment tiers' staging environment — compose stacks, service stubs, DB probe; its own `pyproject.toml`, importable by the tests and by two rigs outside this repo, never by `src/istota/`), `schema.sql`.
 
 ## Key Concepts
 
@@ -143,7 +143,7 @@ Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-jo
 
 Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces, everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
 
-Python is **linted but not formatted**. `ruff check` runs clean over `src/` and `tests/`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
+Python is **linted but not formatted**. `ruff check` runs clean over `src/`, `tests/` and `testbed/`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
 
 ## Verification
 
@@ -152,7 +152,7 @@ There is no single entry point. Run the checks directly, and run only the half t
 Python:
 
 ```bash
-ruff check --output-format concise src tests
+ruff check --output-format concise src tests testbed
 scripts/qtest uv run pytest      # pyproject deselects every marker below; `-n auto`
 ```
 
@@ -167,18 +167,19 @@ scripts/qtest npm --prefix web run test    # vitest run
 npm --prefix web run format:check
 ```
 
-**Six markers are deselected by default, and none of them runs unless you ask.** Each has a different prerequisite, so they are selectable independently: `integration` (a live Nextcloud or Garmin credentials), `live` (a real LLM key; costs money), `linux` (a real kernel and a usable bubblewrap), `image` and `smoke` (a Docker daemon), `ml` (one of the two heavy ML extras). A seventh, `requires_dac`, is not deselected — it skips itself where the process can bypass permission bits, which is what happens as root inside the Linux runner. The four discretionary tiers, none automatic:
+**Seven markers are deselected by default, and none of them runs unless you ask.** Each has a different prerequisite, so they are selectable independently: `integration` (a live Nextcloud or Garmin credentials), `live` (a real LLM key; costs money), `linux` (a real kernel and a usable bubblewrap), `image` and `smoke` (a Docker daemon), `full` (a Docker daemon, minutes, and the network — `provision-nc.sh` fetches Talk and Calendar from the Nextcloud app store at first install), `ml` (one of the two heavy ML extras). An eighth, `requires_dac`, is not deselected — it skips itself where the process can bypass permission bits, which is what happens as root inside the Linux runner. The five discretionary tiers, none automatic:
 
 ```bash
 scripts/test-linux.sh            # the suite + the linux tests, on a real kernel
 uv run pytest -m image -n0       # the built image's contract
 uv run pytest -m smoke -n0       # end-to-end against the lean compose stack
+uv run pytest -m full -n0        # end-to-end against the full stack, incl. a real Nextcloud
 scripts/test-upgrade.sh          # the current image over an older release's state
 ```
 
-`image` and `smoke` require `-n0`: their fixtures are session-scoped and build one tagged image, and N xdist workers would each race to build it. Before a release, add `-m image -n0 --platform amd64` (checks the deployment architecture; since ISSUE-280 the devbox image builds natively too, so a plain `-m image` already runs its assertions) and `scripts/test-upgrade.sh --from-floor --shape volume`. Two of the tiers carry a negative control that must go **red** — `scripts/test-image-negative-control.sh`, and the same broken image handed to the upgrade tier through `ISTOTA_IMAGE_TAG`. That script covers both images: one control for the istota half, and four for the devbox half, because no single broken image reaches all thirteen of that file's assertions. Each control names the exact node ids it must turn red and requires them in pytest's `FAILED` summary, since a control can otherwise pass on an unrelated failure. On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail. Details and a when-to-run-each table in `docs/development/testing.md`.
+`image`, `smoke` and `full` require `-n0`: their fixtures are session-scoped and build one tagged image, and N xdist workers would each race to build it — the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. `smoke` and `full` are the same fixtures over two compose files: the lean stack (one container, entrypoint bypassed, config rendered on the host) and the deployment as shipped, which is the only thing that executes `provision-nc.sh` or reaches the half of `entrypoint.sh` past the config write. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` (checks the deployment architecture; since ISSUE-280 the devbox image builds natively too, so a plain `-m image` already runs its assertions) and `scripts/test-upgrade.sh --from-floor --shape volume`. Two of the tiers carry a negative control that must go **red** — `scripts/test-image-negative-control.sh`, and the same broken image handed to the upgrade tier through `ISTOTA_IMAGE_TAG`. That script covers both images: one control for the istota half, and four for the devbox half, because no single broken image reaches all thirteen of that file's assertions. Each control names the exact node ids it must turn red and requires them in pytest's `FAILED` summary, since a control can otherwise pass on an unrelated failure. On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail. Details and a when-to-run-each table in `docs/development/testing.md`.
 
-**All four tiers need Docker, so a sandboxed task cannot run any of them — check `ISTOTA_SANDBOXED` before you plan around one.** A task's Docker access is the devbox allowlist proxy, which permits no call that creates or starts a container; the Linux tier also wants `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`, which is what the sandbox exists to deny. Both shell drivers refuse up front and say so. **When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say so in the merge request, name the tier that covers it, and ask for the run before merge.** Report the default suite as what it is: it patches `_bwrap_available` and checks argv, so it has never executed the sandbox path you changed.
+**All five tiers need Docker, so a sandboxed task cannot run any of them — check `ISTOTA_SANDBOXED` before you plan around one.** A task's Docker access is the devbox allowlist proxy, which permits no call that creates or starts a container; the Linux tier also wants `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`, which is what the sandbox exists to deny. Both shell drivers refuse up front and say so. **When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say so in the merge request, name the tier that covers it, and ask for the run before merge.** Report the default suite as what it is: it patches `_bwrap_available` and checks argv, so it has never executed the sandbox path you changed.
 
 Chain them in one shell invocation rather than one call each, and use `-x` / `--bail=1` while iterating so the first real failure stops the run. Drop those flags for the full run before a commit. Never read the result through a pipe: a pipeline reports its *last* command's status, so `uv run pytest … | tail` exits 0 on a suite that failed. Set `set -o pipefail` in the same shell, or redirect to a file and check `$?` before reading it. A run wrapped in `scripts/qtest` also says the answer in words, on stderr, which no stdout filter can drop.
 

@@ -1,0 +1,120 @@
+# Harness concessions for the full shape. NOT a deployment recipe.
+#
+# `docker/docker-compose.yml` is a production artifact whose defaults are tuned
+# for production. This overlay is the complete list of places where the stack
+# the `full` tier boots differs from the stack an operator boots, and each entry
+# carries the reason inline — the same habit `docker/docker-compose.test.yml`
+# keeps, which is why that file's shape survived review with so little wrong
+# with it. A sixth concession goes here, where it gets read and reviewed, rather
+# than into a fragment assembled in Python.
+#
+# What is deliberately *not* here: anything that varies per session. The
+# generated `*_PASSWORD` values, the `ISTOTA_*_ENABLED` map derived from
+# `Profile.services`, the ephemeral `NC_PORT` and its matching
+# `ISTOTA_WEB_CALLBACK_URL` are written into the compose env-file that
+# `StackPool` owns, because a file in the repository cannot hold a value that
+# is invented at boot.
+#
+# The one exception to that split is the three credential-shaped brain
+# variables below, and the exception is forced: compose lets the *process*
+# environment outrank an `--env-file`, so a developer with `ANTHROPIC_API_KEY`
+# exported wins over anything the harness writes into a file. A literal in a
+# compose file does not lose that contest.
+#
+# Used as `-f docker/docker-compose.yml -f testbed/compose/testbed.yml`.
+# `testbed/stack.py` assembles the invocation; this file is never run by hand.
+
+services:
+  istota:
+    # `host.docker.internal` is built in on Docker Desktop and absent on Docker
+    # Engine, and `docker-compose.yml` does not declare it because nothing in a
+    # deployment reaches the host. The scripted model endpoint runs in the
+    # pytest process on the host, so every full-shape task depends on this.
+    #
+    # It reaches inside the sandbox too, which is the obvious worry and is
+    # unfounded: `render-config.sh` writes `[security.network] enabled = false`
+    # unconditionally, so `executor.py` builds no CONNECT proxy and appends no
+    # `--unshare-net`, and `/etc/hosts` is bound into the bwrap namespace. A
+    # future profile that turns the CONNECT allowlist on would have to
+    # allowlist each stub's host:port.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Mirrors `docker/docker-compose.test.yml:80-81`, which carries the full
+    # reasoning and the measurement. The short version, re-measured on Docker
+    # Desktop 29.6.2 while this file was written: without the grant,
+    # `bwrap --unshare-user --ro-bind / / -- /bin/true` exits 1 with "No
+    # permissions to create new namespace"; with it, exit 0. Docker's default
+    # seccomp profile blocks the `unshare(CLONE_NEWUSER)` bubblewrap needs.
+    #
+    # This is a decision rather than a detail. `render-config.sh:230` renders
+    # `sandbox_enabled` true and `docker-compose.yml:168` leaves it true, so
+    # without the grant a full-shape stack boots a daemon whose every
+    # filesystem-touching task fails — the tier would be asserting against a
+    # daemon that cannot run a task. The alternative fix, turning the sandbox
+    # off, is worse: `build_bwrap_cmd`'s per-user scoping is what keeps
+    # `/mnt/shared/.istota-provisioned` (mode 644, `OAUTH_CLIENT_SECRET` in
+    # plaintext), `/data/config/.api-provisioned` (`APP_PASSWORD`),
+    # `config.toml` and `.secret_key` out of the model's view.
+    #
+    # As on the lean shape this is the *whole* grant — no `--cap-add=SYS_ADMIN`
+    # — so `/proc/sys` stays read-only, `executor._bwrap_supports_disable_userns`
+    # finds `--disable-userns` unavailable and omits it, and neither shape may
+    # assert anything about nested-userns behaviour.
+    security_opt:
+      - seccomp:unconfined
+
+    environment:
+      # Fixed literals, NOT `${ANTHROPIC_API_KEY:-}` as the base file has them.
+      # All three reach this container in a deployment and `entrypoint.sh`
+      # writes the OAuth token into `~/.claude/.credentials.json`. Interpolating
+      # would ship a developer's real credential into a test container that then
+      # POSTs to a listener on their own machine. Nothing in this tier can use a
+      # real one: the brain is the scripted endpoint, which ignores the
+      # Authorization header entirely.
+      #
+      # The empty string rather than a marker for the two the daemon branches
+      # on: `entrypoint.sh:690-700` writes a credentials file when
+      # `CLAUDE_CODE_OAUTH_TOKEN` is non-empty, so a marker value would have it
+      # write a fake credential and log that Claude Code is configured.
+      ANTHROPIC_API_KEY: ""
+      CLAUDE_CODE_OAUTH_TOKEN: ""
+      ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint
+
+    # The shipped `istota` service carries no `healthcheck:` — only postgres,
+    # redis, nextcloud and browser do — so `wait_ready` would have nothing to
+    # wait on. Worse, `restart: unless-stopped` means an istota that exits 1 on
+    # the 600-second provisioning timeout (`entrypoint.sh:44-55`) comes straight
+    # back rather than showing as exited, so "is the container running" reads a
+    # wedged boot as healthy.
+    #
+    # Lifted from `docker-compose.test.yml:118-134` with its reasoning: the
+    # `tasks` table, not the DB file. The file appears the moment anything opens
+    # the DB, which is before `istota init` has created a schema — measured
+    # there as a container that reported healthy and then logged "no such table:
+    # tasks" on every scheduler tick.
+    #
+    # `retries` and `start_period` are the full shape's, not the lean shape's:
+    # this container spends up to 600 seconds waiting on Nextcloud provisioning
+    # before it renders a config, so a 30-retry probe would mark it unhealthy
+    # long before it had a chance to be wrong.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import sqlite3,sys;
+          sys.exit(0 if sqlite3.connect('file:/data/db/istota.db?mode=ro', uri=True)
+          .execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'\")
+          .fetchone() else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 180
+      start_period: 10s
+
+  web:
+    environment:
+      # `docker-compose.yml:398` passes the same variable to this service, for
+      # the web chat surface's own use of the native brain. Same reasoning as
+      # above; a container the tier never drives is still a container that would
+      # hold a developer's key.
+      ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint

@@ -1,0 +1,38 @@
+[project]
+name = "istota-testbed"
+version = "0.1.0"
+description = "Staging environment for istota's deployment tiers: compose stacks, service stubs, a DB probe"
+requires-python = ">=3.11"
+# Deliberately empty. Everything here is stdlib — `http.server`, `sqlite3`,
+# `subprocess` — because the two consumers outside this repo (istota-demo and
+# istota-redteam) install it beside their own pinned dependencies, and a
+# testbed that dragged in a resolver conflict would be worked around by copying
+# it again, which is the thing this package exists to stop.
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The import name is `testbed` and the modules sit directly beside this file,
+# because `pythonpath = ["src", "."]` in the repo's own pyproject is what makes
+# `from testbed.stack import Stack` work in-tree without an install. `sources`
+# is what reconciles the two: it adds the `testbed/` prefix on the way into the
+# wheel, so an external consumer imports the same names from an installed copy.
+#
+# `only-include` is an explicit list, and it has to be: without one, hatchling
+# takes the build root — which is this directory — and refuses. **A module added
+# here needs a line added there**, and the way that fails is quiet: the in-tree
+# import keeps working and only an installed consumer sees the gap.
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "__init__.py",
+    "httpstub.py",
+    "probe.py",
+    "profiles.py",
+    "stack.py",
+    "services",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"" = "testbed"

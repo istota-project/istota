@@ -1,6 +1,6 @@
 """The GitLab stub, driven by the real clients it exists to answer.
 
-`tests/smoke/fake_gitlab.py` re-implements a slice of GitLab's wire protocol,
+`testbed/services/gitlab.py` re-implements a slice of GitLab's wire protocol,
 which is exactly the thing a stub should not be trusted to have got right. This
 file is the paydown, and it lives in the **default** suite for the same reason
 `tests/test_model_endpoint.py` does: the smoke tier that consumes the stub costs
@@ -20,7 +20,8 @@ import subprocess
 
 import pytest
 
-from .smoke.fake_gitlab import LOOPBACK, _auth_shape, serve
+from testbed.httpstub import LOOPBACK
+from testbed.services.gitlab import _auth_shape, serve
 
 REQUIRES_GLAB = pytest.mark.skipif(
     shutil.which("glab") is None, reason="glab not installed"
@@ -86,39 +87,41 @@ class TestAuthShape:
     )
     def test_the_secret_never_survives_into_the_shape(self, headers):
         """The property the whole dataclass exists for, stated once over every
-        branch. A failing smoke assertion renders `ForgeCall` into the pytest
+        branch. A failing smoke assertion renders `ServiceCall` into the pytest
         report and the terminal, and under `--live` these carry a real token."""
         assert "averyrealsecretvalue" not in _auth_shape(headers)
 
 
-class TestForgeCallRendering:
+class TestServiceCallRendering:
     """What reaches a failing test's output.
 
-    `auth` is lossy by construction; `query` and `body` are not, because
-    assertions need them. So the guarantee has to be about rendering, and the
-    rendering pytest actually uses is `repr` — assertion rewriting prints the
-    repr of whatever a failing comparison touched, and a dataclass's generated
-    one carries every field.
+    `auth` is lossy by construction; `query`, `body` and `headers` are not,
+    because assertions need them. So the guarantee has to be about rendering,
+    and the rendering pytest actually uses is `repr` — assertion rewriting
+    prints the repr of whatever a failing comparison touched, and a dataclass's
+    generated one carries every field.
     """
 
     def _call(self, **overrides):
-        from .smoke.fake_gitlab import ForgeCall
+        from testbed.services import ServiceCall
 
         fields = {
             "method": "POST",
             "path": "/api/v4/projects/1/merge_requests",
             "query": {"private_token": "a-secret-in-the-query"},
-            "body": {"description": "a-secret-in-the-body"},
+            "body": b'{"description": "a-secret-in-the-body"}',
+            "headers": {"PRIVATE-TOKEN": "a-secret-in-the-headers"},
             "auth": "private-token:20",
         }
         fields.update(overrides)
-        return ForgeCall(**fields)
+        return ServiceCall(**fields)
 
-    def test_repr_carries_neither_the_query_nor_the_body(self):
+    def test_repr_carries_neither_the_query_nor_the_body_nor_the_headers(self):
         rendered = repr(self._call())
 
         assert "a-secret-in-the-query" not in rendered, rendered
         assert "a-secret-in-the-body" not in rendered, rendered
+        assert "a-secret-in-the-headers" not in rendered, rendered
 
     def test_repr_still_says_enough_to_debug_with(self):
         """Redaction that removes the diagnostic value is its own failure."""
@@ -153,7 +156,7 @@ class TestRestSurface:
         # The path, so a missing endpoint reports itself precisely instead of
         # surfacing as a glab error about a malformed response.
         assert "/api/v4/groups/1/epics" in body
-        assert "fake_gitlab" in body
+        assert "testbed/services/gitlab.py" in body
 
     def test_calls_are_recorded_with_their_query_and_body(self, stub):
         import urllib.request
@@ -173,8 +176,8 @@ class TestRestSurface:
 
         posted = stub.rest_calls("POST", "merge_requests")
         assert len(posted) == 1, stub.calls
-        assert posted[0].body["title"] == "a title"
-        assert posted[0].body["source_branch"] == "feature"
+        assert posted[0].payload()["title"] == "a title"
+        assert posted[0].payload()["source_branch"] == "feature"
         assert posted[0].auth == "private-token:16"
 
 
@@ -399,8 +402,9 @@ class TestAgainstRealGlab:
         )
         posted = stub.rest_calls("POST", "merge_requests")
         assert len(posted) == 1, [str(c) for c in stub.calls]
-        assert posted[0].body.get("source_branch") == "feature/thing", posted[0].body
-        assert posted[0].body.get("target_branch") == "main", posted[0].body
+        sent = posted[0].payload()
+        assert sent.get("source_branch") == "feature/thing", sent
+        assert sent.get("target_branch") == "main", sent
 
     def test_a_501_is_reported_rather_than_swallowed(self, stub, tmp_path):
         """A stub gap must fail the caller.

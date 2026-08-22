@@ -198,7 +198,11 @@ select = ["E4", "E7", "E9", "F"]
 "tests/**" = ["E402"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# `.` alongside `src`, so `from testbed.stack import Stack` resolves
+# without installing the testbed package. It sits beside `src/` rather
+# than inside `tests/` because it is not part of the shipped
+# application and two repos outside this one consume it.
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 markers = [
     "integration: tests requiring external services (deselected by default)",
@@ -206,10 +210,13 @@ markers = [
     "linux: requires a real Linux kernel and a usable bubblewrap (deselected by default; run via scripts/test-linux.sh)",
     "image: builds and runs a Docker image (needs a Docker daemon, run with -n0; deselected by default)",
     "smoke: end-to-end against the lean compose stack (needs a Docker daemon, run with -n0; deselected by default)",
+    "full: end-to-end against the full compose stack incl. a real Nextcloud (needs a Docker daemon and minutes to boot, run with -n0; deselected by default)",
     "ml: needs a heavy ML extra, memory-search (torch) or whisper (faster-whisper); deselected by default, run via `uv sync --all-extras` then `-m ml`",
     "requires_dac: needs POSIX permission bits to constrain the process (skipped as root)",
+    "profile: which testbed profile the `stack` fixture should hand this test (default \"base\"; `fresh=True` for a private stack)",
+    "script: the turns the scripted model endpoint should replay for this test",
 ]
-addopts = "-m 'not integration and not live and not linux and not image and not smoke and not ml' -n auto"
+addopts = "-m 'not integration and not live and not linux and not image and not smoke and not full and not ml' -n auto"
 asyncio_mode = "auto"
 
 [tool.uv.sources]

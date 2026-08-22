@@ -35,6 +35,12 @@ from pathlib import Path
 
 import pytest
 
+# Hoisted to the rootdir conftest, beside the `--platform` option it reads,
+# because three Docker tiers want it and one tier's conftest is the wrong
+# place for the other two to import from. Re-exported here so every existing
+# `image.conftest.resolve_platform` reference still resolves.
+from ..conftest import resolve_platform  # noqa: F401
+
 REPO = Path(__file__).resolve().parents[2]
 ISTOTA_DOCKERFILE = REPO / "docker" / "istota" / "Dockerfile"
 DEVBOX_DOCKERFILE = REPO / "docker" / "devbox" / "Dockerfile"
@@ -109,18 +115,6 @@ class BuiltImage:
     platform: str
 
 
-def resolve_platform(config) -> str:
-    """`--platform`, else `$ISTOTA_TEST_PLATFORM`, else native.
-
-    A bare architecture is accepted and normalized — `amd64` is what a person
-    types and `linux/amd64` is what Docker wants, and getting that wrong builds
-    natively while the tag claims otherwise.
-    """
-    raw = config.getoption("--platform") or os.environ.get("ISTOTA_TEST_PLATFORM") or ""
-    raw = raw.strip()
-    if not raw:
-        return ""
-    return raw if "/" in raw else f"linux/{raw}"
 
 
 def is_emulated(image: BuiltImage) -> bool:
