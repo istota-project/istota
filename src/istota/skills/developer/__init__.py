@@ -93,9 +93,16 @@ def _plain_http_host_entry(forge_url: str) -> str:
     the entry has to be written by the same code that empties it — a caller
     cannot seed it and have it survive.
 
-    Returns "" for https and for an unset URL, which keeps the file empty
-    wherever it does not have to carry something: whatever is in it is honoured
-    by both CLIs before dispatch, so it is not a surface to grow idly.
+    Returns "" for https, for an unset or unparseable URL, and for one carrying
+    userinfo (see below) — which keeps the file empty wherever it does not have
+    to carry something. Whatever is in it is honoured by both CLIs before
+    dispatch, so it is not a surface to grow idly.
+
+    The key is the lowercased host, its port if non-default, and the URL path.
+    All three are measured rather than assumed: glab lowercases its lookup key,
+    and it derives that key from the whole of ``GITLAB_HOST``, which
+    ``build_invocation`` sets to the whole URL because a sub-path install is a
+    supported shape.
     """
     if not forge_url:
         return ""
