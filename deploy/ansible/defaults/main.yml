@@ -1076,9 +1076,12 @@ istota_developer_gitlab_url: "https://gitlab.com"
 istota_developer_gitlab_token: ""                 # API token (api + write_repository scope — glab needs api, not read_api)
 istota_developer_gitlab_username: ""              # GitLab username for HTTPS auth
 istota_developer_gitlab_default_namespace: ""     # Default namespace for short repo names
-# A GitLab *username*, despite the name: `glab mr create --reviewer` takes
-# usernames, not the numeric user IDs the old REST wrapper wanted.
-istota_developer_gitlab_reviewer_id: ""           # GitLab username to assign as MR reviewer
+# `glab mr create --reviewer` resolves by username, so this is the username.
+istota_developer_gitlab_reviewer: ""              # GitLab username to assign as MR reviewer
+# The same person's numeric user id. Nothing reads it (ISSUE-289) — kept so a
+# recorded value is not discarded on the next run, and because the name only
+# ever described this one.
+istota_developer_gitlab_reviewer_id: ""           # GitLab numeric user id, recorded not consumed
 # GitHub settings
 istota_developer_github_url: "https://github.com"
 istota_developer_github_token: ""                 # Personal access token (repo scope)

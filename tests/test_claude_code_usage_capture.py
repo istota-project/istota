@@ -480,6 +480,42 @@ class TestNonStreaming:
         assert "stream-json" not in cmd
         assert "--include-partial-messages" not in cmd
 
+    def test_the_command_asks_for_verbose_so_the_init_frame_arrives(self):
+        """`--verbose` is what makes the CLI emit the `system` init frame.
+
+        Without it, 2.1.239 answers `--output-format json` with the bare
+        terminal frame — no `apiKeySource`, so every daemon-side call records
+        `cost_basis = "unknown"`. Measured against both deployed versions:
+        2.1.227 and 2.1.239 each emit the frame array with the flag, and
+        `_parse_simple_json_output` has always read that shape. The flag is how
+        the CLI gets asked to report its own credential, rather than the daemon
+        inferring one from config.
+        """
+        req = BrainRequest(
+            prompt="hi", allowed_tools=[], cwd=Path("/tmp"), env={},
+            timeout_seconds=60, streaming=False,
+        )
+        cmd = ClaudeCodeBrain._build_command(req)
+
+        assert "--verbose" in cmd
+
+    def test_a_subscription_init_frame_is_read_as_subscription(self, tmp_path):
+        """The whole point of asking for the init frame.
+
+        `apiKeySource: "none"` is what a `/login` deployment reports, and it
+        must land on `subscription` — not `unknown`, which is where every
+        `sleep_cycle`, `code_review` and `shared_blocks` row went while the
+        frame was missing.
+        """
+        stdout = json.dumps([
+            json.loads(_init(api_key_source="none")),
+            json.loads(_RESULT),
+        ])
+
+        result = _run_simple(stdout, tmp_path=tmp_path)
+
+        assert result.usage.cost_basis == "subscription"
+
 
 class TestFailurePathsStillMeasure:
     @pytest.mark.parametrize("returncode", [0, 1, -9])
@@ -557,7 +593,12 @@ class TestNonStreamingSingleObject:
         """The single-object form carries no `system` init frame, so there is no
         `apiKeySource` to read. `unknown` is the honest answer — inferring the
         basis from config would be the guess `cost_basis_from_api_key_source`
-        exists to refuse."""
+        exists to refuse.
+
+        `--verbose` means a current CLI no longer answers in this shape, so this
+        is now the degradation path rather than the deployed one. It is kept
+        because the flag's effect belongs to the CLI: a version that ignores it
+        must still land on `unknown` rather than on a guess."""
         result = _run_simple(_SINGLE_OBJECT_RESULT, tmp_path=tmp_path)
 
         assert result.usage.cost_basis == "unknown"

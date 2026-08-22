@@ -166,9 +166,14 @@ class TestCostRendering:
         assert "108" not in out
         assert "$99" not in out
 
-    def test_a_group_spanning_bases_marks_rather_than_sums(self, seeded, capsys):
+    def test_a_group_spanning_bases_shows_the_money_and_only_the_money(
+        self, seeded, capsys
+    ):
         """An operator switching the CLI's auth mid-window has rows of both
-        kinds under one key."""
+        kinds under one key. The row reports the $9.00 that is money, does not
+        add the plan-equivalent to it, and does not name it either — the basis
+        names used to trail the figure and overflowed the dashboard's column.
+        """
         with db.get_db(seeded.db_path) as conn:
             conn.execute("UPDATE task_usage SET user_id = 'alice'")
 
@@ -178,8 +183,9 @@ class TestCostRendering:
             ln for ln in _totals_block(out).splitlines() if ln.startswith("alice")
         )
         assert "$9.00" in line
-        assert "estimated" in line or "subscription" in line
         assert "108" not in line
+        assert "estimated" not in line
+        assert "subscription" not in line
 
 
 class TestMoneyPrecision:

@@ -676,11 +676,16 @@ class DeveloperConfig:
     gitlab_token: str = ""        # API token (read_api + write_repository scope recommended)
     gitlab_username: str = ""     # GitLab username for HTTPS auth
     gitlab_default_namespace: str = ""  # Default namespace for resolving short repo names (e.g., "myorg")
-    # A *username*, despite the name: `glab mr create --reviewer` takes
-    # usernames, not numeric IDs. The name predates the CLI wrapper and
-    # renaming it means touching the env spec, the Ansible var and the
-    # rendered config; the comment carries the truth until then.
-    gitlab_reviewer_id: str = ""       # GitLab reviewer username for new MRs
+    # The reviewer `glab mr create --reviewer` is given. It resolves by
+    # username, so this is a username (ISSUE-289).
+    gitlab_reviewer: str = ""     # GitLab username to assign as MR reviewer
+    # The same person's numeric user id. Nothing reads it: it is here because
+    # operators have it recorded, the REST paths that want it may come back,
+    # and dropping the key would silently discard the value on the next
+    # Ansible run. Its name was the whole bug — it used to be the field the
+    # skill consumed, so operators dutifully put a number where `glab` needed
+    # a name and every MR opened unassigned.
+    gitlab_reviewer_id: str = ""  # GitLab numeric user id, recorded not consumed
     github_url: str = "https://github.com"
     github_token: str = ""        # Personal access token (repo scope recommended)
     github_username: str = ""     # GitHub username for HTTPS auth (defaults to x-access-token if empty)
@@ -2874,6 +2879,7 @@ def load_config(config_path: Path | None = None) -> Config:
             gitlab_token=dev.get("gitlab_token", ""),
             gitlab_username=dev.get("gitlab_username", ""),
             gitlab_default_namespace=dev.get("gitlab_default_namespace", ""),
+            gitlab_reviewer=dev.get("gitlab_reviewer", ""),
             gitlab_reviewer_id=dev.get("gitlab_reviewer_id", ""),
             github_url=dev.get("github_url", "https://github.com"),
             github_token=dev.get("github_token", ""),

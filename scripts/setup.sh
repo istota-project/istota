@@ -31,9 +31,22 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
-# Create virtual environment and install dependencies
+# Create virtual environment and install dependencies.
+#
+# Not a bare `uv sync`: that installs the base dependencies only, and the suite
+# needs eight of the optional groups (click from money, fastapi from location
+# and web, and so on). A bare sync leaves several hundred ModuleNotFoundError
+# collection errors, which is a big enough number to read as a broken checkout
+# rather than as a missing package.
+#
+# `test` is `all` minus the two heavy ML extras — memory-search (torch,
+# sentence-transformers) and whisper (faster-whisper, av, onnxruntime). The
+# suite runs clean without them, at 291 MB against 1.1 GB; the one test that
+# needs them carries the `ml` marker and is deselected by default. Add
+# --all-extras if you want that test, or the real libraries to hand-test with.
+# See docs/development/testing.md.
 echo "Installing dependencies..."
-uv sync
+uv sync --extra test
 
 # Create data directory
 mkdir -p data

@@ -36,9 +36,9 @@ const PARITY: [Record<string, number>, string][] = [
   [{ api: 9.0 }, '$9.00'],
   [{ estimated: 0 }, '—'],
   [{ subscription: 99 }, '—'],
-  [{ api: 1, subscription: 2 }, '$1.00 +subscription'],
+  [{ api: 1, subscription: 2 }, '$1.00'],
   [{ estimated: 0, subscription: 1, unknown: 2 }, '—'],
-  [{ api: 1.5, estimated: 0, subscription: 9 }, '$1.50 +estimated+subscription'],
+  [{ api: 1.5, estimated: 0, subscription: 9 }, '$1.50'],
 ];
 
 describe('formatCost parity with the CLI', () => {

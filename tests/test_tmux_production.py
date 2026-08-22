@@ -88,15 +88,21 @@ class TestFlagHelper:
         ]
         # And the brain's _build_command wraps it identically (plus the
         # non-interactive skip-permissions flag and, on the non-streaming path,
-        # `--output-format json`). That last one is what makes the daemon's
-        # task-less model calls measurable at all; it is added by the brain's
-        # own wrapper, so the flag builder the tmux brain shares is untouched —
-        # which is the property this golden exists to pin.
+        # `--output-format json --verbose`). Those two are what make the
+        # daemon's task-less model calls measurable at all — `json` for the
+        # totals, `--verbose` for the `system` init frame carrying
+        # `apiKeySource`, without which every such row records
+        # `cost_basis = "unknown"`. Both are added by the brain's own wrapper,
+        # so the flag builder the tmux brain shares is untouched — which is the
+        # property this golden exists to pin.
         cmd = claude_code.ClaudeCodeBrain._build_command(req)
         assert cmd == (
             ["claude", "-p", "-"]
             + flags
-            + ["--dangerously-skip-permissions", "--output-format", "json"]
+            + [
+                "--dangerously-skip-permissions",
+                "--output-format", "json", "--verbose",
+            ]
         )
         assert "stream-json" not in cmd
 
