@@ -181,6 +181,43 @@ class TestTranscriptAndEvents:
             ).fetchone()
             assert (row["author_user_id"], row["author_label"]) == ("bob", None)
 
+    async def test_returns_the_recorded_row_for_the_web_client_to_stamp(self, make_config):
+        """The stored row's id rides back on `result_data` (ISSUE-300).
+
+        A steer row carries no task id, so `msg_id` is the only key the web
+        client's `appendStreamedRow` can dedup on. Without the stamp the room
+        stream's echo of this row draws a second bubble for one steer — live
+        only, since the inline result is never recorded, so a reload disagrees
+        with what the user just watched. `body` goes with it because the stored
+        row holds the note alone while the client drew the whole `!steer …`
+        line it was given.
+        """
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="web", name="Room 1")
+            _running_task(conn, source_type="web")
+            ctx = _ctx(config, conn, args="check the db layer", surface="web")
+            await cmd_steer(ctx)
+            row = conn.execute(
+                "SELECT id FROM messages WHERE room_token = ? AND body = ?",
+                ("room1", "check the db layer"),
+            ).fetchone()
+            assert ctx.result_data == {
+                "kind": "steer_recorded",
+                "user_msg_id": row["id"],
+                "body": "check the db layer",
+            }
+
+    async def test_no_recorded_row_means_nothing_to_stamp(self, make_config):
+        """No room, no transcript row, so no id — and the client must not be
+        handed one to stamp onto a row that never echoes."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            _running_task(conn)  # no room registered
+            ctx = _ctx(config, conn, args="hey")
+            await cmd_steer(ctx)
+            assert ctx.result_data is None
+
     async def test_no_room_skips_transcript_but_still_steers(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

@@ -9,15 +9,44 @@ const EMPTY: ChatCommands = { commands: [], model_aliases: [] };
 
 let cataloguePromise: Promise<ChatCommands> | null = null;
 
+/**
+ * The names that may be sent while a turn is running (ISSUE-300), as a plain
+ * snapshot of the last resolved catalogue.
+ *
+ * Both readers are synchronous — a `$derived` in the composer, a guard on the
+ * store's send path — and neither can await a fetch. Empty until the catalogue
+ * lands, which is the safe answer: it keeps the mode gate shut rather than
+ * guessing at a name the server may not have.
+ */
+let commandNames: ReadonlySet<string> = new Set();
+
+/** The registered command names, lowercased.
+ *
+ *  Model aliases are deliberately *not* excluded. The prefix the endpoint
+ *  resolves ahead of command dispatch is the literal `!model <alias>`
+ *  (`commands.parse_model_prefix`), not `!<alias>` — so an alias name shadows
+ *  nothing, and filtering on it would only refuse a genuine command that
+ *  happened to share a name with a role alias (`fast`, `smart`). `!model …`
+ *  itself is refused by this set on its own terms: no command is registered
+ *  under `model`. */
+function commandNamesOf(c: ChatCommands): ReadonlySet<string> {
+  return new Set(c.commands.map((x) => x.name.toLowerCase()));
+}
+
 /** Fetch the command/alias catalogue once per session; a failure degrades to an
  *  empty catalogue (the popover simply never opens) and is cached so we don't
  *  hammer a down endpoint on every keystroke. */
 function loadCatalogue(): Promise<ChatCommands> {
   if (!cataloguePromise) {
-    cataloguePromise = fetchChatCommands().catch((e) => {
-      console.warn('command autocomplete: catalogue fetch failed', e);
-      return EMPTY;
-    });
+    cataloguePromise = fetchChatCommands()
+      .catch((e) => {
+        console.warn('command autocomplete: catalogue fetch failed', e);
+        return EMPTY;
+      })
+      .then((c) => {
+        commandNames = commandNamesOf(c);
+        return c;
+      });
   }
   return cataloguePromise;
 }
@@ -25,6 +54,37 @@ function loadCatalogue(): Promise<ChatCommands> {
 /** Drop the cached catalogue (call on session init/teardown to refetch). */
 export function resetCommandCatalogue(): void {
   cataloguePromise = null;
+  commandNames = new Set();
+}
+
+/** The command names, once the catalogue has landed — for a caller that holds
+ *  its own reactive copy rather than reading the snapshot below. */
+export async function loadCommandNames(): Promise<ReadonlySet<string>> {
+  await loadCatalogue();
+  return commandNames;
+}
+
+/**
+ * Whether `text` opens with a `!command` the server registers.
+ *
+ * The name grammar follows the server's own parser (`commands.parse_command`):
+ * `!` then word characters, lowercased. Not byte-for-byte — JS `\w` is ASCII
+ * where Python's is Unicode, so `!steerü` extracts `steer` here and `steerü`
+ * there. That divergence can only make this stricter than the server in
+ * practice, since an unregistered name is answered inline too ("Unknown
+ * command"), and the refusal it produces is the same one an unknown name gets.
+ *
+ * The catalogue is the only evidence available client-side, which is the real
+ * reason an unregistered `!word` is refused while a turn runs — not that the
+ * server would make a task of it. It would answer that one inline as well.
+ *
+ * `names` defaults to the module snapshot, which is what a synchronous caller
+ * outside a reactive scope wants; the composer passes its own copy so the
+ * derivation reruns when the catalogue arrives.
+ */
+export function isKnownCommand(text: string, names: ReadonlySet<string> = commandNames): boolean {
+  const m = /^!(\w+)/.exec(text.trim());
+  return m !== null && names.has(m[1].toLowerCase());
 }
 
 /** The active brain's model aliases (shared cache with the autocomplete), for
