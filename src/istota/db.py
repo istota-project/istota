@@ -962,6 +962,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # notice and the user re-auths).
     _migrate_google_oauth_encryption(conn)
 
+    # Pure DDL with no marker — see the docstring. Last because it depends on
+    # nothing above it.
+    _migrate_notifications(conn)
+
 
 def _resolve_schema_path() -> Path:
     """Locate schema.sql for both a source checkout and an installed wheel.
@@ -5345,6 +5349,66 @@ def _migrate_messages_author(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('messages_author_v1')"
     )
+
+
+def _migrate_notifications(conn: sqlite3.Connection) -> None:
+    """Create the `notifications` inbox table and its indexes on existing DBs.
+
+    Pure DDL, all `IF NOT EXISTS`, so it is idempotent and needs no marker row —
+    there is nothing here that a second run could do twice, and no backfill to
+    skip. It also wants no transaction of its own, which is what makes it safe
+    wherever in the shared-connection list it sits: sqlite3's legacy
+    `isolation_level` mode issues an implicit BEGIN for DML only, so these
+    statements join whichever transaction the migrations before them left open
+    instead of colliding with it (the ISSUE-261 shape). It reads and alters no
+    existing table, so there is nothing for a failure here to leave half done.
+
+    Kept in sync with the block at the end of `schema.sql`, which is what a
+    fresh install gets. See there for the column and index commentary.
+    """
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id           TEXT NOT NULL,
+                source            TEXT NOT NULL,
+                dedup_key         TEXT NOT NULL,
+                object_type       TEXT,
+                object_id         TEXT,
+                severity          TEXT NOT NULL DEFAULT 'info',
+                actionable        INTEGER NOT NULL DEFAULT 0,
+                title             TEXT NOT NULL,
+                body              TEXT NOT NULL DEFAULT '',
+                params            TEXT NOT NULL DEFAULT '{}',
+                link              TEXT,
+                room_token        TEXT,
+                created_at        TEXT NOT NULL
+                                  DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at        TEXT NOT NULL
+                                  DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                last_delivered_at TEXT,
+                occurrences       INTEGER NOT NULL DEFAULT 1,
+                seen_at           TEXT,
+                state             TEXT NOT NULL DEFAULT 'open',
+                resolved_at       TEXT,
+                resolved_by       TEXT,
+                UNIQUE (user_id, source, dedup_key)
+            )
+        """)
+        # Leads with `user_id` — see the schema.sql comment; without it every
+        # per-user-module source resolves across users.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_user_state "
+            "ON notifications (user_id, state, updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_object "
+            "ON notifications (user_id, source, object_type, object_id)"
+        )
+    except sqlite3.OperationalError as e:
+        # The next boot retries; the bell is empty until then rather than init
+        # failing outright.
+        logger.warning("notifications table migration failed, will retry: %s", e)
 
 
 def list_tasks(
