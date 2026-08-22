@@ -175,6 +175,7 @@ class Probe:
         user_id: str | None = None,
         status: str | None = None,
         source_type: str | None = None,
+        conversation_token: str | None = None,
     ) -> list[dict]:
         """Rows from `tasks`, narrowed by whichever filters are given.
 
@@ -183,6 +184,13 @@ class Probe:
         at startup (a feeds poll, a sleep cycle), so `user_id=` alone returns
         whichever task finished first — which is how the smoke tests first came
         back asserting against `source_type='scheduled'`.
+
+        `conversation_token` is what a scenario has instead of a task id when
+        the daemon made the task rather than the test: a Talk message produces
+        a row nobody handed the test a handle for, and the room token is the
+        only thing that discriminates it from the pollers' own work. It is as
+        selective as `task_id` for that case, because a room this test created
+        is a room nothing else has ever posted in.
         """
         clauses, params = [], []
         for column, value in (
@@ -190,6 +198,7 @@ class Probe:
             ("user_id", user_id),
             ("status", status),
             ("source_type", source_type),
+            ("conversation_token", conversation_token),
         ):
             if value is not None:
                 clauses.append(f"{column} = ?")

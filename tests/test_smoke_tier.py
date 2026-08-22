@@ -673,11 +673,12 @@ def framework_db(tmp_path) -> Path:
     connection = sqlite3.connect(path)
     connection.executescript((REPO / "schema.sql").read_text())
     connection.executemany(
-        "INSERT INTO tasks (source_type, user_id, prompt, status) VALUES (?, ?, ?, ?)",
+        "INSERT INTO tasks (source_type, user_id, prompt, status, conversation_token) "
+        "VALUES (?, ?, ?, ?, ?)",
         [
-            ("cli", "alice", "first", "completed"),
-            ("cli", "bob", "second", "pending"),
-            ("talk", "alice", "third", "failed"),
+            ("cli", "alice", "first", "completed", None),
+            ("cli", "bob", "second", "pending", None),
+            ("talk", "alice", "third", "failed", "a-room-token"),
         ],
     )
     connection.commit()
@@ -712,6 +713,24 @@ class TestProbe:
         probe = Probe(local=framework_db)
 
         assert [t["prompt"] for t in probe.tasks(task_id=2)] == ["second"]
+
+    def test_a_conversation_token_narrows_to_a_task_nobody_submitted(
+        self, framework_db
+    ):
+        """What a Talk scenario has instead of a task id.
+
+        The daemon makes the task, not the test, so `submit()` returns no
+        handle to filter on — and `source_type='talk'` alone matches every
+        earlier scenario's task in a session-scoped stack. A room the test
+        created is a room nothing else has ever posted in, which makes its
+        token as selective as an id.
+        """
+        probe = Probe(local=framework_db)
+
+        assert [
+            t["prompt"] for t in probe.tasks(conversation_token="a-room-token")
+        ] == ["third"]
+        assert probe.tasks(conversation_token="a-room-nobody-made") == []
 
     def test_wait_for_task_honours_a_task_id(self, framework_db):
         # Task 1 is completed and task 2 is pending. Without the id filter the

@@ -16,13 +16,12 @@ worked around:
   variable to announce its own presence would be the fixture side-loading
   config, which is the property this tier is built to keep. What does vary with
   the profile — whether Talk is on at all — is `FULL_MODULE_SWITCHES`' job.
-- `reset()` is a documented no-op **for now**. Stage 5 of the spec owns it,
-  together with the scope it can honestly claim: a real server cannot be
-  restored to a byte-identical state the way a truncate would, and a `reset`
-  that attempts completeness and half-succeeds is worse than one whose limits
-  are written down. Nothing in Stage 3's provisioning suite mutates Nextcloud,
-  so an empty reset is true today; it stops being true the moment a scenario
-  creates a room.
+- `reset()` deletes the Talk rooms this object created, and claims nothing
+  else. A real server cannot be restored to a byte-identical state the way a
+  truncate would, and a `reset` that attempts completeness and half-succeeds is
+  worse than one whose limits are written down. The limits are in its docstring,
+  enumerated rather than gestured at, because the deployment itself creates most
+  of what a naive reset would try to remove.
 
 **Where this talks to Nextcloud, and why there are two channels.** Most reads go
 over HTTP through nginx on the ephemeral host port, because that is a real
@@ -39,11 +38,14 @@ reports success having done nothing at all.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote
 from urllib.request import Request, urlopen
 
 #: The address a process *inside* the compose network reaches Nextcloud on.
@@ -67,6 +69,25 @@ CONNECT_RETRY_SECONDS = 60
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_BOT_USER = "istota"
 DEFAULT_TEST_USER = "testuser"
+
+#: Talk's conversation types. 2 is a group room — not 3, which is public and
+#: therefore joinable by anyone holding its token.
+ROOM_TYPE_GROUP = 2
+
+#: The two `files_external` mount points `provision-nc.sh` creates, which are
+#: what a WebDAV path under `/mnt/shared` is prefixed with. The bot gets the
+#: whole volume; the human user gets only the bot workspace, named after the
+#: bot. Neither is `/Users/...`, which is the shape `storage.py` writes and the
+#: shape `resolve_scoped_path` produces — see `files()`.
+BOT_MOUNT_POINT = "Shared Files"
+
+_HREF = re.compile(r"<d:href>([^<]*)</d:href>")
+
+_PROPFIND_BODY = (
+    b'<?xml version="1.0"?>\n'
+    b'<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/>'
+    b"<d:getcontentlength/></d:prop></d:propfind>\n"
+)
 
 
 class NextcloudError(RuntimeError):
@@ -144,6 +165,10 @@ class NextcloudService:
             test_user: test_password,
         }
         self._stack = None
+        #: Talk rooms `create_room` handed out, and the actor that owns each.
+        #: This list *is* `reset`'s scope: a room whose token this object never
+        #: returned is the profile's baseline and is left alone.
+        self._created_rooms: list[tuple[str, str]] = []
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic
         return f"NextcloudService(base_url={self.base_url!r}, <3 redacted>)"
@@ -160,14 +185,62 @@ class NextcloudService:
         return {}
 
     def reset(self) -> None:
-        """A documented no-op until Stage 5 gives it a scope it can keep.
+        """Delete the Talk rooms this object created. That is the whole scope.
 
-        Not `raise NotImplementedError`: `Stack.reset` calls this on every
-        service in the profile before every test, and a service that refused
-        would make the shape unusable for the provisioning suite that proves the
-        shape works. Not silently absent either — a `Service` without `reset` is
-        a protocol violation nothing would catch until a scenario leaked.
+        **Measured, not assumed** (Stage 5's first task, spec Open question 3).
+        `DELETE /ocs/v2.php/apps/spreed/api/v4/room/{token}` as the room's owner
+        answers 200 and the room then disappears from *both* participants'
+        listings, taking its messages and the invite notification it raised with
+        it. So the spec's fallback — a per-test room-name prefix, with every
+        assertion scoped to it — is not needed, and "no room was created" stays
+        an assertion a scenario can make.
+
+        **What is deliberately outside the scope, and why none of it needs
+        undoing.** A real server cannot be restored to a byte-identical state
+        the way a truncate would, and a `reset` that attempts completeness and
+        half-succeeds is worse than one whose limits are written down.
+
+        - *The four rooms the boot made.* `entrypoint.sh:229-315` creates a 1:1
+          plus `#general`, `#logs` and `#alerts`, seeds `CHANNEL.md` for
+          `#general`, and posts an intro message into `#alerts`. Talk adds two
+          of its own per account (`Talk updates`, `Note to self`). All of it is
+          the profile's **baseline**: the daemon polls those four for the whole
+          session and writes its execution log and confirmation traffic into two
+          of them, so `rooms()` and `messages()` see a great deal no scenario
+          created. A scenario asserts on a room it made, never on a count.
+        - *Chat traffic in those rooms.* Talk's message delete is time-bounded
+          and leaves a tombstone, so undoing it is neither possible nor useful.
+        - *Files under `/mnt/shared`.* Nothing is cleared, and on this shape
+          that is a decision rather than an omission — `.istota-provisioned`
+          lives there and `entrypoint.sh` sources it at every boot, so a
+          wholesale clear would break the stack rather than reset it. A storage
+          scenario writes under a name it generated and asserts on that name,
+          which is the same discipline `Probe.rows_above` enforces for tables.
+        - *Shares and files in the bot's own Nextcloud home.* Same rule: a
+          unique name per test, and `list_shares(path=…)` is path-scoped, so a
+          leftover share is invisible to every other scenario.
+
+        Deleting is best-effort about a room that is *already* gone (a scenario
+        may have deleted its own) and loud about anything else: a room that
+        survives a reset is a cross-test dependency, and those get diagnosed as
+        flake rather than as leakage.
         """
+        failures = []
+        for token, actor in list(self._created_rooms):
+            answer = self._ocs(
+                f"/ocs/v2.php/apps/spreed/api/v4/room/{token}",
+                user=actor,
+                method="DELETE",
+                missing_ok=True,
+            )
+            if answer.status_code not in (100, 200, 404):
+                failures.append(f"{token} ({answer.status_code}: {answer.message})")
+        self._created_rooms.clear()
+        if failures:
+            raise NextcloudError(
+                "these rooms survived the reset, so the next test would see "
+                f"them: {failures}"
+            )
 
     def close(self) -> None:
         """Nothing to stop. The container belongs to the stack."""
@@ -179,7 +252,7 @@ class NextcloudService:
         what it can and says what it could not reach rather than replacing a
         test failure with an error from the diagnostic.
         """
-        lines = []
+        lines = [f"rooms this test created: {[t for t, _ in self._created_rooms]}"]
         for label, reader in (
             ("users", self.users),
             ("apps", self.enabled_apps),
@@ -188,6 +261,15 @@ class NextcloudService:
                 lines.append(f"{label}: {sorted(reader())}")
             except Exception as exc:  # pragma: no cover - diagnostic
                 lines.append(f"{label}: unavailable ({exc})")
+        for token, _ in self._created_rooms:
+            try:
+                recent = [
+                    f"{row.get('actorId')}: {(row.get('message') or '')[:60]}"
+                    for row in self.messages(token, limit=10)
+                ]
+                lines.append(f"{token}: {recent}")
+            except Exception as exc:  # pragma: no cover - diagnostic
+                lines.append(f"{token}: unreadable ({exc})")
         return "\n".join(lines)
 
     # -- wiring -----------------------------------------------------------
@@ -205,11 +287,23 @@ class NextcloudService:
 
     # -- reading it back over HTTP ----------------------------------------
 
-    def _ocs(self, path: str, *, user: str = "", method: str = "GET") -> OcsResponse:
+    def _ocs(
+        self,
+        path: str,
+        *,
+        user: str = "",
+        method: str = "GET",
+        body: dict | None = None,
+        missing_ok: bool = False,
+    ) -> OcsResponse:
         """One OCS call as admin, or as whoever the caller names.
 
         The `OCS-APIRequest` header is not optional: without it Nextcloud
         answers a 401 with an HTML login page, which reads as bad credentials.
+
+        `missing_ok` turns a 404 into an `OcsResponse` carrying it rather than
+        an exception, for the one caller that has to tolerate one: `reset`
+        deleting a room a scenario already deleted itself.
         """
         actor = user or self.admin_user
         if actor not in self._passwords:
@@ -219,8 +313,12 @@ class NextcloudService:
             )
         url = f"{self.base_url}{path}"
         separator = "&" if "?" in path else "?"
-        request = Request(f"{url}{separator}format=json", method=method)
+        payload_bytes = json.dumps(body).encode() if body is not None else None
+        request = Request(f"{url}{separator}format=json", method=method,
+                          data=payload_bytes)
         request.add_header("OCS-APIRequest", "true")
+        if payload_bytes is not None:
+            request.add_header("Content-Type", "application/json")
         _add_basic_auth(request, actor, self._passwords[actor])
 
         # Retried on a *connection* error only, and only for a bounded window.
@@ -239,6 +337,8 @@ class NextcloudService:
                     payload = json.loads(response.read() or b"{}")
                 break
             except HTTPError as exc:
+                if missing_ok and exc.code == 404:
+                    return OcsResponse(status_code=404, message="not found", data=None)
                 raise NextcloudError(
                     f"{method} {path} answered HTTP {exc.code}: "
                     f"{exc.read()[:400].decode('utf-8', 'replace')}"
@@ -297,6 +397,208 @@ class NextcloudService:
             str(row.get("actorId") or row.get("userId") or "")
             for row in (answer.data or [])
         ]
+
+    # -- driving Talk, as a person rather than as the bot -----------------
+
+    def create_room(
+        self, *, name: str, participants: Sequence[str] = (), actor: str = ""
+    ) -> str:
+        """A group room (`roomType=2`) owned by `actor`, and its token.
+
+        As the **test user** by default, not as the bot, because rooms are
+        user-created only: nothing in istota mints one during ordinary
+        operation — `create_conversation` has three callers and all three are
+        outside the daemon loop (the web promote, the `provision-rooms` CLI, and
+        the agent-facing skill). A fixture that created a room as the bot would
+        be staging a state the product does not produce.
+
+        Group (2) rather than public (3) for the reason `entrypoint.sh` and
+        `provision_rooms.py` both give: a public room is joinable by anyone
+        holding its token.
+
+        The token is recorded, and that record is `reset`'s entire scope.
+        """
+        owner = actor or self.test_user
+        answer = self._ocs(
+            "/ocs/v2.php/apps/spreed/api/v4/room",
+            user=owner,
+            method="POST",
+            body={"roomType": ROOM_TYPE_GROUP, "roomName": name},
+        )
+        token = str((answer.data or {}).get("token") or "")
+        if not token:
+            raise NextcloudError(
+                f"creating room {name!r} as {owner}: {answer.status_code} "
+                f"{answer.message}"
+            )
+        self._created_rooms.append((token, owner))
+        for participant in participants:
+            self.invite(token, participant, actor=owner)
+        return token
+
+    def invite(self, token: str, participant: str, *, actor: str = "") -> None:
+        """Add one user to a room, as the room's owner."""
+        answer = self._ocs(
+            f"/ocs/v2.php/apps/spreed/api/v4/room/{token}/participants",
+            user=actor or self.test_user,
+            method="POST",
+            body={"newParticipant": participant, "source": "users"},
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(
+                f"inviting {participant} to {token}: {answer.status_code} "
+                f"{answer.message}"
+            )
+
+    def post_message(
+        self, token: str, *, actor: str = "", message: str, reply_to: int = 0
+    ) -> int:
+        """Post one chat message and return its Talk id.
+
+        The id is what the daemon stores as `tasks.talk_message_id` and what a
+        threaded reply carries as `replyTo`, so a scenario that does not keep it
+        cannot assert on either.
+        """
+        body: dict = {"message": message}
+        if reply_to:
+            body["replyTo"] = reply_to
+        answer = self._ocs(
+            f"/ocs/v2.php/apps/spreed/api/v1/chat/{token}",
+            user=actor or self.test_user,
+            method="POST",
+            body=body,
+        )
+        posted = (answer.data or {}).get("id")
+        if not posted:
+            raise NextcloudError(
+                f"posting to {token}: {answer.status_code} {answer.message}"
+            )
+        return int(posted)
+
+    def messages(self, token: str, *, user: str = "", limit: int = 50) -> list[dict]:
+        """A room's recent messages, newest first, as Talk returns them.
+
+        `lookIntoFuture=0` deliberately: the daemon's own poller uses the
+        long-poll form and a test that did the same would block for the poll
+        timeout on a quiet room.
+        """
+        answer = self._ocs(
+            f"/ocs/v2.php/apps/spreed/api/v1/chat/{token}"
+            f"?lookIntoFuture=0&limit={int(limit)}",
+            user=user or self.bot_user,
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(f"reading {token}: {answer.message}")
+        return list(answer.data or [])
+
+    def notifications(self, user: str = "") -> list[dict]:
+        """One account's undismissed Nextcloud notifications.
+
+        The same endpoint `src/istota/nextcloud/notifications.py` reads. That
+        module has no *send* path and deliberately so — its docstring says
+        sending needs the `admin_notifications` app and admin rights, and the
+        bot already has two push channels of its own — so the honest witness for
+        it is the read, against notifications the deployment itself raised.
+        """
+        answer = self._ocs(
+            "/ocs/v2.php/apps/notifications/api/v2/notifications",
+            user=user or self.bot_user,
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(f"listing notifications for {user}: {answer.message}")
+        return list(answer.data or [])
+
+    # -- files and shares -------------------------------------------------
+
+    def shares(self, *, user: str = "", shared_with_me: bool = False) -> list[dict]:
+        """Shares one account owns, or (with `shared_with_me`) receives."""
+        query = "?shared_with_me=true" if shared_with_me else ""
+        answer = self._ocs(
+            f"/ocs/v2.php/apps/files_sharing/api/v1/shares{query}",
+            user=user or self.bot_user,
+        )
+        if answer.status_code not in (100, 200):
+            raise NextcloudError(f"listing shares: {answer.message}")
+        return list(answer.data or [])
+
+    def files(self, path: str = "", *, user: str = "", depth: str = "1") -> list[str]:
+        """WebDAV PROPFIND under `path`, as a flat list of decoded paths.
+
+        Relative to the account's own DAV root, with the collection itself
+        dropped, so a caller compares against names rather than against hrefs
+        carrying `/remote.php/dav/files/<user>/`.
+
+        **The paths are not the ones `storage.py` writes.** On this shape the
+        daemon writes POSIX paths under `/mnt/shared`, and Nextcloud serves that
+        volume through the two `files_external` mounts `provision-nc.sh` makes:
+        the whole volume to the bot at `Shared Files/`, and only the bot
+        workspace to the human user at `<bot name>/`. So `/Users/x/inbox/y` on
+        disk is `Shared Files/Users/x/inbox/y` here. Measured rather than
+        reasoned, and it is the reason this accessor exists at all.
+        """
+        actor = user or self.bot_user
+        body, status = self._dav(
+            path, user=actor, method="PROPFIND", body=_PROPFIND_BODY,
+            headers={"Depth": depth, "Content-Type": "application/xml"},
+        )
+        if status != 207:
+            raise NextcloudError(
+                f"PROPFIND {path!r} as {actor} answered HTTP {status}: "
+                f"{body[:300].decode('utf-8', 'replace')}"
+            )
+        prefix = f"/remote.php/dav/files/{actor}/"
+        found = []
+        for href in _HREF.findall(body.decode("utf-8", "replace")):
+            relative = unquote(href)[len(unquote(prefix)):].rstrip("/")
+            if relative:
+                found.append(relative)
+        return sorted(found)
+
+    def read_file(self, path: str, *, user: str = "") -> bytes:
+        """One file's bytes over WebDAV, as the named account."""
+        actor = user or self.bot_user
+        body, status = self._dav(path, user=actor)
+        if status != 200:
+            raise NextcloudError(
+                f"GET {path!r} as {actor} answered HTTP {status}: "
+                f"{body[:300].decode('utf-8', 'replace')}"
+            )
+        return body
+
+    def _dav(
+        self,
+        path: str,
+        *,
+        user: str,
+        method: str = "GET",
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[bytes, int]:
+        """One WebDAV request against `user`'s own file root.
+
+        Returns the body and the status rather than raising on a non-2xx: a 404
+        is an answer two callers want to see, and an exception carrying it would
+        have to be unpicked to get back to the same fact.
+        """
+        if user not in self._passwords:
+            raise NextcloudError(f"no password for {user!r}")
+        url = (
+            f"{self.base_url}/remote.php/dav/files/{quote(user, safe='')}/"
+            f"{quote(path.lstrip('/'), safe='/')}"
+        )
+        request = Request(url, method=method, data=body)
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
+        _add_basic_auth(request, user, self._passwords[user])
+        try:
+            with urlopen(request, timeout=TIMEOUT) as response:
+                return response.read(), response.status
+        except HTTPError as exc:
+            return exc.read(), exc.code
+        except URLError as exc:
+            raise NextcloudError(
+                f"{method} {url} never connected: {exc}"
+            ) from None
 
     # -- reading it back through occ --------------------------------------
 

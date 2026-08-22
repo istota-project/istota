@@ -725,6 +725,157 @@ class TestTheFullProfile:
         )
 
 
+class TestTheNextcloudReset:
+    """What `reset` touches, and — more importantly — what it does not.
+
+    The scope was settled by experiment against a booted stack (spec Open
+    question 3): a room can be deleted cleanly through the API the daemon's own
+    client exposes, and it takes its messages and its invite notification with
+    it. So the scope is exactly the rooms this object created, and everything
+    the boot made is baseline. These tests hold that boundary without a server,
+    by recording the calls the reset would make.
+    """
+
+    @staticmethod
+    def _service(monkeypatch, *, fail: set[str] = frozenset()):
+        service = nextcloud_service.attach(
+            base_url="http://localhost:1",
+            admin_password="unit-admin",
+            bot_password="unit-bot",
+            test_password="unit-user",
+        )
+        calls: list[tuple[str, str, str]] = []
+
+        def fake_ocs(path, *, user="", method="GET", body=None, missing_ok=False):
+            calls.append((method, path, user))
+            token = path.rsplit("/", 1)[-1]
+            if method == "POST" and path.endswith("/room"):
+                return nextcloud_service.OcsResponse(
+                    200, "OK", {"token": f"token-{len(calls)}"}
+                )
+            if token in fail:
+                return nextcloud_service.OcsResponse(403, "no", None)
+            return nextcloud_service.OcsResponse(200, "OK", {})
+
+        monkeypatch.setattr(service, "_ocs", fake_ocs)
+        return service, calls
+
+    def test_it_deletes_the_rooms_it_created_and_nothing_else(self, monkeypatch):
+        service, calls = self._service(monkeypatch)
+        first = service.create_room(name="one")
+        second = service.create_room(name="two")
+        calls.clear()
+
+        service.reset()
+
+        assert [(method, path) for method, path, _ in calls] == [
+            ("DELETE", f"/ocs/v2.php/apps/spreed/api/v4/room/{first}"),
+            ("DELETE", f"/ocs/v2.php/apps/spreed/api/v4/room/{second}"),
+        ]
+
+    def test_a_room_is_deleted_by_the_actor_that_created_it(self, monkeypatch):
+        """Talk lets a moderator delete, and the creator is one. Deleting as the
+        bot would work for a bot-created room and 403 for a user-created one —
+        which is every room a scenario makes, since rooms are user-created."""
+        service, calls = self._service(monkeypatch)
+        service.create_room(name="one")
+        calls.clear()
+
+        service.reset()
+
+        assert [user for _, _, user in calls] == [service.test_user]
+
+    def test_a_second_reset_deletes_nothing(self, monkeypatch):
+        service, calls = self._service(monkeypatch)
+        service.create_room(name="one")
+        service.reset()
+        calls.clear()
+
+        service.reset()
+
+        assert calls == []
+
+    def test_a_room_that_survives_is_reported_rather_than_swallowed(
+        self, monkeypatch
+    ):
+        """A leaked room is a cross-test dependency, and those get diagnosed as
+        flake in whichever later scenario happens to trip over it."""
+        service, _ = self._service(monkeypatch)
+        service.create_room(name="one")
+        monkeypatch.setattr(
+            service, "_ocs",
+            lambda *a, **k: nextcloud_service.OcsResponse(403, "denied", None),
+        )
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="survived"):
+            service.reset()
+
+    def test_a_room_already_gone_is_not_a_failure(self, monkeypatch):
+        """A scenario may delete its own room to assert on the deletion."""
+        service, _ = self._service(monkeypatch)
+        service.create_room(name="one")
+        monkeypatch.setattr(
+            service, "_ocs",
+            lambda *a, **k: nextcloud_service.OcsResponse(404, "not found", None),
+        )
+
+        service.reset()
+
+    def test_the_baseline_the_boot_creates_is_named_in_the_docstring(self):
+        """The scope is only usable if it is written where a reader will find it.
+
+        Enumerated rather than gestured at, because the failure it prevents is
+        somebody reading `rooms()` returning six entries as leakage and
+        "fixing" the reset to delete them.
+        """
+        body = nextcloud_service.NextcloudService.reset.__doc__ or ""
+
+        for baseline in ("entrypoint.sh", "#alerts", "/mnt/shared", "baseline"):
+            assert baseline in body, baseline
+
+
+class TestTheWebdavPathTranslation:
+    """`files()` reports paths relative to the account's own DAV root."""
+
+    @staticmethod
+    def _service():
+        return nextcloud_service.attach(
+            base_url="http://localhost:1",
+            admin_password="unit-admin",
+            bot_password="unit-bot",
+            test_password="unit-user",
+        )
+
+    def test_the_dav_prefix_and_the_collection_itself_are_dropped(
+        self, monkeypatch
+    ):
+        service = self._service()
+        body = (
+            "<d:multistatus xmlns:d='DAV:'>"
+            "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+            "</d:href></d:response>"
+            "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+            "Users/testuser/inbox/a%20note.txt</d:href></d:response>"
+            "</d:multistatus>"
+        ).encode()
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (body, 207))
+
+        assert service.files("Shared Files") == [
+            "Shared Files",
+            "Shared Files/Users/testuser/inbox/a note.txt",
+        ]
+
+    def test_a_non_multistatus_answer_names_the_status(self, monkeypatch):
+        """A 404 here means the path does not exist in that account's tree,
+        which on this shape is the ordinary way of getting the mount point
+        wrong — and an empty list would read as an empty directory."""
+        service = self._service()
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (b"nope", 404))
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="404"):
+            service.files("Users/testuser")
+
+
 class TestTheMarker:
     def test_the_full_tier_is_deselected_by_default(self):
         """Otherwise `uv run pytest` boots six containers."""
