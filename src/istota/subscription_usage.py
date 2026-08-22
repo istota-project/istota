@@ -76,9 +76,20 @@ _MAX_BODY_BYTES = 1 << 20
 # an error string a user or an operator sees.
 _ERROR_BODY_CHARS = 200
 
-# Settings defaults, kept in step with ``ClaudeCodeBrainConfig`` in config.py.
-# They are duplicated here rather than imported because this module must stay a
-# leaf and must behave correctly against a Config that predates the block.
+# Settings defaults. The same three numbers as the corresponding fields of
+# ``ClaudeCodeBrainConfig`` in config.py, deliberately copied rather than shared
+# through an import in either direction. This module must not import
+# ``istota.config`` — it is a stdlib-only leaf, reached from doctor. And
+# ``istota.config`` must not import this module, because it is loaded by every
+# CLI invocation and every host-side skill CLI the skill proxy spawns per call,
+# and three numbers are not worth pulling urllib and subprocess onto that path.
+# The copy also earns its keep on its own: ``_settings`` reads defensively, and
+# a Config predating ``[brain.claude_code]`` has to behave as the shipping
+# default rather than raise.
+#
+# ``TestOneSourceOfTruthForTheDefaults`` in tests/test_config_claude_code_brain.py
+# pins these against the dataclass, so the two sets cannot drift apart.
+DEFAULT_SUBSCRIPTION_USAGE = True
 DEFAULT_CACHE_TTL_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -980,7 +991,7 @@ def _settings(config: object) -> tuple[bool, float, float]:
     on every dashboard poll.
     """
     block = getattr(getattr(config, "brain", None), "claude_code", None)
-    enabled = getattr(block, "subscription_usage", True)
+    enabled = getattr(block, "subscription_usage", DEFAULT_SUBSCRIPTION_USAGE)
     ttl = _positive(
         getattr(block, "subscription_usage_cache_ttl_seconds", None), DEFAULT_CACHE_TTL_SECONDS
     )

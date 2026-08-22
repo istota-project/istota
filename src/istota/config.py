@@ -1086,6 +1086,45 @@ class TmuxBrainConfig:
 
 
 @dataclass
+class ClaudeCodeBrainConfig:
+    """Settings for the headless ``claude -p`` brain (``brain.kind =
+    "claude_code"``, the default).
+
+    Today this block is the **subscription usage poll only** — the brain's model
+    selection still comes from ``[brain]`` and ``[models]``, and its subprocess
+    behaviour is not configurable here. On a subscription deployment the
+    dashboard's cost column is deliberately blank (a plan-equivalent list price
+    is not spend), so the real budget is the rate-limit windows Anthropic
+    reports at ``GET /api/oauth/usage``. ``istota.subscription_usage`` fetches
+    them; the doctor check, the ``/admin`` card and ``!usage`` render them.
+
+    Every field is defaulted, so an absent ``[brain.claude_code]`` block is the
+    shipping behaviour. The poll is read-only: the credential is never written
+    and never refreshed. ``subscription_usage = false`` makes the doctor check
+    ``SKIP`` and hides the admin card.
+
+    ``_validate_claude_code_brain`` (config load) corrects a configuration that
+    would make the feature misbehave — see its docstring for the three rules.
+    """
+
+    # Poll api.anthropic.com for plan utilization at all.
+    subscription_usage: bool = True
+    # One deployment-wide fetch per this window; every surface reads the same
+    # disk cache, so the dashboard's 60s auto-refresh costs nothing.
+    subscription_usage_cache_ttl_seconds: int = 300
+    # Matches doctor.PROBE_TIMEOUT.
+    subscription_usage_timeout_seconds: float = 10.0
+    # Doctor WARNs and the tile turns amber at or above warn; the tile turns red
+    # at or above high. Never a FAIL at any utilization — a busy plan is a fact
+    # about the plan, not a defect in the host.
+    subscription_usage_warn_percent: float = 80.0
+    subscription_usage_high_percent: float = 95.0
+    # A stale-cache reading older than this WARNs rather than being reported as
+    # a current one.
+    subscription_usage_stale_after_seconds: int = 3600
+
+
+@dataclass
 class BrainConfig:
     """Selects which brain implementation handles model invocation.
 
@@ -1093,7 +1132,9 @@ class BrainConfig:
     ``"native"`` runs istota's own agent loop in-process; its settings live in
     the nested ``native`` block (``[brain.native]`` in TOML).
     ``"tmux_claude"`` drives the interactive ``claude`` TUI via tmux; its
-    settings live in ``[brain.tmux]``.
+    settings live in ``[brain.tmux]``. ``[brain.claude_code]`` holds the
+    subscription usage poll, which is read regardless of ``kind`` — a native
+    primary with a ``claude_code`` fallback burns the same plan.
 
     ``source_type_overrides`` maps a task ``source_type`` (``scheduled``,
     ``heartbeat``, ``talk``, …) to a brain kind, overriding ``kind`` for
@@ -1104,6 +1145,7 @@ class BrainConfig:
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
     tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
+    claude_code: ClaudeCodeBrainConfig = field(default_factory=ClaudeCodeBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found / tmux launch failure), the task runs
@@ -2527,10 +2569,50 @@ def load_config(config_path: Path | None = None) -> Config:
             error_markers=_str_list("error_markers"),
             usage_limit_markers=_str_list("usage_limit_markers"),
         )
+        cc_raw = br.get("claude_code", {})
+        if not isinstance(cc_raw, dict):
+            cc_raw = {}
+        _cc_defaults = ClaudeCodeBrainConfig()
+        claude_code_cfg = ClaudeCodeBrainConfig(
+            subscription_usage=bool(
+                cc_raw.get("subscription_usage", _cc_defaults.subscription_usage)
+            ),
+            subscription_usage_cache_ttl_seconds=int(
+                cc_raw.get(
+                    "subscription_usage_cache_ttl_seconds",
+                    _cc_defaults.subscription_usage_cache_ttl_seconds,
+                )
+            ),
+            subscription_usage_timeout_seconds=float(
+                cc_raw.get(
+                    "subscription_usage_timeout_seconds",
+                    _cc_defaults.subscription_usage_timeout_seconds,
+                )
+            ),
+            subscription_usage_warn_percent=float(
+                cc_raw.get(
+                    "subscription_usage_warn_percent",
+                    _cc_defaults.subscription_usage_warn_percent,
+                )
+            ),
+            subscription_usage_high_percent=float(
+                cc_raw.get(
+                    "subscription_usage_high_percent",
+                    _cc_defaults.subscription_usage_high_percent,
+                )
+            ),
+            subscription_usage_stale_after_seconds=int(
+                cc_raw.get(
+                    "subscription_usage_stale_after_seconds",
+                    _cc_defaults.subscription_usage_stale_after_seconds,
+                )
+            ),
+        )
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
             native=native,
             tmux=tmux_cfg,
+            claude_code=claude_code_cfg,
             source_type_overrides={
                 str(k): str(v) for k, v in overrides_raw.items()
             },
@@ -3098,6 +3180,7 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     _validate_brain_fallback(config)
+    _validate_claude_code_brain(config)
     _validate_advisor_model(config)
     _validate_forge_clis(config)
 
@@ -3256,6 +3339,76 @@ def _validate_brain_fallback(config: "Config") -> None:
             fb,
         )
         config.brain.fallback = ""
+
+
+def _validate_claude_code_brain(config: "Config") -> None:
+    """Correct a ``[brain.claude_code]`` block that would misreport the plan.
+
+    Three rules, each logging one WARNING and correcting in place. None of them
+    can refuse to load, and none of them does any I/O — this runs inside every
+    ``load_config``, and the subscription poll itself is deliberately reached
+    only from a diagnostic path.
+
+    1. Both percentages clamp to ``[0, 100]``. A threshold outside the range the
+       endpoint reports is either unreachable or always tripped.
+    2. ``warn > high`` (after clamping) is corrected to ``warn = high``. An
+       inverted pair makes the amber band unreachable, which is more likely a
+       typo than an intent.
+    3. ``cache_ttl_seconds`` and ``timeout_seconds`` floor at 1. A zero TTL
+       would fetch on every dashboard poll — the cache exists precisely so the
+       whole deployment pays for one fetch per window.
+
+    ``stale_after_seconds`` is deliberately not floored: zero there means "treat
+    any stale reading as too old", which is a coherent thing to ask for.
+    """
+    cc = config.brain.claude_code
+    _logger = logging.getLogger("istota.config")
+
+    def _clamp_percent(name: str, raw: float) -> float:
+        # A NaN (TOML spells it `nan`) compares False against everything, so
+        # max() keeps the 0.0 and min() keeps it — it lands at 0.0 and is
+        # reported as out of range, which is the only deterministic answer.
+        clamped = min(100.0, max(0.0, float(raw)))
+        if clamped != raw:
+            _logger.warning(
+                "[brain.claude_code] %s=%r is outside [0, 100]; using %r",
+                name, raw, clamped,
+            )
+        return clamped
+
+    cc.subscription_usage_warn_percent = _clamp_percent(
+        "subscription_usage_warn_percent", cc.subscription_usage_warn_percent
+    )
+    cc.subscription_usage_high_percent = _clamp_percent(
+        "subscription_usage_high_percent", cc.subscription_usage_high_percent
+    )
+
+    if cc.subscription_usage_warn_percent > cc.subscription_usage_high_percent:
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_warn_percent=%r is above "
+            "subscription_usage_high_percent=%r, which leaves no amber band; "
+            "lowering warn to %r",
+            cc.subscription_usage_warn_percent,
+            cc.subscription_usage_high_percent,
+            cc.subscription_usage_high_percent,
+        )
+        cc.subscription_usage_warn_percent = cc.subscription_usage_high_percent
+
+    if cc.subscription_usage_cache_ttl_seconds < 1:
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_cache_ttl_seconds=%r would "
+            "fetch on every read; using 1",
+            cc.subscription_usage_cache_ttl_seconds,
+        )
+        cc.subscription_usage_cache_ttl_seconds = 1
+
+    if cc.subscription_usage_timeout_seconds < 1:
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_timeout_seconds=%r is below "
+            "one second; using 1",
+            cc.subscription_usage_timeout_seconds,
+        )
+        cc.subscription_usage_timeout_seconds = 1.0
 
 
 def _apply_user_profiles(config: "Config") -> None:

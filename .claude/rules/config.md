@@ -247,6 +247,7 @@ and recalled by relevance (`executor._recall_playbooks`). Off by default.
 kind: str = "claude_code"                       # "claude_code" | "native" | "tmux_claude"
 native: NativeBrainConfig                       # [brain.native] block (native harness)
 tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
+claude_code: ClaudeCodeBrainConfig              # [brain.claude_code] block (subscription usage poll)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
 fallback: str = ""                              # brain kind to fall back to when primary unavailable
 fallback_on_transient: bool = True              # also reroute a persistent transient_api_error (ISSUE-212)
@@ -269,6 +270,35 @@ dialog / error / usage-limit marker lists (`ready_markers`, `trust_markers`,
 `usage_limit_markers` — pane substrings → `stop_reason=usage_limit` → fallback,
 checked before `error_markers`). All defaulted to the prototype's hardcoded
 values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
+
+`ClaudeCodeBrainConfig` (`[brain.claude_code]`) — today this block is the
+**subscription usage poll only**; the headless brain's model selection still
+comes from `[brain]` and `[models]`, and its subprocess behaviour is not
+configurable. It is read whatever `kind` is set to, because a `native` primary
+with a `claude_code` fallback (or a `source_type_overrides` entry) burns the
+same plan. Every field is defaulted, so an absent block is the shipping
+behaviour. Read by `istota.subscription_usage.get_snapshot`, which the doctor
+check `runtime.subscription_usage`, the `/admin` stats payload and `!usage` all
+share — one fetch per TTL for the whole deployment, from a disk cache at
+`{db_path.parent}/subscription_usage.json`. The credential is read, never
+written and never refreshed.
+- `subscription_usage: bool = True` — poll `GET https://api.anthropic.com/api/oauth/usage` for plan utilization at all. `false` = the doctor check `SKIP`s and the admin card is hidden.
+- `subscription_usage_cache_ttl_seconds: int = 300` — one deployment-wide fetch per this window. Floored at 1 by the loader; a zero TTL would fetch on every dashboard poll.
+- `subscription_usage_timeout_seconds: float = 10.0` — matches `doctor.PROBE_TIMEOUT`. Floored at 1.
+- `subscription_usage_warn_percent: float = 80.0` / `subscription_usage_high_percent: float = 95.0` — our own thresholds, applied identically by doctor and the admin tile (the server's own `severity` is carried on the wire but does not drive either). Doctor WARNs and the tile turns amber at or above `warn`, red at or above `high`. **Never a `FAIL` at any utilization** — a busy plan is a fact about the plan, not a defect in the host, and a `FAIL` would exit `istota doctor` non-zero and alert every admin.
+- `subscription_usage_stale_after_seconds: int = 3600` — a stale-cache reading older than this WARNs rather than being reported as current.
+
+`_validate_claude_code_brain` (config load, beside `_validate_brain_fallback`)
+corrects rather than refuses, one WARNING per correction: both percentages clamp
+to `[0, 100]`; `warn > high` after clamping is lowered to `high` (an inverted
+pair leaves no amber band and is more likely a typo than an intent); the TTL and
+the timeout floor at 1. `stale_after_seconds` is deliberately not floored — zero
+there coherently means "treat any stale reading as too old". No I/O: the poll is
+reached only from a diagnostic path, never from `load_config`.
+`subscription_usage.py` is a stdlib-only leaf and carries its own copy of the
+three defaults it reads, pinned against this dataclass by
+`tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`.
+
 Selects which `Brain` implementation handles model invocation. `source_type_overrides`
 maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
 (gradual rollout: cron/heartbeat on native, interactive on claude_code). The
