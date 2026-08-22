@@ -67,7 +67,7 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import db
+from . import confirmations, db
 from .brain import make_brain
 from .build_info import build_description
 from .consumers import (
@@ -96,6 +96,8 @@ from .executor import (
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .modules import MODULE_NAMES
+from .notification_resolvers import confirmation as confirmation_source
+from .notification_store import RaiseResult, deliver_pending
 from .notifications import effective_log_destinations, send_notification
 from .process_group import kill_process_group
 from .transport import (
@@ -209,6 +211,10 @@ CONFIRMATION_PATTERN = re.compile(
     r')',
     re.IGNORECASE
 )
+
+# How much of a parked task's own question the notification body carries. The
+# title already holds its first line; this is the rest, flattened.
+_CONFIRMATION_BODY_CHARS = 400
 
 _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")
 
@@ -2451,6 +2457,11 @@ def process_one_task(
     # whose delivery opens a second connection to the database this function is
     # holding a write transaction on.
     failure_alert = None
+    # Inbox rows raised inside the transaction below and delivered after it, for
+    # the same reason `failure_alert` is buffered: `deliver_pending` sends
+    # through `send_notification`, which routes by purpose and can land on the
+    # web surface, which opens a second connection to this database.
+    notification_results: list[RaiseResult | None] = []
 
     # Guard: detect API errors masquerading as successful results
     # (Claude Code may exit 0 with API error text as output).
@@ -2555,6 +2566,27 @@ def process_one_task(
                     _talk_is_mirror and (task.source_type or "") in ROOM_SURFACES
                 ):
                     post_talk_message = result
+
+                # The durable record of the question, written on this connection
+                # inside the transaction that just parked the task — always,
+                # whatever else carries it, because the row is what makes the
+                # question recoverable when the push is missed.
+                #
+                # It is *delivered* only when nothing else is carrying the
+                # question. `post_talk_message` above is that push for a Talk
+                # task, and raising there too would put the same question in the
+                # room twice. A web-origin confirmation has only its own SSE
+                # stream, which reaches a client that happens to be watching and
+                # nobody else, so there this is the first push the user gets on
+                # any surface they are not currently looking at.
+                held_notification = confirmation_source.write(
+                    conn, task.user_id, task_id=task_id,
+                    title=confirmations.describe_prompt(result),
+                    body=confirmations.flatten(result)[:_CONFIRMATION_BODY_CHARS],
+                    room_token=transcript_token,
+                )
+                if post_talk_message is None:
+                    notification_results.append(held_notification)
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
@@ -2907,6 +2939,12 @@ def process_one_task(
                             "Scheduled job %d auto-disabled after %d failures",
                             task.scheduled_job_id, fail_count,
                         )
+
+    # The transaction above has closed, so the inbox rows raised inside it can
+    # be sent. First thing after the `with`, deliberately: everything below it
+    # opens further connections of its own, and a buffer that outlives them is a
+    # buffer somebody eventually forgets to flush.
+    deliver_pending(config, notification_results)
 
     # Emit terminal task events + notify subscribers (brain path only). On a
     # retry-eligible failure the task isn't done — emit nothing terminal; the
@@ -5254,6 +5292,15 @@ def run_cleanup_checks(config: Config) -> None:
                 _expired_confirmation_notice(conn, task_info),
                 _confirmation_notice_token(task_info),
             ))
+            # The question is gone, so the inbox item is answered — by the
+            # clock, which is what `resolved_by='system'` records. On this
+            # connection, inside the transaction the expiry itself ran in.
+            # Stage 6 adds the `task_alert` row that replaces it; closing this
+            # one is what stops the panel offering a Confirm button for a task
+            # that has already been cancelled.
+            confirmation_source.resolve_for_task(
+                conn, task_info["user_id"], task_info["id"], by="system",
+            )
 
         # 1b. Recover stuck locked/running tasks (mirrors claim_task recovery
         # but runs even when no tasks are being claimed)
