@@ -174,10 +174,12 @@ def _seed_cli_config_dir(
     ``forge`` and ``forge_url`` together decide whether anything is written at
     all — see :func:`_plain_http_host_entry`. **Only glab gets an entry**, and
     the rule lives here rather than at the call site because it is not merely
-    useless for gh, it is harmful: gh cannot address a non-443 forge at all
-    (``forge_cli._hostname`` strips the port by construction), and on finding a
-    ``hosts:`` block it runs its multi-account migration and writes a
-    ``hosts.yml`` beside the config. This function truncates ``config.yml`` and
+    useless for gh, it is harmful: on finding a ``hosts:`` block gh runs its
+    multi-account migration and writes a ``hosts.yml`` beside the config. (It
+    would also buy nothing. The entry exists to reach a forge over plain HTTP,
+    and gh refuses a scheme in ``GH_HOST`` outright. The *port* half is a
+    different question and is handled — ``forge_cli._gh_host`` keeps a
+    non-default one, ISSUE-279.) This function truncates ``config.yml`` and
     nothing else, and ``user_temp_dir`` persists across tasks — so that file
     would survive every later run, in a directory whose whole design is that
     nothing does.

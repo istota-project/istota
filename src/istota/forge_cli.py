@@ -686,7 +686,22 @@ def fetch_forge_credentials(
         url = reply.get("url")
         return str(value), str(url) if isinstance(url, str) else ""
 
-    raise NoProxyError("no credential proxy available")
+    # Name the deployment shape, not the socket path. The path is a fact about
+    # this process's environment and tells the reader nothing about why it is
+    # missing; the shape is the actual answer, and the two shapes differ on
+    # purpose (ISSUE-282). Under Ansible a per-user `istota-devbox-proxy@`
+    # instance provides the socket; the docker-compose devbox has no proxy and
+    # is not meant to, so forge commands there are unavailable rather than
+    # broken.
+    raise NoProxyError(
+        "no credential proxy: neither ISTOTA_SKILL_PROXY_SOCK (sandbox) nor "
+        "ISTOTA_CRED_SOCK (devbox) is set in this environment. The Ansible "
+        "deployment runs a per-user credential proxy for the devbox; the "
+        "docker-compose deployment deliberately does not, so forge commands "
+        "are not available inside the devbox on that shape. Report this "
+        "rather than retrying — no retry finds a socket that is not "
+        "configured."
+    )
 
 
 
@@ -757,6 +772,9 @@ _SCRUB = (
 )
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def _hostname(url: str) -> str:
     """Bare hostname from a configured URL, or "" if there isn't one.
 
@@ -766,7 +784,10 @@ def _hostname(url: str) -> str:
     GH_TOKEN / GH_ENTERPRISE_TOKEN branch keys off it, and picking the wrong
     one leaves every call unauthenticated, which reads like a scope problem.
     """
-    if not url:
+    # isinstance, not just falsiness: `url` comes from a JSON policy file, so a
+    # number or a list there would make `"://" in url` raise TypeError —
+    # uncaught, in a process holding a credential, one call before `execve`.
+    if not isinstance(url, str) or not url:
         return ""
     candidate = url if "://" in url else f"https://{url}"
     try:
@@ -774,6 +795,73 @@ def _hostname(url: str) -> str:
     except ValueError:
         return ""
     return host.rstrip(".")
+
+
+def _gh_host(url: str) -> str:
+    """The whole of what gh is told about the forge: host, plus a non-default port.
+
+    Built on :func:`_hostname` rather than parsing independently, so the host
+    it names is the same host by construction. That matters because this one
+    string answers *both* of gh's questions — where to connect, and which token
+    variable to read — and a version that could disagree with itself would send
+    a credential somewhere the credential was not chosen for.
+
+    Everything below is measured against gh 2.98.0, because the shapes gh
+    accepts here are narrower than the variable's name suggests:
+
+    - **A port is honoured.** ``GH_HOST=ghe.example.com:8443`` makes gh request
+      ``https://ghe.example.com:8443/api/v3/``. This is what ISSUE-279 was: the
+      wrapper passed ``_hostname``'s answer, which strips the port, so a forge
+      configured on a non-443 port was silently addressed on 443.
+    - **The port is part of gh's host identity, token included.** ``gh auth
+      token`` with ``GH_HOST=github.com:8443`` reads GH_ENTERPRISE_TOKEN and
+      ignores GH_TOKEN — the same classification that picks the API endpoint
+      picks the variable. So the caller must decide the token from *this*
+      answer, never from the bare hostname; doing otherwise sets the variable
+      gh will not read and leaves every call unauthenticated.
+    - **A default port must be dropped.** ``GH_HOST=github.com:443`` takes gh
+      *off* api.github.com and onto ``https://github.com:443/api/v3``, which
+      404s, and onto GH_ENTERPRISE_TOKEN with it. Only a port differing from
+      the scheme's default is passed on, so every URL that does not carry one
+      behaves exactly as it did before.
+    - **A scheme is refused outright** ("error connecting to http"), so plain
+      HTTP remains unreachable for gh however this value is spelled. That is a
+      separate limitation from the port and the one
+      `doctor.check_forge_transport` reports; it is not fixable here.
+
+    Userinfo is dropped with the rest of the authority: this is a destination,
+    not a credential, and the token travels in its own variable. Returns "" when
+    there is no host, so the caller's github.com fallback still applies.
+    """
+    host = _hostname(url)
+    if not host:
+        return ""
+    # `hostname` unwraps an IPv6 literal; unbracketed it is not a parseable
+    # authority, and gh dials `https://[::1]:8443/api/v3/` from the bracketed
+    # form.
+    if ":" in host:
+        host = f"[{host}]"
+    candidate = url if "://" in url else f"https://{url}"
+    try:
+        parts = urlsplit(candidate)
+        port = parts.port
+    except ValueError:
+        # A port that will not parse (`:notaport`, `:99999`, a trailing space)
+        # degrades to the bare host rather than raising: this runs on the way
+        # to an exec with a credential in scope, where an exception is not
+        # benign. It is not silent in the deployment that matters —
+        # `executor._build_network_allowlist` reads `parsed.port` on the same
+        # configured URL and raises before a sandboxed task starts, so the
+        # operator gets a failure at setup rather than a misdirected call.
+        return host
+    # Port 0 parses but addresses nothing, so `if port` rather than
+    # `is not None`. The default is 443 for *any* scheme, not just https: gh
+    # speaks https whatever the URL said, so `ssh://host:22` must not become
+    # `host:22`, and an unrecognised scheme must not turn an explicit `:443`
+    # into a ported host — which would move it onto GH_ENTERPRISE_TOKEN.
+    if port and port != _DEFAULT_PORTS.get(parts.scheme, 443):
+        host = f"{host}:{port}"
+    return host
 
 
 def _is_github_com(host: str) -> bool:
@@ -784,11 +872,20 @@ def _is_github_com(host: str) -> bool:
     with data residency — an enterprise product that nonetheless takes the
     *non*-enterprise variable, which is exactly the sort of thing worth reading
     rather than inferring from the name.
+
+    A *subdomain* of ghe.com, and not the apex. Measured with `gh auth token`
+    on 2.98.0: `tenant.ghe.com` reads GH_TOKEN, while a bare `ghe.com` reads
+    GH_ENTERPRISE_TOKEN. The apex used to be listed here anyway, which is the
+    documented sentence read one word too generously and would have left a
+    forge configured at `https://ghe.com` unauthenticated.
+
+    The caller passes `_gh_host`'s answer, so a host carrying a port arrives
+    here as `github.com:8443` and is correctly *not* github.com — which matches
+    gh, whose own classification does not strip the port either.
     """
     return (
         host == "github.com"
         or host.endswith(".github.com")
-        or host == "ghe.com"
         or host.endswith(".ghe.com")
     )
 
@@ -853,7 +950,12 @@ def build_invocation(
         env["GH_NO_EXTENSION_UPDATE_NOTIFIER"] = "1"
         env["GH_TELEMETRY"] = "0"
         env["GH_PROMPT_DISABLED"] = "1"
-        host = _hostname(forge_url) or "github.com"
+        # One derivation feeding both answers, because gh derives both from
+        # this single string: a non-443 port reaches the forge the operator
+        # configured (ISSUE-279) *and* moves the host onto the enterprise
+        # variable. Deciding the token from the bare hostname instead would set
+        # the one gh does not read. See `_gh_host`.
+        host = _gh_host(forge_url) or "github.com"
         env["GH_HOST"] = host
         if token:
             # gh resolves auth per host: GH_TOKEN is github.com's, and an
