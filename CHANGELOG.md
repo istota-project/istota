@@ -72,6 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Checkouts the bot makes for coding work are now cleaned up once their work has been merged. Nothing ever removed one, so a server accumulated gigabyte-sized copies of every repository it had touched with nobody responsible for them. A checkout goes only when losing it cannot lose anything: it is clean — counting scratch files and ignored ones like a `.env` — nothing has touched it for a day, and every commit on it is already upstream, including work merged by squash or rebase, which is the usual case. Anything held back is counted in the log, so a pile that is not going away is visible rather than silent. The sweep runs on its own schedule every six hours rather than at the start of a task, so it never races the work it is cleaning up after.
+
 - The Linux test tier builds again on a machine where BuildKit is switched off. It passed a flag only the newer builder accepts, so the build was refused before it started — on exactly the setup that needs the older builder, which is the documented way past a broken build service. The runner now asks the Docker command line which builder it is about to use and only passes the flag when it applies.
 
 - The four deployment test tiers now say plainly that they cannot run inside the assistant's sandbox, instead of failing several minutes in with an unrelated-looking error. All four need to start containers, which a task is not allowed to do and should not be. The two shell runners refuse up front and say what to do instead — mention it in the merge request and ask for the run before merge — and the developer documentation now says the same thing where it tells the assistant to run them.
