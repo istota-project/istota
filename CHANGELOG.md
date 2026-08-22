@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A self-hosted GitHub reachable on a port other than the usual one is now actually reached on it. The port was dropped from the address before every `gh` call, so the request went to the default port instead — either to whatever answered there, or, inside a task, to a refusal from the network allowlist, which had the port right all along. Nothing warned, and the code alongside claimed gh could not do this at all, which turned out to be untrue when measured. GitLab was never affected.
+
+- A GitHub Enterprise Cloud account at the bare `ghe.com` address now authenticates. It was handed the wrong one of the two credentials `gh` reads — the rule covers subdomains of that address rather than the address itself, and the code had taken it one word too broadly, so every call went out unauthenticated and failed as though the token's permissions were wrong. Subdomains were always correct and are unchanged.
+
 - The Linux test tier builds again on a machine where BuildKit is switched off. It passed a flag only the newer builder accepts, so the build was refused before it started — on exactly the setup that needs the older builder, which is the documented way past a broken build service. The runner now asks the Docker command line which builder it is about to use and only passes the flag when it applies.
 
 - The four deployment test tiers now say plainly that they cannot run inside the assistant's sandbox, instead of failing several minutes in with an unrelated-looking error. All four need to start containers, which a task is not allowed to do and should not be. The two shell runners refuse up front and say what to do instead — mention it in the merge request and ask for the run before merge — and the developer documentation now says the same thing where it tells the assistant to run them.
