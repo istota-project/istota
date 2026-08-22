@@ -618,54 +618,52 @@
          with its own failure mode under the same heading as an aggregate over
          `task_usage`, leaving one card half-stale and half-fresh with two error
          branches. Two cards each say one thing. -->
-    {#if stats.subscription}
+    <!-- The key is absent unless there is a card to draw: the backend omits it
+         when Claude Code is neither the brain nor the fallback, and when the
+         reading could not be obtained. So this one guard is the whole gate. It
+         used to render a "Plan limits unavailable" note instead of vanishing,
+         so an operator who expected the reading learned why — right while a
+         missing reading meant something was wrong, and wrong once we learned the
+         endpoint will not serve the long-lived setup-token credential both
+         server shapes deploy. That note was permanent on those hosts and named
+         nothing anyone could do. `runtime.subscription_usage` carries the reason
+         now, as a SKIP. -->
+    {#if stats.subscription && (stats.subscription.windows ?? []).length > 0}
       {@const sub = stats.subscription}
       <section class="card">
         <header class="section-header">
           <h2>Claude Code subscription</h2>
         </header>
-        {#if sub.available && (sub.windows ?? []).length > 0}
-          <!-- Extra usage is a tile in this grid rather than a footer line
+        <!-- Extra usage is a tile in this grid rather than a footer line
                under it, so the card reads as one row of meters the way the
                system banner above does. It is last because it is the one
                figure here that is money rather than a share of a plan
                window. -->
-          <div class="kpi-grid card-grid">
-            {#each sub.windows ?? [] as w (w.key)}
-              <StatTile
-                label={w.label}
-                sub={formatResetIn(w.resets_in_seconds)}
-                valueColor={utilizationColor(w.percent, sub.warn_percent, sub.high_percent)}
-              >
-                {formatUtilization(w.percent)}
-              </StatTile>
-            {/each}
-            {#if sub.spend?.enabled}
-              <StatTile
-                label="Extra usage"
-                sub={formatSpendCap(sub.spend)}
-                valueColor={utilizationColor(sub.spend.percent, sub.warn_percent, sub.high_percent)}
-              >
-                {formatSpendUsed(sub.spend)}
-              </StatTile>
-            {/if}
-          </div>
-          <p class="usage-note">
-            Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
-              — reading is stale{#if sub.error}: {sub.error}{/if}
-            {/if}
-          </p>
-        {:else}
-          <!-- Never hidden. An operator who expects this reading and does not
-               get it has to learn why, which is why the payload's
-               `available: false` always carries a reason. The fallback sentence
-               is for the one shape that can arrive without one: the stats
-               endpoint's own best-effort catch emits `{error: str(exc)}`, and
-               `str(exc)` is empty for an exception raised with no arguments. -->
-          <p class="usage-note">
-            Plan limits unavailable: {sub.error || 'the reading failed for an unreported reason'}
-          </p>
-        {/if}
+        <div class="kpi-grid card-grid">
+          {#each sub.windows ?? [] as w (w.key)}
+            <StatTile
+              label={w.label}
+              sub={formatResetIn(w.resets_in_seconds)}
+              valueColor={utilizationColor(w.percent, sub.warn_percent, sub.high_percent)}
+            >
+              {formatUtilization(w.percent)}
+            </StatTile>
+          {/each}
+          {#if sub.spend?.enabled}
+            <StatTile
+              label="Extra usage"
+              sub={formatSpendCap(sub.spend)}
+              valueColor={utilizationColor(sub.spend.percent, sub.warn_percent, sub.high_percent)}
+            >
+              {formatSpendUsed(sub.spend)}
+            </StatTile>
+          {/if}
+        </div>
+        <p class="usage-note">
+          Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
+            — reading is stale{#if sub.error}: {sub.error}{/if}
+          {/if}
+        </p>
       </section>
     {/if}
 

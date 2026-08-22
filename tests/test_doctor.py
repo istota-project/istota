@@ -879,7 +879,7 @@ class TestSubscriptionUsage:
         assert r.status != SKIP, "a SKIP here would pass this test on a broken check"
 
     @pytest.mark.parametrize("source", ["env", "file", "keychain"])
-    def test_a_rejected_credential_warns_naming_which_one(
+    def test_a_rejected_credential_skips_naming_which_one(
         self, make_config, tmp_path, monkeypatch, source
     ):
         """Three credential sources resolve, and only the source name is fit to print.
@@ -887,14 +887,19 @@ class TestSubscriptionUsage:
         Which one the endpoint refused is the whole diagnostic: a setup token in
         the environment and an interactive login in the keychain fail for
         completely different reasons and have different repairs.
+
+        SKIP rather than WARN, and no remedy. The endpoint does not serve the
+        long-lived setup-token credential both server shapes deploy, so on those
+        hosts this row was a permanent warning naming no action anyone could
+        take. The reason is still carried; only the severity changed.
         """
         transport = _UsageTransport(status=403, body=b'{"error":"forbidden"}')
         _drive_usage(monkeypatch, transport=transport, **self._sources(tmp_path, source))
         r = self._result(_usage_config(make_config))
-        assert r.status == WARN
+        assert r.status == SKIP
         assert "403" in r.detail
         assert source in r.detail
-        assert r.remedy
+        assert not r.remedy, "a SKIP names no repair"
         assert transport.calls, "a resolvable credential should have been tried"
 
     @pytest.mark.parametrize("source", ["env", "file", "keychain"])
@@ -911,7 +916,12 @@ class TestSubscriptionUsage:
         transport = _UsageTransport(status=status, body=_usage_body(40))
         _drive_usage(monkeypatch, transport=transport, **self._sources(tmp_path, source))
         r = self._result(_usage_config(make_config))
-        assert r.status != SKIP
+        # Not `status != SKIP` any more: a refused credential is a legitimate
+        # SKIP now. The guard that check-level tests must not pass on a check
+        # that never ran still holds, so it is spelled against evidence the
+        # check reached the endpoint and reported what came back.
+        assert transport.calls, "the check never issued a request"
+        assert ("403" in r.detail) if status == 403 else ("40" in r.detail)
         assert _TOKEN_SENTINEL not in r.detail + r.remedy
         assert "sk-ant" not in r.detail + r.remedy
         sent = transport.calls[0][1]["Authorization"]
@@ -927,7 +937,7 @@ class TestSubscriptionUsage:
             return {"env": {}, "home": _credential_file(tmp_path, _TOKEN_SENTINEL)}
         return {"env": {"USER": "someone"}, "home": tmp_path / "no", "darwin_blob": blob}
 
-    def test_an_unreachable_endpoint_with_no_cache_warns(self, make_config, monkeypatch):
+    def test_an_unreachable_endpoint_with_no_cache_skips(self, make_config, monkeypatch):
         transport = _UsageTransport(status=500, body=b"")
         _drive_usage(
             monkeypatch,
@@ -935,27 +945,30 @@ class TestSubscriptionUsage:
             env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
         )
         r = self._result(_usage_config(make_config))
-        assert r.status == WARN
+        assert r.status == SKIP
         assert "500" in r.detail
-        assert "api.anthropic.com" in r.remedy
+        assert not r.remedy
 
-    def test_an_endpoint_with_no_recognizable_windows_warns(self, make_config, monkeypatch):
-        """A shipped shape change reads as a warning, not as 0% utilization."""
+    def test_an_endpoint_with_no_recognizable_windows_skips(self, make_config, monkeypatch):
+        """A shipped shape change reads as "nothing to check", not as 0%.
+
+        It reported WARN with a "the parser needs updating" remedy until the
+        whole no-data family became SKIP. The distinction that remedy drew — the
+        request succeeded, so do not go hunting for an egress fault — is worth
+        keeping, and it survives in the detail, which still says the endpoint
+        named no window this reader understands.
+        """
         _drive_usage(
             monkeypatch,
             transport=_UsageTransport(body=b'{"limits": [], "quince": null}'),
             env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
         )
         r = self._result(_usage_config(make_config))
-        assert r.status == WARN
+        assert r.status == SKIP
         assert "no recognizable rate-limit windows" in r.detail
-        # The request succeeded and the body parsed, so egress and the credential
-        # are both fine. Sending the operator to look at either would be a
-        # wild-goose chase.
-        assert "shape has changed" in r.remedy
-        assert "api.anthropic.com" not in r.remedy
+        assert not r.remedy
 
-    def test_a_windowless_success_warns_rather_than_raising(
+    def test_a_windowless_success_skips_rather_than_raising(
         self, make_config, monkeypatch
     ):
         """The guard behind the never-FAIL promise, driven directly.
@@ -974,8 +987,8 @@ class TestSubscriptionUsage:
             lambda config, **kwargs: su.UsageSnapshot(fetched_at=time.time()),
         )
         r = self._result(_usage_config(make_config))
-        assert r.status == WARN
-        assert r.remedy
+        assert r.status == SKIP
+        assert r.detail, "a SKIP still has to say why"
 
     def _seed_cache(self, config, age_seconds, percent=40):
         """Write a good cache entry `age_seconds` old, as a fetch would have."""
@@ -1039,10 +1052,10 @@ class TestSubscriptionUsage:
             env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
         )
         r = self._result(config)
-        assert r.status == WARN
+        assert r.status == SKIP
         assert "5-hour at 40%" not in r.detail, "past the window it is not a reading"
 
-    def test_a_reading_older_than_stale_after_warns_with_its_age(
+    def test_a_reading_older_than_stale_after_skips_with_its_age(
         self, make_config, monkeypatch
     ):
         config = _usage_config(make_config, subscription_usage_stale_after_seconds=3600)
@@ -1053,10 +1066,10 @@ class TestSubscriptionUsage:
             env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
         )
         r = self._result(config)
-        assert r.status == WARN
+        assert r.status == SKIP
         assert "last successful reading is 2h 01m old" in r.detail
         assert "500" in r.detail
-        assert r.remedy
+        assert not r.remedy
 
     def test_a_fresh_cache_is_served_without_a_request(self, make_config, monkeypatch):
         """The TTL is deployment-wide: doctor, the dashboard and `!usage` share it."""

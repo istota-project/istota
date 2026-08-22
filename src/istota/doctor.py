@@ -512,20 +512,17 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-# The three remedies this check can offer. Fixed literals: `detail` and `remedy`
-# are built from these plus a percentage, a duration and a resolver branch name,
-# never from the credential, the raw response body or an exception string.
-_USAGE_REMEDY = "Check network egress to api.anthropic.com, or re-run `claude setup-token`."
+# The one remedy this check can offer. A fixed literal: `detail` and `remedy` are
+# built from this plus a percentage, a duration and a resolver branch name, never
+# from the credential, the raw response body or an exception string.
+#
+# There used to be three. The other two answered a failure to obtain a reading —
+# check your egress, re-run `claude setup-token`, the response shape changed —
+# and both went with the WARNs they accompanied. A remedy belongs on a row an
+# operator can act on, and "the endpoint will not serve this credential class"
+# is not one: those rows are SKIPs now, carrying the reason and no instruction.
 _USAGE_BUSY_REMEDY = (
     "Tasks will fail over to the fallback brain when this window is exhausted."
-)
-# Kept separate from _USAGE_REMEDY because this one follows a *successful*
-# request: the endpoint answered, it parsed, and it named no window this reader
-# understands. Neither egress nor re-authentication is the repair, and offering
-# them would send an operator hunting for a fault on their own host.
-_USAGE_SHAPE_REMEDY = (
-    "The endpoint answered normally but named no rate-limit window this version "
-    "understands; its response shape has changed and the parser needs updating."
 )
 
 
@@ -585,12 +582,16 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(name, SKIP, snapshot.error)
 
     if snapshot.error and not snapshot.has_data:
-        remedy = (
-            _USAGE_SHAPE_REMEDY
-            if snapshot.error == subscription_usage.NO_WINDOWS_ERROR
-            else _USAGE_REMEDY
-        )
-        return CheckResult(name, WARN, _usage_error(snapshot), remedy=remedy)
+        # SKIP, not WARN. This used to warn, on the reading that a reading the
+        # operator expected and did not get is a problem worth surfacing. On the
+        # deployment shapes that actually run, it is not: the endpoint does not
+        # serve the long-lived setup-token credential Ansible and Docker deploy,
+        # answering it with a persistent 429, so the WARN was permanent, matched
+        # no operator action, and coloured the Health pane for a host with
+        # nothing wrong with it. A reading that cannot be obtained is a check
+        # that does not apply here, which is what SKIP means. The reason is
+        # still carried, so anyone asking why the card is absent can read it.
+        return CheckResult(name, SKIP, _usage_error(snapshot))
 
     if not snapshot.windows:
         # Unreachable: every error-free return from `get_snapshot` carries
@@ -599,9 +600,7 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
         # `run_checks` turns a raising check into exactly the FAIL this check
         # exists never to produce. Two lines make the promise structural rather
         # than inherited from another module's invariant.
-        return CheckResult(
-            name, WARN, subscription_usage.NO_WINDOWS_ERROR, remedy=_USAGE_SHAPE_REMEDY
-        )
+        return CheckResult(name, SKIP, subscription_usage.NO_WINDOWS_ERROR)
 
     # A snapshot with both windows and an error is the stale-cache branch: real
     # numbers from an older fetch, plus the failure that made them old.
@@ -615,7 +614,11 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
             settings, "subscription_usage_stale_after_seconds", 3600.0
         )
         if age > stale_after:
-            return CheckResult(name, WARN, stale_note, remedy=_USAGE_REMEDY)
+            # Same reasoning as the no-data branch above: a reading this old
+            # means the fetches are failing, which on a server shape is the
+            # steady state rather than a fault. The numbers are too old to
+            # report as current, so there is nothing to check.
+            return CheckResult(name, SKIP, stale_note)
 
     # Worst first, and all of them: "5-hour at 12%, weekly at 94%" and "5-hour at
     # 94%, weekly at 12%" call for different operator responses, and this one
