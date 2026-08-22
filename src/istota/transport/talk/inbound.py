@@ -202,6 +202,71 @@ async def _poll_single_conversation(
         return (conversation_token, [])
 
 
+def _reconcile_webmirror_stamp(
+    conn, config: Config, conversation_token: str, reference_id: str,
+    msg: dict,
+) -> None:
+    """Repair a post-as-user mirror whose send-time stamp never landed, from
+    the Talk echo of the message itself (ISSUE-287). Best-effort, never raises.
+
+    Nothing here may raise, and that is the whole shape of this function. The
+    caller's `conn` is the poll batch's single transaction — it spans every
+    conversation in the batch, the poll-cursor advance and every
+    `ingest_message` — and `db.get_db` commits only on the non-exception path.
+    An exception escaping here therefore discards the whole batch, and since
+    the cursor never advances the same message is re-polled and re-raises on
+    every tick: one message would stop all Talk inbound, permanently. That
+    matters because every input is attacker-chosen. `referenceId` is free text
+    on Talk's chat API, and this block deliberately runs *ahead* of the bot,
+    actor-type and known-user filters (a genuine echo is authored by a user and
+    must be skipped before any of them), so the sender need not even be a
+    configured user.
+
+    Hence a strict parse rather than a permissive one: `str.isdigit()` is true
+    for characters `int()` refuses outright (`'²'`), and true for non-ASCII
+    decimal digits that `int()` silently folds onto an ASCII value (`'١٢٣'` →
+    123) — a row id the producer could never have written. The producer emits
+    ASCII decimal digits, so that is the whole accepted alphabet, and the
+    `int()` still runs under `except` because a long-enough run of them
+    overflows SQLite's INTEGER on binding rather than on conversion.
+    """
+    try:
+        mirrored = reference_id[len(WEBMIRROR_REF_PREFIX):]
+        talk_id = msg.get("id")
+        actor_id = msg.get("actorId") or ""
+        if not talk_id or not mirrored.isascii() or not mirrored.isdecimal():
+            return
+        # A deleted mirror keeps its referenceId, so reconciling from it would
+        # stamp an id that no longer resolves — and the stamp suppresses the
+        # repost, leaving the question absent from Talk entirely. Cheap to
+        # refuse, and correct whichever way Talk reports a deletion.
+        if msg.get("messageType") == "comment_deleted" or msg.get("deleted"):
+            return
+        # The echo's author is the evidence, so the actor has to be a real,
+        # known user before it is worth comparing (`stamp_webmirror_echo`
+        # makes the comparison itself). A guest or a foreign actor carrying a
+        # forged reference stops here.
+        if msg.get("actorType") != "users" or actor_id not in config.users:
+            return
+        canonical_token = (
+            db.resolve_room_token(conn, "talk", conversation_token)
+            or conversation_token
+        )
+        if db.stamp_webmirror_echo(
+            conn, canonical_token, int(mirrored), str(talk_id), actor_id,
+        ):
+            logger.info(
+                "Reconciled unstamped web-mirror turn %s in room %s from its "
+                "Talk echo (talk id %s)",
+                mirrored, canonical_token, talk_id,
+            )
+    except Exception as e:  # noqa: BLE001 — must never abort the poll batch
+        logger.warning(
+            "web-mirror stamp reconciliation failed in %s (ref=%s): %s: %s",
+            conversation_token, reference_id, type(e).__name__, e,
+        )
+
+
 async def poll_talk_conversations(config: Config) -> list[int]:
     """
     Poll all Talk conversations concurrently for new messages and create tasks.
@@ -461,10 +526,21 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 # filter below can't catch it); the poll cursor has already
                 # advanced and the talk_messages cache upsert above kept it —
                 # the turn is legitimately part of the conversation context.
+                #
+                # The echo is also Nextcloud's own confirmation that the
+                # message exists, so it is where a stamp that never arrived at
+                # all gets repaired: `_post_as_user` gives up at 5 s on a post
+                # the server went on to store, and the unstamped turn then drew
+                # the scheduler's legacy attributed repost on top of it
+                # (ISSUE-287). Handling a stamp that lands *late* was never
+                # enough — one that never lands needs reconciling from here.
                 reference_id = msg.get("referenceId") or ""
                 if isinstance(reference_id, str) and reference_id.startswith(
                     WEBMIRROR_REF_PREFIX
                 ):
+                    _reconcile_webmirror_stamp(
+                        conn, config, conversation_token, reference_id, msg,
+                    )
                     logger.debug(
                         "Skipping web-mirror echo in %s (ref=%s)",
                         conversation_token, reference_id,
