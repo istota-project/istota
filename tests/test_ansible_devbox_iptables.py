@@ -24,12 +24,13 @@ a teardown that omits it silently deletes nothing.
 run iptables. It proves the scripts ask for the right rules, not that a
 container is unable to reach anything:
 
-  * whether the rules are ever *reached*. Both writers append to
-    ``DOCKER-USER``, and a stock dockerd before v28 ships that chain
-    containing ``-j RETURN`` — everything appended after it is never
-    evaluated. That is ISSUE-295, and it is why the append/insert flag is
-    deliberately **not** pinned below: this file must not go red when that is
-    fixed.
+  * whether the rules are ever *reached* at run time. Position in the chain
+    is now pinned (all three writers insert at the front — ISSUE-295), which
+    is the property that makes them reachable on a stock dockerd before v28,
+    where ``DOCKER-USER`` ships containing ``-j RETURN`` and a user-defined
+    chain stops at its first terminal rule. What this still cannot see is
+    what an *operator* put in that chain on a live host; ``doctor``'s
+    ``security.devbox_netfilter`` reads the running chain and answers that.
   * traffic terminating on the host. ``DOCKER-USER`` is reached from
     ``FORWARD``, so the bridge gateway address is outside these rules
     entirely (ISSUE-296), as is any published port, which ``docker-proxy``
@@ -103,8 +104,10 @@ def _render(template: Path, **overrides) -> str:
 
 _ENSURE_DROP_CALL = re.compile(r'^ensure_drop\s+"([^"]*)"\s+"([^"]*)"\s*$', re.M)
 
-# `-A` today, `-I <chain> 1` once ISSUE-295 lands. Both are "add a rule", and
-# this file asserts everything about the rule except which of the two it is.
+# Both `-A` and `-I` are "add a rule". Matching either keeps the *content*
+# assertions independent of the position one, so a regression to `-A` fails
+# `check_rules_are_inserted_at_the_front` and nothing else — one red test
+# naming one defect, rather than every rule assertion going red at once.
 _ADD_RULE = re.compile(r"iptables -(?:A|I)\b[^\n]*")
 
 
@@ -148,12 +151,23 @@ def check_subnet_is_a_real_cidr(script: str) -> None:
     ipaddress.ip_network(subnet, strict=True)
 
 
-def check_every_rule_is_a_guarded_drop(script: str) -> None:
-    """`ensure_drop` has to test with `-C` before adding, and both forms have to
-    name the right chain, scope to the subnet, and jump to DROP.
+def check_every_rule_is_a_converging_drop(script: str) -> None:
+    """`ensure_drop` has to delete every existing copy and then insert, and all
+    three forms have to name the right chain, scope to the subnet, and use DROP.
 
-    The guard is not tidiness: the boot unit re-runs on every boot, so an
-    unguarded add grows a duplicate rule each time.
+    This replaced a "test with `-C`, then add if absent" contract, and the
+    reason is ISSUE-295. `-C` matches on the rule spec and is blind to position,
+    so a presence guard answers "is this rule somewhere in the chain" — which is
+    true of exactly the hosts that need repairing, where the four rules sit
+    behind dockerd's `-j RETURN`. A guarded add therefore reports success and
+    moves nothing, and the fix would never reach the hosts it was written for.
+
+    So the properties are inverted from the old ones: the `-C` gates a *delete*,
+    and the insert is deliberately **un**guarded, because running it
+    unconditionally is what makes the script converge on the right chain from
+    any starting state. Idempotence still holds in effect — the loop removes
+    every copy first, so the script ends with exactly one rule at the head no
+    matter how many it found.
     """
     body = re.search(r"ensure_drop\(\)\s*\{(.*?)\n\}", script, re.S)
     assert body, "the script no longer defines an ensure_drop() function"
@@ -162,27 +176,39 @@ def check_every_rule_is_a_guarded_drop(script: str) -> None:
     text = re.sub(r"\\\n\s*", " ", body.group(1))
 
     checks = re.findall(r"iptables -C\b[^\n]*", text)
+    deletes = re.findall(r"iptables -D\b[^\n]*", text)
     adds = _ADD_RULE.findall(text)
-    assert len(checks) == 1, f"expected one `iptables -C` guard, found {len(checks)}"
+    assert len(checks) == 1, f"expected one `iptables -C` probe, found {len(checks)}"
+    assert len(deletes) == 1, f"expected one `iptables -D` call, found {len(deletes)}"
     assert len(adds) == 1, f"expected one rule-adding call, found {len(adds)}"
 
-    guard_at, add_at = text.index(checks[0]), text.index(adds[0])
-    assert guard_at < add_at, (
-        "the add is not guarded by the check — the rule would be added again "
-        "on every boot"
+    probe_at = text.index(checks[0])
+    delete_at = text.index(deletes[0])
+    add_at = text.index(adds[0])
+    assert probe_at < delete_at, (
+        "the delete is not gated by the `-C` probe, so the script would try to "
+        "remove a rule that is not there and `set -e` would abort the unit"
     )
-    conditional = re.search(r"if\s*!", text)
-    assert conditional and conditional.start() < guard_at, (
-        "the `-C` is not inside a negated conditional preceding it, so it does "
-        "not gate the add"
+    assert delete_at < add_at, (
+        "the insert runs before the delete, so the rule it just inserted is the "
+        "one the delete removes"
+    )
+    loop = re.search(r"while\s+iptables -C", text)
+    assert loop, (
+        "the `-C` probe is not a loop condition — a single delete leaves the "
+        "duplicate copies an older unguarded version of this script accumulated"
+    )
+    assert not re.search(r"if\s*!\s*iptables -C", text), (
+        "the rule is added only when absent again, which cannot move a rule "
+        "that is present in the wrong position (ISSUE-295)"
     )
 
-    for rule in checks + adds:
+    for rule in checks + deletes + adds:
         flat = " ".join(rule.split())
         # The chain is the assertion this file was missing: four perfect DROP
         # rules appended to a chain nothing jumps to are inert, and every other
         # check here passes on them.
-        assert re.search(rf"iptables -[ACI] {CHAIN}\b", flat), (
+        assert re.search(rf"iptables -[ACDI] {CHAIN}\b", flat), (
             f"rule does not target the {CHAIN} chain: {flat!r}"
         )
         # Not `endswith`: the `-C` form carries `2>/dev/null; then` after the
@@ -194,6 +220,34 @@ def check_every_rule_is_a_guarded_drop(script: str) -> None:
         assert '--comment "$comment"' in flat, (
             f"rule carries no comment, so the teardown's `-C` cannot match it: {flat!r}"
         )
+
+
+def check_rules_are_inserted_at_the_front(script: str) -> None:
+    """The rules have to go to the *front* of the chain, not the end of it.
+
+    ISSUE-295. A user-defined chain stops evaluating at its first terminal
+    rule, and a stock dockerd before v28 ships ``DOCKER-USER`` containing
+    ``-j RETURN`` — so a rule appended after it is present in ``iptables -S``
+    and never evaluated. Measured: on Docker 27 the appended rule gave 0% loss
+    and the same rule re-added with ``-I DOCKER-USER 1`` gave 100%.
+
+    The position is the property, not the version. Docker has never promised
+    the chain is empty, and anything an operator puts at the front has the same
+    effect — Docker Desktop's daemon seeds it with ``-i eth0 -j ACCEPT``, and
+    ``ufw-docker``, the common host-firewall integration, works by inserting.
+    Which is why Docker's own documentation inserts in every example.
+    """
+    body = re.search(r"ensure_drop\(\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "the script no longer defines an ensure_drop() function"
+    text = re.sub(r"\\\n\s*", " ", body.group(1))
+    adds = _ADD_RULE.findall(text)
+    assert len(adds) == 1, f"expected one rule-adding call, found {len(adds)}"
+    flat = " ".join(adds[0].split())
+    assert re.search(rf"iptables -I {CHAIN} 1\b", flat), (
+        f"the boot script does not insert at the front of {CHAIN}: {flat!r} — "
+        "a rule appended after a terminal rule already in the chain is never "
+        "reached, and looks identical to a working one in `iptables -S`"
+    )
 
 
 def check_it_fails_loudly(script: str) -> None:
@@ -208,7 +262,8 @@ ALL_CHECKS = (
     check_no_jinja_survives,
     check_no_empty_expansion,
     check_subnet_is_a_real_cidr,
-    check_every_rule_is_a_guarded_drop,
+    check_every_rule_is_a_converging_drop,
+    check_rules_are_inserted_at_the_front,
     check_it_fails_loudly,
 )
 
@@ -320,27 +375,38 @@ class TestTheThreeSourcesAgree:
             "nothing and silently deletes nothing"
         )
 
-    def test_both_paths_add_rules_the_same_way(self, iptables_tasks, script):
-        """Append versus insert has to be the same on both paths, or a reboot
-        changes the rules' position in the chain. Which of the two it is, this
-        file does not pin — see ISSUE-295."""
-        module_actions = {
-            task["ansible.builtin.iptables"].get("action", "append")
-            for task in iptables_tasks
+    def test_both_paths_insert_the_rules_at_the_front(self, iptables_tasks, script):
+        """ISSUE-295, on the task side; `check_rules_are_inserted_at_the_front`
+        is the same property on the script side.
+
+        Both writers have to agree *and* both have to insert at the front.
+        Agreement alone was what this file pinned before, and two writers
+        agreeing to append is exactly the state that shipped: four correct
+        rules that a stock dockerd before v28 never evaluates. The teardown
+        tasks are deliberately not covered — `-D` matches on the rule spec, not
+        on where the rule sits, so position is meaningless for a delete.
+        """
+        applying = [
+            task for task in iptables_tasks
             if task["ansible.builtin.iptables"]["state"] == "present"
-        }
-        assert len(module_actions) == 1, (
-            f"the apply tasks disagree among themselves: {module_actions}"
-        )
-        script_flag = _ADD_RULE.search(script or "") or _ADD_RULE.search(
-            re.sub(r"\\\n\s*", " ", SCRIPT_TEMPLATE.read_text())
-        )
-        assert script_flag, "no rule-adding call found in the boot script"
-        script_action = "append" if " -A " in script_flag.group(0) else "insert"
-        assert script_action in module_actions, (
-            f"the boot script {script_action}s while the tasks {module_actions} — "
-            "a reboot would move the rules within the chain"
-        )
+        ]
+        assert applying, "no rule-applying iptables tasks found — file moved?"
+        for task in applying:
+            spec = task["ansible.builtin.iptables"]
+            assert spec.get("action") == "insert", (
+                f"{task['name']!r} leaves `action` at the module default, which "
+                "is append — the rule lands behind anything already in the chain"
+            )
+            # `rule_num` is optional and defaults to 1 on an insert. Reading it
+            # through `.get` keeps this an assertion about position rather than
+            # about whether the task spells the default out.
+            assert str(spec.get("rule_num", 1)) == "1", (
+                f"{task['name']!r} inserts at position {spec['rule_num']}, "
+                "not at the front"
+            )
+
+        # And the boot script agrees, or a reboot moves the rules.
+        check_rules_are_inserted_at_the_front(script)
 
     def test_the_bridge_sysctl_is_set(self, tasks):
         """Without `net.bridge.bridge-nf-call-iptables`, traffic between two
@@ -461,26 +527,36 @@ class TestTheseAssertionsCanFail:
         [
             # A lost `-j DROP` — the rule then matches and falls through.
             (lambda s: s.replace("-j DROP", "-j RETURN"),
-             check_every_rule_is_a_guarded_drop),
+             check_every_rule_is_a_converging_drop),
             # Rules appended to a chain nothing jumps to. Perfectly formed and
             # completely inert; every other check here passes on it.
             (lambda s: s.replace(CHAIN, "ISTOTA-DEVBOX"),
-             check_every_rule_is_a_guarded_drop),
+             check_every_rule_is_a_converging_drop),
             # Rules put straight into FORWARD, bypassing Docker's own chain.
             (lambda s: s.replace(CHAIN, "FORWARD"),
-             check_every_rule_is_a_guarded_drop),
+             check_every_rule_is_a_converging_drop),
             # The comment dropped — the teardown's `-C` can then never match.
             (lambda s: s.replace(' -m comment --comment "$comment"', ""),
-             check_every_rule_is_a_guarded_drop),
+             check_every_rule_is_a_converging_drop),
             # Source and destination swapped.
             (lambda s: s.replace('-s "$SUBNET" -d "$dest"', '-s "$dest" -d "$SUBNET"'),
-             check_every_rule_is_a_guarded_drop),
-            # A bare add — the chain grows a duplicate rule every boot.
-            (lambda s: re.sub(r"if ! iptables -C.*?fi",
-                              'iptables -A DOCKER-USER -s "$SUBNET" -d "$dest" '
-                              '-m comment --comment "$comment" -j DROP',
-                              s, flags=re.S),
-             check_every_rule_is_a_guarded_drop),
+             check_every_rule_is_a_converging_drop),
+            # Back to a presence guard: the rule is added only when absent, so
+            # a chain holding it in the wrong position is left alone. This is
+            # the ISSUE-295 regression, and it is invisible to every other
+            # check here because the resulting rule spec is perfect.
+            (lambda s: re.sub(r"while iptables -C.*?done\n",
+                              "", s, flags=re.S).replace(
+                                  'iptables -I DOCKER-USER 1',
+                                  'if ! iptables -C DOCKER-USER -s "$SUBNET" '
+                                  '-d "$dest" -m comment --comment "$comment" '
+                                  '-j DROP 2>/dev/null; then iptables -I '
+                                  'DOCKER-USER 1'),
+             check_every_rule_is_a_converging_drop),
+            # The delete dropped — the insert then stacks a fresh copy on every
+            # boot, which is the duplicate-growth bug the old guard prevented.
+            (lambda s: re.sub(r"while iptables -C.*?done\n", "", s, flags=re.S),
+             check_every_rule_is_a_converging_drop),
             # The subnet variable rendered empty.
             (lambda s: re.sub(r'^SUBNET="[^"]*"$', 'SUBNET=""', s, flags=re.M),
              check_subnet_is_a_real_cidr),
@@ -497,12 +573,22 @@ class TestTheseAssertionsCanFail:
             # `set -e` dropped, so a rejected rule leaves the unit green.
             (lambda s: s.replace("set -euo pipefail", "set -uo pipefail"),
              check_it_fails_loudly),
+            # The ISSUE-295 regression itself: back to appending. Every other
+            # check in this file passes on it, which is the whole point.
+            (lambda s: s.replace(f"iptables -I {CHAIN} 1", f"iptables -A {CHAIN}"),
+             check_rules_are_inserted_at_the_front),
+            # Inserting, but not at the front — position 5 sits behind whatever
+            # dockerd or the operator seeded the chain with.
+            (lambda s: s.replace(f"iptables -I {CHAIN} 1", f"iptables -I {CHAIN} 5"),
+             check_rules_are_inserted_at_the_front),
         ],
         ids=[
             "drop_becomes_return", "unreferenced_chain", "straight_to_forward",
-            "comment_dropped", "source_dest_swapped", "unguarded_add",
+            "comment_dropped", "source_dest_swapped", "back_to_presence_guard",
+            "delete_dropped",
             "empty_subnet_cidr", "empty_subnet_expansion", "subnet_with_host_bits",
-            "unrendered_jinja", "no_set_e",
+            "unrendered_jinja", "no_set_e", "insert_becomes_append",
+            "insert_not_at_the_front",
         ],
     )
     def test_a_broken_script_is_rejected(self, mutate, check, script):

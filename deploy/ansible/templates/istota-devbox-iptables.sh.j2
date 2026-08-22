@@ -12,8 +12,24 @@
 #
 # Ordering: the istota-devbox-iptables.service unit specifies
 # After=docker.service, so the DOCKER-USER chain exists by the time this
-# runs. Each rule is checked with `iptables -C` before being added, so
-# the script is idempotent.
+# runs.
+#
+# Position: `-I DOCKER-USER 1`, never `-A`. A user-defined chain stops
+# evaluating at its first terminal rule, and a stock dockerd before v28
+# populates DOCKER-USER with `-j RETURN` — so an appended rule is present
+# in `iptables -S` and never evaluated, which is a boundary that looks
+# identical to a working one (ISSUE-295). The Docker version is not the
+# property to rely on either: Docker has never promised the chain is
+# empty, Docker Desktop seeds it with `-i eth0 -j ACCEPT`, and ufw-docker
+# inserts at the front.
+#
+# Convergence, not idempotence-by-guard: each rule is deleted wherever it
+# currently sits and re-inserted at position 1, so running this on a host
+# whose rules were appended by an older version of the role repairs them.
+# The script therefore ends with exactly one copy of each rule at the head
+# of the chain no matter what state it started in. The four rules end up
+# in reverse call order, which does not matter: they are all DROP over
+# disjoint destinations.
 
 set -euo pipefail
 
@@ -22,11 +38,23 @@ SUBNET="{{ istota_devbox_network_subnet }}"
 ensure_drop() {
     local dest="$1"
     local comment="$2"
-    if ! iptables -C DOCKER-USER -s "$SUBNET" -d "$dest" \
-            -m comment --comment "$comment" -j DROP 2>/dev/null; then
-        iptables -A DOCKER-USER -s "$SUBNET" -d "$dest" \
+    # Delete every existing copy, then insert at the front. Not a presence
+    # guard: `-C` matches on the rule spec and is blind to position, so a
+    # guard can only answer "is this rule somewhere in the chain" — which is
+    # true of exactly the broken hosts this needs to repair, where the four
+    # rules sit behind dockerd's `-j RETURN`. A guarded add therefore reports
+    # success and moves nothing (ISSUE-295).
+    #
+    # The loop rather than a single `-D` because `-D` removes one match at a
+    # time, and a chain that accumulated duplicates under the old unguarded
+    # path would keep the copies behind the RETURN.
+    while iptables -C DOCKER-USER -s "$SUBNET" -d "$dest" \
+            -m comment --comment "$comment" -j DROP 2>/dev/null; do
+        iptables -D DOCKER-USER -s "$SUBNET" -d "$dest" \
             -m comment --comment "$comment" -j DROP
-    fi
+    done
+    iptables -I DOCKER-USER 1 -s "$SUBNET" -d "$dest" \
+        -m comment --comment "$comment" -j DROP
 }
 
 {% if istota_devbox_block_metadata | default(true) %}

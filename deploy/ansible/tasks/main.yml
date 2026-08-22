@@ -2597,6 +2597,28 @@
 # persistence is handled by the istota-devbox-iptables.service oneshot
 # below — it re-applies the same rules After=docker.service so we never
 # race with dockerd's own iptables programming.
+#
+# `action: insert` on both, matching the boot script's `-I DOCKER-USER 1`.
+# The module defaults to append, and an appended rule lands after whatever
+# is already in the chain — which on a stock dockerd before v28 is
+# `-j RETURN`, making all four rules inert while `iptables -S` shows them
+# present (ISSUE-295). The teardown tasks below stay at the default: `-D`
+# matches on the rule spec, not on position.
+#
+# Deploying this to a host on Docker 27 or earlier makes rules effective
+# that were not before, and two things change there rather than one.
+#
+# DNS: on those versions the embedded resolver forwards from the
+# *container* namespace, so a resolver on an RFC1918 address (a LAN or VPN
+# resolver, or AWS's 172.31.0.2) is now blocked and devbox DNS stops
+# working. On 28+ the `host(...)` forwarding makes this a non-issue.
+#
+# Reachability: the devbox subnet itself sits inside 172.16.0.0/12, as does
+# most of Docker's default address pool. While the rules were inert the
+# devbox could reach sibling containers on other Docker networks; now it
+# cannot. That is the isolation working as designed, but it presents as
+# "the devbox suddenly cannot reach anything" rather than as a DNS error,
+# so check what the container actually talks to before deploying.
 - name: Block cloud metadata endpoint from the devbox subnet
   ansible.builtin.iptables:
     chain: DOCKER-USER
@@ -2604,6 +2626,7 @@
     destination: "169.254.169.254/32"
     jump: DROP
     comment: "istota-devbox: block cloud metadata"
+    action: insert
     state: present
   when: istota_devbox_enabled and istota_devbox_block_metadata and not istota_web_only
 
@@ -2614,6 +2637,7 @@
     destination: "{{ item }}"
     jump: DROP
     comment: "istota-devbox: block {{ item }}"
+    action: insert
     state: present
   loop:
     - 10.0.0.0/8
@@ -2623,8 +2647,8 @@
 
 # Reboot persistence: a small oneshot unit re-applies the DROP rules
 # after dockerd has come up and re-installed its own POSTROUTING /
-# DOCKER-FORWARD rules. Idempotent (`iptables -C || -A`) so it's safe
-# to retrigger.
+# DOCKER-FORWARD rules. Convergent (delete-then-insert) so it's safe to
+# retrigger, and so it repairs a chain whose rules are in the wrong place.
 - name: Deploy devbox iptables reapply script
   template:
     src: istota-devbox-iptables.sh.j2
@@ -2633,6 +2657,27 @@
     group: root
     mode: '0755'
   when: istota_devbox_enabled and not istota_web_only
+
+# The two module tasks above cannot repair an existing host, and this is
+# the task that does. `ansible.builtin.iptables` with `state: present`
+# runs its own `-C` probe, which matches on the rule spec and is blind to
+# position — so on a host provisioned by an older version of this role,
+# with the four rules appended behind dockerd's `-j RETURN`, it finds each
+# rule already present and reports ok/changed=false while moving nothing.
+# That is exactly the broken state ISSUE-295 describes, and a deploy would
+# otherwise leave it in place and call itself green.
+#
+# Running the script is the repair: it deletes each rule wherever it sits
+# and re-inserts it at the head. `changed_when: false` because it is
+# convergent rather than idempotent-by-guard — it rewrites the same four
+# rules every run, and reporting that as a change every time would train
+# everyone to ignore it.
+- name: Re-apply devbox rules at the head of the chain now
+  ansible.builtin.command: /usr/local/sbin/istota-devbox-iptables
+  changed_when: false
+  when:
+    - istota_devbox_enabled and not istota_web_only
+    - istota_devbox_block_metadata or istota_devbox_block_rfc1918
 
 - name: Deploy devbox iptables systemd unit
   template:
