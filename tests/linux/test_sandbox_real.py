@@ -396,9 +396,22 @@ class TestSystemBinaries:
     """
 
     def test_an_alternatives_managed_binary_runs(self, layout, task, user_temp):
+        # `pytest.skip`, not `_unavailable`: this asks about the host's
+        # packaging rather than about bwrap, and the driver's probes check
+        # neither, so escalating it to a failure inside the tier would fail
+        # on a question nobody validated. A distribution that does not route
+        # awk through alternatives has nothing here to assert.
+        #
+        # normpath rather than a prefix test on readlink(): the target is
+        # absolute on Debian but may be written relative, and `resolve()`
+        # cannot stand in because it would follow the link the whole way to
+        # /usr/bin/mawk and lose the alternatives step.
         link = Path("/usr/bin/awk")
-        if not link.is_symlink() or not str(link.readlink()).startswith("/etc/alternatives/"):
-            _unavailable("awk is not managed through /etc/alternatives on this host")
+        if not link.is_symlink():
+            pytest.skip("no /usr/bin/awk on this host")
+        target = Path(os.path.normpath(link.parent / link.readlink()))
+        if target.parent != Path("/etc/alternatives"):
+            pytest.skip(f"awk is not managed through /etc/alternatives here: {target}")
 
         result = run_probe(
             "awk 'BEGIN { print \"AWK_OK\" }' || echo AWK_FAIL",
