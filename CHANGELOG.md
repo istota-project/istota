@@ -72,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When the server reports memory it cannot account for, the report it writes now names the task holding it. That memory lives in the private scratch space each task gets, which the report had no way of looking into, so the most common cause of the warning was also the one thing it could never name — every occurrence needed someone to log in as root and work it out by hand. Each running task's scratch space is now measured and listed against the task's own number.
+
+- A line in that same report saying it could not read a container's memory now says why it could not. The old wording read as a passing glitch worth retrying, and an investigation was sent after the wrong suspect on the strength of it. The reason is now named exactly, and where a reason has more than one possible cause the line says so rather than picking one.
+
 - The Linux test tier builds again on a machine where BuildKit is switched off. It passed a flag only the newer builder accepts, so the build was refused before it started — on exactly the setup that needs the older builder, which is the documented way past a broken build service. The runner now asks the Docker command line which builder it is about to use and only passes the flag when it applies.
 
 - The four deployment test tiers now say plainly that they cannot run inside the assistant's sandbox, instead of failing several minutes in with an unrelated-looking error. All four need to start containers, which a task is not allowed to do and should not be. The two shell runners refuse up front and say what to do instead — mention it in the merge request and ask for the run before merge — and the developer documentation now says the same thing where it tells the assistant to run them.

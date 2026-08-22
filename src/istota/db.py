@@ -5876,6 +5876,33 @@ def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int) -> None:
     conn.commit()
 
 
+def get_running_task_pids(conn: sqlite3.Connection) -> list[tuple[int, int]]:
+    """``(task_id, worker_pid)`` for every running task with a pid recorded.
+
+    Read by the host-pressure snapshot, which uses the pids to reach into each
+    task's bwrap mount namespace and attribute the tmpfs the daemon's own mount
+    table cannot see (ISSUE-286).
+
+    ``worker_pid`` is cleared on every transition out of ``running``, so a pid
+    on a ``running`` row is a live attempt rather than a stale one from a
+    finished task. It can still exit between this read and the ``/proc`` read a
+    moment later; the caller renders that as an unavailable row.
+
+    **Every running task is returned, including one with no pid**, which is
+    reported as ``0``. Filtering those out would have printed ``sandbox
+    none-running`` on a host that was running work: ``NativeBrain`` never calls
+    ``on_pid`` at all, and neither does ``ClaudeCodeBrain``'s non-streaming
+    path, so on those deployments the column is legitimately NULL while a task
+    is running. The caller renders a ``0`` as "no worker pid recorded" — which
+    is the true answer, and unlike an omission it does not read as an
+    idle host.
+    """
+    cursor = conn.execute(
+        "SELECT id, worker_pid FROM tasks WHERE status = 'running'"
+    )
+    return [(int(row["id"]), int(row["worker_pid"] or 0)) for row in cursor.fetchall()]
+
+
 def set_task_model_used(conn: sqlite3.Connection, task_id: int, model: str) -> None:
     """Record the model that actually ran a task (resolved canonical ID).
 
