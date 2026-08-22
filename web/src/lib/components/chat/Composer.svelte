@@ -30,7 +30,12 @@
   import { uploadChatAttachment, chatConfigOnce, type ChatAttachment } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
-  import { commandProvider, modelAliasProvider } from './autocomplete/providers';
+  import {
+    commandProvider,
+    isKnownCommand,
+    loadCommandNames,
+    modelAliasProvider,
+  } from './autocomplete/providers';
   import { createRecorder, formatElapsed } from './useRecorder.svelte';
   import { usesSoftKeyboard, isImeComposing, IME_COMMIT_GRACE_MS } from '$lib/platform/input';
   import {
@@ -661,11 +666,23 @@
     if (activeDraftKey) {
       clearTimeout(saveTimer);
       saveTimer = undefined;
-      // What was stored, not what was passed: an over-long message is held
-      // clamped, and both the tests that recognise it again — the ack in
-      // `settleDraft` and the restore refusal in `switchDraft` — compare
-      // against the stored copy.
-      unsettledSends.set(activeDraftKey, writeDraft(activeDraftKey, t));
+      const held = unsettledSends.get(activeDraftKey);
+      if (held !== undefined) {
+        // A second send is open in this room, which since ISSUE-300 means a
+        // `!command` typed while an ordinary message is still pre-ack. The
+        // command is not a draft — nothing about it is worth restoring after a
+        // reload — and the slot it would take belongs to that other message,
+        // whose stored copy is the only one that survives a reload if its send
+        // then fails. So the held text is written back over whatever typing
+        // this command left in the slot, and the map entry stays its owner's.
+        writeDraft(activeDraftKey, held);
+      } else {
+        // What was stored, not what was passed: an over-long message is held
+        // clamped, and both the tests that recognise it again — the ack in
+        // `settleDraft` and the restore refusal in `switchDraft` — compare
+        // against the stored copy.
+        unsettledSends.set(activeDraftKey, writeDraft(activeDraftKey, t));
+      }
     }
     queueMicrotask(autoGrow);
     // A sent message is the end of a turn, and the reply arrives in the third of
@@ -677,7 +694,38 @@
 
   // The send/stop control is one button in two modes — see the markup below.
   const canSend = $derived(!!text.trim() || attachments.length > 0);
-  const showStop = $derived(busy && !!onCancel);
+
+  // Held here rather than read from the module's own snapshot so the derivation
+  // below reruns when the fetch lands. Empty until then, which leaves the gate
+  // exactly as it was — a name we cannot confirm is not one we let through.
+  let commandNames = $state<ReadonlySet<string>>(new Set());
+  void loadCommandNames().then((n) => (commandNames = n));
+
+  /**
+   * Whether what is typed is a `!command` the server answers inside the
+   * request (ISSUE-300).
+   *
+   * This is the one thing that stays sendable while a turn runs. A command is
+   * answered inline and comes back carrying no task id, so it never enters the
+   * store's `runTurn` — which is what the mode gate actually protects, a single
+   * non-re-entrant entry point rather than the server's task count. `!steer`,
+   * built for exactly this moment, is otherwise untypeable on the surface that
+   * is watching the stream.
+   *
+   * A few commands (`!retry`, `!resume`, `!confirm`) do leave a task queued
+   * server-side. That is not this gate's business: the backend's per-channel
+   * gate serializes it and its rows arrive over the room stream, the same path
+   * a Talk turn landing mid-stream already takes.
+   *
+   * An attachment disqualifies it: a file belongs to a task.
+   */
+  const isInlineCommand = $derived(attachments.length === 0 && isKnownCommand(text, commandNames));
+
+  // Stop stays the mode for a running turn, because cancelling is still what
+  // the button is for — but not over a command, where the same tap has to be
+  // able to send. `!stop` is itself a command, so the cancel is still reachable
+  // from the field in that state.
+  const showStop = $derived(busy && !!onCancel && !isInlineCommand);
 
   // Belt to the single-element brace: even on one element, a tap can be
   // delivered twice (a compat mouse event after the touch), and the second

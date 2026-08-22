@@ -50,7 +50,7 @@ import {
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
-import { resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
+import { isKnownCommand, resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
 import {
   applyEvent as applySegmentEvent,
   type ChatMessage,
@@ -59,6 +59,7 @@ import {
   type SearchResultsData,
   type SearchResultItem,
   type ConfirmationAnsweredData,
+  type SteerRecordedData,
   type MessageReply,
 } from '$lib/stores/segments';
 
@@ -72,6 +73,7 @@ export type {
   SearchResultsData,
   SearchResultItem,
   ConfirmationAnsweredData,
+  SteerRecordedData,
   MessageReply,
 };
 
@@ -2182,6 +2184,28 @@ function createSession(): ChatSession {
     const trimmed = text.trim();
     if (!roomId || (!trimmed && attachments.length === 0)) return;
 
+    // A turn is already running. The one message that may still go out is a
+    // `!command`: the endpoint answers it inside the request and returns no
+    // task id, so it does not need the turn machinery below — and must not take
+    // it, since `status`, the `pendingSend` echo slot and the pending-cancel
+    // flag all belong to the turn that is running.
+    //
+    // Anything else here would be a second `runTurn` in a room that already
+    // has one. The composer's mode gate refuses those (ISSUE-300); this is the
+    // same rule at the seam that owns the invariant, rather than a check the
+    // caller can forget. An attachment belongs to a task either way.
+    //
+    // "No task id" is a statement about this response, not about the server:
+    // `!retry`, `!resume` and `!confirm` all leave a task queued and still
+    // answer inline. Those turns arrive over the room stream and are picked up
+    // by `pickUpStreamedTask` like any turn started elsewhere, which is why
+    // they are none of this path's business.
+    if (get(status) !== 'idle') {
+      if (attachments.length > 0 || !isKnownCommand(trimmed)) return;
+      await sendInlineCommand(roomId, trimmed);
+      return;
+    }
+
     const userCid = nextCid();
     // Which room this row belongs to, stamped now rather than waiting for the
     // echo: a send that fails has no echo, and the row has to be re-appendable
@@ -2387,6 +2411,10 @@ function createSession(): ChatSession {
     reason: string,
     retryable: boolean,
     roomId: number,
+    // False for a `!command` that failed alongside a running turn: the status
+    // is that turn's, and reporting the room idle would hide its Stop and
+    // unlock the composer while it is still streaming.
+    { settleStatus = true }: { settleStatus?: boolean } = {},
   ) {
     messages.update((arr) => arr.filter((m) => m.cid !== phCid));
     updateMsg(userCid, (m) => {
@@ -2401,7 +2429,7 @@ function createSession(): ChatSession {
     // composer, hiding Stop, and putting the next send into the backend's
     // per-channel gate. The row updates above no-op on their own (the failed
     // row left with its room).
-    if (get(activeRoomId) === roomId) status.set('idle');
+    if (settleStatus && get(activeRoomId) === roomId) status.set('idle');
   }
 
   /**
@@ -2435,7 +2463,8 @@ function createSession(): ChatSession {
    * history is in — so a delivered row is indistinguishable from a reloaded
    * one, and nothing downstream has to learn a third value.
    */
-  function settleSend(userCid: number, roomId: number) {
+  /** Clear the send marks off a user row. The row half of `settleSend`. */
+  function settleSendRow(userCid: number) {
     updateMsg(userCid, (m) => {
       m.sendState = undefined;
       m.showSending = undefined;
@@ -2443,10 +2472,22 @@ function createSession(): ChatSession {
       m.retryable = undefined;
       m.sendPayload = undefined;
     });
+  }
+
+  function settleSend(userCid: number, roomId: number) {
+    settleSendRow(userCid);
     // The composer has been holding this message as a draft since it was
     // submitted — the stored draft is the only copy that survives a reload, so
     // it is dropped on the ack rather than on submit. This is the ack, and it
     // names the room so a second send open at the same time keeps its own.
+    //
+    // Only a *drafted* send may signal here. The room is the whole identity
+    // the composer has to match an ack against, and since ISSUE-300 two sends
+    // can be open in one room — a `!command` sent while an ordinary message is
+    // still pre-ack. The command is not a draft and never displaced one, so
+    // signalling on its ack would drop the other send's stored copy, which for
+    // a send that then fails is the only copy there is. `sendInlineCommand`
+    // therefore settles its row through `settleSendRow` and stops there.
     const token = get(rooms).find((r) => r.id === roomId)?.token ?? null;
     sendSettled.update((s) => ({ n: s.n + 1, token }));
   }
@@ -2553,42 +2594,13 @@ function createSession(): ChatSession {
       ]);
     }
     if (res.task_id == null) {
-      // !command ran inline — no task, no stream.
-      const cd = res.command_data as
-        SearchResultsData | ConfirmationAnsweredData | null | undefined;
-      updateMsg(phCid, (m) => {
-        m.role = 'system';
-        m.text = res.inline_result || '';
-        // A structured search_results payload renders as result cards; any
-        // other kind (or absent data) falls back to the markdown text.
-        if (cd && cd.kind === 'search_results') m.searchResults = cd;
-        m.progress = undefined;
-        m.streaming = false;
-      });
-      if (cd && cd.kind === 'confirmation_answered') {
-        // Unlike every other inline result, this one is *durable*: the server
-        // wrote the answer and the ack into `messages`, so both echo back over
-        // the room stream. Stamp their ids onto the two rows already on screen
-        // — `appendStreamedRow` drops a frame whose `msg_id` is present — or
-        // the exchange renders twice. This is also what makes the rows
-        // starrable and deletable without a reload.
-        const answered = cd as ConfirmationAnsweredData;
-        if (typeof answered.user_msg_id === 'number') {
-          updateMsg(userCid, (m) => {
-            m.msgId = answered.user_msg_id!;
-          });
-        }
-        if (typeof answered.system_msg_id === 'number') {
-          updateMsg(phCid, (m) => {
-            m.msgId = answered.system_msg_id!;
-          });
-        }
-        // The banner above the transcript holds the same question. Clear it
-        // now rather than at the next 30s tick — an answer that works while
-        // the card lingers reads as the answer not having taken.
-        void refreshConfirmations();
-      }
-      status.set('idle');
+      applyInlineResult(userCid, phCid, res);
+      // Room-guarded for the reason `failSend` is: switching rooms isn't gated
+      // on `busy`, so a command settling after a switch would report 'idle'
+      // about a room that may have a task streaming in it — unlocking the
+      // composer and hiding its Stop. The append above already guards; this
+      // line did not, one line away from it.
+      if (get(activeRoomId) === roomId) status.set('idle');
       return;
     }
     // Stamp the task id on BOTH halves of the turn. The assistant placeholder
@@ -2616,6 +2628,177 @@ function createSession(): ChatSession {
     // Stream now if the room is free, otherwise queue behind the in-flight
     // task. The backend gate keeps this task pending until its turn either way.
     enqueueStream(res.task_id, phCid);
+  }
+
+  /**
+   * Turn the assistant placeholder into the answer a `!command` came back with.
+   *
+   * No task, no stream: the command ran inside the request, so this row is the
+   * whole of the reply. Shared by the ordinary send path and the mid-turn one,
+   * which differ only in who owns `status` afterwards.
+   */
+  function applyInlineResult(userCid: number, phCid: number, res: SendResult) {
+    const cd = res.command_data as
+      SearchResultsData | ConfirmationAnsweredData | SteerRecordedData | null | undefined;
+    updateMsg(phCid, (m) => {
+      m.role = 'system';
+      m.text = res.inline_result || '';
+      // A structured search_results payload renders as result cards; any
+      // other kind (or absent data) falls back to the markdown text.
+      if (cd && cd.kind === 'search_results') m.searchResults = cd;
+      m.progress = undefined;
+      m.streaming = false;
+    });
+    if (cd && cd.kind === 'confirmation_answered') {
+      // Unlike every other inline result, this one is *durable*: the server
+      // wrote the answer and the ack into `messages`, so both echo back over
+      // the room stream. Stamp their ids onto the two rows already on screen
+      // — `appendStreamedRow` drops a frame whose `msg_id` is present — or
+      // the exchange renders twice. This is also what makes the rows
+      // starrable and deletable without a reload.
+      const answered = cd as ConfirmationAnsweredData;
+      if (typeof answered.user_msg_id === 'number') {
+        updateMsg(userCid, (m) => {
+          m.msgId = answered.user_msg_id!;
+        });
+      }
+      if (typeof answered.system_msg_id === 'number') {
+        updateMsg(phCid, (m) => {
+          m.msgId = answered.system_msg_id!;
+        });
+      }
+      // The banner above the transcript holds the same question. Clear it
+      // now rather than at the next 30s tick — an answer that works while
+      // the card lingers reads as the answer not having taken.
+      void refreshConfirmations();
+    }
+    if (cd && cd.kind === 'steer_recorded') {
+      // Durable in the same way and stamped for the same reason: `cmd_steer`
+      // records the note as a `task_id IS NULL` user row, which echoes back
+      // over the room stream with `msg_id` as the only dedup key available —
+      // unstamped, the steer appears twice. The body is adopted along with the
+      // id because the two rows differ: this one was drawn from the whole
+      // `!steer <note>` line, while what is stored, and what a reload shows,
+      // is the note alone.
+      const steered = cd as SteerRecordedData;
+      if (typeof steered.user_msg_id === 'number') {
+        updateMsg(userCid, (m) => {
+          m.msgId = steered.user_msg_id!;
+          m.text = steered.body;
+        });
+      }
+    }
+  }
+
+  /**
+   * Send a `!command` while a turn is already running (ISSUE-300).
+   *
+   * Deliberately not `runTurn`. That entry point announces a turn — it sets
+   * `status`, clears the pending-cancel flag and claims the single
+   * `pendingSend` echo slot — and all three of those belong to the turn that
+   * is streaming. A command's answer arrives in its own response rather than
+   * over a stream, so it needs none of them, and this path owns nothing beyond
+   * its own two rows and the draft slot it is careful not to touch.
+   *
+   * The caller has already established that the room is busy, that `trimmed`
+   * names a registered command and that there are no attachments.
+   */
+  async function sendInlineCommand(roomId: number, trimmed: string) {
+    const userCid = nextCid();
+    const phCid = nextCid();
+    const roomToken = get(rooms).find((r) => r.id === roomId)?.token;
+    messages.update((a) => [
+      ...a,
+      {
+        cid: userCid,
+        role: 'user',
+        text: trimmed,
+        segments: [],
+        streaming: false,
+        roomToken,
+        attachments: [],
+        attachmentPaths: [],
+        createdAt: new Date().toISOString(),
+        sendState: 'sending',
+        // No `sendPayload`, which is what makes the row un-retryable below
+        // even if something else were to offer it one.
+      },
+    ]);
+    // The same grace-gated pending mark `runTurn` opens, and needed more here:
+    // a command runs *inside* the request, so the POST stays open for its whole
+    // duration (`!search` over a memory corpus is seconds of it), and the one
+    // spinner on screen belongs to the turn underneath. Without this the command
+    // is silent for as long as it takes and reads as having been swallowed.
+    const graceTimer = setTimeout(() => {
+      updateMsg(userCid, (m) => {
+        if (m.sendState === 'sending') m.showSending = true;
+      });
+    }, SEND_PENDING_GRACE_MS);
+    try {
+      const res = await sendChatMessage(
+        roomId,
+        trimmed,
+        [],
+        [],
+        undefined,
+        newIdempotencyKey(),
+        {},
+      );
+      if (!res.ok) {
+        const { reason } = sendFailureReason(res);
+        // Never retryable, for the reason `sendTurn` gives: a command runs
+        // before the endpoint consults the idempotency key, so a repeat is a
+        // second execution rather than a resend.
+        failSend(userCid, phCid, reason, false, roomId, { settleStatus: false });
+        return;
+      }
+      // The row half only. A command was never held as a draft, so signalling
+      // the composer here would settle the *other* send's — see `settleSend`.
+      settleSendRow(userCid);
+      // Guarded on the room for the same reason `sendTurn` guards its own
+      // append: this runs after an await, and `messages` is rebuilt per room.
+      if (get(activeRoomId) !== roomId) return;
+      if (res.task_id != null) {
+        // Not expected to be reachable: `dispatch` answers every `!word` inline,
+        // registered or not, so a `!`-prefixed body cannot come back with a task
+        // id — the one that could, the `!model` prefix, is refused by the
+        // catalogue gate because no command is registered under that name. So
+        // this deliberately does nothing rather than guessing: the turn the
+        // server made will arrive over the room stream, where an unsettled user
+        // row is handed to `pickUpStreamedTask` and queued behind the running
+        // one. Claiming it here instead would take the active stream slot off
+        // that turn, since `enqueueStream` only queues while a stream is live
+        // and the running turn has none of its own until its own ack lands.
+        return;
+      }
+      messages.update((a) => [
+        ...a,
+        {
+          cid: phCid,
+          role: 'assistant',
+          text: '',
+          segments: [],
+          streaming: true,
+          progress: randomAckVerb(),
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      applyInlineResult(userCid, phCid, res);
+      // No `status` write: the running turn still owns it.
+    } catch {
+      // `sendChatMessage` classifies rather than throwing, so this is the
+      // unforeseen case — and it must not leave the row on 'sending' forever.
+      if (get(messages).find((m) => m.cid === userCid)?.sendState === 'sending') {
+        failSend(userCid, phCid, 'Couldn’t send — something went wrong.', false, roomId, {
+          settleStatus: false,
+        });
+      }
+    } finally {
+      clearTimeout(graceTimer);
+      updateMsg(userCid, (m) => {
+        m.showSending = undefined;
+      });
+    }
   }
 
   async function cancel() {
