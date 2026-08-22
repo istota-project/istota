@@ -1,4 +1,4 @@
-"""The lean stack, brought up around one test.
+"""The lean stack, brought up once per profile and shared for the session.
 
 Everything here exists to get from "a checkout" to "a running daemon that will
 answer a task" in under thirty seconds, with no Nextcloud and no API key. Three
@@ -12,10 +12,30 @@ slowly:
   `[brain.native] base_url`, so no credential and no network are involved;
 - the stack is one service.
 
-The machinery underneath lives in `testbed/` — `Stack`, the `Service` protocol,
-the compose helpers, the probe. What stays here is the part that is specific to
-the *lean shape*: which compose file, which image tag, and running the render
-script on the host.
+A test declares what it needs and is handed a stack that already has it:
+
+    @pytest.mark.profile("forge")
+    @pytest.mark.script([{"text": "done"}])
+    def test_something(stack): ...
+
+`profile` defaults to `"base"` and `script` to one plain answer. Both are
+optional, and a scenario whose script depends on something only known at run
+time — a stub's port, say — calls `stack.script(...)` inside the test instead.
+
+**Stacks are session-scoped, one per profile.** The fixture that used to boot
+one per test argued that the endpoint's `base_url` is baked into the rendered
+config, so a shared stack would need reconfiguring between tests anyway. That
+held only because the endpoint was started immediately before the render. Here
+the services start once per profile, before that profile's config is rendered,
+and live as long as the stack — so the address stays valid and `rescript`
+handles the per-test script, which is what it was written for. `Stack.reset` is
+what makes the sharing safe; read its docstring before adding a scenario that
+mutates something.
+
+The machinery underneath lives in `testbed/` — `StackPool`, `Stack`, the
+`Service` protocol, the compose helpers, the probe. What stays here is the part
+that is specific to the *lean shape* and to pytest: which compose file, which
+image tag, the xdist guards, and building the negative control's image.
 """
 
 from __future__ import annotations
@@ -24,18 +44,14 @@ import hashlib
 import os
 import subprocess
 import time
-import uuid
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from testbed import probe as probe_support
+from testbed import profiles
 from testbed import stack as stack_support
-from testbed.profiles import BASE, FORGE, NO_FORGE, Profile
-from testbed.services import Service, gitlab
-from testbed.services.model_endpoint import serve_script
-from testbed.stack import Stack
 
 # Imported rather than re-derived. `--platform amd64` is a rootdir-level option
 # that both Docker tiers honour, and the normalization — a bare `amd64`
@@ -48,34 +64,35 @@ from ..image import conftest as image_support
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
 RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
+NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
+PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
 
 READY_TIMEOUT = 120
 
 _XDIST_MESSAGE = (
-    "the smoke tier must run with -n0. Each test builds and tears down a whole "
-    "compose stack, so N workers would race the same daemon, exhaust it, and "
-    "sweep each other's projects."
+    "the smoke tier must run with -n0. Session-scoped fixtures are per-worker, "
+    "so N workers would each build the image and bring up their own stacks "
+    "under one project prefix, race the same daemon, and sweep each other's "
+    "projects."
 )
 
 # Every project this tier creates starts with it, which is what makes the
 # session-start sweep able to find leftovers without touching anything else.
 PROJECT_PREFIX = "istota-smoke-"
 
-# The credential the endpoint is bound with. It authenticates nothing — the
-# daemon sends whatever `docker-compose.test.yml` hardcodes as
-# `ISTOTA_BRAIN_NATIVE_API_KEY`, and this endpoint answers regardless — but
-# `HttpStub.start` requires one for a non-loopback bind, so that the tier knows
-# the name of every value it has published on a shared network.
-ENDPOINT_CREDENTIAL = "unused-by-the-scripted-endpoint"
+# What a test gets when it declares no `script` marker. One plain answer, which
+# is enough for any scenario that only needs a task to complete —
+# `test_lean_stack.py` asserts on this exact string.
+DEFAULT_SCRIPT = [{"text": "the scripted answer"}]
 
 
 def lean_image_tag() -> str:
     """One image tag per checkout, shared by every stack this tier starts.
 
     Compose names a built image after the project, and the project is unique
-    per test so an interrupted run's stack is never adopted by the next one.
-    Images are not reclaimed by `down --volumes`, so that left one permanent
-    tag per test. A single tag collapses them.
+    per stack so an interrupted run's containers are never adopted by the next
+    session. Images are not reclaimed by `down --volumes`, so that left one
+    permanent tag per stack. A single tag collapses them.
 
     Scoped by checkout path rather than fixed, because work in this repo runs
     in parallel git worktrees: two of them sharing a tag means the second
@@ -136,7 +153,7 @@ def require_docker() -> None:
 def _sweep_leftover_stacks():
     """Reclaim stacks an earlier run was killed before tearing down.
 
-    A unique project name per test stops one run from adopting another's
+    A unique project name per stack stops one run from adopting another's
     containers mid-flight, but it also means nothing ever reclaims them: a
     killed session leaves a container and a named volume behind for good. One
     sweep at session start closes that, and it is scoped by the prefix so it can
@@ -178,168 +195,6 @@ def _measure_probe_exec(request):
         f"({stats.seconds / elapsed:.0%} of the tier), "
         f"{stats.seconds / stats.calls * 1000:.0f}ms each"
     )
-
-
-def _render_config(
-    destination: Path,
-    services: dict[str, Service],
-    extra: dict[str, str] | None = None,
-) -> Path:
-    """Run the shipped render script on the host.
-
-    This is the property that makes the shortcut legitimate: the file the lean
-    stack boots from is produced by the same script the container would have
-    run, not by a fixture that approximates it.
-
-    Each service contributes its own `config_env()` — the variables that point
-    the daemon at it — merged over the base, with `extra` (the profile's own
-    `config`) last. Every one of those is a variable `render-config.sh` already
-    reads, so a block the shipped script would not have produced cannot be
-    smuggled in here, and this environment is left with nothing
-    subsystem-specific in it.
-
-    Two services claiming the same variable is refused rather than resolved.
-    Silent last-wins would boot a stack from a config naming the wrong
-    service's port, and dict order is what would decide which — a diagnosis
-    that starts from "the daemon never reached the feeds stub" and ends
-    somewhere else entirely.
-    """
-    config_file = destination / "config.toml"
-    # An explicit environment, NOT `**os.environ`. render-config.sh reads
-    # dozens of `ISTOTA_*` variables, so inheriting the developer's shell would
-    # make the config the lean stack boots from depend on whatever happens to be
-    # exported in the terminal that started pytest — the same run passing on one
-    # machine and failing on another, with nothing in the repo to explain it.
-    #
-    # This is reproducibility, not test isolation: it does *not* stop the daemon
-    # queueing work of its own. The scheduler seeds `_module.feeds.run_scheduled`
-    # and polls it at startup regardless of this environment, so the smoke tests
-    # filter on the submitted task's id rather than on its user.
-    environment = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "CONFIG_FILE": str(config_file),
-        "USER_NAME": "testuser",
-        "NC_URL": "http://nextcloud",
-        "APP_PASSWORD": "app-password-value",
-        "BOT_USER": "istota",
-        "USER_TIMEZONE": "UTC",
-    }
-    claimed: dict[str, str] = {}
-    for name, service in services.items():
-        for variable, value in service.config_env().items():
-            if variable in claimed:
-                pytest.fail(
-                    f"{name} and {claimed[variable]} both set {variable}; one "
-                    "of them would silently win and the stack would boot "
-                    "pointing at the other",
-                    pytrace=False,
-                )
-            claimed[variable] = name
-            environment[variable] = value
-    environment.update(extra or {})
-    result = subprocess.run(
-        ["bash", str(RENDER_CONFIG)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=environment,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"render-config.sh exited {result.returncode}\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
-            pytrace=False,
-        )
-    assert config_file.exists(), "render-config.sh reported success but wrote nothing"
-    return config_file
-
-
-def _start_stack(
-    pytestconfig,
-    tmp_path: Path,
-    profile: Profile,
-    services: dict[str, Service],
-):
-    """Render, bring the stack up, hand back a `Stack`, tear it down.
-
-    A generator rather than a fixture so the three fixtures below can each
-    decide what to start *before* calling it — the services have to be
-    listening before the config that names their ports is rendered.
-    """
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    # A fresh project name per test, so a stack left behind by an interrupted
-    # run is never adopted (and then torn down) by the next one. The session
-    # sweep above is what reclaims those leftovers.
-    project = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:8]}"
-
-    # The config directory travels in an --env-file, not in our environment.
-    # Compose interpolates the compose file on *every* subcommand, so a
-    # `${VAR:?}` supplied only to `up` makes `ps`, `exec`, `logs` and `down`
-    # fail before they touch a container. `down` swallows its failures, so the
-    # visible symptom was a stack that survived the run holding a named volume,
-    # while `wait_ready` sat out its whole timeout reading "no container yet".
-    # An --env-file rides along in the argument list, so every subcommand gets
-    # it and no caller has to remember.
-    env_file = tmp_path / "compose.env"
-    lines = [
-        f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
-        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}",
-    ]
-    overlays = list(profile.compose_overlays)
-    if profile.image:
-        # Both the overlay and the variable it interpolates, for the same
-        # every-subcommand reason as the config dir above.
-        lines.append(f"ISTOTA_TEST_IMAGE={profile.image}")
-        overlays.append(PREBUILT_OVERLAY)
-    env_file.write_text("\n".join(lines) + "\n")
-    args = stack_support.compose_args(
-        COMPOSE_FILE, project=project, env_file=env_file, overlays=overlays
-    )
-
-    try:
-        _render_config(config_dir, services, profile.config)
-        stack_support.up(args, platform=resolve_platform(pytestconfig))
-        stack_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
-        yield Stack(
-            profile=profile, args=args, services=services, config_dir=config_dir
-        )
-    finally:
-        # Volumes too: the DB is a named volume, and leaving it behind would
-        # make the next run's assertions depend on this one's rows.
-        stack_support.down(args, volumes=True)
-
-
-@pytest.fixture
-def lean_stack(pytestconfig, tmp_path, request):
-    """A running daemon and the endpoint it talks to.
-
-    Function-scoped on purpose, until Stage 2 of the deployment-testbed spec
-    replaces this with a session-scoped pool. The scripted turns differ per
-    test, and the endpoint's base URL is baked into the rendered config, so a
-    shared stack would have to be reconfigured and restarted between tests
-    anyway — at which point the sharing saves nothing and couples the tests to
-    each other's scripts.
-    """
-    _require_no_xdist(pytestconfig)
-    require_docker()
-
-    turns = getattr(request, "param", None) or [{"text": "the scripted answer"}]
-
-    # All interfaces, explicitly. The default is loopback so an ordinary
-    # `uv run pytest` never opens a listener beyond it; this tier is the one
-    # caller that genuinely needs the container to reach back in.
-    endpoint = serve_script(turns, host="0.0.0.0", credential=ENDPOINT_CREDENTIAL)
-    try:
-        yield from _start_stack(pytestconfig, tmp_path, BASE, {"model": endpoint})
-    finally:
-        endpoint.close()
-
-
-
-NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
-PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
 
 
 @pytest.fixture(scope="session")
@@ -397,89 +252,66 @@ def no_forge_image(pytestconfig) -> str:
     return tag
 
 
-@pytest.fixture
-def forge_stack(pytestconfig, tmp_path, request):
-    """The lean stack with the developer skill wired to a fake GitLab.
+@pytest.fixture(scope="session")
+def stacks(pytestconfig, tmp_path_factory):
+    """Lazily-started, session-scoped stacks, keyed by profile name.
 
-    Function-scoped like `lean_stack`, and for the same reason plus one: the
-    stub's port is baked into the rendered config, and its recorded calls are
-    per-scenario state that a shared stack would smear across tests.
-
-    Two things here are worth not rediscovering.
-
-    The stub binds all interfaces, because the daemon reaching it lives in a
-    container. `gitlab.serve` defaults to loopback for the same reason
-    `serve_script` does — this listener runs `git http-backend`, and publishing
-    one on every `uv run pytest` is not a thing to do by default.
-
-    The `[developer]` block is produced by `render-config.sh` from the
-    `ISTOTA_DEVELOPER_*` variables in `GitLabService.config_env()`, not written
-    by this fixture. So the config the scenarios exercise is one the shipped
-    script can actually generate, and a change that breaks that generation fails
-    here rather than in production.
-    """
-    yield from _forge_stack(pytestconfig, tmp_path, request, FORGE)
-
-
-@pytest.fixture
-def broken_forge_stack(pytestconfig, tmp_path, request, no_forge_image):
-    """The same stack, on an image whose forge binaries are missing.
-
-    The negative control. Everything in `test_forge_e2e.py` is a claim that
-    this tier can see a broken deployment; without an artifact that *is*
-    broken, the claim is unfalsified and the whole file would pass identically
-    if the daemon never ran a forge command. This reproduces ISSUE-263 exactly:
-    a config naming `/usr/local/lib/istota_forge/glab`, and nothing at that
-    path.
-
-    The tag is filled into the profile here rather than written into
-    `profiles.py`, because it is derived from whichever image the session built.
-    """
-    yield from _forge_stack(
-        pytestconfig,
-        tmp_path,
-        request,
-        replace(NO_FORGE, image=no_forge_image),
-    )
-
-
-def _forge_stack(pytestconfig, tmp_path, request, profile: Profile):
-    """The body both forge fixtures share.
-
-    A plain generator rather than a third fixture: the two differ only in which
-    image they run, and a variant that re-stated the other forty lines would
-    drift on the parts that are genuinely the same.
+    Nothing is booted here. The pool starts a stack the first time a test
+    declares its profile, so a run selecting only the forge scenarios never
+    pays for a `base` stack — and `close_all` tears down whatever ended up
+    running, volumes included.
     """
     _require_no_xdist(pytestconfig)
     require_docker()
 
-    turns = getattr(request, "param", None) or [{"text": "nothing scripted"}]
-
-    # Both listeners are started inside the `try`, not before it: `gitlab.serve`
-    # does a `mkdir` and a bind, either of which can raise, and an endpoint
-    # started on the line above would then never be closed — leaking a bound
-    # port and a live thread for the rest of the session. Both bind all
-    # interfaces, so the leak is a publicly-bound socket.
-    endpoint = None
-    stub = None
+    pool = stack_support.StackPool(
+        workdir=tmp_path_factory.mktemp("testbed"),
+        lean=stack_support.LeanShape(
+            compose_file=COMPOSE_FILE,
+            render_script=RENDER_CONFIG,
+            image=lean_image_tag(),
+            prebuilt_overlay=PREBUILT_OVERLAY,
+            ready_timeout=READY_TIMEOUT,
+        ),
+        platform=resolve_platform(pytestconfig),
+        project_prefix=PROJECT_PREFIX,
+    )
     try:
-        endpoint = serve_script(turns, host="0.0.0.0", credential=ENDPOINT_CREDENTIAL)
-        # The token is both what the daemon is configured with and what this
-        # listener challenges for, which is what makes
-        # `authenticated_git_calls()` mean "the helper produced the right
-        # token". It is also the access control: the listener is bound to all
-        # interfaces so the container can reach it, and it serves a real
-        # `git http-backend`.
-        stub = gitlab.serve(
-            tmp_path / "forge", host="0.0.0.0", token=gitlab.FORGE_TOKEN
-        )
-        stub.seed_repo(stub.project)
-        yield from _start_stack(
-            pytestconfig, tmp_path, profile, {"model": endpoint, "gitlab": stub}
-        )
+        yield pool
     finally:
-        # Guarded, because either may be None if the other's construction raised.
-        if stub is not None:
-            stub.close()
-        if endpoint is not None:
-            endpoint.close()
+        pool.close_all()
+
+
+@pytest.fixture
+def stack(request, stacks):
+    """The stack for the profile this test declared, reset and quiescent.
+
+    `reset` runs *before* the test rather than after, so a failed test's state
+    is still there to inspect and the next test is still clean.
+
+    `no-forge` is the one profile whose image cannot be written down: it is
+    derived from whichever image the session actually built. The tag is filled
+    in here, and `getfixturevalue` rather than a fixture argument so a run with
+    no negative control in it never builds the second image.
+    """
+    marker = request.node.get_closest_marker("profile")
+    name = marker.args[0] if marker and marker.args else profiles.BASE.name
+    fresh = bool(marker.kwargs.get("fresh")) if marker else False
+
+    profile = profiles.by_name(name)
+    if profile.name == profiles.NO_FORGE.name:
+        profile = replace(profile, image=request.getfixturevalue("no_forge_image"))
+
+    running = stacks.get(profile, fresh=fresh)
+    script_marker = request.node.get_closest_marker("script")
+    turns = (
+        list(script_marker.args[0])
+        if script_marker and script_marker.args
+        else list(DEFAULT_SCRIPT)
+    )
+    try:
+        running.reset(turns)
+        yield running
+    finally:
+        if fresh:
+            stacks.release(running)
