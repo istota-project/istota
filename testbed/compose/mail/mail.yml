@@ -77,10 +77,20 @@ services:
       # production code so a test can run is the trade this avoids; OpenSSL
       # reads this variable, so it works entirely outside the application.
       #
-      # It *replaces* the public trust store in this container rather than
-      # adding to it, and that is the concession. Nothing in any profile makes
-      # an outbound TLS connection to anything else — the model endpoint, the
-      # forge stub and Nextcloud are all plain HTTP inside the project — so
-      # today it costs nothing. A scenario that needs a public CA has to
-      # concatenate one in here rather than assume it is present.
+      # `SSL_CERT_FILE` alone *replaces* the trust store rather than adding to
+      # it, and that is not survivable here — measured, not reasoned. The
+      # entrypoint's first act is `uv run`, which resolves the dev dependency
+      # group against PyPI, and with only this certificate trusted the boot
+      # dies on `invalid peer certificate: UnknownIssuer` and the container
+      # never starts.
+      #
+      # `SSL_CERT_DIR` is what restores the rest. OpenSSL's default-paths
+      # loader takes both: the file is read eagerly into the store, the
+      # directory is consulted by subject hash on demand, and `/etc/ssl/certs`
+      # in the image is the Debian bundle's hashed symlink tree. Verified in
+      # both directions inside the shipped image — a TLS handshake to this
+      # server with hostname verification against `mail`, and an HTTPS fetch
+      # from PyPI, in one process with both variables set. `uv` honours the
+      # pair as well, which it has to, since it is what fails first.
       SSL_CERT_FILE: /etc/istota-testbed/mail-ca.crt
+      SSL_CERT_DIR: /etc/ssl/certs

@@ -84,7 +84,22 @@ class Profile:
 #: than a fixture reaching past the generator. Sixty would put a minute of dead
 #: wait into every mail scenario, which on a session-scoped stack is a minute
 #: per test rather than one per session.
-MAIL_CONFIG = {"ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL": "5"}
+#: And they give the stack's one user an address of their own.
+#:
+#: `USER_EMAIL` is read by `render-config.sh` and passed through by
+#: `docker-compose.yml`, so it satisfies the two-file rule like everything else
+#: here; it is not `ISTOTA_`-prefixed because it belongs to the identity block
+#: rather than to a module. Without it `config.users["testuser"]` has no address
+#: and neither the sender-match rung nor the plus-address rung can resolve —
+#: `extract_user_from_recipient` requires the tag to name a user that exists.
+#:
+#: `@ext.test` rather than `@bot.test`: the mail server collapses every
+#: recipient at the bot's own domain into the bot mailbox, so a user address
+#: inside it would make the bot the recipient of its own replies.
+MAIL_CONFIG = {
+    "ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL": "5",
+    "USER_EMAIL": "testuser@ext.test",
+}
 
 BASE = Profile("base")
 FORGE = Profile("forge", services=("model", "gitlab"))

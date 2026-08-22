@@ -176,6 +176,7 @@ class Probe:
         status: str | None = None,
         source_type: str | None = None,
         conversation_token: str | None = None,
+        id_above: int | None = None,
     ) -> list[dict]:
         """Rows from `tasks`, narrowed by whichever filters are given.
 
@@ -191,6 +192,14 @@ class Probe:
         only thing that discriminates it from the pollers' own work. It is as
         selective as `task_id` for that case, because a room this test created
         is a room nothing else has ever posted in.
+
+        `id_above` is for the case with neither — inbound *email*, where the
+        daemon makes the task and there is no room token to discriminate on.
+        `source_type='email'` alone matches every earlier scenario's row on a
+        session-scoped stack, and `wait_for_task` returns the first terminal one
+        it sees, so it would answer with the previous test's task. Paired with
+        the reset's watermark this is as selective as an id, and it is the same
+        both-halves rule `rows_above` enforces one table over.
         """
         clauses, params = [], []
         for column, value in (
@@ -203,6 +212,9 @@ class Probe:
             if value is not None:
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if id_above is not None:
+            clauses.append("id > ?")
+            params.append(id_above)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(f"SELECT * FROM tasks{where} ORDER BY id", params)
 
