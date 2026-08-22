@@ -27,9 +27,16 @@
 # currently sits and re-inserted at position 1, so running this on a host
 # whose rules were appended by an older version of the role repairs them.
 # The script therefore ends with exactly one copy of each rule at the head
-# of the chain no matter what state it started in. The four rules end up
-# in reverse call order, which does not matter: they are all DROP over
+# of the chain no matter what state it started in. The rules end up in
+# reverse call order, which does not matter: they are all DROP over
 # disjoint destinations.
+#
+# `-w 5` on every call. dockerd programs iptables at start and this unit is
+# ordered After=docker.service, so the xtables lock is genuinely contended
+# here. Without the wait a lock collision returns non-zero, `set -e` aborts
+# the script, and because the retire pass runs first the host is left with
+# no devbox rules at all — the boundary silently absent, the failure only in
+# the unit's journal.
 
 set -euo pipefail
 
@@ -48,12 +55,12 @@ ensure_drop() {
     # The loop rather than a single `-D` because `-D` removes one match at a
     # time, and a chain that accumulated duplicates under the old unguarded
     # path would keep the copies behind the RETURN.
-    while iptables -C DOCKER-USER -s "$SUBNET" -d "$dest" \
+    while iptables -w 5 -C DOCKER-USER -s "$SUBNET" -d "$dest" \
             -m comment --comment "$comment" -j DROP 2>/dev/null; do
-        iptables -D DOCKER-USER -s "$SUBNET" -d "$dest" \
+        iptables -w 5 -D DOCKER-USER -s "$SUBNET" -d "$dest" \
             -m comment --comment "$comment" -j DROP
     done
-    iptables -I DOCKER-USER 1 -s "$SUBNET" -d "$dest" \
+    iptables -w 5 -I DOCKER-USER 1 -s "$SUBNET" -d "$dest" \
         -m comment --comment "$comment" -j DROP
 }
 
@@ -71,9 +78,9 @@ retire_drop() {
     #
     # Runs regardless of the block_* flags: a host that has turned metadata
     # blocking off should still lose the rule this role no longer installs.
-    while iptables -C DOCKER-USER -s "$SUBNET" -d "$dest" \
+    while iptables -w 5 -C DOCKER-USER -s "$SUBNET" -d "$dest" \
             -m comment --comment "$comment" -j DROP 2>/dev/null; do
-        iptables -D DOCKER-USER -s "$SUBNET" -d "$dest" \
+        iptables -w 5 -D DOCKER-USER -s "$SUBNET" -d "$dest" \
             -m comment --comment "$comment" -j DROP
     done
 }

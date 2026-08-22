@@ -6,7 +6,11 @@ services:
     container_name: istota-browser
     ports:
       - "127.0.0.1:9223:9223"  # API (localhost only)
-      - "0.0.0.0:6080:6080"    # noVNC (external for captcha solving)
+      # noVNC serves an interactive view of the logged-in browser. Loopback
+      # by default; set BROWSER_VNC_BIND to reach it from elsewhere, and set
+      # VNC_PASSWORD when you do (entrypoint.sh passes -passwd only when it
+      # is non-empty, so an exposed console without one is unauthenticated).
+      - "${BROWSER_VNC_BIND:-127.0.0.1}:6080:6080"
     shm_size: 2gb
     volumes:
       - browser-profile:/data/browser-profile

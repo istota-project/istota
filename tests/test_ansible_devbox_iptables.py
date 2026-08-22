@@ -1,7 +1,7 @@
 """The devbox network isolation, asserted rather than assumed.
 
 ``skill.md`` tells the model, in the prompt, that the devbox network blocks
-RFC1918 and cloud metadata. Until ISSUE-283 nothing checked that claim. Four
+RFC1918 and cloud metadata. Until ISSUE-283 nothing checked that claim. Six
 ``DROP`` rules in the ``DOCKER-USER`` chain and one sysctl are what back it,
 and they lived in 39 lines of generated shell with no witness of any kind — a
 mistyped CIDR, a lost ``-j DROP``, a rule appended to a chain nothing jumps
@@ -33,12 +33,17 @@ container is unable to reach anything:
     ``security.devbox_netfilter`` reads the running chain and answers that.
   * traffic terminating on the host. ``DOCKER-USER`` is reached from
     ``FORWARD``, so the bridge gateway address is outside these rules
-    entirely (ISSUE-296), as is any published port, which ``docker-proxy``
-    re-originates from the host (ISSUE-297).
-  * address space the four destinations do not name, and IPv6, which no
-    ``ip6tables`` rule anywhere covers (ISSUE-298).
+    entirely, as is any published port, which ``docker-proxy`` re-originates
+    from the host. Closed by the host firewall rather than by these rules
+    (ISSUE-296, ``[wontfix]``), which is a real dependency on something this
+    role does not manage.
+  * IPv6. Every rule here is IPv4-only and no ``ip6tables`` rule exists
+    anywhere in the repo; today that gap is held shut by Docker, not by us.
+    ``TestIPv6CannotBeOpenedSilently`` below is what stops it being opened in
+    one line without anyone noticing (ISSUE-298).
   * a source address the container chose for itself; ``NET_RAW`` permits that
-    and every rule here is ``-s``-scoped (ISSUE-299).
+    and every rule here is ``-s``-scoped (ISSUE-299, ``[wontfix]`` — closing
+    it needs a pinned bridge name, which means recreating the network).
 
 For a witness that a container really cannot reach a destination you want the
 ``linux``-marked test described in ISSUE-283, which applies the script inside a
@@ -113,6 +118,16 @@ RETIRED_RULES = {
 METADATA_DESTINATIONS = {"169.254.0.0/16", "168.63.129.16/32"}
 RFC1918_DESTINATIONS = EXPECTED_DESTINATIONS - METADATA_DESTINATIONS
 
+# A destination cannot be both retired and wanted — the script would delete a
+# rule it is about to insert, and the chain would end up without it. Asserted
+# here at module level rather than only inside a test, because the task-side
+# comparison merges the two dicts and a collision would be absorbed silently
+# rather than reported.
+assert not (set(RETIRED_RULES) & EXPECTED_DESTINATIONS), (
+    "a destination is both retired and wanted: "
+    f"{set(RETIRED_RULES) & EXPECTED_DESTINATIONS}"
+)
+
 
 def _defaults() -> dict:
     return yaml.safe_load(DEFAULTS_FILE.read_text())
@@ -138,7 +153,7 @@ _RETIRE_DROP_CALL = re.compile(r'^retire_drop\s+"([^"]*)"\s+"([^"]*)"\s*$', re.M
 # assertions independent of the position one, so a regression to `-A` fails
 # `check_rules_are_inserted_at_the_front` and nothing else — one red test
 # naming one defect, rather than every rule assertion going red at once.
-_ADD_RULE = re.compile(r"iptables -(?:A|I)\b[^\n]*")
+_ADD_RULE = re.compile(r"iptables (?:-w \d+ )?-(?:A|I)\b[^\n]*")
 
 
 def dropped_rules(script: str) -> dict[str, str]:
@@ -209,8 +224,8 @@ def check_every_rule_is_a_converging_drop(script: str) -> None:
     # as the one command it is.
     text = re.sub(r"\\\n\s*", " ", body.group(1))
 
-    checks = re.findall(r"iptables -C\b[^\n]*", text)
-    deletes = re.findall(r"iptables -D\b[^\n]*", text)
+    checks = re.findall(r"iptables (?:-w \d+ )?-C\b[^\n]*", text)
+    deletes = re.findall(r"iptables (?:-w \d+ )?-D\b[^\n]*", text)
     adds = _ADD_RULE.findall(text)
     assert len(checks) == 1, f"expected one `iptables -C` probe, found {len(checks)}"
     assert len(deletes) == 1, f"expected one `iptables -D` call, found {len(deletes)}"
@@ -227,22 +242,32 @@ def check_every_rule_is_a_converging_drop(script: str) -> None:
         "the insert runs before the delete, so the rule it just inserted is the "
         "one the delete removes"
     )
-    loop = re.search(r"while\s+iptables -C", text)
+    loop = re.search(r"while\s+iptables (?:-w \d+ )?-C", text)
     assert loop, (
         "the `-C` probe is not a loop condition — a single delete leaves the "
         "duplicate copies an older unguarded version of this script accumulated"
     )
-    assert not re.search(r"if\s*!\s*iptables -C", text), (
+    assert not re.search(r"if\s*!\s*iptables (?:-w \d+ )?-C", text), (
         "the rule is added only when absent again, which cannot move a rule "
         "that is present in the wrong position (ISSUE-295)"
     )
+
+    # `-w` on every call. dockerd programs iptables at daemon start and this
+    # unit is ordered After=docker.service, so the xtables lock is genuinely
+    # contended. Without the wait a collision returns non-zero, `set -e` aborts,
+    # and since the retire pass runs first the host is left with no devbox rules
+    # at all — the boundary absent, the failure visible only in the journal.
+    for rule in checks + deletes + adds:
+        assert re.search(r"iptables -w \d+", rule), (
+            f"iptables call does not wait for the xtables lock: {rule!r}"
+        )
 
     for rule in checks + deletes + adds:
         flat = " ".join(rule.split())
         # The chain is the assertion this file was missing: four perfect DROP
         # rules appended to a chain nothing jumps to are inert, and every other
         # check here passes on them.
-        assert re.search(rf"iptables -[ACDI] {CHAIN}\b", flat), (
+        assert re.search(rf"iptables (?:-w \d+ )?-[ACDI] {CHAIN}\b", flat), (
             f"rule does not target the {CHAIN} chain: {flat!r}"
         )
         # Not `endswith`: the `-C` form carries `2>/dev/null; then` after the
@@ -277,7 +302,7 @@ def check_rules_are_inserted_at_the_front(script: str) -> None:
     adds = _ADD_RULE.findall(text)
     assert len(adds) == 1, f"expected one rule-adding call, found {len(adds)}"
     flat = " ".join(adds[0].split())
-    assert re.search(rf"iptables -I {CHAIN} 1\b", flat), (
+    assert re.search(rf"iptables (?:-w \d+ )?-I {CHAIN} 1\b", flat), (
         f"the boot script does not insert at the front of {CHAIN}: {flat!r} — "
         "a rule appended after a terminal rule already in the chain is never "
         "reached, and looks identical to a working one in `iptables -S`"
@@ -596,20 +621,61 @@ class TestIPv6CannotBeOpenedSilently:
     first, and this test is what says so.
     """
 
+    @staticmethod
+    def _enables_ipv6(text: str) -> bool:
+        """Every spelling of a truthy `enable_ipv6`, not just the bare one.
+
+        The first cut anchored on `^\\s*enable_ipv6:\\s*(true|yes)\\s*$`, which
+        misses `enable_ipv6: "true"`, `enable_ipv6: True  # comment`, and the
+        flow form `{enable_ipv6: true}` — three spellings that would each open
+        the gap while the test stayed green. Rendering and reading the key back
+        as YAML would be better still, but the compose template interpolates
+        `istota_home`, which is itself a template (see
+        `test_the_rules_scope_the_subnet_the_network_actually_uses` for the same
+        constraint), so this stays textual and errs toward matching.
+        """
+        return re.search(
+            r"enable_ipv6\s*:\s*[\"\']?\s*(true|yes|on|1)\b",
+            text,
+            re.I,
+        ) is not None
+
     def test_the_devbox_network_does_not_enable_ipv6(self):
-        text = COMPOSE_TEMPLATE.read_text()
-        assert not re.search(r"^\s*enable_ipv6:\s*(true|yes)\s*$", text, re.M | re.I), (
+        assert not self._enables_ipv6(COMPOSE_TEMPLATE.read_text()), (
             "the devbox network enables IPv6, and every rule in this file is "
             "IPv4-only — mirror them into ip6tables before turning this on"
         )
 
-    def test_the_assertion_can_fail(self):
-        """The negative control. A test asserting the *absence* of a line is
-        vacuous unless it has been shown to reject the line's presence."""
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "    enable_ipv6: true",
+            "    enable_ipv6: True",
+            '    enable_ipv6: "true"',
+            "    enable_ipv6: yes",
+            "    enable_ipv6: true  # for the VPN",
+            "    ipam: {enable_ipv6: true}",
+        ],
+        ids=["bare", "capitalised", "quoted", "yes", "trailing_comment", "flow"],
+    )
+    def test_the_assertion_can_fail(self, line):
+        """The negative control. A test asserting the *absence* of something is
+        vacuous unless shown to reject its presence — and this one has to reject
+        every way the line can be written, not the one way it was first tried.
+        """
         broken = COMPOSE_TEMPLATE.read_text().replace(
-            "    driver: bridge", "    driver: bridge\n    enable_ipv6: true", 1
+            "    driver: bridge", "    driver: bridge\n" + line, 1
         )
-        assert re.search(r"^\s*enable_ipv6:\s*(true|yes)\s*$", broken, re.M | re.I)
+        assert broken != COMPOSE_TEMPLATE.read_text(), "anchor stale"
+        assert self._enables_ipv6(broken), f"{line!r} slipped past the guard"
+
+    def test_it_does_not_fire_on_a_disabled_setting(self):
+        """The other half: matching too eagerly would make the guard unusable
+        the day someone documents the setting as off."""
+        text = COMPOSE_TEMPLATE.read_text().replace(
+            "    driver: bridge", "    driver: bridge\n    enable_ipv6: false", 1
+        )
+        assert not self._enables_ipv6(text)
 
 
 class TestTheUnitRunsAfterDocker:
@@ -695,9 +761,9 @@ class TestTheseAssertionsCanFail:
             # a chain holding it in the wrong position is left alone. This is
             # the ISSUE-295 regression, and it is invisible to every other
             # check here because the resulting rule spec is perfect.
-            (lambda s: re.sub(r"while iptables -C.*?done\n",
+            (lambda s: re.sub(r"while iptables (?:-w \d+ )?-C.*?done\n",
                               "", s, flags=re.S).replace(
-                                  'iptables -I DOCKER-USER 1',
+                                  'iptables -w 5 -I DOCKER-USER 1',
                                   'if ! iptables -C DOCKER-USER -s "$SUBNET" '
                                   '-d "$dest" -m comment --comment "$comment" '
                                   '-j DROP 2>/dev/null; then iptables -I '
@@ -705,7 +771,7 @@ class TestTheseAssertionsCanFail:
              check_every_rule_is_a_converging_drop),
             # The delete dropped — the insert then stacks a fresh copy on every
             # boot, which is the duplicate-growth bug the old guard prevented.
-            (lambda s: re.sub(r"while iptables -C.*?done\n", "", s, flags=re.S),
+            (lambda s: re.sub(r"while iptables (?:-w \d+ )?-C.*?done\n", "", s, flags=re.S),
              check_every_rule_is_a_converging_drop),
             # The subnet variable rendered empty.
             (lambda s: re.sub(r'^SUBNET="[^"]*"$', 'SUBNET=""', s, flags=re.M),
@@ -725,11 +791,11 @@ class TestTheseAssertionsCanFail:
              check_it_fails_loudly),
             # The ISSUE-295 regression itself: back to appending. Every other
             # check in this file passes on it, which is the whole point.
-            (lambda s: s.replace(f"iptables -I {CHAIN} 1", f"iptables -A {CHAIN}"),
+            (lambda s: re.sub(rf"iptables (-w \d+ )?-I {CHAIN} 1", rf"iptables \g<1>-A {CHAIN}", s),
              check_rules_are_inserted_at_the_front),
             # Inserting, but not at the front — position 5 sits behind whatever
             # dockerd or the operator seeded the chain with.
-            (lambda s: s.replace(f"iptables -I {CHAIN} 1", f"iptables -I {CHAIN} 5"),
+            (lambda s: re.sub(rf"(iptables (?:-w \d+ )?-I {CHAIN}) 1", r"\g<1> 5", s),
              check_rules_are_inserted_at_the_front),
         ],
         ids=[

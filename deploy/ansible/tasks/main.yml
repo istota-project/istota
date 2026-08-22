@@ -2145,6 +2145,66 @@
     - reload systemd
     - "restart istota-scheduler"
 
+- name: Refuse an unauthenticated or unreachable noVNC console
+  ansible.builtin.assert:
+    that:
+      # Plain string tests rather than an ipaddr filter: `ansible.utils` is used
+      # nowhere else in this role and nothing declares it as a dependency, so
+      # the filter would raise at deploy time and fail the run this guard exists
+      # to protect. It also drags in the netaddr package.
+      #
+      # `| default('', true) | string` because `match` is `re.match` with no
+      # coercion: a key written with no value parses to None and the test would
+      # raise TypeError instead of producing the message below. The whole point
+      # of a guard is that it fails *legibly*.
+      #
+      # Anchored at both ends. `^127\.` alone accepts "127.0.0.1:6080", which
+      # the template would then render into a four-part port spec.
+      - >-
+        (_vnc_bind is match('^127[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$'))
+        or (_vnc_bind in ['::1', '[::1]', 'localhost'])
+        or (_vnc_pass | length > 0)
+      # An empty bind address is not loopback — compose reads a missing host
+      # address as every interface — so it must never pass on the strength of a
+      # password alone being set.
+      - _vnc_bind | length > 0
+      # Reaching the console from off-host is what `istota_browser_vnc_external_url`
+      # means, and after this default flip that is no longer implied by anything.
+      # Without this arm the operator whose access actually breaks gets a green
+      # deploy and a dead link at the moment they need the console
+      # (`src/istota/skills/browse/skill.md` hands the user that URL).
+      - not (_vnc_external | length > 0 and _vnc_bind is match('^127[.]'))
+    fail_msg: |
+      The noVNC console configuration will not work as written.
+
+      istota_browser_vnc_bind_address = {{ istota_browser_vnc_bind_address | default('') }}
+      istota_browser_vnc_password     = {{ 'set' if istota_browser_vnc_password | default('') | length > 0 else 'empty' }}
+      istota_browser_vnc_external_url = {{ istota_browser_vnc_external_url | default('') }}
+
+      noVNC serves an interactive view of the browser holding your logged-in
+      profile, and docker/browser/entrypoint.sh passes -passwd only when the
+      password is non-empty. So one of these is true:
+
+        * the bind address is reachable from off the host and no password is
+          set — set istota_browser_vnc_password in your vault, or bind to
+          127.0.0.1 and reach the console over an SSH tunnel;
+
+        * the bind address is empty, which Docker reads as every interface —
+          set it to 127.0.0.1 or to the address you reach the console on;
+
+        * istota_browser_vnc_external_url is set while the console is bound to
+          loopback, so that URL cannot resolve to anything — set the bind
+          address to the interface that URL points at, or clear the URL.
+    success_msg: >-
+      noVNC on {{ istota_browser_vnc_bind_address }}
+      ({{ 'password set' if istota_browser_vnc_password | default('') | length > 0
+          else 'loopback only' }})
+  vars:
+    _vnc_bind: "{{ istota_browser_vnc_bind_address | default('', true) | string }}"
+    _vnc_pass: "{{ istota_browser_vnc_password | default('', true) | string }}"
+    _vnc_external: "{{ istota_browser_vnc_external_url | default('', true) | string }}"
+  when: istota_browser_enabled and not istota_web_only
+
 - name: Deploy browser container docker-compose
   template:
     src: docker-compose.browser.yml.j2
@@ -2628,6 +2688,12 @@
     comment: "istota-devbox: block cloud metadata"
     state: absent
   when: istota_devbox_enabled and not istota_web_only
+  # Matching the two teardown tasks below, which carry the same guard. This is
+  # cleanup of a rule an older version installed; a host where it cannot run —
+  # no DOCKER-USER chain yet, a transient lock — should still get its current
+  # rules applied by the tasks that follow. Failing the deploy over a leftover
+  # that blocks a strict subset of what replaced it would be the wrong trade.
+  failed_when: false
 
 - name: Block link-local and cloud metadata from the devbox subnet
   ansible.builtin.iptables:
