@@ -21,6 +21,7 @@ that failed for an unrelated-looking reason.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 
 from ..httpstub import FROM_CONTAINER, LOOPBACK, HttpStub
@@ -38,6 +39,21 @@ ARGS_CHUNK = 8
 # supposed to hit loudly rather than grind past.
 SCRIPTED_MODEL = "scripted-test-model"
 MAX_TURNS = 4
+
+# The credential a deployment tier binds this endpoint with. It authenticates
+# nothing — the daemon sends whatever the compose file hardcodes as
+# `ISTOTA_BRAIN_NATIVE_API_KEY`, and this endpoint answers regardless — but
+# `HttpStub.start` requires one for a non-loopback bind so the tier knows the
+# name of every value it has published on a shared network. Here rather than in
+# a fixture for the same reason `FORGE_TOKEN` is on the forge: a service's own
+# credential belongs to the service.
+ENDPOINT_CREDENTIAL = "unused-by-the-scripted-endpoint"
+
+# What a request refused by the barrier is answered with. 409 rather than 503:
+# an HTTP client that retries at all retries a 503, and a retry landing after
+# the barrier drops would take the turn the barrier exists to protect. A
+# conflict is not retried, so the refusal stays a refusal.
+BARRIER_STATUS = 409
 
 
 class ScriptedEndpoint(HttpStub):
@@ -57,6 +73,10 @@ class ScriptedEndpoint(HttpStub):
         self.requests: list[dict] = []
         self.turns: list[dict] = list(turns or [])
         self.served: int = 0
+        #: Requests turned away while the barrier was up. Read by `Stack.reset`
+        #: to tell "nothing arrived during the swap" from "something did".
+        self.refused: int = 0
+        self._barred: bool = False
 
     # -- the `Service` members --------------------------------------------
 
@@ -88,6 +108,8 @@ class ScriptedEndpoint(HttpStub):
         """
         super().reset()
         self.rescript([])
+        with self._lock:
+            self.refused = 0
 
     def describe(self) -> str:
         """Counts, not content, for `Stack.diagnostics`.
@@ -99,7 +121,11 @@ class ScriptedEndpoint(HttpStub):
         """
         with self._lock:
             served, scripted, seen = self.served, len(self.turns), len(self.requests)
-        return f"  {served} turn(s) served of {scripted} scripted, {seen} request(s) recorded"
+            refused = self.refused
+        return (
+            f"  {served} turn(s) served of {scripted} scripted, "
+            f"{seen} request(s) recorded, {refused} refused at the barrier"
+        )
 
     # -- addresses --------------------------------------------------------
     #
@@ -136,6 +162,36 @@ class ScriptedEndpoint(HttpStub):
             self.turns = list(turns)
             self.served = 0
             self.requests.clear()
+
+    @contextmanager
+    def barrier(self):
+        """Refuse every request for the duration, and count what was refused.
+
+        The barrier between quiescing and rescripting. The daemon runs its
+        pollers on their own threads for the whole session — Talk every 10
+        seconds, the tasks file every 30 — so one of them can create a task in
+        the window between "the task table reads quiescent" and "the next
+        test's script is installed", and that task then consumes turn 0. The
+        symptom is an assertion about work done on behalf of a different task,
+        or an exhausted-script error frame on a run that scripted plenty, and
+        both read as subsystem faults.
+
+        Re-checking quiescence after the swap catches the row that appeared;
+        this catches the request that arrives *during* it, which the re-check
+        structurally cannot see. Turning it into a loud refusal is the point:
+        a stolen turn is silent, and a task that failed saying "the harness was
+        swapping scripts" names itself.
+
+        `refused` is a counter rather than a flag so a caller can compare
+        across the block and tell one refusal from three.
+        """
+        with self._lock:
+            self._barred = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._barred = False
 
     def transcript(self) -> str:
         """Every message the endpoint was ever sent, as one string.
@@ -337,10 +393,30 @@ def serve_script(
                 return
 
             with endpoint._lock:
-                index = endpoint.served
-                endpoint.served += 1
-                endpoint.requests.append(body)
-                scripted = list(endpoint.turns)
+                if endpoint._barred:
+                    endpoint.refused += 1
+                    barred = True
+                else:
+                    barred = False
+                    index = endpoint.served
+                    endpoint.served += 1
+                    endpoint.requests.append(body)
+                    scripted = list(endpoint.turns)
+
+            if barred:
+                # Not recorded in `requests`: nothing was served, and a body in
+                # the transcript that never got a turn would make `served` and
+                # `len(requests)` disagree for every later reader.
+                self.send_error(
+                    BARRIER_STATUS,
+                    "the harness was swapping scripts",
+                    "A turn was requested while `Stack.reset` held the barrier "
+                    "between quiescing and rescripting. The task that made this "
+                    "request was created by one of the daemon's own pollers "
+                    "after the task table read quiescent; refusing it is what "
+                    "stops it consuming turn 0 of the next scenario.",
+                )
+                return
 
             model = body.get("model", "")
             if index < len(scripted):

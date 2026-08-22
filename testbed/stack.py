@@ -36,8 +36,11 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import services as service_support
 from .probe import Probe
 from .profiles import Profile
 from .services import Service
@@ -65,6 +68,48 @@ CONTAINER_CONFIG = "/data/config/config.toml"
 # for the same reason.
 IN_FLIGHT = frozenset({"pending", "locked", "running"})
 
+#: The interface a host-side stub binds so a container can reach it. Every stub
+#: bound here has to name a credential; `HttpStub.start` is what enforces that.
+PUBLIC_BIND = "0.0.0.0"
+
+READY_TIMEOUT = 120
+
+# Releasing a parked confirmation, through the daemon's own `cancel_task`
+# rather than a hand-written UPDATE — the harness should not be the second
+# implementation of a status transition.
+#
+# Why release at all: `db.py` blocks any foreground task in a room that holds a
+# `locked`, `running` or `pending_confirmation` task, and
+# `confirmation_timeout_minutes` is 120. Under a session-scoped stack a
+# scenario that parks one deliberately would wedge that room for every later
+# test in the profile. It is *not* in-flight — the quiesce loop excludes it on
+# purpose, because a suspended task will not move on its own and treating it as
+# busy would make every reset wait out its whole timeout.
+_RELEASE_CONFIRMATIONS = """
+import sys
+from istota import db
+with db.get_db(sys.argv[1]) as conn:
+    parked = [row[0] for row in conn.execute(
+        "SELECT id FROM tasks WHERE status = 'pending_confirmation'"
+    ).fetchall()]
+    for task_id in parked:
+        db.cancel_task(conn, task_id)
+print(len(parked))
+"""
+
+# Emptying a container-side scratch directory without removing it — the ones in
+# question are tmpfs mount points the compose file declares, so removing the
+# directory itself would take the mount with it.
+#
+# `find -mindepth 1 -maxdepth 1 -exec rm -rf` rather than `rm -rf "$d"/*`,
+# because a glob misses dotfiles and the thing most likely to be left behind in
+# a checkout is `.git`.
+_CLEAR_SCRATCH = (
+    'set -eu; for d in "$@"; do '
+    'if [ -d "$d" ]; then find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi; '
+    "done"
+)
+
 
 def docker_available() -> bool:
     """Whether a daemon is actually reachable, not merely whether the CLI exists.
@@ -88,6 +133,15 @@ def docker_available() -> bool:
 
 class ComposeError(RuntimeError):
     """A compose command failed, or a service never became ready."""
+
+
+class StackError(RuntimeError):
+    """A stack was asked for something and answered wrongly.
+
+    Distinct from `ComposeError`, which is compose itself failing. This one is
+    the daemon inside a running stack: a task that would not submit, a `doctor`
+    that printed something other than JSON, a render script that exited 2.
+    """
 
 
 def compose_args(
@@ -351,13 +405,109 @@ def sweep_projects(prefix: str) -> None:
             continue
 
 
-class StackError(RuntimeError):
-    """A stack was asked for something and answered wrongly.
+# -- rendering the lean shape's config -------------------------------------
 
-    Distinct from `ComposeError`, which is compose itself failing. This one is
-    the daemon inside a running stack: a task that would not submit, a `doctor`
-    that printed something other than JSON.
+#: What every lean profile's config is rendered from, before any service adds
+#: its own variables.
+#:
+#: **`NC_URL` and `APP_PASSWORD` are set, and empty.** Not `http://nextcloud`,
+#: which is what this used to be: `Config.storage_is_nextcloud` is
+#: `bool(nextcloud.url)`, so that rendered a config claiming Nextcloud-backed
+#: storage and pointed it at a hostname `docker-compose.test.yml` resolves to
+#: nothing. That is a third configuration — Nextcloud configured but absent —
+#: and nobody ships it. Empty makes the lean daemon local-backed, which *is* a
+#: shipped install shape and is truthful for every scenario the lean shape
+#: runs, none of which touches storage.
+#:
+#: Set-but-empty rather than unset, and the difference is load-bearing:
+#: `render-config.sh:68` preflights with `[ -n "${NC_URL+x}" ]`, which tests
+#: whether the variable is *set*. Unset fails the render with exit 2 and a
+#: "missing required input" message. `APP_PASSWORD` is required by the same
+#: preflight and takes the same treatment.
+#:
+#: One measured consequence: `/mnt/shared` is a tmpfs on the lean stack, so
+#: `runtime.mount_liveness` reported `ok` under the old value and reports
+#: `skip` under this one. Any assertion comparing a whole `doctor` payload has
+#: to become an assertion on named checks.
+DEFAULT_RENDER_ENV: dict[str, str] = {
+    "USER_NAME": "testuser",
+    "BOT_USER": "istota",
+    "USER_TIMEZONE": "UTC",
+    "NC_URL": "",
+    "APP_PASSWORD": "",
+}
+
+
+def render_config(
+    render_script: Path,
+    destination: Path,
+    services: dict[str, Service],
+    *,
+    extra: dict[str, str] | None = None,
+    base_env: dict[str, str] | None = None,
+) -> Path:
+    """Run the shipped render script on the host, into `destination`.
+
+    This is the property that makes the lean shortcut legitimate: the file the
+    stack boots from is produced by the same script the container would have
+    run, not by a fixture that approximates it.
+
+    Each service contributes its own `config_env()` — the variables that point
+    the daemon at it — merged over the base, with `extra` (the profile's own
+    `config`) last. Every one of those is a variable the shipped generator
+    already reads, so a block it would not have produced cannot be smuggled in
+    here, and the base environment is left with nothing subsystem-specific in
+    it.
+
+    Two services claiming the same variable is refused rather than resolved.
+    Silent last-wins would boot a stack from a config naming the wrong
+    service's port, and dict order is what would decide which — a diagnosis
+    that starts from "the daemon never reached the feeds stub" and ends
+    somewhere else entirely.
+
+    The environment is explicit and **not** `os.environ`. The generator reads
+    dozens of `ISTOTA_*` variables, so inheriting the developer's shell would
+    make the config a stack boots from depend on whatever happens to be
+    exported in the terminal that started the run — the same run passing on one
+    machine and failing on another, with nothing in the repo to explain it.
+    That is reproducibility, not test isolation: it does not stop the daemon
+    queueing work of its own.
     """
+    config_file = destination / "config.toml"
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "CONFIG_FILE": str(config_file),
+        **DEFAULT_RENDER_ENV,
+        **(base_env or {}),
+    }
+    claimed: dict[str, str] = {}
+    for name, service in services.items():
+        for variable, value in service.config_env().items():
+            if variable in claimed:
+                raise StackError(
+                    f"{name} and {claimed[variable]} both set {variable}; one "
+                    "of them would silently win and the stack would boot "
+                    "pointing at the other"
+                )
+            claimed[variable] = name
+            environment[variable] = value
+    environment.update(extra or {})
+
+    result = subprocess.run(
+        ["bash", str(render_script)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=environment,
+    )
+    if result.returncode != 0:
+        raise StackError(
+            f"render-config.sh exited {result.returncode}\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        )
+    if not config_file.exists():
+        raise StackError("render-config.sh reported success but wrote nothing")
+    return config_file
 
 
 class Stack:
@@ -469,41 +619,179 @@ class Stack:
             )
         return int(match.group(1))
 
+    def in_flight(self) -> list[dict]:
+        """Task rows in a status the daemon may still be working on."""
+        return [
+            task for task in self.probe.tasks() if task.get("status") in IN_FLIGHT
+        ]
+
+    def _quiesce(self, deadline: float) -> None:
+        busy: list = []
+        while time.monotonic() < deadline:
+            busy = self.in_flight()
+            if not busy:
+                return
+            time.sleep(POLL_INTERVAL)
+        raise TimeoutError(
+            "the daemon still had work in flight, so a scripted turn would "
+            "have gone to it rather than to this scenario: "
+            f"{[(task.get('id'), task.get('status')) for task in busy]}"
+        )
+
     def script(self, turns: list[dict], *, timeout: float = 60) -> None:
         """Install a script, once the daemon is not going to consume it.
 
         `rescript` rewinds the endpoint, and the endpoint routes by call order
-        alone — it has no notion of which task a request belongs to. The daemon
-        queues work of its own at startup (`submit` says as much), so a task
-        still in flight when a scenario rewinds would take turn 0, and the
-        submitted task would get turn 1. The symptom is either an assertion
-        about a merge request opened on behalf of a different task, or the
-        exhausted-script error frame that rewinding exists to prevent — and both
-        read as subsystem problems.
+        alone — it has no notion of which task a request belongs to. So a task
+        still in flight when a scenario rewinds takes turn 0, and the submitted
+        task gets turn 1. The symptom is either an assertion about a merge
+        request opened on behalf of a different task, or the exhausted-script
+        error frame that rewinding exists to prevent — and both read as
+        subsystem problems.
 
-        So: wait for the task table to hold nothing non-terminal, then rewind.
-        `Probe.wait_for_task` cannot express this — it waits for *a* task to
-        reach a status, and what is wanted here is the absence of any that have
-        not.
+        Waiting for the table to go quiescent is most of the answer and was all
+        of it while every test got its own stack. It is not all of it under a
+        session-scoped pool, because the daemon's pollers run on their own
+        threads for the whole session — Talk every 10 seconds, the tasks file
+        every 30, eleven of them in total, all seeded to fire at boot. Any of
+        them can create a task in the window between "the table read quiescent"
+        and "the script is installed".
+
+        Two mechanisms close that, and they cover different halves. The
+        endpoint's `barrier()` refuses a request that arrives *during* the swap,
+        which turns a stolen turn into a task that failed saying why. Re-reading
+        the table afterwards catches the row that appeared but has not called
+        yet, which the barrier structurally cannot see. Either one firing means
+        going round again, and the loop is bounded by the same deadline as the
+        quiesce so a busy daemon fails with a list of ids rather than hanging.
         """
         deadline = time.monotonic() + timeout
-        busy: list = []
-        while time.monotonic() < deadline:
-            busy = [
-                task
-                for task in self.probe.tasks()
-                if task.get("status") in IN_FLIGHT
-            ]
-            if not busy:
+        while True:
+            self._quiesce(deadline)
+            before = self.endpoint.refused
+            with self.endpoint.barrier():
                 self.endpoint.rescript(turns)
+            stolen = self.endpoint.refused - before
+            busy = self.in_flight()
+            if not stolen and not busy:
                 return
-            time.sleep(POLL_INTERVAL)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "a task kept appearing between quiescing and rescripting, "
+                    f"so this scenario's script could not be installed cleanly "
+                    f"({stolen} request(s) refused at the barrier, still in "
+                    f"flight: {[(t.get('id'), t.get('status')) for t in busy]})"
+                )
 
-        raise TimeoutError(
-            "the daemon still had work in flight after "
-            f"{timeout}s, so a scripted turn would have gone to it rather than "
-            f"to this scenario: {[(t.get('id'), t.get('status')) for t in busy]}"
+    def release_parked_confirmations(self) -> int:
+        """Cancel every `pending_confirmation` task, and say how many.
+
+        A parked confirmation is not in flight — it is suspended waiting for a
+        human — but it wedges the room it sits in: `db.py` refuses any
+        foreground task in a room already holding one, for the two hours
+        `confirmation_timeout_minutes` allows. Under a session-scoped stack the
+        next test in that room would fail for a reason that has nothing to do
+        with it.
+
+        Through the daemon's own `cancel_task` inside the container, rather
+        than a hand-written UPDATE from the host: the harness should not be a
+        second implementation of a status transition, and the DB lives on a
+        named volume with no host path anyway.
+
+        Guarded by a read first, and the guard is worth more than it looks.
+        This exec is `uv run python -c` importing `istota.db`, which is one to
+        two seconds — every test, on a tier whose whole point is that the
+        per-test cost is now small. A `Probe` query answering "is there one" is
+        tens of milliseconds, and on every run but the mail scenarios the
+        answer is no.
+        """
+        if not self.probe.tasks(status="pending_confirmation"):
+            return 0
+        result = self.exec(
+            ["uv", "run", "python", "-c", _RELEASE_CONFIRMATIONS, self.probe.db_path],
+            timeout=120,
         )
+        if result.returncode != 0:
+            raise StackError(
+                f"releasing parked confirmations exited {result.returncode}\n"
+                f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            )
+        return int((result.stdout or "0").strip().splitlines()[-1])
+
+    def container_state_paths(self) -> list[str]:
+        """Container-side directories the profile's services say are per-test.
+
+        Read off the services rather than off the profile, so a path cannot
+        drift from the `config_env()` variable that pointed the daemon at it.
+        """
+        paths: list[str] = []
+        for service in self.services.values():
+            for path in getattr(service, "container_state_paths", ()):
+                if not path.startswith("/") or path.count("/") < 2:
+                    raise StackError(
+                        f"{service.name} declares container state path {path!r}; "
+                        "it must be absolute and below a top-level directory, "
+                        "because this is emptied with rm -rf inside a container"
+                    )
+                paths.append(path)
+        return paths
+
+    def clear_container_state(self) -> None:
+        """Empty what the profile's services declared, inside the container.
+
+        The half of "reset" that lives on the far side of the process boundary.
+        A host-side stub can clear its own recorded calls and rebuild its own
+        repositories; it cannot reach the *checkout* the daemon made, and that
+        checkout is state too. The forge is the worked example and the reason
+        this exists: with `/data/repos` left alone, the second scenario's
+        `git clone <url> project` fails on a directory that already exists,
+        never reaches the listener, and reports itself as a forge that was
+        never called.
+        """
+        paths = self.container_state_paths()
+        if not paths:
+            return
+        result = self.exec(["sh", "-c", _CLEAR_SCRATCH, "sh", *paths], timeout=60)
+        if result.returncode != 0:
+            raise StackError(
+                f"clearing {paths} exited {result.returncode}\n"
+                f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            )
+
+    def reset(self, turns: list[dict] | None = None, *, timeout: float = 60) -> dict:
+        """Put the stack back in the state a fresh test expects, and watermark it.
+
+        Called before each test rather than after, so a failed test's state is
+        still there to inspect and the next test is still clean.
+
+        The order is forced. Parked confirmations go first, because releasing
+        one produces a `cancelled` row and nothing else — it cannot make the
+        table busy, and leaving it until after the quiesce would leave a wedged
+        room for the test about to run. Then `script`, which is the quiesce, the
+        barrier and the rewind. Then every *other* service, once nothing is
+        using them — the model is excluded because `script` has just installed
+        this test's turns and `ScriptedEndpoint.reset()` would throw them away
+        — and alongside them the container-side directories those services
+        declared, which no host-side `reset()` can reach. Then the watermark,
+        last, so it is taken after every row this reset itself produced.
+
+        It deliberately does **not** truncate `tasks` or any other table. The
+        daemon is running, and deleting rows underneath its dispatcher is a
+        race. Two exceptions, both narrow and both forced, and both above: the
+        parked confirmation, and whatever a service's own `reset()` restores.
+
+        The returned watermark is what negative assertions scope to — see
+        `Probe.rows_above`, which will not let one be written with the
+        watermark alone.
+        """
+        self.release_parked_confirmations()
+        self.script(list(turns or []), timeout=timeout)
+        for name, service in self.services.items():
+            if name == "model":
+                continue
+            service.reset()
+        self.clear_container_state()
+        return self.probe.watermark()
 
     def restart(self, service: str = ISTOTA_SERVICE) -> None:
         """Restart one service in place, keeping its volumes.
@@ -577,3 +865,220 @@ class Stack:
             f"--- services ---\n{seen}\n"
             f"--- daemon logs ---\n{self.logs(150)}"
         )
+
+
+@dataclass(frozen=True)
+class LeanShape:
+    """Everything booting a lean stack needs that the profile does not carry.
+
+    One object rather than six constructor arguments on `StackPool`, because
+    all six are properties of the *shape* — which compose file, which generator,
+    which image — and the full shape in the next stage brings a different six.
+    """
+
+    compose_file: Path
+    """`docker/docker-compose.test.yml`."""
+
+    render_script: Path
+    """`docker/istota/render-config.sh`, run on the host."""
+
+    image: str
+    """The tag `up --build` writes, shared by every stack in the session."""
+
+    prebuilt_overlay: Path
+    """Applied when a profile names its own `image`, so nothing is rebuilt."""
+
+    ready_timeout: int = READY_TIMEOUT
+
+    render_env: dict[str, str] = field(default_factory=dict)
+    """Merged over `DEFAULT_RENDER_ENV`, for a caller with a house value."""
+
+
+class StackPool:
+    """Lazily-started stacks, keyed by profile name, for the length of a session.
+
+    The arithmetic is the whole argument. A per-test `up` / `down --volumes` is
+    about twelve seconds on the lean shape and minutes on the full one, and six
+    subsystems on that model produces a tier nobody runs — which is the same as
+    no tier. One boot per *profile* amortizes it across every test that declares
+    the same one, and `Stack.reset` is what makes the sharing safe.
+
+    The objection the per-test fixture was written against dissolves rather than
+    being overridden: it held that the endpoint's `base_url` is baked into the
+    rendered config, so a shared stack would need reconfiguring anyway. That is
+    only true because the endpoint was started immediately before the render.
+    Here the services start once per profile, *before* that profile's config is
+    rendered, and live as long as the stack — so the address baked in stays
+    valid, and `rescript` handles the per-test script, which is what it was
+    written for.
+
+    Two things stay outside the sharing. A test needing a different image is a
+    different profile, because the image is a compose-level property. And a test
+    asserting on start-up behaviour needs its own stack by construction; that is
+    `fresh=True`, and the cost is visible at the point that asks for it.
+    """
+
+    def __init__(
+        self,
+        *,
+        workdir: Path,
+        lean: LeanShape,
+        platform: str = "",
+        project_prefix: str = "istota-testbed-",
+    ) -> None:
+        self.workdir = workdir
+        self.lean = lean
+        self.platform = platform
+        self.project_prefix = project_prefix
+        self._cached: dict[str, Stack] = {}
+        self._private: list[Stack] = []
+        self._booted = 0
+
+    # -- the pool ---------------------------------------------------------
+
+    def get(self, profile: Profile, *, fresh: bool = False) -> Stack:
+        """The stack for `profile`, booting one if none is running.
+
+        Keyed by `profile.name`, which is why `profiles.py` guards against two
+        profiles sharing a name: the second would silently get the first's
+        services.
+
+        `fresh` bypasses the cache in both directions — it neither adopts a
+        running stack nor leaves this one behind for the next caller. Hand it
+        back to `release()` when the test is done.
+        """
+        if not fresh:
+            running = self._cached.get(profile.name)
+            if running is not None:
+                return running
+        stack = self._boot(profile)
+        if fresh:
+            self._private.append(stack)
+        else:
+            self._cached[profile.name] = stack
+        return stack
+
+    def release(self, stack: Stack) -> None:
+        """Tear down a `fresh=True` stack. A cached one is ignored."""
+        if stack in self._private:
+            self._private.remove(stack)
+            self._teardown(stack)
+
+    def close_all(self) -> None:
+        """Tear down every stack this pool started.
+
+        Private stacks first, then cached ones, and each in its own `try` — a
+        teardown that raised partway through would leave the rest running with
+        their named volumes, which is the failure the session sweep exists to
+        clean up after and should not have to.
+        """
+        for stack in list(self._private) + list(self._cached.values()):
+            try:
+                self._teardown(stack)
+            except Exception as exc:  # pragma: no cover - teardown is best effort
+                logger.warning("tearing down %s raised %s", stack.profile.name, exc)
+        self._private.clear()
+        self._cached.clear()
+
+    # -- booting ----------------------------------------------------------
+
+    def _boot(self, profile: Profile) -> Stack:
+        """Start the profile's services, render, bring the stack up, wait ready.
+
+        The order is not arrangeable: the services have to be listening before
+        the config that names their ports is rendered, and the config has to
+        exist before the container that reads it starts.
+        """
+        if profile.shape != "lean":
+            raise StackError(
+                f"profile {profile.name!r} declares shape {profile.shape!r}; "
+                "only the lean shape is implemented"
+            )
+
+        self._booted += 1
+        scratch = self.workdir / f"{profile.name}-{self._booted}"
+        config_dir = scratch / "config"
+        config_dir.mkdir(parents=True)
+
+        services: dict[str, Service] = {}
+        args: list[str] = []
+        try:
+            for name in profile.services:
+                # Every host-side stub binds all interfaces, because the daemon
+                # that reaches it lives in a container. `HttpStub.start` is what
+                # makes each of them name the credential it is publishing.
+                services[name] = service_support.build(
+                    name, scratch=scratch, host=PUBLIC_BIND
+                )
+            args = self._compose_args(profile, scratch, config_dir)
+            render_config(
+                self.lean.render_script,
+                config_dir,
+                services,
+                extra=profile.config,
+                base_env=self.lean.render_env,
+            )
+            up(args, platform=self.platform)
+            wait_ready(args, ISTOTA_SERVICE, timeout=self.lean.ready_timeout)
+        except BaseException:
+            # Both halves, and in this order. A stack that came up before
+            # `wait_ready` timed out is holding a named volume; a stub that
+            # bound before a later one raised is holding a publicly-bound
+            # socket and a live thread for the rest of the session.
+            if args:
+                down(args, volumes=True)
+            for service in services.values():
+                try:
+                    service.close()
+                except Exception:  # pragma: no cover - cleanup is best effort
+                    logger.debug("closing a service during a failed boot raised")
+            raise
+
+        return Stack(
+            profile=profile, args=args, services=services, config_dir=config_dir
+        )
+
+    def _compose_args(
+        self, profile: Profile, scratch: Path, config_dir: Path
+    ) -> list[str]:
+        """The compose prefix, and the env-file everything in it rides in.
+
+        Compose interpolates the compose file on *every* subcommand, so a
+        variable supplied only to `up` makes `ps`, `exec`, `logs` and `down`
+        fail during interpolation, before they touch a container. `down`
+        swallows its failures, so the visible symptom was a stack that survived
+        the run holding a named volume while `wait_ready` sat out its whole
+        timeout reading "no container yet". An `--env-file` rides in the
+        argument list, so every subcommand gets it and no caller has to
+        remember.
+        """
+        # A fresh project name per stack, so one left behind by an interrupted
+        # run is never adopted (and then torn down) by the next session. The
+        # session-start sweep is what reclaims those.
+        project = f"{self.project_prefix}{uuid.uuid4().hex[:8]}"
+        env_file = scratch / "compose.env"
+        lines = [
+            f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
+            f"ISTOTA_TEST_LEAN_IMAGE={self.lean.image}",
+        ]
+        overlays = list(profile.compose_overlays)
+        if profile.image:
+            lines.append(f"ISTOTA_TEST_IMAGE={profile.image}")
+            overlays.append(self.lean.prebuilt_overlay)
+        env_file.write_text("\n".join(lines) + "\n")
+        return compose_args(
+            self.lean.compose_file,
+            project=project,
+            env_file=env_file,
+            overlays=overlays,
+        )
+
+    def _teardown(self, stack: Stack) -> None:
+        # Volumes too: the DB is a named volume, and leaving it behind would
+        # make the next session's assertions depend on this one's rows.
+        down(stack.args, volumes=True)
+        for service in stack.services.values():
+            try:
+                service.close()
+            except Exception:  # pragma: no cover - teardown is best effort
+                logger.debug("closing a service during teardown raised")

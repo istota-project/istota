@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
 from urllib.parse import parse_qs
 
@@ -148,3 +149,55 @@ REGISTRY: dict[str, Callable[..., Service]] = {
     "model": _model_service,
     "gitlab": _gitlab_service,
 }
+
+
+def build(name: str, *, scratch: Path, host: str) -> Service:
+    """Construct one registered service the way a *stack* needs it.
+
+    A separate function rather than a uniform `REGISTRY` signature, because the
+    factories deliberately keep their own. `serve_script(turns, ...)` and
+    `gitlab.serve(repo_root, ...)` are the API a unit test and an external
+    driver use, and — the part that would be lost — they are what
+    `tests/test_testbed_services.py` drives when it proves every registered
+    service refuses a public bind with no credential. Flattening them into one
+    "give me a service" signature that always supplies a credential would make
+    that guard unwritable.
+
+    So this is the adapter: the two things a pool has (a scratch directory and
+    the interface to bind) turned into what each service's own factory takes,
+    including the credential each one publishes. It is an explicit branch per
+    service rather than a table of partials, because each branch has something
+    to say — the forge needs its repository seeded before a scenario can clone
+    it, and a table would have hidden that in a lambda.
+    """
+    if name not in REGISTRY:
+        raise KeyError(
+            f"no service named {name!r}; the registry holds {sorted(REGISTRY)}"
+        )
+
+    if name == "model":
+        from . import model_endpoint
+
+        # No turns: `Stack.reset` installs the real script before each test,
+        # and a service constructed with one would let a poller's task consume
+        # it in the window before the first reset.
+        return model_endpoint.serve_script(
+            [], host=host, credential=model_endpoint.ENDPOINT_CREDENTIAL
+        )
+
+    if name == "gitlab":
+        from . import gitlab
+
+        stub = gitlab.serve(
+            scratch / "gitlab", host=host, token=gitlab.FORGE_TOKEN
+        )
+        # Seeded here rather than by the caller: a forge with no repository is
+        # not a thing any scenario in this tier can use, and `reset()` rebuilds
+        # exactly what `seed_repo` registered — so a stack whose repo was
+        # seeded by the test would lose it at the first reset.
+        stub.seed_repo(stub.project)
+        return stub
+
+    raise KeyError(  # pragma: no cover - unreachable while the two agree
+        f"{name!r} is registered but `build` does not know how to construct it"
+    )

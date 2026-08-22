@@ -37,6 +37,8 @@ import json
 import secrets
 import shutil
 import subprocess
+import threading
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -47,6 +49,13 @@ from . import ServiceCall
 # `git http-backend` streams a packfile; a clone of a seeded repo is tiny, but
 # the bound keeps a wedged child from holding a handler thread for the session.
 GIT_TIMEOUT = 120
+
+# How long `reset()` waits for an in-flight git request to finish before it
+# rebuilds the repositories underneath it. Short: `Stack.reset` has already
+# waited for the task table to go quiescent, so anything still running here is
+# a subprocess outliving the task that spawned it, and waiting minutes for one
+# would trade a rare corrupt reset for a routine hang.
+GIT_IDLE_TIMEOUT = 10
 
 # Whatever the stub answers for "who am I". glab asks before most write verbs.
 STUB_USER = {"id": 1, "username": "istota-test", "name": "Istota Test"}
@@ -63,6 +72,11 @@ STUB_USER = {"id": 1, "username": "istota-test", "name": "Istota Test"}
 # `ServiceCall.auth`.
 FORGE_TOKEN = "forge-token-for-the-smoke-tier"
 FORGE_PROJECT = "istota-test/smoke-project"
+
+# Where the daemon checks repositories out, inside the container. A tmpfs that
+# `docker-compose.test.yml` already declares, which the developer skill binds
+# read-write into the sandbox.
+CONTAINER_REPOS_DIR = "/data/repos"
 
 
 def _auth_shape(headers) -> str:
@@ -117,6 +131,18 @@ class GitLabService(HttpStub):
 
     name = "gitlab"
 
+    #: Container-side directories this service's scenarios write into, cleared
+    #: by `Stack.reset`. `/data/repos` is what `config_env` points
+    #: `ISTOTA_DEVELOPER_REPOS_DIR` at, and it is the checkout the model clones
+    #: into — so under a session-scoped stack the second scenario's
+    #: `git clone <url> project` fails with "destination path already exists",
+    #: never reaches the listener, and reports itself as a forge that was never
+    #: called. Found by running the tier, not by reading it.
+    #:
+    #: Declared on the service rather than on the profile so it cannot drift
+    #: from the variable in `config_env` that put the daemon there.
+    container_state_paths: tuple[str, ...] = (CONTAINER_REPOS_DIR,)
+
     def __init__(
         self,
         repo_root: Path,
@@ -137,6 +163,13 @@ class GitLabService(HttpStub):
         self.git_calls: list[ServiceCall] = []
         # Which repos `seed_repo` created, so `reset` can rebuild exactly those.
         self.seeded: list[str] = []
+        # In-flight git-over-HTTP requests, so `reset` does not rmtree a
+        # repository out from under a running `git http-backend`. Layered over
+        # the stub's own lock rather than a second one: a handler already takes
+        # that lock to record a call, and two locks in one handler is how an
+        # ordering bug gets made.
+        self._git_in_flight = 0
+        self._git_idle = threading.Condition(self._lock)
 
     @property
     def expect_git_password(self) -> str | None:
@@ -196,12 +229,31 @@ class GitLabService(HttpStub):
             # A tmpfs the compose file already declares. The developer skill
             # binds it read-write into the sandbox, which is where the scenarios
             # clone.
-            "ISTOTA_DEVELOPER_REPOS_DIR": "/data/repos",
+            "ISTOTA_DEVELOPER_REPOS_DIR": CONTAINER_REPOS_DIR,
             "ISTOTA_DEVELOPER_GITLAB_URL": self.container_url,
             "ISTOTA_DEVELOPER_GITLAB_TOKEN": self.token,
             "ISTOTA_DEVELOPER_GITLAB_USERNAME": STUB_USER["username"],
             "ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE": self.project.split("/")[0],
         }
+
+    @contextmanager
+    def serving_git(self):
+        """Mark a git-over-HTTP request in flight, for `reset`'s benefit."""
+        with self._git_idle:
+            self._git_in_flight += 1
+        try:
+            yield
+        finally:
+            with self._git_idle:
+                self._git_in_flight -= 1
+                self._git_idle.notify_all()
+
+    def await_git_idle(self, timeout: float = GIT_IDLE_TIMEOUT) -> bool:
+        """Block until no git request is being served. False on timeout."""
+        with self._git_idle:
+            return self._git_idle.wait_for(
+                lambda: self._git_in_flight == 0, timeout=timeout
+            )
 
     def reset(self) -> None:
         """Forget the calls, and rebuild the seeded repositories.
@@ -211,7 +263,24 @@ class GitLabService(HttpStub):
         test's push. `shutil.rmtree` then `seed_repo` is total in a way that
         deleting refs would not be — a scenario is free to create a tag, a note
         or a second branch, and none of that has to be enumerated here.
+
+        Under a session-scoped pool this runs against a *live* listener, which
+        it did not when every test got its own stack. `Stack.reset` quiesces the
+        daemon first, and the daemon is the only client this stub has, so in
+        practice nothing is cloning by the time we get here. "In practice" is
+        not "never": a `git` subprocess can outlive the task that spawned it,
+        and rmtree under a running `http-backend` would answer a clone with a
+        truncated packfile — a corrupt-repository error in whichever scenario
+        ran next, naming nothing. So the wait is bounded and its expiry is
+        reported rather than swallowed.
         """
+        if not self.await_git_idle():
+            raise RuntimeError(
+                f"{type(self).__name__}.reset() waited {GIT_IDLE_TIMEOUT}s for "
+                f"{self._git_in_flight} in-flight git request(s) to finish and "
+                "they did not. Rebuilding the repositories now would corrupt "
+                "whatever is reading them."
+            )
         super().reset()
         with self._lock:
             self.git_calls.clear()
@@ -388,7 +457,10 @@ class _Handler(BaseHTTPRequestHandler):
         if split.path.startswith("/api/"):
             self._rest(method, split.path, parse_qs(split.query))
         else:
-            self._git_http(method, split.path, split.query)
+            # Counted, so `reset()` can wait rather than rmtree the repository
+            # this request is reading.
+            with self.stub.serving_git():
+                self._git_http(method, split.path, split.query)
 
     # -- REST -------------------------------------------------------------
 

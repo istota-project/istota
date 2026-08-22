@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import re
 import socket
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import pytest
 
-from testbed import profiles
+from testbed import profiles, services
 from testbed.httpstub import LOOPBACK, HttpStub
 from testbed.services import REGISTRY, ServiceCall, gitlab
 from testbed.services.model_endpoint import serve_script
@@ -501,3 +502,196 @@ def _push_a_branch(forge, tmp_path: Path) -> None:
                    capture_output=True, timeout=60, env=env)
     subprocess.run(["git", "-C", str(work), "push", "origin", "extra"], check=True,
                    capture_output=True, timeout=60, env=env)
+
+
+class TestTheServiceBuilder:
+    """`services.build` is what a `StackPool` calls; `REGISTRY` is not.
+
+    The two are kept apart deliberately — see `build`'s docstring — so the pair
+    needs a guard that they stay in step.
+    """
+
+    def test_it_covers_every_registered_service(self, tmp_path):
+        for name in REGISTRY:
+            service = services.build(name, scratch=tmp_path, host=LOOPBACK)
+            try:
+                assert service.name == name
+            finally:
+                service.close()
+
+    def test_an_unregistered_name_says_what_exists(self, tmp_path):
+        with pytest.raises(KeyError, match="gitlab"):
+            services.build("nextcloud", scratch=tmp_path, host=LOOPBACK)
+
+    def test_the_forge_arrives_with_its_repository_already_seeded(self, tmp_path):
+        """A stack's forge has to be clonable before the first scenario runs.
+
+        And it has to be seeded *by* `build`, not by the caller: `reset()`
+        rebuilds exactly what `seed_repo` registered, so a repository the test
+        seeded itself would vanish at the first reset.
+        """
+        forge = services.build("gitlab", scratch=tmp_path, host=LOOPBACK)
+        try:
+            assert forge.seeded == [forge.project]
+            assert "main" in forge.branches(forge.project)
+        finally:
+            forge.close()
+
+    def test_the_model_arrives_with_no_script(self, tmp_path):
+        """`Stack.reset` installs the real turns before every test.
+
+        A service constructed with a script would let one of the daemon's own
+        pollers consume it in the window before that first reset.
+        """
+        endpoint = services.build("model", scratch=tmp_path, host=LOOPBACK)
+        try:
+            assert endpoint.turns == []
+        finally:
+            endpoint.close()
+
+    def test_a_public_bind_carries_the_credential_each_service_publishes(
+        self, tmp_path
+    ):
+        """The pool binds all interfaces, so `build` has to satisfy the rule.
+
+        `HttpStub.start` refuses a non-loopback bind with no credential, and a
+        `build` that forgot one would fail at the first `StackPool.get` — after
+        an image build, inside a session fixture. Cheaper to find here.
+        """
+        for name in REGISTRY:
+            service = services.build(name, scratch=tmp_path / name, host="0.0.0.0")
+            try:
+                assert service.credential, name
+            finally:
+                service.close()
+
+
+class TestTheProfileLookup:
+    def test_a_declared_name_resolves(self):
+        assert profiles.by_name("forge") is profiles.FORGE
+
+    def test_a_typo_names_the_profiles_that_exist(self):
+        """The message is the point: this is raised inside a session fixture,
+        where pytest reports it as an error on every test in the profile."""
+        with pytest.raises(KeyError, match="no-forge"):
+            profiles.by_name("noforge")
+
+
+class TestTheScriptedEndpointsBarrier:
+    """The barrier between quiescing and rescripting.
+
+    The daemon's pollers run on their own threads all session, so one can
+    create a task in the window between "the task table read quiescent" and
+    "the next test's script is installed" — and that task then consumes turn 0.
+    Refusing loudly is what turns a stolen turn into a task that failed saying
+    why.
+    """
+
+    def test_a_request_during_the_swap_is_refused_and_counted(self):
+        endpoint = serve_script([{"text": "hello"}])
+        try:
+            with endpoint.barrier():
+                with pytest.raises(urllib.error.HTTPError) as raised:
+                    _post_completion(endpoint)
+                assert raised.value.code == 409
+            assert endpoint.refused == 1
+            # And nothing was served, so the next request still gets turn 0.
+            assert endpoint.served == 0
+            assert endpoint.requests == []
+        finally:
+            endpoint.close()
+
+    def test_the_barrier_drops_again_afterwards(self):
+        endpoint = serve_script([{"text": "hello"}])
+        try:
+            with endpoint.barrier():
+                pass
+            _post_completion(endpoint)
+            # `served`, not the bytes: `TEXT_CHUNK` is 4, so "hello" arrives as
+            # two deltas and never appears contiguously in the stream.
+            assert endpoint.served == 1
+            assert endpoint.refused == 0
+        finally:
+            endpoint.close()
+
+    def test_it_drops_even_when_the_body_raises(self):
+        """`rescript` can raise; a barrier left up serves nothing for the rest
+        of the session, and every later test times out with no explanation."""
+        endpoint = serve_script([{"text": "hello"}])
+        try:
+            with pytest.raises(RuntimeError):
+                with endpoint.barrier():
+                    raise RuntimeError("the swap failed")
+            _post_completion(endpoint)
+            assert endpoint.served == 1
+        finally:
+            endpoint.close()
+
+
+def _post_completion(endpoint) -> bytes:
+    request = urllib.request.Request(
+        f"{endpoint.url}/chat/completions",
+        data=b'{"model": "m", "messages": []}',
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.read()
+
+
+class TestTheForgeWaitsForGitBeforeRebuilding:
+    """`reset()` rmtrees the bare repositories and re-seeds them.
+
+    Under a session-scoped pool that runs against a *live* listener.
+    `Stack.reset` quiesces the daemon first and the daemon is this stub's only
+    client, so in practice nothing is cloning — but a `git` subprocess can
+    outlive the task that spawned it, and rmtree under a running `http-backend`
+    answers a clone with a truncated packfile. The wait is what makes that a
+    bounded refusal rather than a corrupt repository in whichever scenario runs
+    next.
+    """
+
+    def test_a_reset_waits_for_an_in_flight_git_request(self, tmp_path):
+        forge = gitlab.serve(tmp_path / "repos")
+        try:
+            forge.seed_repo("group/project")
+            released = threading.Event()
+            entered = threading.Event()
+
+            def hold():
+                with forge.serving_git():
+                    entered.set()
+                    released.wait(timeout=10)
+
+            holder = threading.Thread(target=hold)
+            holder.start()
+            entered.wait(timeout=10)
+
+            assert forge.await_git_idle(timeout=0.2) is False
+            released.set()
+            holder.join(timeout=10)
+            assert forge.await_git_idle(timeout=5) is True
+        finally:
+            forge.close()
+
+    def test_a_reset_refuses_rather_than_rebuilding_underneath_a_clone(
+        self, tmp_path, monkeypatch
+    ):
+        """The failure the wait exists to prevent, made to happen.
+
+        Asserted on the refusal rather than on a corrupt repository, because a
+        corrupt repository is precisely the outcome that would be diagnosed as
+        something else.
+        """
+        forge = gitlab.serve(tmp_path / "repos")
+        try:
+            forge.seed_repo("group/project")
+            monkeypatch.setattr(gitlab, "GIT_IDLE_TIMEOUT", 0.1)
+            with forge.serving_git():
+                with pytest.raises(RuntimeError, match="in-flight git request"):
+                    forge.reset()
+            # And once it is idle again, the rebuild happens as usual.
+            forge.reset()
+            assert forge.branches("group/project") == ["main"]
+        finally:
+            forge.close()

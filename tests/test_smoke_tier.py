@@ -19,6 +19,7 @@ a WHERE clause ignoring its filters and therefore matches every row.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sqlite3
@@ -28,8 +29,10 @@ from pathlib import Path
 
 import pytest
 
+from testbed import profiles
 from testbed import stack as compose_support
-from testbed.probe import Probe
+from testbed.probe import WATERMARK_TABLES, Probe
+from testbed.services import gitlab
 
 REPO = Path(__file__).resolve().parents[1]
 PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
@@ -808,3 +811,377 @@ class TestProbe:
 
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             probe.query("DELETE FROM tasks")
+
+
+class TestTheWatermark:
+    """The primitive a negative assertion needs once a stack outlives a test.
+
+    Under a session-scoped pool `sent_emails`, `processed_emails`, `messages`
+    and `task_events` are never reset, so "nothing was sent" against an empty
+    table is reading the previous test's rows the moment one scenario sends
+    anything.
+    """
+
+    def test_it_reports_the_highest_id_per_table(self, framework_db):
+        mark = Probe(local=framework_db).watermark()
+
+        assert set(mark) == set(WATERMARK_TABLES)
+        assert mark["tasks"] == 3
+
+    def test_an_empty_table_reads_zero_rather_than_none(self, framework_db):
+        """So `id > mark[...]` is always a valid comparison and no caller has
+        to write the null case."""
+        assert Probe(local=framework_db).watermark()["sent_emails"] == 0
+
+    def test_rows_above_sees_only_what_came_after_the_mark(self, framework_db):
+        probe = Probe(local=framework_db)
+        mark = probe.watermark()
+        _insert_task(framework_db, "cli", "dave", "after the mark")
+
+        assert [row["prompt"] for row in probe.rows_above(
+            "tasks", mark, user_id="dave"
+        )] == ["after the mark"]
+        # And the rows that were already there stay invisible, which is the
+        # half a bare `SELECT * WHERE user_id = ?` would get wrong.
+        assert probe.rows_above("tasks", mark, user_id="alice") == []
+
+    def test_the_column_filter_is_required(self, framework_db):
+        """A watermark alone still matches rows one of the daemon's eleven
+        pollers made during the test, so an assertion written that way fails
+        for reasons unrelated to what it is about — and gets called flake."""
+        probe = Probe(local=framework_db)
+
+        with pytest.raises(ValueError, match="column filter"):
+            probe.rows_above("tasks", probe.watermark())
+
+    def test_a_table_outside_the_list_is_refused(self, framework_db):
+        probe = Probe(local=framework_db)
+
+        with pytest.raises(ValueError, match="not watermarked"):
+            probe.rows_above("secrets", {}, user_id="alice")
+
+    def test_a_column_that_is_not_an_identifier_is_refused(self, framework_db):
+        probe = Probe(local=framework_db)
+
+        with pytest.raises(ValueError, match="column name"):
+            probe.rows_above("tasks", {}, **{"1 = 1 --": "x"})
+
+    def test_every_watermarked_table_exists_in_the_shipped_schema(self):
+        """`watermark()` is one query over all of them, so a table that is not
+        in `schema.sql` fails the whole reset with `no such table` — inside a
+        fixture, on every test in the profile."""
+        schema = (REPO / "schema.sql").read_text()
+        for table in WATERMARK_TABLES:
+            assert f"CREATE TABLE IF NOT EXISTS {table} (" in schema, table
+
+
+def _insert_task(path: Path, source_type: str, user_id: str, prompt: str) -> None:
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO tasks (source_type, user_id, prompt, status) VALUES (?, ?, ?, ?)",
+        (source_type, user_id, prompt, "completed"),
+    )
+    connection.commit()
+    connection.close()
+
+
+class TestStackPool:
+    """Caching, `fresh`, and teardown — without booting anything.
+
+    `_boot` is the one thing that needs Docker, so it is the one thing replaced.
+    Everything above it is bookkeeping whose failure mode is a second stack
+    quietly started (twelve seconds and a named volume per test, which is the
+    cost the pool exists to remove) or a stack never torn down.
+    """
+
+    def _pool(self, tmp_path, monkeypatch) -> tuple:
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            lean=compose_support.LeanShape(
+                compose_file=COMPOSE_FILE,
+                render_script=Path("/nonexistent/render-config.sh"),
+                image="istota-test/lean:unit",
+                prebuilt_overlay=PREBUILT_OVERLAY,
+            ),
+        )
+        booted: list = []
+        torn_down: list = []
+
+        def fake_boot(profile):
+            stack = compose_support.Stack(
+                profile=profile,
+                args=["docker", "compose", "--project-name", f"p{len(booted)}"],
+                services={},
+            )
+            booted.append(stack)
+            return stack
+
+        monkeypatch.setattr(pool, "_boot", fake_boot)
+        monkeypatch.setattr(pool, "_teardown", torn_down.append)
+        return pool, booted, torn_down
+
+    def test_a_second_request_for_a_profile_reuses_the_running_stack(
+        self, tmp_path, monkeypatch
+    ):
+        pool, booted, _ = self._pool(tmp_path, monkeypatch)
+
+        first = pool.get(profiles.BASE)
+        second = pool.get(profiles.BASE)
+
+        assert first is second
+        assert len(booted) == 1
+
+    def test_two_profiles_get_two_stacks(self, tmp_path, monkeypatch):
+        pool, booted, _ = self._pool(tmp_path, monkeypatch)
+
+        pool.get(profiles.BASE)
+        pool.get(profiles.FORGE)
+
+        assert len(booted) == 2
+
+    def test_fresh_neither_adopts_a_running_stack_nor_leaves_one_behind(
+        self, tmp_path, monkeypatch
+    ):
+        """The escape for a test asserting on start-up behaviour.
+
+        Both directions matter. Adopting would hand it a daemon that has been
+        up for minutes, which is the one thing it must not have; leaving it
+        behind would hand the *next* test a stack that had a private test run
+        against it.
+        """
+        pool, booted, _ = self._pool(tmp_path, monkeypatch)
+
+        shared = pool.get(profiles.BASE)
+        private = pool.get(profiles.BASE, fresh=True)
+        assert private is not shared
+
+        assert pool.get(profiles.BASE) is shared
+        assert len(booted) == 2
+
+    def test_release_tears_down_a_private_stack_and_ignores_a_shared_one(
+        self, tmp_path, monkeypatch
+    ):
+        pool, _, torn_down = self._pool(tmp_path, monkeypatch)
+
+        shared = pool.get(profiles.BASE)
+        private = pool.get(profiles.BASE, fresh=True)
+
+        pool.release(shared)
+        assert torn_down == []
+        pool.release(private)
+        assert torn_down == [private]
+
+    def test_close_all_tears_down_everything_it_started(self, tmp_path, monkeypatch):
+        pool, _, torn_down = self._pool(tmp_path, monkeypatch)
+
+        shared = pool.get(profiles.BASE)
+        other = pool.get(profiles.FORGE)
+        private = pool.get(profiles.BASE, fresh=True)
+
+        pool.close_all()
+
+        assert set(map(id, torn_down)) == {id(shared), id(other), id(private)}
+        # And it is idempotent, because a session fixture's finalizer runs even
+        # when the body already tore down.
+        pool.close_all()
+        assert len(torn_down) == 3
+
+    def test_one_teardown_raising_does_not_strand_the_rest(
+        self, tmp_path, monkeypatch
+    ):
+        """A stack left running holds a named volume that only the next
+        session's sweep reclaims — and the sweep is a backstop, not a plan."""
+        pool, _, _ = self._pool(tmp_path, monkeypatch)
+        pool.get(profiles.BASE)
+        pool.get(profiles.FORGE)
+        seen: list = []
+
+        def explode(stack):
+            seen.append(stack)
+            raise RuntimeError("teardown failed")
+
+        monkeypatch.setattr(pool, "_teardown", explode)
+        pool.close_all()
+
+        assert len(seen) == 2
+
+    def test_a_full_shape_profile_is_refused_rather_than_booted_as_lean(
+        self, tmp_path
+    ):
+        """Stage 3 adds the full shape. Until it does, a profile declaring it
+        must not quietly get a one-container lean stack that answers every
+        assertion wrongly."""
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            lean=compose_support.LeanShape(
+                compose_file=COMPOSE_FILE,
+                render_script=Path("/nonexistent/render-config.sh"),
+                image="istota-test/lean:unit",
+                prebuilt_overlay=PREBUILT_OVERLAY,
+            ),
+        )
+        full = dataclasses.replace(profiles.BASE, name="full", shape="full")
+
+        with pytest.raises(compose_support.StackError, match="lean shape"):
+            pool.get(full)
+
+
+class TestRenderConfig:
+    """The lean shape's config comes out of the shipped generator, on the host.
+
+    That is the property making the shortcut legitimate, so the failure paths
+    are worth holding down: a generator that exited non-zero used to be
+    reported as "the daemon never became ready" 120 seconds later.
+    """
+
+    def test_two_services_claiming_one_variable_is_refused(self, tmp_path):
+        """Silent last-wins would boot a stack from a config naming the wrong
+        service's port, with dict order deciding which."""
+        first = _FakeService("first", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://a"})
+        second = _FakeService("second", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://b"})
+
+        with pytest.raises(compose_support.StackError, match="BASE_URL"):
+            compose_support.render_config(
+                Path("/nonexistent/render-config.sh"),
+                tmp_path,
+                {"first": first, "second": second},
+            )
+
+    def test_a_generator_that_failed_is_reported_with_its_output(self, tmp_path):
+        script = tmp_path / "render.sh"
+        script.write_text('echo "missing required input" >&2\nexit 2\n')
+
+        with pytest.raises(compose_support.StackError, match="missing required input"):
+            compose_support.render_config(script, tmp_path, {})
+
+    def test_the_lean_render_environment_claims_no_nextcloud(self):
+        """`NC_URL` and `APP_PASSWORD` are *set and empty*, not absent.
+
+        `render-config.sh` preflights with `[ -n "${NC_URL+x}" ]`, which tests
+        whether the variable is set rather than whether it has a value — so
+        unset fails the render outright, and empty is what makes the lean
+        daemon local-backed. It used to be `http://nextcloud`, which rendered a
+        config claiming Nextcloud-backed storage and pointed it at a hostname
+        the lean compose file resolves to nothing: a third configuration nobody
+        ships.
+        """
+        assert compose_support.DEFAULT_RENDER_ENV["NC_URL"] == ""
+        assert compose_support.DEFAULT_RENDER_ENV["APP_PASSWORD"] == ""
+
+    def test_the_preflight_really_tests_for_set_rather_than_non_empty(self):
+        """Asserted against the shipped script, because the whole mechanism
+        rests on which of the two spellings it uses."""
+        body = (REPO / "docker" / "istota" / "render-config.sh").read_text()
+
+        assert "${NC_URL+x}" in body, (
+            "the generator no longer preflights NC_URL with the set-test "
+            "spelling, so an empty value may no longer render"
+        )
+
+
+class _FakeService:
+    def __init__(self, name: str, env: dict) -> None:
+        self.name = name
+        self._env = env
+
+    def config_env(self) -> dict:
+        return dict(self._env)
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class TestContainerSideState:
+    """The half of a reset that lives on the far side of the process boundary.
+
+    A host-side stub clears its own recorded calls and rebuilds its own
+    repositories; it cannot reach the *checkout* the daemon made. `/data/repos`
+    is the worked example, and it is why the ported forge suite failed the first
+    time it ran against a shared stack: the second scenario's
+    `git clone <url> project` hit a directory that already existed, never
+    reached the listener, and reported itself as a forge that was never called.
+    """
+
+    def _stack(self, services: dict) -> compose_support.Stack:
+        return compose_support.Stack(
+            profile=profiles.BASE,
+            args=["docker", "compose", "--project-name", "p"],
+            services=services,
+        )
+
+    def test_the_forge_declares_the_directory_it_configured(self):
+        """Declared on the service, so it cannot drift from the `config_env`
+        variable that pointed the daemon there."""
+        forge = gitlab.GitLabService(Path("/tmp/unused"))
+
+        assert forge.container_state_paths == (
+            forge.config_env()["ISTOTA_DEVELOPER_REPOS_DIR"],
+        )
+
+    def test_a_service_with_nothing_to_clear_costs_no_exec(self, monkeypatch):
+        """Every test pays for this, so the no-op path must not shell out."""
+        stack = self._stack({"model": _FakeService("model", {})})
+        called: list = []
+        monkeypatch.setattr(
+            compose_support.Stack, "exec", lambda self, *a, **k: called.append(a)
+        )
+
+        stack.clear_container_state()
+
+        assert called == []
+
+    def test_the_declared_paths_reach_the_container_command(self, monkeypatch):
+        service = _FakeService("gitlab", {})
+        service.container_state_paths = ("/data/repos",)
+        stack = self._stack({"gitlab": service})
+        seen: list = []
+
+        def fake_exec(self, argv, **kwargs):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(compose_support.Stack, "exec", fake_exec)
+        stack.clear_container_state()
+
+        assert seen and seen[0][-1] == "/data/repos"
+        assert seen[0][0] == "sh"
+
+    @pytest.mark.parametrize("path", ["relative/path", "/", "/data"])
+    def test_a_path_that_could_empty_something_important_is_refused(self, path):
+        """This runs `rm -rf` inside a container as root. A typo'd `/` or
+        `/data` would take the database with it, and the symptom would be a
+        stack that stopped answering rather than an error naming the cause."""
+        service = _FakeService("gitlab", {})
+        service.container_state_paths = (path,)
+
+        with pytest.raises(compose_support.StackError, match="absolute"):
+            self._stack({"gitlab": service}).container_state_paths()
+
+    def test_the_clearing_command_reaches_dotfiles(self, tmp_path):
+        """Driven against a real shell, because the bug it guards against is a
+        glob: `rm -rf "$d"/*` leaves `.git` behind, and `.git` is exactly what
+        is left in a checkout."""
+        scratch = tmp_path / "repos"
+        (scratch / "project" / ".git").mkdir(parents=True)
+        (scratch / ".hidden").write_text("x")
+
+        subprocess.run(
+            ["sh", "-c", compose_support._CLEAR_SCRATCH, "sh", str(scratch)],
+            check=True,
+        )
+
+        assert scratch.exists(), "the directory itself is a mount point; keep it"
+        assert list(scratch.iterdir()) == []
+
+    def test_an_absent_directory_is_not_an_error(self, tmp_path):
+        """A profile may declare a path a given image does not create."""
+        subprocess.run(
+            [
+                "sh", "-c", compose_support._CLEAR_SCRATCH, "sh",
+                str(tmp_path / "never-made"),
+            ],
+            check=True,
+        )

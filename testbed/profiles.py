@@ -83,3 +83,21 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
 ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE)
+
+
+def by_name(name: str) -> Profile:
+    """The profile a test declared, or a message naming the ones that exist.
+
+    A test declares its profile as a *string* (`@pytest.mark.profile("forge")`)
+    so a scenario file needs no import from this package. The cost is that a
+    typo is only caught here, so it is caught loudly: the alternative is a
+    `KeyError` raised inside a session-scoped fixture, which pytest reports as
+    an error on every test in the profile.
+    """
+    for profile in ALL:
+        if profile.name == name:
+            return profile
+    raise KeyError(
+        f"no profile named {name!r}; testbed.profiles defines "
+        f"{[profile.name for profile in ALL]}"
+    )
