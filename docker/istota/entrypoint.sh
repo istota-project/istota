@@ -98,11 +98,20 @@ room_has_participant() {
         -X GET "${NC_URL}/ocs/v2.php/apps/spreed/api/v4/room/${token}/participants?format=json" \
         2>/dev/null || true
 
-    found=$(python3 - "$user" <<'PY' < "$body_file"
+    # The body arrives as a *path argument*, not on stdin. `python3 - <<'PY' <
+    # "$body_file"` reads the program from stdin and then redirects stdin to the
+    # file, so the last redirection wins and python executes the JSON as its
+    # program — and a JSON object is a valid Python expression statement, so it
+    # evaluates, prints nothing and exits 0. This function silently answered
+    # "not a participant" for every room, which made `find_room_by_name` below
+    # never match and the recovery-by-name path create a duplicate set of rooms
+    # on every boot that had lost API_PROVISION_FLAG.
+    found=$(python3 - "$user" "$body_file" <<'PY'
 import json, sys
-target = sys.argv[1]
+target, path = sys.argv[1], sys.argv[2]
 try:
-    data = json.load(sys.stdin)
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
     parts = data.get("ocs", {}).get("data") or []
     if isinstance(parts, list):
         for p in parts:
@@ -132,11 +141,14 @@ find_room_by_name() {
         -X GET "${NC_URL}/ocs/v2.php/apps/spreed/api/v4/room?format=json" \
         2>/dev/null || true
 
-    candidates=$(python3 - "$room_name" <<'PY' < "$body_file"
+    # Path argument, not stdin — see `room_has_participant` above for what the
+    # `<<'PY' < "$body_file"` form actually did.
+    candidates=$(python3 - "$room_name" "$body_file" <<'PY'
 import json, sys
-target = sys.argv[1]
+target, path = sys.argv[1], sys.argv[2]
 try:
-    data = json.load(sys.stdin)
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
     rooms = data.get("ocs", {}).get("data") or []
     if isinstance(rooms, list):
         for r in rooms:

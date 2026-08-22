@@ -21,9 +21,10 @@ that failed for an unrelated-looking reason.
 from __future__ import annotations
 
 import json
-import threading
-from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler
+
+from ..httpstub import FROM_CONTAINER, LOOPBACK, HttpStub
 
 # Deliberately small, so a multi-character payload always arrives as more than
 # one delta. Streaming reassembly is most of what `_parse_sse_lines` does, and a
@@ -32,27 +33,129 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TEXT_CHUNK = 4
 ARGS_CHUNK = 8
 
-# The host side connects over loopback; a container reaches the same listener by
-# the Docker Desktop / Docker Engine alias. Both names are offered rather than
-# guessed at the call site, because the two are needed at once: the smoke test
-# asserts against `requests` in-process while the daemon it is driving talks to
-# `container_base_url`.
-LOOPBACK = "127.0.0.1"
-FROM_CONTAINER = "host.docker.internal"
+# What `config_env` renders as the model name and the turn ceiling. Named
+# because a scenario asserts on the first (`test_lean_stack.py` checks the
+# request carried it) and because the second is a bound the agent loop is
+# supposed to hit loudly rather than grind past.
+SCRIPTED_MODEL = "scripted-test-model"
+MAX_TURNS = 4
+
+# The credential a deployment tier binds this endpoint with. It authenticates
+# nothing — the daemon sends whatever the compose file hardcodes as
+# `ISTOTA_BRAIN_NATIVE_API_KEY`, and this endpoint answers regardless — but
+# `HttpStub.start` requires one for a non-loopback bind so the tier knows the
+# name of every value it has published on a shared network. Here rather than in
+# a fixture for the same reason `FORGE_TOKEN` is on the forge: a service's own
+# credential belongs to the service.
+ENDPOINT_CREDENTIAL = "unused-by-the-scripted-endpoint"
+
+# What a request refused by the barrier is answered with, and it is chosen
+# against the *daemon's* classifier rather than for HTTP correctness.
+#
+# 409 Conflict is the semantically apt code and it is the wrong one. A refused
+# turn fails the task, and the scheduler then decides whether to retry:
+# `is_permanent` is `is_api_error_banner(result) and is_permanent_api_error(result)`,
+# and 409 appears in neither `TRANSIENT_STATUS_CODES` nor
+# `PERMANENT_STATUS_CODES` (`brain/claude_code.py`). Not-permanent means retry,
+# which writes the row back as `status = 'pending'` with `scheduled_for` one,
+# four, then sixteen minutes out — and a harness that counted that as in-flight
+# would wedge every remaining test in the profile.
+#
+# 403 is in `PERMANENT_STATUS_CODES`, so the daemon fails the task outright,
+# and it is in no HTTP client's retry set either. `Stack.in_flight` and
+# `Stack.reset_framework_state` close the retry hole independently, for the
+# tasks that fail for reasons this endpoint did not choose; this is the half
+# that stops the barrier's own remedy from creating one.
+BARRIER_STATUS = 403
 
 
-@dataclass
-class ScriptedEndpoint:
-    """A running endpoint and the record of what it was asked."""
+class ScriptedEndpoint(HttpStub):
+    """A running endpoint and the record of what it was asked.
 
-    port: int
-    host_bound: str
-    requests: list[dict] = field(default_factory=list)
-    turns: list[dict] = field(default_factory=list)
-    served: int = 0
-    _server: ThreadingHTTPServer | None = None
-    _thread: threading.Thread | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    `requests` stays its own list rather than becoming `HttpStub.calls`: a chat
+    completion is a JSON body a scenario reads whole, not a method-and-path
+    tuple, and forcing it into `ServiceCall` would lose the shape every
+    assertion here uses. The protocol admits that — call recording is on
+    `HttpStub`, not on `Service`.
+    """
+
+    name = "model"
+
+    def __init__(self, turns: list[dict] | None = None) -> None:
+        super().__init__()
+        self.requests: list[dict] = []
+        self.turns: list[dict] = list(turns or [])
+        self.served: int = 0
+        #: Requests turned away while the barrier was up. Read by `Stack.reset`
+        #: to tell "nothing arrived during the swap" from "something did".
+        self.refused: int = 0
+        self._barred: bool = False
+
+    # -- the `Service` members --------------------------------------------
+
+    def config_env(self) -> dict[str, str]:
+        """Point the daemon's native brain at this endpoint.
+
+        All four are read by `docker/istota/render-config.sh` and passed
+        through by `docker/docker-compose.yml`, which is the rule every service
+        is held to. They were hardcoded in the smoke fixture's render
+        environment; on the service is where they belong, and moving them
+        leaves that environment with nothing subsystem-specific in it.
+        """
+        return {
+            "ISTOTA_BRAIN_KIND": "native",
+            "ISTOTA_BRAIN_NATIVE_BASE_URL": self.container_url,
+            "ISTOTA_BRAIN_NATIVE_MODEL": SCRIPTED_MODEL,
+            # A handful of turns is all a scripted scenario has; a loop that
+            # asked for more should fail loudly rather than grind through a
+            # hundred attempts.
+            "ISTOTA_BRAIN_NATIVE_MAX_TURNS": str(MAX_TURNS),
+        }
+
+    def reset(self) -> None:
+        """Empty the script and forget what was asked.
+
+        Deliberately not a *useful* script: the stack's own reset installs the
+        real turns immediately afterwards, and leaving the previous test's
+        script in place between the two would let a poller's task consume it.
+        """
+        super().reset()
+        self.rescript([])
+        with self._lock:
+            self.refused = 0
+
+    def describe(self) -> str:
+        """Counts, not content, for `Stack.diagnostics`.
+
+        The bodies are the whole conversation — system prompt, memory, tool
+        results — and dumping them into every failure report would bury the
+        three lines that say what went wrong. A scenario that needs the content
+        has `transcript()`.
+        """
+        with self._lock:
+            served, scripted, seen = self.served, len(self.turns), len(self.requests)
+            refused = self.refused
+        return (
+            f"  {served} turn(s) served of {scripted} scripted, "
+            f"{seen} request(s) recorded, {refused} refused at the barrier"
+        )
+
+    # -- addresses --------------------------------------------------------
+    #
+    # `/v1` on the end, because the provider appends `/chat/completions` to
+    # whatever `base_url` it is given.
+
+    @property
+    def url(self) -> str:
+        """For a caller in this process."""
+        return f"http://{LOOPBACK}:{self.port}/v1"
+
+    @property
+    def container_url(self) -> str:
+        """For a caller inside a container on this host."""
+        return f"http://{FROM_CONTAINER}:{self.port}/v1"
+
+    # -- scripting --------------------------------------------------------
 
     def rescript(self, turns: list[dict]) -> None:
         """Replace the script, and rewind.
@@ -73,6 +176,36 @@ class ScriptedEndpoint:
             self.served = 0
             self.requests.clear()
 
+    @contextmanager
+    def barrier(self):
+        """Refuse every request for the duration, and count what was refused.
+
+        The barrier between quiescing and rescripting. The daemon runs its
+        pollers on their own threads for the whole session — Talk every 10
+        seconds, the tasks file every 30 — so one of them can create a task in
+        the window between "the task table reads quiescent" and "the next
+        test's script is installed", and that task then consumes turn 0. The
+        symptom is an assertion about work done on behalf of a different task,
+        or an exhausted-script error frame on a run that scripted plenty, and
+        both read as subsystem faults.
+
+        Re-checking quiescence after the swap catches the row that appeared;
+        this catches the request that arrives *during* it, which the re-check
+        structurally cannot see. Turning it into a loud refusal is the point:
+        a stolen turn is silent, and a task that failed saying "the harness was
+        swapping scripts" names itself.
+
+        `refused` is a counter rather than a flag so a caller can compare
+        across the block and tell one refusal from three.
+        """
+        with self._lock:
+            self._barred = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._barred = False
+
     def transcript(self) -> str:
         """Every message the endpoint was ever sent, as one string.
 
@@ -87,34 +220,6 @@ class ScriptedEndpoint:
             for message in body.get("messages") or []:
                 parts.append(str(message.get("content")))
         return "\n".join(parts)
-
-    @property
-    def base_url(self) -> str:
-        """For a caller in this process."""
-        return f"http://{LOOPBACK}:{self.port}/v1"
-
-    @property
-    def container_base_url(self) -> str:
-        """For a caller inside a container on this host."""
-        return f"http://{FROM_CONTAINER}:{self.port}/v1"
-
-    def close(self) -> None:
-        if self._server is not None:
-            # `shutdown` before `server_close`: the former stops the serve loop
-            # and blocks until it has, the latter releases the socket. Reversed,
-            # the loop can be mid-`accept` on a closed fd.
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def __enter__(self) -> ScriptedEndpoint:
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -217,7 +322,11 @@ def _exhausted_frame(served: int, scripted: int) -> bytes:
 
 
 def serve_script(
-    turns: list[dict], *, port: int = 0, host: str = LOOPBACK
+    turns: list[dict],
+    *,
+    port: int = 0,
+    host: str = LOOPBACK,
+    credential: str | None = None,
 ) -> ScriptedEndpoint:
     """Start an endpoint replaying `turns`, one per request, in order.
 
@@ -226,16 +335,25 @@ def serve_script(
     lets the OS choose, which is what keeps concurrent test sessions from
     colliding — the chosen port is on the returned object.
 
-    `host` defaults to loopback and only the smoke tier overrides it. Binding
-    all interfaces unconditionally would publish an unauthenticated POST
+    `host` defaults to loopback and only the deployment tiers override it.
+    Binding all interfaces unconditionally would publish an unauthenticated POST
     listener on every `uv run pytest`, which the ten default-suite tests here
-    have no use for — they connect over `base_url`, which is loopback. It also
-    raises the macOS incoming-connections prompt, where the run appears to hang
-    on a dialog nobody is looking at.
+    have no use for — they connect over `url`, which is loopback. It also raises
+    the macOS incoming-connections prompt, where the run appears to hang on a
+    dialog nobody is looking at.
+
+    `credential` is therefore required whenever `host` is not loopback, per
+    `HttpStub.start`. This endpoint does not *check* it: the daemon sends
+    whatever `ISTOTA_BRAIN_NATIVE_API_KEY` the compose file hardcodes, and a 401
+    from here would surface as a task that failed for an unrelated-looking
+    reason — which is the failure mode this whole module exists to avoid. What
+    the value buys is that the tier knows the name of every secret it has
+    published, which is what the secret-isolation scenario scans a transcript
+    for.
     """
     # The script lives on the endpoint rather than in this closure, so
     # `rescript` can replace it after the server is listening.
-    endpoint = ScriptedEndpoint(port=0, host_bound=host, turns=list(turns))
+    endpoint = ScriptedEndpoint(turns=list(turns))
 
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -276,9 +394,10 @@ def serve_script(
                     # `AttributeError` on `.get` below — in a handler thread
                     # whose `handle_error` is deliberately silent, so the client
                     # sees a dropped connection. `transcript()` would raise the
-                    # same way later. `fake_gitlab._read_body` guards this; the
-                    # asymmetry between two files added together is what bites
-                    # when someone points a different client at one of them.
+                    # same way later. `ServiceCall.payload` carries the same
+                    # guard for the stubs that record a body rather than
+                    # replaying one, which is what it bites on when someone
+                    # points a different client at either.
                     raise ValueError("body was not a JSON object")
             except (ValueError, OSError):
                 # A 400 the caller can see beats a traceback in someone else's
@@ -287,10 +406,30 @@ def serve_script(
                 return
 
             with endpoint._lock:
-                index = endpoint.served
-                endpoint.served += 1
-                endpoint.requests.append(body)
-                scripted = list(endpoint.turns)
+                if endpoint._barred:
+                    endpoint.refused += 1
+                    barred = True
+                else:
+                    barred = False
+                    index = endpoint.served
+                    endpoint.served += 1
+                    endpoint.requests.append(body)
+                    scripted = list(endpoint.turns)
+
+            if barred:
+                # Not recorded in `requests`: nothing was served, and a body in
+                # the transcript that never got a turn would make `served` and
+                # `len(requests)` disagree for every later reader.
+                self.send_error(
+                    BARRIER_STATUS,
+                    "the harness was swapping scripts",
+                    "A turn was requested while `Stack.reset` held the barrier "
+                    "between quiescing and rescripting. The task that made this "
+                    "request was created by one of the daemon's own pollers "
+                    "after the task table read quiescent; refusing it is what "
+                    "stops it consuming turn 0 of the next scenario.",
+                )
+                return
 
             model = body.get("model", "")
             if index < len(scripted):
@@ -309,23 +448,5 @@ def serve_script(
             self.end_headers()
             self.wfile.write(payload)
 
-    server = ThreadingHTTPServer((host, port), _Handler)
-    # `block_on_close` is `not daemon_threads`, so leaving daemon_threads True
-    # means `server_close` does not join handler threads — an in-flight handler
-    # could then append to `requests` after `close()` returned, and a keep-alive
-    # thread parked in `handle_one_request` would outlive the endpoint.
-    server.daemon_threads = False
-    endpoint.port = server.server_address[1]
-    # Read the bound address back off the socket rather than trusting what we
-    # asked for. `host_bound` is asserted against, and an assertion on the
-    # argument we passed in would stay green if the bind itself changed.
-    endpoint.host_bound = server.server_address[0]
-    endpoint._server = server
-    # A short poll interval: `serve_forever`'s default is 0.5s and `shutdown`
-    # waits for the current poll to finish, so every teardown paid up to half a
-    # second — which was most of this file's runtime.
-    endpoint._thread = threading.Thread(
-        target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
-    )
-    endpoint._thread.start()
+    endpoint.start(_Handler, host=host, port=port, credential=credential)
     return endpoint

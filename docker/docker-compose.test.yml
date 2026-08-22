@@ -9,7 +9,7 @@
 # thirty seconds, which is what makes it usable in a test.
 #
 # It is driven by tests/smoke/, never by hand — the config it needs does not
-# exist until the harness renders it. `tests/support/compose.py` holds the
+# exist until the harness renders it. `testbed/stack.py` holds the
 # invocation.
 
 services:

@@ -483,10 +483,14 @@ glab_bin_path: str = "/usr/local/bin/glab"
 devbox_proxy_enabled: bool = True
 devbox_proxy_socket_dir: str = "/var/run/istota"
 devbox_proxy_audit_log: str = ""
+worktree_reap_enabled: bool = True    # Reap landed worktrees on the setup path
+worktree_retention_hours: float = 24.0  # Idle time before one is a candidate; 0 = no age guard
 review: ReviewConfig
 ```
 
 `gitlab_reviewer` is the value the developer skill exports as `GITLAB_REVIEWER` and hands to `glab mr create --reviewer`, which resolves by username. `gitlab_reviewer_id` holds the same person's numeric id and is read by nothing — it kept its name and lost its consumer in ISSUE-289, where the name was the bug: operators put the id `users/<id>` reports into the field the skill consumed, `glab` answered `failed to find user by name`, and because the recipe builds the flag rather than failing, every agent-authored MR opened with nobody assigned. The `developer.gitlab_reviewer` doctor check WARNs on an all-digits username, and on an `_id` set with no username beside it — the shape a host that has not re-run Ansible is in.
+
+`worktree_reap_enabled` and `worktree_retention_hours` drive `worktree_reaper.py` (ISSUE-288). Nothing removed a task's worktree before it, so `repos_dir` accumulated gigabyte checkouts with no owner and no stated retention rule. The sweep runs from the **scheduler**, on `scheduler.worktree_reap_interval`, not from the developer skill's `setup_env`: `dispatch_setup_env_hooks` calls every skill's hook whatever the task selected, so a sweep there fired before every Talk reply, every cron job and every heartbeat tick — and the heartbeat builds a task with `id=0`, so it also ran with no notion of whose worktree was whose. A delete path belongs on a cadence somebody chose. The retention window is what protects a task running *right now*, since the periodic sweep knows nothing about the worker pool and recent activity is the only evidence available that a checkout is in use. It is clamped to a one-hour floor: a worktree seconds old is clean, unlocked and carries nothing that is not upstream, which is exactly the reapable state, so a shorter window does not mean "reap sooner" but "reap the checkout a task is still setting up".
 
 `gitlab_api_allowlist` / `github_api_allowlist` and `api_timeout_seconds` are **gone** (unified-forge-cli-wrapper spec). An endpoint allowlist cannot describe what a real `gh` invocation does — `gh pr create` is several calls, `gh pr checks` paginates — so the deny list moved into `forge_cli.py`'s argv policy, and `api_timeout_seconds` lost its last consumer when the devbox proxy's httpx client went. The loader ignores unknown keys by design, so a `config.toml` still carrying any of the three loads clean and inert; `config.toml.j2` no longer renders them, but a host keeps its last-rendered file until Ansible runs again.
 

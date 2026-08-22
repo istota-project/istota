@@ -33,10 +33,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from istota.skills.code_review import engine
 from istota.skills.code_review.engine import (
     Caps,
     Finding,
@@ -1534,3 +1536,379 @@ class TestCollectNeededFiles:
             collect_needed_files(
                 contained, "HEAD", ["secret.py"], max_files=6, max_file_chars=20_000
             )
+
+
+class TestRoundTripBudget:
+    """Whether the `need_files` round trip is affordable, measured not assumed.
+
+    The round trip is optional: the first answer already stands, and the second
+    call is strictly the larger of the two — the same prompt, plus the served
+    bodies, plus the final-answer instruction. So the only call worth starting
+    is one that can finish, and the evidence for that is what the round that
+    just ran actually cost. A flat floor cannot see it: against any budget of
+    30s or more it admitted the round whenever 15s remained, which is how a
+    reviewer that spent 78 of its 120 seconds was sent back out with 42.
+
+    These drive `_run_agent` directly against a fake clock, because the thing
+    under test is arithmetic over durations and a real one would need the test
+    to spend the minutes it is measuring.
+    """
+
+    @staticmethod
+    def _clock():
+        """Stands in for the `time` module inside `engine` only.
+
+        Everything but `monotonic` is delegated to the real module. `engine`
+        also reads `time` from `_read_bounded`'s subprocess deadline and from
+        `run_review`'s bounded join, and a stand-in that answered only
+        `monotonic` would make any future use of another attribute fail from
+        inside a daemon thread rather than in the test that installed it.
+        """
+
+        class Clock:
+            def __init__(self):
+                self.now = 1_000.0
+
+            def monotonic(self):
+                return self.now
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        return Clock()
+
+    @staticmethod
+    def _serve(*served):
+        def serve(requested):
+            return engine.NeededFiles(
+                text="## Files you asked for\n\nBODY\n", served=list(served)
+            )
+
+        return serve
+
+    def _run(self, monkeypatch, *, budget, durations, serve_cost=0.0, serve=None):
+        """Run one reviewer whose calls take `durations` seconds each.
+
+        Returns `(outcome, timeouts)` — the second being the budget each call
+        was actually handed, so a test can assert on the round that was made as
+        well as on the one that was not.
+        """
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+        replies = [
+            json.dumps({"need_files": ["helper.py"], "findings": []}),
+            json.dumps({"findings": []}),
+        ]
+        timeouts: list[int] = []
+        spent = iter(durations)
+
+        def invoke(agent, prompt, timeout_seconds):
+            timeouts.append(timeout_seconds)
+            clock.now += next(spent)
+            return engine.AgentReply(ok=True, text=replies[len(timeouts) - 1])
+
+        def serving(requested):
+            clock.now += serve_cost
+            return (serve or self._serve("helper.py"))(requested)
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE,
+            "first prompt",
+            invoke,
+            budget,
+            serve=serving,
+            build_final_prompt=lambda: "final prompt",
+        )
+        return outcome, timeouts
+
+    def test_a_round_that_cannot_finish_in_what_is_left_is_not_started(
+        self, monkeypatch
+    ):
+        """The reported failure: 120s budget, 78s spent, 42s left, and the flat
+        15s floor waved the second call through to be charged and time out."""
+        outcome, timeouts = self._run(monkeypatch, budget=120, durations=[78.0])
+
+        assert timeouts == [120], "the round trip must not have been invoked"
+        assert outcome.round_trip is False
+        assert outcome.round_trip_refused is True
+        assert outcome.calls == 1, "a round that was not made must not be charged"
+        assert "78s" in outcome.note and "42s" in outcome.note
+
+    def test_the_other_reported_budget_is_refused_the_same_way(self, monkeypatch):
+        """240s budget, 157s spent, 83s left. A larger budget does not make a
+        second call that costs more than 83s fit into 83s."""
+        outcome, timeouts = self._run(monkeypatch, budget=240, durations=[157.0])
+
+        assert timeouts == [240], "the round trip must not have been invoked"
+        assert outcome.round_trip_refused is True
+        assert outcome.calls == 1
+
+    def test_a_retry_does_not_reset_the_measurement(self, monkeypatch):
+        """The reintroduction path. `started` covers both calls, but the retry
+        is timed on its own — so taking the *last* duration rather than the
+        slowest lets a reviewer that burned 100s on prose and answered the nudge
+        in 2s be estimated at 3s and admitted with 18s left, which is the
+        original bug arriving through the fix."""
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+        timeouts: list[int] = []
+        spent = iter([100.0, 2.0])
+        replies = [
+            "prose, not JSON",
+            json.dumps({"need_files": ["helper.py"], "findings": []}),
+        ]
+
+        def invoke(agent, prompt, timeout_seconds):
+            timeouts.append(timeout_seconds)
+            clock.now += next(spent)
+            return engine.AgentReply(ok=True, text=replies[len(timeouts) - 1])
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE,
+            "first prompt",
+            invoke,
+            120,
+            serve=self._serve("helper.py"),
+            build_final_prompt=lambda: "final prompt",
+        )
+
+        assert timeouts == [120, 20], "the retry runs, the round trip does not"
+        assert outcome.round_trip is False
+        assert outcome.round_trip_refused is True
+        assert outcome.calls == 2, "the retry is charged; the refused round is not"
+        assert "100s" in outcome.note
+
+    def test_a_reviewer_that_answered_quickly_still_gets_its_round(self, monkeypatch):
+        """The point is to refuse the rounds that cannot finish, not to stop
+        offering them. 20s of a 240s budget leaves 220s for a call estimated to
+        cost 30 — that one runs, and runs against what is left."""
+        outcome, timeouts = self._run(monkeypatch, budget=240, durations=[20.0, 25.0])
+
+        assert len(timeouts) == 2, "the round trip must have been invoked"
+        assert timeouts[1] == 220
+        assert outcome.round_trip is True
+        assert outcome.round_trip_refused is False
+        assert outcome.calls == 2
+
+    def test_the_estimate_carries_a_margin_for_the_larger_second_prompt(
+        self, monkeypatch
+    ):
+        """A second call is not the same size as the first, so "it fits if the
+        last one did" is the wrong test. 70s of a 120s budget leaves 50, which
+        clears the 70 the last round cost only if the second prompt were no
+        bigger than the first — and it never is."""
+        outcome, timeouts = self._run(monkeypatch, budget=120, durations=[70.0])
+
+        assert timeouts == [120], "the round trip must not have been invoked"
+        assert outcome.round_trip_refused is True
+
+        # The margin is what separates this from the previous case: the same
+        # 120s budget with a round cheap enough to leave one and a half of it
+        # goes through.
+        outcome, timeouts = self._run(monkeypatch, budget=120, durations=[45.0, 5.0])
+        assert len(timeouts) == 2
+        assert outcome.round_trip is True
+
+    def test_min_retry_seconds_remains_the_lower_bound(self, monkeypatch):
+        """The estimate raises the floor; it never lowers it.
+
+        Asserted against `_remaining` directly, because the end-to-end version
+        below cannot tell the two implementations apart: a 3s estimate and the
+        old flat constant both refuse a call with 3s left, so it would pass
+        against the pre-change engine and prove nothing. What discriminates is
+        the floor `_remaining` actually returns for a cheap estimate.
+        """
+        assert engine._remaining(0.0, 120, estimated_cost=3.0)[1] == (
+            engine.MIN_RETRY_SECONDS
+        ), "a cheap estimate must not lower the floor below the flat minimum"
+        assert engine._remaining(0.0, 120, estimated_cost=45.0)[1] == 45
+
+        # And the end-to-end half: gathering the files is charged to the same
+        # clock, so a first round of 2s can still arrive at the second check
+        # with almost nothing left.
+        outcome, timeouts = self._run(
+            monkeypatch, budget=120, durations=[2.0], serve_cost=115.0
+        )
+
+        assert timeouts == [120]
+        assert outcome.round_trip_refused is True
+        assert f"{engine.MIN_RETRY_SECONDS}s" in outcome.note
+
+    def test_a_non_finite_estimate_is_ignored_rather_than_raising(self):
+        """`_remaining` is called outside `_round_trip`'s exception guards, and
+        an escape there turns a review already paid for into a failed reviewer
+        with its findings discarded. `math.ceil(inf)` raises `OverflowError`."""
+        assert engine._remaining(0.0, 120, estimated_cost=float("inf"))[1] == (
+            engine.MIN_RETRY_SECONDS
+        )
+        assert engine._remaining(0.0, 120, estimated_cost=float("nan"))[1] == (
+            engine.MIN_RETRY_SECONDS
+        )
+
+    def test_a_reviewer_that_asks_with_no_round_trip_on_offer_says_so(
+        self, monkeypatch
+    ):
+        """`serve=None` is how a spent *call* budget reaches `_run_agent`, and
+        nothing stops a reviewer emitting `need_files` with the offer absent
+        from its prompt. Reporting that as `round_trip_refused: false` would say
+        the reviewer never asked — and this is the case the flag matters most
+        in, since a finding left `unverified` here went unchecked for want of a
+        round the CLI could not buy."""
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+        calls: list[int] = []
+
+        def invoke(agent, prompt, timeout_seconds):
+            calls.append(timeout_seconds)
+            clock.now += 5.0
+            return engine.AgentReply(
+                ok=True,
+                text=json.dumps({"need_files": ["helper.py"], "findings": []}),
+            )
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE, "first prompt", invoke, 240, serve=None
+        )
+
+        assert calls == [240]
+        assert outcome.round_trip is False
+        assert outcome.round_trip_refused is True
+        assert outcome.calls == 1
+        assert outcome.note, "the note is the only place that can say why"
+
+    def test_a_reviewer_that_never_asked_is_not_a_refusal(self, monkeypatch):
+        """The other half of the same distinction, and the ordinary path."""
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+
+        def invoke(agent, prompt, timeout_seconds):
+            clock.now += 5.0
+            return engine.AgentReply(ok=True, text=json.dumps({"findings": []}))
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE, "first prompt", invoke, 240, serve=None
+        )
+
+        assert outcome.round_trip_refused is False
+        assert outcome.note == ""
+
+    def test_a_second_prompt_that_cannot_be_built_is_not_charged(self, monkeypatch):
+        """`build_final_prompt` is a second pass over a diff that can run to
+        `max_diff_chars`, and the docstring names it as one of the two raisers
+        the guards exist for. It does no model work, so a raise there must not
+        be billed as a round trip that was never made."""
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+        calls: list[int] = []
+
+        def invoke(agent, prompt, timeout_seconds):
+            calls.append(timeout_seconds)
+            clock.now += 5.0
+            return engine.AgentReply(
+                ok=True,
+                text=json.dumps(
+                    {
+                        "need_files": ["helper.py"],
+                        "findings": [
+                            {
+                                "severity": "high",
+                                "file": "app.py",
+                                "line": 4,
+                                "claim": "a defect",
+                                "evidence": "observed",
+                                "action": "fix it",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+        def explode():
+            raise RuntimeError("diff vanished under us")
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE,
+            "first prompt",
+            invoke,
+            240,
+            serve=self._serve("helper.py"),
+            build_final_prompt=explode,
+        )
+
+        assert calls == [240], "no second call was made"
+        assert outcome.calls == 1, "and none was charged"
+        assert outcome.round_trip is False
+        assert outcome.round_trip_refused is True
+        assert [f.claim for f in outcome.findings] == ["a defect"]
+        assert "RuntimeError" in outcome.note
+
+    def test_a_request_nothing_could_serve_reports_a_refused_round(self, monkeypatch):
+        """`round_trip_refused` is "it asked and no second call was made", not
+        "the budget said no". A caller weighing an `unverified` finding needs
+        the same answer either way, and the note says which it was."""
+        outcome, timeouts = self._run(
+            monkeypatch,
+            budget=240,
+            durations=[10.0],
+            serve=lambda requested: engine.NeededFiles(),
+        )
+
+        assert timeouts == [240]
+        assert outcome.round_trip is False
+        assert outcome.round_trip_refused is True
+        assert outcome.calls == 1
+
+    def test_a_round_that_was_made_and_failed_is_not_a_refusal(self, monkeypatch):
+        """The distinction the envelope has to carry: this one cost a call."""
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+        calls: list[int] = []
+
+        def invoke(agent, prompt, timeout_seconds):
+            calls.append(timeout_seconds)
+            clock.now += 10.0
+            if len(calls) == 1:
+                return engine.AgentReply(
+                    ok=True,
+                    text=json.dumps({"need_files": ["helper.py"], "findings": []}),
+                )
+            return engine.AgentReply(ok=False, error="timeout")
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE,
+            "first prompt",
+            invoke,
+            240,
+            serve=self._serve("helper.py"),
+            build_final_prompt=lambda: "final prompt",
+        )
+
+        assert len(calls) == 2
+        assert outcome.round_trip is True
+        assert outcome.round_trip_refused is False
+        assert outcome.calls == 2
+
+    def test_the_malformed_retry_keeps_its_flat_floor(self, monkeypatch):
+        """Deliberately not changed. A retry is the same prompt plus a nudge,
+        and without it the reviewer has no usable answer at all — so a poor
+        chance beats a certain failure. The round trip is the other way round:
+        the first answer already stands, so a poor chance buys nothing and
+        costs a call."""
+        clock = self._clock()
+        monkeypatch.setattr(engine, "time", clock)
+        calls: list[int] = []
+
+        def invoke(agent, prompt, timeout_seconds):
+            calls.append(timeout_seconds)
+            clock.now += 78.0
+            if len(calls) == 1:
+                return engine.AgentReply(ok=True, text="prose, not JSON")
+            return engine.AgentReply(ok=True, text=json.dumps({"findings": []}))
+
+        outcome = engine._run_agent(
+            engine.CONFORMANCE, "first prompt", invoke, 120, serve=None
+        )
+
+        assert calls == [120, 42], "the retry runs on what is left, and still runs"
+        assert outcome.calls == 2
+        assert outcome.findings == []

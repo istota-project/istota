@@ -415,7 +415,7 @@ class TestTheNextcloudStub:
         assert payload["ocs"]["data"]["token"]
 
     def test_an_unknown_path_is_refused_rather_than_faked(self, stub):
-        """A 501 naming the path, as `fake_gitlab` does.
+        """A 501 naming the path, as the forge stub does.
 
         An entrypoint reaching an endpoint this stub does not implement is the
         signal that a newer release wants more provisioning than two endpoints,

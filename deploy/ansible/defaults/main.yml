@@ -210,6 +210,7 @@ istota_scheduler_tasks_file_poll_interval: 30
 istota_scheduler_shared_file_check_interval: 120  # Shared file organization check interval
 istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
 istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
+istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping sweep (ISSUE-288, 6h; 0 disables)
 istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch loop's read scans; a lock past this skips the tick instead of blocking 30s (0 = 30s default)
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
@@ -1140,6 +1141,19 @@ istota_developer_forge_cli_permit: []             # Baseline entries to turn off
 # install gh or glab from the vendors' own repos or by hand.
 istota_developer_gh_bin_path: "/usr/bin/gh"
 istota_developer_glab_bin_path: "/usr/bin/glab"
+
+# Worktree reaping (ISSUE-288). Nothing removed a task's worktree, so
+# `repos_dir` accumulated gigabyte checkouts with no owner and no stated
+# retention rule. The sweep runs before every developer task and removes only a
+# worktree that is clean, unlocked, idle for the window below, and carrying no
+# commit that is not already upstream. The window is what protects a
+# *concurrently running* task rather than merely a stale one: tasks for one
+# user run in parallel and none knows the others exist, so recent activity is
+# the only evidence available that a checkout is in use. Raise it on a host
+# where a checkout is routinely inspected by hand days later; `git worktree
+# lock` pins one indefinitely and is the better tool for a single case.
+istota_developer_worktree_reap_enabled: true
+istota_developer_worktree_retention_hours: 24.0
 
 # Wall-clock budget for one code-review agent. Both agents run concurrently, so
 # this is the whole review's clock and not half of it, and it covers the entire

@@ -1,5 +1,6 @@
 import type { Plugin } from 'vite';
 import type { AdminStats } from './src/lib/api';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -139,6 +140,7 @@ interface MockChatRoom {
   updated_at: string;
   model?: string | null;
   effort?: string | null;
+  origin?: string;
 }
 interface MockChatTask {
   id: number;
@@ -178,7 +180,53 @@ const mockChatRooms: MockChatRoom[] = [
     model: 'claude-opus-4-8',
     effort: 'high',
   },
+  // A Talk-origin room, so the room-memory pane's shared notice and its empty
+  // state are both reachable in dev (`general` below is seeded with content).
+  {
+    id: 2,
+    token: 'talk-design-review',
+    name: 'design review',
+    archived: false,
+    origin: 'talk',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
 ];
+// Room memory (`CHANNEL.md`), keyed by room token. `general` starts with
+// content and `design review` starts empty, so the editor and the
+// offer-the-template empty state are both reachable without editing this file.
+const CHANNEL_MEMORY_TEMPLATE = `# Channel Memory
+
+This file contains remembered information about this channel/room.
+The bot can append to this file to remember things relevant to all participants.
+
+## Notes
+
+`;
+const mockChannelMemory = new Map<string, string>([
+  [
+    'web-carol-general',
+    `# Channel Memory
+
+## Notes
+
+- Standing style: answer in British English, no bullet lists unless asked.
+- The quarterly figures live in the shared drive, not in the repo.
+- When a deploy is mentioned, always name the release tag.
+`,
+  ],
+]);
+// Flip to true in dev to exercise the 409 conflict branch: the next save is
+// refused as though an agent had written the file in the meantime.
+let mockMemoryConflictNext = false;
+// Hashes what a *reader* sees, matching `_channel_memory_revision`: the server
+// collapses a whitespace-only file to empty, so hashing the raw bytes would
+// hand back a tag the next read can never reproduce.
+const mockMemoryRevision = (content: string) =>
+  createHash('sha256')
+    .update(content.trim() ? content : '', 'utf8')
+    .digest('hex');
+
 const mockChatTasks = new Map<number, MockChatTask>();
 let mockChatRoomSeq = 1;
 let mockChatTaskSeq = 1000;
@@ -1019,6 +1067,46 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     mockChatRooms.push(room);
     return room;
   }
+  // Room memory (`CHANNEL.md`) — GET returns the file plus an opaque revision
+  // the PUT must hand back; a mismatch is the 409 the editor recovers from.
+  const roomMemory = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/memory$/);
+  if (roomMemory && (method === 'GET' || method === 'PUT')) {
+    const room = mockChatRooms.find((r) => r.id === Number(roomMemory[1]));
+    if (!room) return { error: 'room not found', __status: 404 };
+    const stored = mockChannelMemory.get(room.token) ?? '';
+    if (method === 'GET') {
+      return {
+        room_id: room.id,
+        token: room.token,
+        content: stored,
+        exists: stored.trim().length > 0,
+        shared: room.origin === 'talk',
+        template: CHANNEL_MEMORY_TEMPLATE,
+        revision: mockMemoryRevision(stored),
+      };
+    }
+    const content = typeof body?.content === 'string' ? body.content : null;
+    if (content === null) return { error: 'content required', __status: 400 };
+    if (typeof body?.revision !== 'string') return { error: 'revision required', __status: 400 };
+    if (Buffer.byteLength(content, 'utf8') > 256 * 1024)
+      return {
+        error: 'channel memory too large',
+        code: 'too_large',
+        max_bytes: 256 * 1024,
+        __status: 413,
+      };
+    if (mockMemoryConflictNext || body.revision !== mockMemoryRevision(stored)) {
+      mockMemoryConflictNext = false;
+      return {
+        error: 'channel memory changed since it was loaded',
+        code: 'conflict',
+        __status: 409,
+      };
+    }
+    mockChannelMemory.set(room.token, content);
+    return { status: 'ok', revision: mockMemoryRevision(content) };
+  }
+
   const roomPatch = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)$/);
   if (roomPatch && method === 'PATCH') {
     const room = mockChatRooms.find((r) => r.id === Number(roomPatch[1]));

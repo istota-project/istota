@@ -1171,6 +1171,25 @@ class TestDeveloperConfig:
         assert dev.devbox_proxy_enabled is True
         assert dev.devbox_proxy_socket_dir == "/var/run/istota"
         assert dev.devbox_proxy_audit_log == ""
+        # Worktree reaping (ISSUE-288). On by default: the whole point was that
+        # a retention rule nobody applied is the state that produced the leak.
+        assert dev.worktree_reap_enabled is True
+        assert dev.worktree_retention_hours == 24.0
+
+    def test_load_worktree_reaping_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+worktree_reap_enabled = false
+worktree_retention_hours = 72
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.worktree_reap_enabled is False
+        # TOML gives an int for a bare `72`; the field is a float and the
+        # reaper multiplies it by 3600, so either arrives at the same window.
+        assert cfg.developer.worktree_retention_hours == 72
 
     def test_load_devbox_proxy_from_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"

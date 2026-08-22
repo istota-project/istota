@@ -221,6 +221,14 @@ class SchedulerConfig:
     # Ansible, so what is installed changes under a config the daemon already
     # loaded. A boot-only check is blind to exactly that. 0 disables the sweep.
     doctor_check_interval: int = 3600
+    # Seconds between developer-worktree reaping sweeps (ISSUE-288, 0 = off).
+    # A periodic job rather than a task setup hook, deliberately: setup_env
+    # hooks are dispatched for every skill in the index regardless of what the
+    # task selected, so a sweep there ran before every Talk reply and every
+    # heartbeat tick. A delete path belongs on a stated cadence. Six hours is
+    # well under the default 24-hour retention window, so nothing waits long
+    # after becoming eligible, and well over the cost of a sweep.
+    worktree_reap_interval: int = 21600
     db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
     db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
     db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
@@ -726,6 +734,18 @@ class DeveloperConfig:
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
+    # Worktree reaping (ISSUE-288, src/istota/worktree_reaper.py). Nothing used
+    # to remove a task's worktree, so `repos_dir` accumulated gigabyte
+    # checkouts with no owner. The sweep runs on the developer skill's setup
+    # path and removes only a worktree that is clean, unlocked, idle for the
+    # retention window and carrying no commit that is not already upstream.
+    worktree_reap_enabled: bool = True
+    # Hours of no activity before a worktree is a candidate. This is what
+    # protects a *concurrently running* task: tasks for one user run in
+    # parallel and none knows the others exist, so recent activity is the only
+    # evidence available that a checkout is in use. 0 turns the age guard off
+    # and nothing else.
+    worktree_retention_hours: float = 24.0
     review: ReviewConfig = field(default_factory=ReviewConfig)
 
 
@@ -2284,6 +2304,7 @@ def load_config(config_path: Path | None = None) -> Config:
             heartbeat_check_interval=sched.get("heartbeat_check_interval", 60),
             db_health_check_interval=sched.get("db_health_check_interval", 86400),
             doctor_check_interval=sched.get("doctor_check_interval", 3600),
+            worktree_reap_interval=sched.get("worktree_reap_interval", 21600),
             db_backup_enabled=sched.get("db_backup_enabled", True),
             db_backup_interval=sched.get("db_backup_interval", 86400),
             db_backup_dir=sched.get("db_backup_dir", ""),
@@ -2895,6 +2916,8 @@ def load_config(config_path: Path | None = None) -> Config:
             devbox_proxy_enabled=dev.get("devbox_proxy_enabled", True),
             devbox_proxy_socket_dir=dev.get("devbox_proxy_socket_dir", "/var/run/istota"),
             devbox_proxy_audit_log=dev.get("devbox_proxy_audit_log", ""),
+            worktree_reap_enabled=dev.get("worktree_reap_enabled", True),
+            worktree_retention_hours=dev.get("worktree_retention_hours", 24.0),
             review=ReviewConfig(**review_kwargs),
             **extra,
         )

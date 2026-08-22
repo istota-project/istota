@@ -7,6 +7,7 @@ SvelteKit frontend served as static files, Python handles auth and API.
 """
 
 import asyncio
+import hashlib
 import importlib
 import json
 import logging
@@ -3658,6 +3659,166 @@ def _chat_delete_room(username: str, room_id: int) -> str:
     return "ok"
 
 
+# A room's CHANNEL.md is prompt text, not a document store: it is read into
+# every task in the room, so the cap is about what belongs in a system prompt
+# rather than about what the filesystem can hold. 256 KiB is far above any
+# hand-written standing instruction and far below a pasted corpus.
+_CHANNEL_MEMORY_MAX_BYTES = 256 * 1024
+
+
+def _channel_memory_revision(content: str) -> str:
+    """Opaque revision tag for what a reader will see as the file's content.
+
+    Hashes what `read_channel_memory` **returns**, not the bytes on disk: that
+    reader collapses absent and whitespace-only to None, so a file saved as
+    `"  \\n"` reads back as `""`. Hashing the submitted bytes instead would hand
+    the client a tag the next read can never reproduce, and every subsequent
+    save would be refused as a conflict with no way out but discarding the
+    user's text.
+
+    The save is optimistic: the client sends back the revision it loaded, and a
+    mismatch means something else wrote in between. That check — not the lock —
+    is what covers the case the lock cannot: the anchor dir is per-user
+    (`ISTOTA_DEFERRED_DIR`), so a second member's task writing the same shared
+    Talk-room file takes a *different* anchor and excludes nobody.
+    """
+    normalized = content if content.strip() else ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _channel_memory_lock_dir(username: str):
+    """The flock anchor dir the memory skill CLI and the nightly curator use.
+
+    Same expression as `sleep_cycle` and `skills/memory._lock_dir` so a web
+    save and a runtime CLI write against this user's own tasks land on one
+    anchor inode instead of two.
+    """
+    from .memory.curation.file_lock import deferred_lock_dir
+    return deferred_lock_dir(_config.temp_dir / username)
+
+
+def _chat_memory_room(username: str, room_id: int):
+    """Resolve `room_id` for a channel-memory read or write, or None.
+
+    None covers unknown, not-the-caller's handle, no longer a member, and a
+    stored token that isn't path-safe — all reported as 404 so the endpoint is
+    no id oracle, the rule the star and delete endpoints already set.
+
+    **Membership is checked, not inferred from the handle.** Owner scoping alone
+    looks like a membership check and is not one: `_chat_delete_room` on a
+    Talk-origin room deliberately keeps the handle row and merely archives it
+    (`web_app.py`, the ISSUE-134 hide), and `db.get_web_chat_room` applies no
+    archived filter — so a user who left a shared room would keep write access
+    to the one file every remaining member's tasks are given as standing
+    instructions. `db.delete_message` is the neighbouring room-wide write and
+    gates on `db.is_room_member` for the same reason; this follows it.
+    """
+    from . import db, storage
+    room = _chat_owned_room(username, room_id)
+    if room is None:
+        return None
+    try:
+        storage.validate_conversation_token(room.token)
+    except ValueError:
+        # A stored token that isn't path-safe is a corrupt row, not a request
+        # to guess at a path. Report it as absent rather than 500.
+        logger.warning("chat room memory: unsafe token on room %s", room_id)
+        return None
+    with db.get_db(_config.db_path) as conn:
+        if not db.is_room_member(conn, room.token, username):
+            return None
+    return room
+
+
+def _chat_room_memory(username: str, room_id: int) -> dict | None:
+    """The room's `CHANNEL.md` for the settings pane. None = 404 (see resolver)."""
+    from . import db, storage
+    room = _chat_memory_room(username, room_id)
+    if room is None:
+        return None
+    content = storage.read_channel_memory(_config, room.token)
+    with db.get_db(_config.db_path) as conn:
+        # `origin` is token-invariant, so an arbitrary row for this token is the
+        # right one. Don't widen this read to a per-user field without scoping.
+        reg = db.get_room(conn, room.token)
+    return {
+        "room_id": room.id,
+        "token": room.token,
+        # `read_channel_memory` collapses "absent" and "whitespace only" to
+        # None; both are the empty state to a reader, so the pane offers the
+        # template for either rather than showing a blank box.
+        "content": content or "",
+        "exists": content is not None,
+        # A Talk-origin room has one CHANNEL.md across all its members, so a
+        # save is room-global. The UI says so rather than letting it be found.
+        "shared": bool(reg is not None and reg.origin == "talk"),
+        # Served from the server so the pane's "start from template" can't
+        # drift from what `init_channel_memory` writes.
+        "template": storage.CHANNEL_MEMORY_TEMPLATE,
+        "revision": _channel_memory_revision(content or ""),
+    }
+
+
+def _chat_save_room_memory(
+    username: str, room_id: int, content: str, revision: str,
+) -> tuple[str, str | None]:
+    """Replace the room's `CHANNEL.md`. Returns `(status, new_revision)`.
+
+    Status is ``"not_found"``, ``"busy"`` (a task is in flight in the room),
+    ``"conflict"`` (the file moved under the editor), ``"locked"`` (a writer
+    held the lock past the timeout), ``"failed"``, or ``"ok"``.
+
+    The busy refusal takes its shape from `_chat_delete_room` — a worker may be
+    appending to the file being replaced — but counts across **every** member
+    (`count_active_room_tasks`), not just the caller. Delete is per-user because
+    it drops only the caller's own handle; this file is one object shared by the
+    room, so a per-user count would refuse nothing in the shared case.
+    """
+    from . import db, storage
+    from .memory.curation.file_lock import MemoryMdLocked, memory_md_lock
+    room = _chat_memory_room(username, room_id)
+    if room is None:
+        return "not_found", None
+    with db.get_db(_config.db_path) as conn:
+        if db.count_active_room_tasks(conn, room.token) > 0:
+            return "busy", None
+    if _config.use_mount:
+        memory_path = _config.nextcloud_mount_path / "Channels" / room.token / "CHANNEL.md"
+    else:
+        # No local file exists on an rclone deployment, so the anchor is keyed on
+        # a synthetic absolute path. Absolute deliberately: `lock_path_for` hashes
+        # `os.path.abspath`, so a relative one would resolve against the caller's
+        # cwd and two processes would take different anchors. It still excludes
+        # only writers on this host — the object lives on a remote, and
+        # `_rclone_rcat` streams it rather than staging a rename, so a concurrent
+        # reader there can see a partial file. The revision check is what makes
+        # the save safe on that shape; the lock is a local courtesy.
+        memory_path = Path("/") / storage.get_channel_memory_path(room.token).lstrip("/")
+    try:
+        with memory_md_lock(
+            memory_path, timeout_seconds=5.0,
+            lock_dir=_channel_memory_lock_dir(username),
+        ):
+            # Re-read *inside* the lock: the revision the client carries was
+            # taken before it, so comparing outside would leave exactly the
+            # window the check exists to close.
+            current = storage.read_channel_memory(_config, room.token) or ""
+            if _channel_memory_revision(current) != revision:
+                return "conflict", None
+            try:
+                written = storage.write_channel_memory(_config, room.token, content)
+            except OSError as e:
+                # A full disk or a dropped mount is a reportable failure with a
+                # code the client understands, not an unstructured 500.
+                logger.warning("chat room memory save failed for %s: %s", room.token, e)
+                return "failed", None
+            if not written:
+                return "failed", None
+    except MemoryMdLocked:
+        return "locked", None
+    return "ok", _channel_memory_revision(content)
+
+
 def _room_talk_binding(username: str, room_id: int) -> str | None:
     """The Talk room token a web room is bound to, or None. Owner-scoped."""
     from . import db
@@ -5203,6 +5364,80 @@ async def chat_delete_room(
             {"error": "room has a task in progress"}, status_code=409,
         )
     return {"status": "ok"}
+
+
+@api_router.get("/chat/rooms/{room_id}/memory")
+async def chat_room_memory(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    """The room's `CHANNEL.md` — the standing instructions every task in the
+    room is given. Read-only from `/chat/files`' point of view: that endpoint
+    is confined to `/Users/{user_id}` on purpose (`_resolve_chat_file`), and
+    `/Channels/{token}` sits outside it by design, so this carries its own
+    room-scoped confinement rather than widening that root."""
+    result = await asyncio.to_thread(_chat_room_memory, user["username"], room_id)
+    if result is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    return result
+
+
+@api_router.put("/chat/rooms/{room_id}/memory")
+async def chat_save_room_memory(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    content = data.get("content")
+    if not isinstance(content, str):
+        return JSONResponse({"error": "content required"}, status_code=400)
+    # The revision the editor loaded. Required, not optional: a client that may
+    # omit it can silently clobber, which is the whole failure this guards.
+    revision = data.get("revision")
+    if not isinstance(revision, str):
+        return JSONResponse({"error": "revision required"}, status_code=400)
+    if len(content.encode("utf-8")) > _CHANNEL_MEMORY_MAX_BYTES:
+        return JSONResponse(
+            {"error": "channel memory too large",
+             "code": "too_large",
+             "max_bytes": _CHANNEL_MEMORY_MAX_BYTES},
+            status_code=413,
+        )
+    status, new_revision = await asyncio.to_thread(
+        _chat_save_room_memory, user["username"], room_id, content, revision,
+    )
+    if status == "not_found":
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    if status == "busy":
+        return JSONResponse(
+            {"error": "room has a task in progress", "code": "busy"},
+            status_code=409,
+        )
+    if status == "conflict":
+        return JSONResponse(
+            {"error": "channel memory changed since it was loaded",
+             "code": "conflict"},
+            status_code=409,
+        )
+    if status == "locked":
+        return JSONResponse(
+            {"error": "channel memory is being written; try again",
+             "code": "locked"},
+            status_code=409,
+        )
+    if status != "ok":
+        return JSONResponse(
+            {"error": "could not write channel memory", "code": "failed"},
+            status_code=500,
+        )
+    return {"status": "ok", "revision": new_revision}
 
 
 @api_router.get("/chat/rooms/{room_id}/messages")

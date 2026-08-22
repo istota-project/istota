@@ -583,3 +583,82 @@ class TestSnapshotRunsOffTheLoopThread:
             _check(config, pool, last_alert=0.0, now=1000.0)
 
         assert pool._pressure_sample == STARVED
+
+
+class TestRunningTaskPidsReachTheSnapshot:
+    """ISSUE-286: the sandbox tmpfs the snapshot could not see.
+
+    The reader lives in ``host_pressure`` and is covered against a fixture
+    ``/proc`` there. What is under test here is the seam — that the scheduler
+    reads the task table and hands the pids over, since without that the
+    attribution is a function nothing calls.
+    """
+
+    def _running_task(self, config, pid):
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="hello", user_id="alice")
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
+            db.update_task_pid(conn, task_id, pid)
+        return task_id
+
+    def _snapshot_kwargs(self, config, pool):
+        with patch.object(host_pressure, "read_sample", return_value=STARVED), \
+             patch.object(host_pressure, "read_tmpfs_usage", return_value=[]), \
+             patch.object(host_pressure, "snapshot", return_value="host_pressure_snapshot") as snap, \
+             patch.object(scheduler, "_send_operator_alert"):
+            _check(config, pool, last_alert=0.0, now=1000.0)
+        return snap.call_args.kwargs
+
+    def test_a_running_tasks_pid_is_handed_to_the_snapshot(self, config):
+        task_id = self._running_task(config, 533787)
+
+        kwargs = self._snapshot_kwargs(config, WorkerPool(config))
+
+        assert kwargs["task_pids"] == [(task_id, 533787)]
+
+    def test_a_finished_task_is_not_offered_as_a_holder(self, config):
+        """``worker_pid`` is cleared on the way out of ``running``, and the
+        query leans on that. A stale pid would attribute the residue to a
+        sandbox that no longer exists — or to whatever now owns that number."""
+        task_id = self._running_task(config, 533787)
+        with db.get_db(config.db_path) as conn:
+            db.update_task_status(conn, task_id, "completed", result="done")
+
+        kwargs = self._snapshot_kwargs(config, WorkerPool(config))
+
+        assert kwargs["task_pids"] == []
+
+    def test_a_running_task_with_no_pid_is_reported_not_dropped(self, config):
+        """Reachable in production, and the reason the query does not filter on
+        ``worker_pid``: NativeBrain never calls ``on_pid``, and neither does
+        ClaudeCodeBrain's non-streaming path. Dropping those rows printed
+        ``sandbox none-running`` on a host that was running work."""
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="hello", user_id="alice")
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
+
+        kwargs = self._snapshot_kwargs(config, WorkerPool(config))
+
+        assert kwargs["task_pids"] == [(task_id, 0)]
+
+    def test_no_running_tasks_is_an_empty_list_not_none(self, config):
+        """The two render differently and mean different things: an empty list
+        is "nothing is running", ``None`` is "the table could not be read"."""
+        kwargs = self._snapshot_kwargs(config, WorkerPool(config))
+
+        assert kwargs["task_pids"] == []
+
+    def test_an_unreadable_task_table_costs_the_section_not_the_snapshot(self, config):
+        """The outer net already stops the loop dying. This asserts the finer
+        promise: a database that will not open must still leave the headline
+        figures, the tmpfs list and the process table in the log."""
+        pool = WorkerPool(config)
+        with patch.object(host_pressure, "read_sample", return_value=STARVED), \
+             patch.object(host_pressure, "read_tmpfs_usage", return_value=[]), \
+             patch.object(db, "get_running_task_pids", side_effect=OSError("disk gone")), \
+             patch.object(host_pressure, "snapshot", return_value="host_pressure_snapshot") as snap, \
+             patch.object(scheduler, "_send_operator_alert"):
+            _check(config, pool, last_alert=0.0, now=1000.0)
+
+        assert snap.called
+        assert snap.call_args.kwargs["task_pids"] is None

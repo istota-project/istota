@@ -72,9 +72,12 @@ def block() -> str:
     # The scanner counts `{% if %}` / `{% endif %}` pairs, so a whitespace-
     # control tag or an inline conditional could skew the count and return a
     # short block — which would turn every `assert key not in block` below into
-    # a pass for the wrong reason. Fail loudly instead: this key is the last one
-    # in the block.
-    assert "devbox_proxy_audit_log" in text, (
+    # a pass for the wrong reason. Fail loudly instead, on the key that is
+    # currently *last* in the block. Move this assertion whenever a key is
+    # appended after it: a canary that is no longer last stops being a canary,
+    # which is what happened when ISSUE-288 added two keys below
+    # `devbox_proxy_audit_log`.
+    assert "worktree_retention_hours" in text, (
         "the [developer] block scanner truncated early; the retirement "
         "assertions below would pass vacuously"
     )
