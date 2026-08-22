@@ -1,0 +1,41 @@
+# The negative control: the shipped image with the forge binaries removed.
+#
+# Every assertion in `tests/image/` is a claim that the tier can see a broken
+# artifact. Without something known-broken to point it at, that claim is
+# unfalsified — the suite would pass identically if `run_in` returned success
+# unconditionally. This is the artifact that makes it falsifiable, and it
+# reproduces ISSUE-263 exactly: an image where `entrypoint.sh` renders a
+# `[developer]` block naming `/usr/local/lib/istota_forge/gh`, and that path
+# does not exist. In production that surfaced as `os.execve` exiting 6 with
+# ENOENT, at the one point in a task where it would publish.
+#
+# **Test-owned, deliberately.** The alternative was a build arg in
+# `docker/istota/Dockerfile` selecting an empty forge stage — a switch in the
+# production recipe whose only purpose is producing a broken artifact. This is
+# the same control with no production surface: nothing in a real build reads
+# this file, and it cannot be enabled by accident.
+#
+# Usage — it takes the real image as its base rather than rebuilding one:
+#
+#   docker build -f docker/test/Dockerfile.no-forge \
+#       --build-arg BASE=<the tag tests/image/conftest.py built> \
+#       -t istota-test/no-forge:local docker/test
+#
+# Expected result when the image tier is pointed at it (ISTOTA_IMAGE_TAG):
+#   * Group B's literal-path assertion FAILS — /usr/local/lib/istota_forge/gh
+#     is not there, which is the assertion that fails on the pre-fix image.
+#   * Group A FAILS on developer.forge_binaries, in the environment carrying a
+#     token. Under the compose defaults that check SKIPs instead, which is
+#     precisely why Group A names its environment.
+ARG BASE
+FROM ${BASE}
+
+# `rm -rf` on the directory rather than on the two files: an image that ships a
+# third binary later should lose that one too, or the control stops matching
+# what the product does.
+RUN rm -rf /usr/local/lib/istota_forge
+
+# Everything else is untouched on purpose. The config still renders a
+# [developer] block naming the paths, the wrappers are still written per task,
+# and `command -v gh` still finds nothing — so the only difference between this
+# and a correct image is the one the tier is supposed to catch.

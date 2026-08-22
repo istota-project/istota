@@ -1,7 +1,7 @@
 """ISSUE-263 — the docker image shipped neither `gh` nor `glab`.
 
 The image's apt line installed `curl git sqlite3 tmux bubblewrap` and the
-WeasyPrint/tesseract libraries, but no forge CLI. Meanwhile `entrypoint.sh`
+WeasyPrint/tesseract libraries, but no forge CLI. Meanwhile the entrypoint
 renders a `[developer]` block whenever `ISTOTA_DEVELOPER_ENABLED=true`, which
 compose defaults to. Once an operator also set `repos_dir` and a token — the
 two gates the skill checks — `setup_env` wrote the wrappers, `gh` and `glab`
@@ -17,7 +17,7 @@ installed so dpkg does not put a second, real `gh` on PATH.
 
 The tests below pin the three properties that make that safe: the binaries are
 present and checksummed, they land *off* PATH so the wrapper stays the only
-`gh` a task can reach, and the entrypoint tells the skill where they are —
+`gh` a task can reach, and the rendered config tells the skill where they are —
 without which `_resolve_real_bin` cannot find an off-PATH binary and falls back
 to the broken default.
 """
@@ -35,7 +35,7 @@ from istota.skills.developer import _resolve_real_bin
 REPO = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO / "docker" / "istota" / "Dockerfile"
 DEVBOX_DOCKERFILE = REPO / "docker" / "devbox" / "Dockerfile"
-ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"
+RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
 
 # Where the real binaries live: deliberately not a PATH directory. The devbox
 # image made the same choice for the same reason.
@@ -89,18 +89,22 @@ def _forge_run_block(body: str) -> str:
 
 
 def _developer_block(body: str) -> str:
-    """Everything the entrypoint writes into the `[developer]` config block.
+    """Everything render-config.sh writes into the `[developer]` config block.
 
     The heredoc, plus the `echo`-appended keys below it: `author_credit` is
     written after the `TOML` terminator, so a slice that stopped there would
     leave it out of the field-name guard. The terminator is anchored to a line
     of its own — a comment containing the word TOML inside the block would
     otherwise truncate the region silently and make the guard pass on less.
+
+    This block used to live in `entrypoint.sh`. It moved to `render-config.sh`
+    with the Stage 4 extraction; `tests/test_render_config.py` holds the
+    entrypoint to calling that script rather than re-inlining the render.
     """
     start = body.index("[developer]")
     rest = body[start:]
     end = re.search(r"^\s*fi$", rest, re.M)
-    assert end, "unterminated [developer] branch in entrypoint.sh"
+    assert end, "unterminated [developer] branch in render-config.sh"
     return rest[: end.start()]
 
 
@@ -164,19 +168,19 @@ class TestTheImageShipsTheForgeBinaries:
         assert "dpkg -i" not in run
 
 
-class TestTheEntrypointPointsTheSkillAtThem:
+class TestTheRenderedConfigPointsTheSkillAtThem:
     def test_the_developer_block_renders_both_bin_paths(self):
         # Without these, `_resolve_real_bin` falls back to the daemon's PATH,
         # finds nothing (the binaries are off PATH by design), and returns the
         # /usr/local/bin default that does not exist.
-        block = _developer_block(ENTRYPOINT.read_text())
+        block = _developer_block(RENDER_CONFIG.read_text())
         assert "gh_bin_path" in block
         assert "glab_bin_path" in block
 
     def test_the_rendered_paths_default_to_where_the_dockerfile_puts_them(self):
         # Operator-overridable, but the default has to match the image or the
         # stock container is back to exec'ing a path that does not exist.
-        block = _developer_block(ENTRYPOINT.read_text())
+        block = _developer_block(RENDER_CONFIG.read_text())
         assert f":-{FORGE_LIB}/gh}}" in block
         assert f":-{FORGE_LIB}/glab}}" in block
 
@@ -191,7 +195,7 @@ class TestTheEntrypointPointsTheSkillAtThem:
     def test_every_rendered_key_is_a_developer_config_field(self):
         # Same guard the Ansible template has: the loader ignores unknown keys,
         # so a typo here reaches every container and does nothing at all.
-        block = _developer_block(ENTRYPOINT.read_text())
+        block = _developer_block(RENDER_CONFIG.read_text())
         rendered = set(re.findall(r"^([a-z_][a-z0-9_]*)\s*=", block, re.M))
         # The conditionally-appended keys are written with `echo`, not by the
         # heredoc, and need covering too — `author_credit` is one.
@@ -201,7 +205,7 @@ class TestTheEntrypointPointsTheSkillAtThem:
             "keys; the field-name guard below would cover less than it claims"
         )
         unknown = sorted(rendered - {f.name for f in fields(DeveloperConfig)})
-        assert not unknown, f"entrypoint.sh renders unknown [developer] keys: {unknown}"
+        assert not unknown, f"render-config.sh renders unknown [developer] keys: {unknown}"
 
 
 class TestTheResolvedBinaryIsTheOneTheImageShips:

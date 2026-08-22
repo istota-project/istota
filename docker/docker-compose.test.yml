@@ -1,0 +1,97 @@
+# The lean stack: one container, no Nextcloud, no database server, no browser.
+#
+# A standalone file rather than an overlay on docker-compose.yml. It shares
+# almost nothing with the full stack, and an overlay that had to disable six
+# services would be harder to read than a file that never mentions them.
+#
+# The full stack takes around ten minutes to reach healthy, almost all of it
+# Nextcloud installing itself and the entrypoint polling it. This one targets
+# thirty seconds, which is what makes it usable in a test.
+#
+# It is driven by tests/smoke/, never by hand — the config it needs does not
+# exist until the harness renders it. `tests/support/compose.py` holds the
+# invocation.
+
+services:
+  istota:
+    build:
+      context: ..
+      dockerfile: docker/istota/Dockerfile
+
+    # The command the shipped entrypoint execs, run directly. Bypassing
+    # entrypoint.sh is the whole point: everything it does before this line is
+    # Nextcloud provisioning, and the config it would generate has already been
+    # rendered on the host by the same render-config.sh the container ships.
+    #
+    # Deliberately NOT `istota serve`. That launcher belongs to the local
+    # single-user install; the Docker deployment runs istota-scheduler, and a
+    # tier that verifies the deployment artifact should start it the way the
+    # artifact does.
+    # `istota init` first, then the scheduler — the same two steps the shipped
+    # entrypoint runs (entrypoint.sh, `istota … init` then `exec … scheduler`).
+    # Nothing else creates the schema: `init_db` is called from the `init`
+    # subcommand alone, and the scheduler opens the DB without it. Skipping it
+    # produced a container that passed a health check and then logged
+    # "no such table: tasks" twice a second forever.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        uv run istota -c /data/config/config.toml init &&
+        exec uv run istota-scheduler --daemon -c /data/config/config.toml
+
+    environment:
+      # Config generation already happened on the host, so almost nothing is
+      # needed here. What remains is what the daemon reads from the environment
+      # at load time rather than from the file.
+      # A fixed literal, NOT `${ISTOTA_BRAIN_NATIVE_API_KEY:-…}`. Interpolating
+      # from the ambient environment would ship a developer's real key into a
+      # test container that then POSTs to a listener on their own machine.
+      # Nothing in this tier can use a real key: the endpoint is scripted and
+      # ignores the Authorization header entirely.
+      ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      # The rendered config, from a host directory the harness owns. A bind
+      # mount rather than a named volume because the harness has to write the
+      # file *before* the container starts, and a named volume has no host path
+      # to write it through.
+      - ${ISTOTA_TEST_CONFIG_DIR:?the harness must export ISTOTA_TEST_CONFIG_DIR}:/data/config:ro
+      # The framework DB on a named volume, so Layer 4 can retain it across an
+      # upgrade and assert that migrations applied over the old file.
+      - istota_test_db:/data/db
+
+    tmpfs:
+      # The Nextcloud mount, which in this stack has no Nextcloud behind it.
+      # tmpfs rather than a volume: nothing here outlives the run, and it keeps
+      # a failed teardown from leaving state that the next run inherits.
+      - /mnt/shared
+      - /data/repos
+
+    # `host.docker.internal` is built in on Docker Desktop and absent on Docker
+    # Engine. Declaring it makes the scripted model endpoint — which runs in the
+    # pytest process on the host — reachable by the same name on both.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    healthcheck:
+      # The `tasks` table, not the file. The file appears the moment anything
+      # opens the DB, which is *before* `init` has created a schema — measured:
+      # a container that reported healthy and then logged "no such table:
+      # tasks" on every scheduler tick. Readiness is "the daemon can do work",
+      # and the cheapest honest proxy for that is the table it dispatches from.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import sqlite3,sys;
+          sys.exit(0 if sqlite3.connect('file:/data/db/istota.db?mode=ro', uri=True)
+          .execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'\")
+          .fetchone() else 1)"
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+volumes:
+  istota_test_db:
