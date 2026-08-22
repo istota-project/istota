@@ -77,12 +77,41 @@ CHAIN = "DOCKER-USER"
 # comments are load-bearing: `iptables -C` matches them, so the apply and the
 # teardown must agree on the exact string or the teardown deletes nothing.
 EXPECTED_RULES = {
-    "169.254.169.254/32": "istota-devbox: block cloud metadata",
+    # The whole link-local /16, not just the one metadata address: AWS serves
+    # instance DNS at .169.253, ECS task credentials — which hand out role
+    # credentials — at .170.2, and NTP at .169.123. Nothing in that range is
+    # something a devbox legitimately needs (ISSUE-298).
+    "169.254.0.0/16": "istota-devbox: block link-local (incl. cloud metadata)",
+    # Azure's WireServer / host agent. Neither link-local nor RFC1918, so no
+    # other rule here touches it and on an Azure host the metadata block was
+    # half applied without it.
+    "168.63.129.16/32": "istota-devbox: block Azure host agent",
     "10.0.0.0/8": "istota-devbox: block 10.0.0.0/8",
     "172.16.0.0/12": "istota-devbox: block 172.16.0.0/12",
     "192.168.0.0/16": "istota-devbox: block 192.168.0.0/16",
+    # RFC 6598 carrier-grade NAT, and the range Tailscale uses. `ip_forward` is
+    # on and the MASQUERADE rule is `! -o br-devbox`, so a host that joins a
+    # tailnet would otherwise let the devbox masquerade straight into it.
+    "100.64.0.0/10": "istota-devbox: block 100.64.0.0/10",
 }
 EXPECTED_DESTINATIONS = set(EXPECTED_RULES)
+
+# Rules older versions of this role installed and no longer want. The role has
+# to delete these by their exact old spec, or a host that has been upgraded
+# keeps them: `ensure_drop` deletes by spec before inserting, so a rule whose
+# destination changed is never matched by the new spec and survives forever —
+# including through `istota_devbox_enabled: false`, whose teardown also names
+# only the current set. That is the ISSUE-283 failure shape (a teardown that
+# silently deletes nothing) arriving by a different route.
+RETIRED_RULES = {
+    "169.254.169.254/32": "istota-devbox: block cloud metadata",
+}
+
+# Which flag gates which destination. Split out because the two groups are
+# independently switchable and a rule landing in the wrong group would be
+# invisible to a test that only counted them.
+METADATA_DESTINATIONS = {"169.254.0.0/16", "168.63.129.16/32"}
+RFC1918_DESTINATIONS = EXPECTED_DESTINATIONS - METADATA_DESTINATIONS
 
 
 def _defaults() -> dict:
@@ -103,6 +132,7 @@ def _render(template: Path, **overrides) -> str:
 # The assertions, as functions over rendered text.
 
 _ENSURE_DROP_CALL = re.compile(r'^ensure_drop\s+"([^"]*)"\s+"([^"]*)"\s*$', re.M)
+_RETIRE_DROP_CALL = re.compile(r'^retire_drop\s+"([^"]*)"\s+"([^"]*)"\s*$', re.M)
 
 # Both `-A` and `-I` are "add a rule". Matching either keeps the *content*
 # assertions independent of the position one, so a regression to `-A` fails
@@ -117,6 +147,10 @@ def dropped_rules(script: str) -> dict[str, str]:
 
 def dropped_destinations(script: str) -> set[str]:
     return set(dropped_rules(script))
+
+
+def retired_rules(script: str) -> dict[str, str]:
+    return dict(_RETIRE_DROP_CALL.findall(script))
 
 
 def check_no_jinja_survives(text: str) -> None:
@@ -295,15 +329,23 @@ class TestTheFlagsActuallyGate:
     `istota_devbox_enabled`), so the live rules stay until the next reboot
     regenerates the script without them."""
 
-    def test_metadata_flag_removes_only_the_metadata_rule(self):
+    def test_metadata_flag_removes_only_the_metadata_rules(self):
         script = _render(SCRIPT_TEMPLATE, istota_devbox_block_metadata=False)
-        assert dropped_destinations(script) == EXPECTED_DESTINATIONS - {
-            "169.254.169.254/32"
-        }
+        assert dropped_destinations(script) == RFC1918_DESTINATIONS
 
     def test_rfc1918_flag_removes_only_the_rfc1918_rules(self):
         script = _render(SCRIPT_TEMPLATE, istota_devbox_block_rfc1918=False)
-        assert dropped_destinations(script) == {"169.254.169.254/32"}
+        assert dropped_destinations(script) == METADATA_DESTINATIONS
+
+    def test_both_flags_off_blocks_nothing(self):
+        """A supported state, and one `doctor`'s security.devbox_netfilter has
+        to recognise as deliberate rather than as four missing rules."""
+        script = _render(
+            SCRIPT_TEMPLATE,
+            istota_devbox_block_metadata=False,
+            istota_devbox_block_rfc1918=False,
+        )
+        assert dropped_destinations(script) == set()
 
     def test_both_default_to_on(self):
         defaults = _defaults()
@@ -350,6 +392,21 @@ class TestTheThreeSourcesAgree:
             if dest == "{{ item }}":
                 for item in task["loop"]:
                     found[item] = comment.replace("{{ item }}", item)
+            elif dest == "{{ item.dest }}":
+                # Destination and comment vary together, so the loop carries
+                # both. A flat loop cannot express a rule whose comment is not
+                # derivable from its destination, which is every rule whose
+                # comment says what the range *is* rather than repeating it.
+                #
+                # A task looping over dicts but taking its comment from
+                # somewhere else has the two able to drift apart. That is
+                # recorded rather than raised: this parser feeds a comparison,
+                # and an exception here would report the drift as a broken test
+                # instead of as the mismatch it is.
+                for item in task["loop"]:
+                    found[item["dest"]] = (
+                        item["comment"] if comment == "{{ item.comment }}" else comment
+                    )
             else:
                 found[dest] = comment
         return found
@@ -369,10 +426,35 @@ class TestTheThreeSourcesAgree:
         the teardown named all four destinations and no comments, so its `-C`
         probe never matched, the module reported ok/changed=false, and all four
         rules stayed on the host after `istota_devbox_enabled: false`."""
-        assert self._rules(iptables_tasks, "absent") == EXPECTED_RULES, (
-            "the teardown does not remove exactly the rules the role applies, "
-            "comments included — a delete spec whose comment differs matches "
-            "nothing and silently deletes nothing"
+        assert self._rules(iptables_tasks, "absent") == {
+            **EXPECTED_RULES,
+            **RETIRED_RULES,
+        }, (
+            "the teardown does not remove exactly the rules the role applies "
+            "plus the ones it has retired, comments included — a delete spec "
+            "whose comment differs matches nothing and silently deletes nothing"
+        )
+
+    def test_the_retired_rule_is_removed_while_the_devbox_stays_enabled(
+        self, iptables_tasks
+    ):
+        """The teardown only runs on `istota_devbox_enabled: false`. A host that
+        stays enabled through the upgrade needs its superseded rule removed too,
+        which is a separate task gated the other way — without it the narrow
+        `169.254.169.254/32` rule outlives every subsequent run.
+        """
+        removals = [
+            task for task in iptables_tasks
+            if task["ansible.builtin.iptables"]["state"] == "absent"
+            and "not istota_devbox_enabled" not in str(task.get("when", ""))
+        ]
+        assert removals, (
+            "nothing removes a superseded rule on a host that remains enabled"
+        )
+        found = self._rules(removals, "absent")
+        assert found == RETIRED_RULES, (
+            f"the enabled-path removal names {found}, the retired set is "
+            f"{RETIRED_RULES}"
         )
 
     def test_both_paths_insert_the_rules_at_the_front(self, iptables_tasks, script):
@@ -460,6 +542,74 @@ class TestTheThreeSourcesAgree:
             f"is correctly formed and completely inert"
         )
         ipaddress.ip_network(_defaults()[var], strict=True)
+
+
+class TestSupersededRulesAreRemoved:
+    """A destination this role stops blocking has to be deleted by its old spec.
+
+    `ensure_drop` deletes by spec before inserting, which converges a rule whose
+    *position* is wrong but says nothing about a rule whose *destination*
+    changed: the new spec never matches the old rule, so it survives every
+    subsequent run. ISSUE-298 widened `169.254.169.254/32` to the whole
+    `169.254.0.0/16`, and without this the narrow rule stays on every upgraded
+    host indefinitely — and through `istota_devbox_enabled: false`, since the
+    teardown tasks name only the current set.
+
+    Functionally the leftover is harmless here (it blocks a subset of what
+    replaced it). It is asserted anyway because the harmlessness is a property
+    of this particular widening, not of the mechanism, and the next change to
+    the blocklist may not be a widening.
+    """
+
+    def test_the_retired_rule_is_deleted(self, script):
+        assert retired_rules(script) == RETIRED_RULES
+
+    def test_no_rule_is_both_retired_and_wanted(self, script):
+        """The two lists must not overlap, or the script deletes a rule it is
+        about to insert and the chain ends up without it."""
+        assert not (set(retired_rules(script)) & dropped_destinations(script))
+
+    def test_the_retired_spec_is_the_one_that_really_shipped(self):
+        """The old rule is identified by destination *and* comment, because
+        `iptables -D` matches on both — a delete naming the right destination
+        and the wrong comment removes nothing at all, which is exactly the bug
+        ISSUE-283 fixed in the teardown.
+        """
+        assert RETIRED_RULES == {
+            "169.254.169.254/32": "istota-devbox: block cloud metadata"
+        }
+
+
+class TestIPv6CannotBeOpenedSilently:
+    """No `ip6tables` rule exists anywhere in this repo, so every rule here is
+    IPv4-only. Today that is closed by Docker rather than by us: a container on
+    a network without IPv6 gets `disable_ipv6=1` on `eth0`, so there is no
+    address to work with.
+
+    That is one line away from being wrong. Setting `enable_ipv6: true` on the
+    devbox network — or `"ipv6": true` in the daemon config — turns all six
+    rules into decoration, and AWS serves metadata over IPv6 at `fd00:ec2::254`.
+    ISSUE-298 chose the cheap guard over mirroring the rules into `ip6tables`:
+    assert the gap cannot be opened without this going red, which is the same
+    approach the repo takes elsewhere for "closed by something we do not
+    control". If IPv6 is ever wanted on this network, the rules have to come
+    first, and this test is what says so.
+    """
+
+    def test_the_devbox_network_does_not_enable_ipv6(self):
+        text = COMPOSE_TEMPLATE.read_text()
+        assert not re.search(r"^\s*enable_ipv6:\s*(true|yes)\s*$", text, re.M | re.I), (
+            "the devbox network enables IPv6, and every rule in this file is "
+            "IPv4-only — mirror them into ip6tables before turning this on"
+        )
+
+    def test_the_assertion_can_fail(self):
+        """The negative control. A test asserting the *absence* of a line is
+        vacuous unless it has been shown to reject the line's presence."""
+        broken = COMPOSE_TEMPLATE.read_text().replace(
+            "    driver: bridge", "    driver: bridge\n    enable_ipv6: true", 1
+        )
+        assert re.search(r"^\s*enable_ipv6:\s*(true|yes)\s*$", broken, re.M | re.I)
 
 
 class TestTheUnitRunsAfterDocker:

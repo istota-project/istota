@@ -2619,15 +2619,30 @@
 # cannot. That is the isolation working as designed, but it presents as
 # "the devbox suddenly cannot reach anything" rather than as a DNS error,
 # so check what the container actually talks to before deploying.
-- name: Block cloud metadata endpoint from the devbox subnet
+- name: Remove superseded devbox rules from earlier versions of this role
   ansible.builtin.iptables:
     chain: DOCKER-USER
     source: "{{ istota_devbox_network_subnet }}"
     destination: "169.254.169.254/32"
     jump: DROP
     comment: "istota-devbox: block cloud metadata"
+    state: absent
+  when: istota_devbox_enabled and not istota_web_only
+
+- name: Block link-local and cloud metadata from the devbox subnet
+  ansible.builtin.iptables:
+    chain: DOCKER-USER
+    source: "{{ istota_devbox_network_subnet }}"
+    destination: "{{ item.dest }}"
+    jump: DROP
+    comment: "{{ item.comment }}"
     action: insert
     state: present
+  loop:
+    - dest: "169.254.0.0/16"
+      comment: "istota-devbox: block link-local (incl. cloud metadata)"
+    - dest: "168.63.129.16/32"
+      comment: "istota-devbox: block Azure host agent"
   when: istota_devbox_enabled and istota_devbox_block_metadata and not istota_web_only
 
 - name: Block RFC1918 destinations from the devbox subnet
@@ -2643,6 +2658,7 @@
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16
+    - 100.64.0.0/10
   when: istota_devbox_enabled and istota_devbox_block_rfc1918 and not istota_web_only
 
 # Reboot persistence: a small oneshot unit re-applies the DROP rules
@@ -2732,14 +2748,25 @@
 # filtering a subnet the role no longer owns and which is inside Docker's
 # default address pool. Each delete must therefore carry the same comment its
 # matching apply task set, verbatim (ISSUE-283).
-- name: Drop devbox cloud-metadata iptables rule when disabled
+- name: Drop devbox link-local and metadata iptables rules when disabled
   ansible.builtin.iptables:
     chain: DOCKER-USER
     source: "{{ istota_devbox_network_subnet }}"
-    destination: "169.254.169.254/32"
+    destination: "{{ item.dest }}"
     jump: DROP
-    comment: "istota-devbox: block cloud metadata"
+    comment: "{{ item.comment }}"
     state: absent
+  loop:
+    - dest: "169.254.0.0/16"
+      comment: "istota-devbox: block link-local (incl. cloud metadata)"
+    - dest: "168.63.129.16/32"
+      comment: "istota-devbox: block Azure host agent"
+    # The pre-ISSUE-298 spec. A host disabled after being upgraded has only the
+    # two above; one disabled while still carrying the narrow rule needs this,
+    # and `-D` matches destination *and* comment, so the old spelling has to be
+    # named in full or the delete matches nothing.
+    - dest: "169.254.169.254/32"
+      comment: "istota-devbox: block cloud metadata"
   when: not istota_devbox_enabled and not istota_web_only
   failed_when: false
 
@@ -2755,6 +2782,7 @@
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16
+    - 100.64.0.0/10
   when: not istota_devbox_enabled and not istota_web_only
   failed_when: false
 

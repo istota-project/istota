@@ -57,11 +57,47 @@ ensure_drop() {
         -m comment --comment "$comment" -j DROP
 }
 
+retire_drop() {
+    local dest="$1"
+    local comment="$2"
+    # A destination this role used to block and no longer does. `ensure_drop`
+    # cannot converge one of these: it deletes by the rule's *current* spec,
+    # which never matches the old rule, so without this the old rule survives
+    # every run — and every teardown, since those name only the current set.
+    #
+    # Listed explicitly rather than derived. Deriving "ours but no longer
+    # wanted" means parsing `iptables -S` output back into a delete, and the
+    # field it would have to parse is an operator-supplied comment string.
+    #
+    # Runs regardless of the block_* flags: a host that has turned metadata
+    # blocking off should still lose the rule this role no longer installs.
+    while iptables -C DOCKER-USER -s "$SUBNET" -d "$dest" \
+            -m comment --comment "$comment" -j DROP 2>/dev/null; do
+        iptables -D DOCKER-USER -s "$SUBNET" -d "$dest" \
+            -m comment --comment "$comment" -j DROP
+    done
+}
+
+# Superseded by the whole-link-local rule below (ISSUE-298).
+retire_drop "169.254.169.254/32" "istota-devbox: block cloud metadata"
+
 {% if istota_devbox_block_metadata | default(true) %}
-ensure_drop "169.254.169.254/32" "istota-devbox: block cloud metadata"
+# The whole link-local /16 rather than the single metadata address. AWS serves
+# instance DNS at 169.254.169.253, ECS task credentials — which hand out role
+# credentials — at 169.254.170.2, and NTP at 169.254.169.123. There is nothing
+# in that range a devbox legitimately needs.
+ensure_drop "169.254.0.0/16" "istota-devbox: block link-local (incl. cloud metadata)"
+# Azure's WireServer / host agent. Neither link-local nor RFC1918, so without
+# this the metadata block is half applied on an Azure host.
+ensure_drop "168.63.129.16/32" "istota-devbox: block Azure host agent"
 {% endif %}
 {% if istota_devbox_block_rfc1918 | default(true) %}
 ensure_drop "10.0.0.0/8" "istota-devbox: block 10.0.0.0/8"
 ensure_drop "172.16.0.0/12" "istota-devbox: block 172.16.0.0/12"
 ensure_drop "192.168.0.0/16" "istota-devbox: block 192.168.0.0/16"
+# RFC 6598 carrier-grade NAT, and the range Tailscale hands out. ip_forward is
+# on and the MASQUERADE rule is `! -o br-devbox`, so on a host that joins a
+# tailnet the devbox would masquerade straight into it — the pivot these rules
+# exist to stop, arriving over a range none of the others name.
+ensure_drop "100.64.0.0/10" "istota-devbox: block 100.64.0.0/10"
 {% endif %}
