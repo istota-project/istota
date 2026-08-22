@@ -742,7 +742,11 @@ class TestTheCloneEnablesTheRepositorysOwnHooks:
             capture_output=True,
         ).returncode != 0, "precondition: the fixture clone has no hooksPath set"
 
-        _run_fragment(_extract('FRESH=""', "config core.hooksPath"), bare_clone)
+        fragment = _extract('FRESH=""', "config core.hooksPath")
+        assert 'if [ ! -d "$BARE_DIR" ]' in fragment, (
+            "the extracted range has to span the guard, or this passes for free"
+        )
+        _run_fragment(fragment, bare_clone)
 
         assert _git(bare_clone, "config", "--get", "core.hooksPath").strip() == ".githooks"
 
