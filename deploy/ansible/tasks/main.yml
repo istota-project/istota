@@ -226,6 +226,154 @@
     and istota_developer_enabled
   tags: [developer]
 
+# ============================================================
+# gitleaks (pre-commit credential scan)
+# ============================================================
+# The agent commits into checkouts under `developer.repos_dir`, and those
+# checkouts run this repository's `.githooks/pre-commit`. gitleaks is the half
+# of that hook which recognises a credential by shape and entropy rather than
+# by a pattern somebody remembered to write down. It was absent here for every
+# agent commit the host ever made, and the hook warned and continued
+# (ISSUE-291). The hook now refuses instead when nobody is watching, so this
+# install is what keeps agent commits working.
+#
+# Not from the Debian archive, unlike gh and glab: trixie ships 8.16, and
+# `gitleaks git` — the invocation the hook uses — only exists from 8.19, where
+# it replaced `detect` and `protect`. An apt install would put a binary here
+# that the hook's capability probe rejects, which reads as the fix being broken
+# rather than as the package being old.
+#
+# /usr/local/bin, ahead of /usr/bin on the default PATH, so this binary wins
+# over a distro package somebody installs later. It reaches the sandbox for two
+# separate reasons, both worth writing down because a move to /opt would break
+# it silently: `build_bwrap_cmd` binds /usr read-only (not /, as the gh/glab
+# note nearby might suggest), and the scheduler unit's Environment=PATH lists
+# /usr/local/bin.
+- name: Read the gitleaks version already installed
+  ansible.builtin.command: /usr/local/bin/gitleaks version
+  register: istota_gitleaks_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+- name: Install gitleaks from the upstream release
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+    and (istota_gitleaks_installed.stdout | default('') | trim) != istota_developer_gitleaks_version
+  tags: [developer]
+  block:
+    - name: Determine the dpkg architecture for the gitleaks release
+      ansible.builtin.command: dpkg --print-architecture
+      register: istota_gitleaks_arch
+      changed_when: false
+      check_mode: false
+
+    - name: Assert a gitleaks digest is pinned for this architecture
+      ansible.builtin.assert:
+        that:
+          - (istota_gitleaks_arch.stdout | default('')) in istota_developer_gitleaks_checksums
+        fail_msg: >-
+          No gitleaks digest is pinned for
+          {{ istota_gitleaks_arch.stdout | default('an undetermined architecture') }}.
+          Add one to istota_developer_gitleaks_checksums rather than dropping
+          the pin — this binary is what keeps a credential out of a public
+          repository, so an unverified download is the wrong trade.
+
+    # A private directory rather than /tmp. The download runs as root on a host
+    # that has a real unprivileged account for the bot, and a predictable name
+    # in a world-writable directory is a destination somebody else can prepare.
+    # The checksum authenticates the payload, not the path it is written to.
+    - name: Create a private directory for the gitleaks download
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: istota-gitleaks.
+      register: istota_gitleaks_tmp
+
+    - name: Fetch, verify and install the gitleaks release
+      block:
+        - name: Download the gitleaks release tarball
+          ansible.builtin.get_url:
+            url: >-
+              https://github.com/gitleaks/gitleaks/releases/download/v{{ istota_developer_gitleaks_version }}/gitleaks_{{ istota_developer_gitleaks_version }}_linux_{{ istota_developer_gitleaks_release_arch[istota_gitleaks_arch.stdout] }}.tar.gz
+            dest: "{{ istota_gitleaks_tmp.path }}/gitleaks.tar.gz"
+            checksum: "sha256:{{ istota_developer_gitleaks_checksums[istota_gitleaks_arch.stdout] }}"
+            mode: '0600'
+
+        - name: Unpack gitleaks into /usr/local/bin
+          ansible.builtin.unarchive:
+            src: "{{ istota_gitleaks_tmp.path }}/gitleaks.tar.gz"
+            remote_src: yes
+            dest: /usr/local/bin
+            include:
+              - gitleaks
+            owner: root
+            group: root
+            mode: '0755'
+      always:
+        # In `always`, so a failed download or unpack does not leave the
+        # directory behind on every subsequent run.
+        - name: Remove the gitleaks download directory
+          ansible.builtin.file:
+            path: "{{ istota_gitleaks_tmp.path }}"
+            state: absent
+
+# Two checks rather than one, because they fail differently. The version floor
+# catches a pin edited down below what the hook needs; the subcommand probe is
+# what the hook itself runs, so it catches a binary that reports a fine version
+# and still cannot do the thing. Both at deploy time, where the message can say
+# what to do, rather than at the agent's next commit.
+# Resolved through PATH, not by absolute path, unlike the idempotence read
+# above. That one asks "is the binary this role installs already current"; these
+# two ask "will the hook find a working gitleaks", and the hook runs
+# `command -v gitleaks`. If something earlier on PATH shadows /usr/local/bin —
+# an apt-installed 8.16, say — that is the binary the hook gets, so that is the
+# one worth asserting against.
+- name: Read the gitleaks version now on the host
+  ansible.builtin.command: gitleaks version
+  register: istota_gitleaks_version_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+# `| default('0.0.0', true)` on the *result* of the regex, not on stdout: with
+# gitleaks absent the command's stdout is empty, regex_search returns None, and
+# `None is version(…)` raises a comparison error rather than evaluating false —
+# so the task would fail with an opaque Jinja traceback in precisely the state
+# this assert was written to name. The second argument makes the default apply
+# to None as well as to undefined.
+- name: Assert gitleaks clears the floor the pre-commit hook needs
+  ansible.builtin.assert:
+    that:
+      - "(istota_gitleaks_version_check.stdout | default('') | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') | default('0.0.0', true)) is version(istota_developer_cli_floors['gitleaks'], '>=')"
+    fail_msg: >-
+      gitleaks is missing or below the floor the pre-commit hook needs
+      ({{ istota_developer_cli_floors['gitleaks'] }}). Installed:
+      {{ istota_gitleaks_version_check.stdout | default('') | trim | default('not installed', true) }}.
+      Every unattended commit on this host will be refused until this is fixed.
+    success_msg: "gitleaks {{ istota_gitleaks_version_check.stdout | default('') | trim }}"
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+- name: Assert gitleaks has the subcommand the pre-commit hook calls
+  ansible.builtin.command: gitleaks git --help
+  changed_when: false
+  check_mode: false
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
 - name: Enable unprivileged user namespaces for bubblewrap sandbox
   ansible.posix.sysctl:
     name: kernel.unprivileged_userns_clone

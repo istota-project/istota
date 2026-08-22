@@ -33,6 +33,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from istota import task_cgroup
 from istota import usage as usage_types
 from ..process_group import kill_process_group
 from ._aliases import CANONICAL_ROLES, split_effort
@@ -1268,15 +1269,27 @@ class ClaudeCodeBrain:
         # timeout is the only killer, and nothing here wedges a worker (on POSIX
         # `subprocess.run` kills the child and `wait()`s, it does not re-drain
         # the pipes).
-        result = subprocess.run(
-            cmd,
-            input=req.prompt,
-            capture_output=True,
-            text=True,
-            timeout=req.timeout_seconds,
-            cwd=str(req.cwd),
-            env=req.env,
-        )
+        #
+        # Placement is the one thing this path does get, because it costs a
+        # keyword argument. `subprocess.run` takes `preexec_fn` like `Popen`
+        # does, so the child places itself before exec (ISSUE-285). It matters
+        # more here than the paragraph above suggests: `use_streaming` is
+        # `event_writer is not None`, so a deployment with
+        # `scheduler.event_log_enabled = false` runs *every* task through here,
+        # and without this the startup line would report containment for a host
+        # on which no task was ever contained. There is no `verify_placement`
+        # afterwards — `run` does not hand back a pid to check.
+        with task_cgroup.placement(req.task_cgroup) as place_in_cgroup:
+            result = subprocess.run(
+                cmd,
+                input=req.prompt,
+                capture_output=True,
+                text=True,
+                timeout=req.timeout_seconds,
+                cwd=str(req.cwd),
+                env=req.env,
+                preexec_fn=place_in_cgroup,
+            )
 
         output = result.stdout.strip()
 
@@ -1452,22 +1465,40 @@ class ClaudeCodeBrain:
         execution_trace: list[dict] = []
         stderr_lines: list[str] = []
 
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=str(req.cwd),
-            env=req.env,
-            # Own process group so a timeout, a `!stop` or a web cancel can
-            # signal the whole tree. The CLI's bash grandchildren are where the
-            # work actually is — a `pytest -n auto` run survived a bare
-            # process.kill() and finished on a saturated host (ISSUE-257).
-            # This also makes the pid handed to on_pid below a group leader,
-            # which is what lets the two cancel endpoints reach the group.
-            start_new_session=True,
-        )
+        # Per-task cgroup (A6), placed from the child rather than moved into
+        # place afterwards. bwrap forks its inner process during namespace
+        # setup, long before Popen returns, and cgroup v2 membership is
+        # inherited at fork — so a write to `cgroup.procs` after the fact caught
+        # the outer bwrap and left the CLI, its bash grandchildren and whatever
+        # they spawn in the daemon's own leaf forever (ISSUE-285). `preexec_fn`
+        # is None on any deployment with no delegated subtree, which is the
+        # spawn this path has always done.
+        with task_cgroup.placement(req.task_cgroup) as place_in_cgroup:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(req.cwd),
+                env=req.env,
+                # Own process group so a timeout, a `!stop` or a web cancel can
+                # signal the whole tree. The CLI's bash grandchildren are where
+                # the work actually is — a `pytest -n auto` run survived a bare
+                # process.kill() and finished on a saturated host (ISSUE-257).
+                # This also makes the pid handed to on_pid below a group leader,
+                # which is what lets the two cancel endpoints reach the group.
+                start_new_session=True,
+                preexec_fn=place_in_cgroup,
+            )
+
+        # The child cannot report a failed placement, so the parent reads the
+        # membership back. Only when placement actually engaged: where it did
+        # not, `placement` has already said why, and asking again would report
+        # one cause twice. Nothing is retried on a miss either — moving the pid
+        # at this point is exactly the write that produced ISSUE-285.
+        if place_in_cgroup is not None and req.task_cgroup is not None:
+            task_cgroup.verify_placement(process.pid, req.task_cgroup)
 
         # Feed the prompt to stdin on a dedicated thread, started immediately
         # after spawn. The `claude` CLI aborts its stdin read after ~3s

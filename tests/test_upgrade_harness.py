@@ -310,7 +310,7 @@ class TestTheProvisioningFlag:
         assert "USER_NAME=" in flag
         assert "BOT_USER=" in flag
 
-    def test_a_value_with_shell_metacharacters_is_quoted(self):
+    def test_a_value_with_shell_metacharacters_is_quoted(self, tmp_path):
         """The reason this is built in Python rather than by a heredoc.
 
         A quoted heredoc writes `${USER_NAME}` literally and leaves the
@@ -322,9 +322,16 @@ class TestTheProvisioningFlag:
         flag = upgrade._provisioning_flag({"USER_NAME": hostile})
         # `sh` sourcing the file is the real reader; ask it, rather than
         # asserting on the quoting we happened to produce.
+        #
+        # Sourced from a real file rather than from `/dev/stdin` with `input=`.
+        # That form read empty under a full `-n auto` run — returncode 0 and no
+        # output, so the assertion reported a quoting failure that had not
+        # happened — while passing whenever the file was run on its own. A real
+        # path is also closer to what the entrypoint does, which sources a file.
+        flag_file = tmp_path / "provisioning.env"
+        flag_file.write_text(flag)
         result = subprocess.run(
-            ["sh", "-c", '. /dev/stdin; printf %s "$USER_NAME"'],
-            input=flag,
+            ["sh", "-c", f'. "{flag_file}"; printf %s "$USER_NAME"'],
             capture_output=True,
             text=True,
             timeout=30,
