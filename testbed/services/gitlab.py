@@ -156,10 +156,30 @@ class GitLabService(HttpStub):
         all would let anyone on the same network clone from and push to the
         seeded repos for the length of a run. `None` keeps the permissive
         behaviour for the loopback-bound default-suite tests, which have no
-        token to expect, and `HttpStub.start` is what stops a non-loopback bind
+        token to expect, and `start` below is what stops a non-loopback bind
         from reaching that state.
         """
         return self.credential
+
+    def start(self, handler_cls: type, *, host: str = LOOPBACK, **kwargs) -> None:
+        """The base's guard, plus the one it cannot see.
+
+        `HttpStub.start` asserts that *a* credential was named; it has no view
+        of whether the subclass will go on to enforce it. `require_git_auth`
+        is exactly that hole — false, and `_git_http` never challenges, so a
+        non-loopback bind publishes `git http-backend` with
+        `GIT_HTTP_EXPORT_ALL` to anyone on the network while satisfying the
+        base. Refused here rather than removed, because a stub answering a
+        public repository is a legitimate shape on loopback.
+        """
+        if host != LOOPBACK and not self.require_git_auth:
+            raise ValueError(
+                f"{type(self).__name__} was asked to bind {host!r} with "
+                "require_git_auth=False, which publishes git http-backend "
+                "unauthenticated. Challenge for a credential, or bind "
+                f"{LOOPBACK!r}."
+            )
+        super().start(handler_cls, host=host, **kwargs)
 
     # -- the `Service` members --------------------------------------------
 
@@ -196,10 +216,25 @@ class GitLabService(HttpStub):
         with self._lock:
             self.git_calls.clear()
             seeded = list(self.seeded)
-            self.seeded.clear()
+        # `seeded` is *not* cleared first, and that is the whole of the
+        # bookkeeping. Clearing up front and re-registering as each repo is
+        # rebuilt loses the whole list the moment one rebuild raises: the repos
+        # after the failure are never visited, they keep the previous
+        # scenario's pushes, and every later `reset()` is a no-op that reports
+        # success — the exact silent cross-test dependency this method exists
+        # to prevent. `seed_repo` already refuses to register a path twice, so
+        # re-entering is free.
         for path in seeded:
             bare = self.repo_root / f"{path}.git"
-            shutil.rmtree(bare, ignore_errors=True)
+            try:
+                # Not `ignore_errors`: a *partial* removal followed by
+                # `git init --bare` reinitializes rather than resets, so a
+                # branch survives with nothing raised. An absent directory is
+                # the one benign case — an earlier reset that failed after
+                # removing this one — and it is the only one tolerated.
+                shutil.rmtree(bare)
+            except FileNotFoundError:
+                pass
             shutil.rmtree(bare.parent / f"{bare.stem}-seed", ignore_errors=True)
             self.seed_repo(path)
 
@@ -447,12 +482,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         self._record_git(method, path, shape)
 
-        # After the body read, for the same keep-alive reason as the 401 above.
         root = self.stub.repo_root
-        if root is None:
-            self._json(500, {"error": "no repo root"})
-            return
-
         environment = {
             "GIT_PROJECT_ROOT": str(root),
             # Every repo under the root is exported. The root is a per-test
@@ -687,12 +717,25 @@ def serve(
     path", which `HttpStub.start` allows only on a loopback bind.
     """
     repo_root.mkdir(parents=True, exist_ok=True)
+    # Resolved once, so `self.token` (what `config_env` advertises to the
+    # daemon) and `credential` (what the git path challenges for) cannot end up
+    # holding different values. They did when the default was applied in one
+    # place and not the other, and the symptom was the daemon's own push being
+    # rejected while anyone else's was accepted.
+    challenge = token or FORGE_TOKEN
     stub = GitLabService(
         repo_root,
-        token=token or FORGE_TOKEN,
+        token=challenge,
         project=project,
         require_git_auth=require_git_auth,
     )
     handler = type("_BoundHandler", (_Handler,), {"stub": stub})
-    stub.start(handler, host=host, port=port, credential=token)
+    stub.start(
+        handler,
+        host=host,
+        port=port,
+        # `token=""` is treated as absent rather than as a credential of
+        # length zero, so the two can never disagree about what is enforced.
+        credential=challenge if token else None,
+    )
     return stub

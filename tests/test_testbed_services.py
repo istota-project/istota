@@ -57,16 +57,39 @@ class TestTheCredentialRuleIsStructural:
     implementations, not six.
     """
 
-    def test_a_non_loopback_bind_without_a_credential_is_refused(self):
+    def test_a_non_loopback_bind_without_a_credential_is_refused(self, monkeypatch):
+        """And refused *before* binding, which is the whole point.
+
+        The socket is what has to not exist: a guard that raised after
+        `ThreadingHTTPServer` would have published the listener it was
+        complaining about. `stub.port` cannot say so — it starts at 0 and is
+        only assigned after the bind, so it reads 0 on both the refusal and
+        the leak. The constructor itself is the witness.
+        """
+        built = []
+        monkeypatch.setattr(
+            "testbed.httpstub.ThreadingHTTPServer",
+            lambda *args, **kwargs: built.append(args) or pytest.fail(
+                "a listener was constructed despite the refusal", pytrace=False
+            ),
+        )
         stub = HttpStub()
+
         with pytest.raises(ValueError) as caught:
             _serve(stub, host="0.0.0.0")
 
         assert "credential" in str(caught.value)
-        # And it refused *before* binding, which is the whole point: a stub
-        # that raised after `ThreadingHTTPServer` would have published the
-        # listener it is complaining about.
-        assert stub.port == 0
+        assert built == []
+
+    def test_an_empty_credential_counts_as_none(self):
+        """`credential=""` would satisfy an `is None` test and enforce nothing.
+
+        The forge's `_password_accepted` compares against the stored value, so
+        an empty one accepts `Basic base64("anyone:")` from the network while
+        the guard reports itself satisfied.
+        """
+        with pytest.raises(ValueError, match="credential"):
+            _serve(HttpStub(), host="0.0.0.0", credential="")
 
     def test_a_non_loopback_bind_with_a_credential_is_allowed(self):
         stub = _serve(HttpStub(), host="0.0.0.0", credential="a-value-to-expect")
@@ -245,7 +268,13 @@ def _reads_variable(script: str, name: str) -> bool:
 
 
 def _passed_through(compose: str, name: str) -> bool:
-    """Whether `docker-compose.yml` puts `name` in a service's `environment:`.
+    """Whether `name` appears in `docker-compose.yml` as an indented key.
+
+    Which is a proxy for "compose passes it into the container", not the thing
+    itself: the same shape would match a key under `labels:` or an `x-` block.
+    Narrow enough for what it is guarding — every `ISTOTA_*` key in that file is
+    in an `environment:` map — and stated as a proxy so nobody reads more into a
+    pass than is there.
 
     The rule has two files in it. On the lean shape the generator runs on the
     host, so anything it reads is reachable; on the full shape it runs *inside
@@ -337,6 +366,63 @@ class TestConfigEnvNamesOnlyShippedVariables:
         assert rendered["ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE"] == "istota-test"
 
 
+class TestTheForgeGuardsItsOwnListener:
+    """`HttpStub.start` cannot see whether the subclass enforces the credential.
+
+    The forge is where that gap is real: `require_git_auth=False` satisfies the
+    base's guard and then never challenges, on a listener running
+    `git http-backend` with `GIT_HTTP_EXPORT_ALL`.
+    """
+
+    def test_a_public_bind_without_a_git_challenge_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="require_git_auth"):
+            gitlab.serve(
+                tmp_path / "repos",
+                host="0.0.0.0",
+                token="a-token-to-expect",
+                require_git_auth=False,
+            )
+
+    def test_a_loopback_bind_without_a_challenge_is_still_allowed(self, tmp_path):
+        """A stub answering a public repository is a legitimate shape."""
+        forge = gitlab.serve(tmp_path / "repos", require_git_auth=False)
+        try:
+            assert forge.host_bound == LOOPBACK
+        finally:
+            forge.close()
+
+    def test_the_advertised_token_is_the_one_the_git_path_challenges_for(
+        self, tmp_path
+    ):
+        """Two names for one value, and they used to be able to disagree.
+
+        `config_env()` advertises `token` to the daemon while the git path
+        compares against `credential`. Resolving the default in one place and
+        not the other rejected the daemon's own push while accepting anyone
+        else's — a failure that reads as a broken credential helper.
+        """
+        forge = gitlab.serve(tmp_path / "repos", token="a-token-to-expect")
+        try:
+            assert forge.token == "a-token-to-expect"
+            assert forge.expect_git_password == "a-token-to-expect"
+            assert (
+                forge.config_env()["ISTOTA_DEVELOPER_GITLAB_TOKEN"]
+                == forge.expect_git_password
+            )
+        finally:
+            forge.close()
+
+    def test_no_token_challenges_for_nothing_rather_than_for_the_default(
+        self, tmp_path
+    ):
+        """The permissive loopback shape the default-suite tests rely on."""
+        forge = gitlab.serve(tmp_path / "repos")
+        try:
+            assert forge.expect_git_password is None
+        finally:
+            forge.close()
+
+
 class TestTheForgeResets:
     def test_reset_forgets_the_calls_and_rebuilds_the_repository(self, tmp_path):
         """A pushed branch must not survive into the next scenario.
@@ -361,6 +447,43 @@ class TestTheForgeResets:
             # And the repository still exists, rather than being deleted: the
             # next scenario clones it.
             assert forge.branches(forge.project) == ["main"]
+        finally:
+            forge.close()
+
+
+    def test_a_failed_rebuild_leaves_the_registry_intact(self, tmp_path, monkeypatch):
+        """The bookkeeping bug that made every later reset a silent no-op.
+
+        Clearing `seeded` up front and re-registering as each repo is rebuilt
+        loses the whole list the moment one rebuild raises: repos after the
+        failure keep the previous scenario's pushes, and `reset()` reports
+        success from then on. Under a session-scoped pool that is a stale
+        branch a later assertion passes on.
+        """
+        forge = gitlab.serve(tmp_path / "repos")
+        try:
+            forge.seed_repo("ns/first")
+            forge.seed_repo("ns/second")
+
+            real_git = gitlab._git
+
+            def _fail_on_first(argv, **kwargs):
+                if any("ns/first.git" in str(token) for token in argv):
+                    raise RuntimeError("simulated git failure")
+                return real_git(argv, **kwargs)
+
+            monkeypatch.setattr(gitlab, "_git", _fail_on_first)
+            with pytest.raises(RuntimeError):
+                forge.reset()
+
+            assert forge.seeded == ["ns/first", "ns/second"]
+
+            # And once the failure clears, a reset rebuilds both rather than
+            # reporting success having done nothing.
+            monkeypatch.setattr(gitlab, "_git", real_git)
+            forge.reset()
+            assert forge.branches("ns/first") == ["main"]
+            assert forge.branches("ns/second") == ["main"]
         finally:
             forge.close()
 

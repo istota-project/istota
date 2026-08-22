@@ -145,7 +145,11 @@ def _sweep_leftover_stacks():
     yield
 
 
-def _render_config(destination: Path, services: dict[str, Service]) -> Path:
+def _render_config(
+    destination: Path,
+    services: dict[str, Service],
+    extra: dict[str, str] | None = None,
+) -> Path:
     """Run the shipped render script on the host.
 
     This is the property that makes the shortcut legitimate: the file the lean
@@ -153,10 +157,17 @@ def _render_config(destination: Path, services: dict[str, Service]) -> Path:
     run, not by a fixture that approximates it.
 
     Each service contributes its own `config_env()` — the variables that point
-    the daemon at it — merged over the base. Every one of those is a variable
-    `render-config.sh` already reads, so a block the shipped script would not
-    have produced cannot be smuggled in here, and this environment is left with
-    nothing subsystem-specific in it.
+    the daemon at it — merged over the base, with `extra` (the profile's own
+    `config`) last. Every one of those is a variable `render-config.sh` already
+    reads, so a block the shipped script would not have produced cannot be
+    smuggled in here, and this environment is left with nothing
+    subsystem-specific in it.
+
+    Two services claiming the same variable is refused rather than resolved.
+    Silent last-wins would boot a stack from a config naming the wrong
+    service's port, and dict order is what would decide which — a diagnosis
+    that starts from "the daemon never reached the feeds stub" and ends
+    somewhere else entirely.
     """
     config_file = destination / "config.toml"
     # An explicit environment, NOT `**os.environ`. render-config.sh reads
@@ -178,8 +189,19 @@ def _render_config(destination: Path, services: dict[str, Service]) -> Path:
         "BOT_USER": "istota",
         "USER_TIMEZONE": "UTC",
     }
-    for service in services.values():
-        environment.update(service.config_env())
+    claimed: dict[str, str] = {}
+    for name, service in services.items():
+        for variable, value in service.config_env().items():
+            if variable in claimed:
+                pytest.fail(
+                    f"{name} and {claimed[variable]} both set {variable}; one "
+                    "of them would silently win and the stack would boot "
+                    "pointing at the other",
+                    pytrace=False,
+                )
+            claimed[variable] = name
+            environment[variable] = value
+    environment.update(extra or {})
     result = subprocess.run(
         ["bash", str(RENDER_CONFIG)],
         capture_output=True,
@@ -230,7 +252,7 @@ def _start_stack(
         f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
         f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}",
     ]
-    overlays = []
+    overlays = list(profile.compose_overlays)
     if profile.image:
         # Both the overlay and the variable it interpolates, for the same
         # every-subcommand reason as the config dir above.
@@ -242,7 +264,7 @@ def _start_stack(
     )
 
     try:
-        _render_config(config_dir, services)
+        _render_config(config_dir, services, profile.config)
         stack_support.up(args, platform=resolve_platform(pytestconfig))
         stack_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
         yield Stack(

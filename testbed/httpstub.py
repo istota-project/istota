@@ -28,6 +28,17 @@ from .services import ServiceCall
 LOOPBACK = "127.0.0.1"
 FROM_CONTAINER = "host.docker.internal"
 
+# Bounds a parked keep-alive connection, and it is `close()` that depends on it.
+# `daemon_threads = False` below means `server_close` joins handler threads, and
+# HTTP/1.1 keeps the socket open between requests — so a client that connected
+# and went quiet blocks `handle_one_request`, and the join behind it, for as long
+# as it likes. Measured: with no handler `timeout` at all, `close()` on a parked
+# connection had still not returned after six seconds; with one, it returned as
+# soon as the timeout expired. `start` supplies this to any handler that did not
+# set its own, because the alternative is the next subclass hanging a whole
+# pytest session inside a fixture finalizer with nothing on stdout.
+DEFAULT_HANDLER_TIMEOUT = 30
+
 
 class HttpStub:
     """Base for an in-process HTTP stub.
@@ -76,18 +87,32 @@ class HttpStub:
         the forge challenges for it, and a stub with no authenticated verb of
         its own still has to name the value it is exposing, because that is what
         the secret-isolation scenario scans a transcript for.
+
+        Empty counts as absent. `credential=""` would satisfy a `is None` test
+        while leaving a subclass that compares against it accepting anything —
+        the forge's `_password_accepted` would take `Basic base64("anyone:")`
+        from the network — so the guard is falsiness, not identity.
         """
-        if host != LOOPBACK and credential is None:
+        if host != LOOPBACK and not credential:
             raise ValueError(
                 f"{type(self).__name__} was asked to bind {host!r}, which is "
                 "reachable from outside this machine, without a credential to "
-                "expect. Pass `credential=` (see HttpStub.start), or bind "
-                f"{LOOPBACK!r}."
+                "expect. Pass a non-empty `credential=` (see HttpStub.start), "
+                f"or bind {LOOPBACK!r}."
             )
         if self._server is not None:
             raise RuntimeError(f"{type(self).__name__} is already serving")
 
-        self.credential = credential
+        if getattr(handler_cls, "timeout", None) is None:
+            # A subclass rather than an assignment: `handler_cls` belongs to the
+            # caller, and mutating it would reach every other stub that happens
+            # to share it.
+            handler_cls = type(
+                handler_cls.__name__,
+                (handler_cls,),
+                {"timeout": DEFAULT_HANDLER_TIMEOUT},
+            )
+
         server = ThreadingHTTPServer((host, port), handler_cls)
         # Set explicitly, and it is `daemon_threads` that matters rather than
         # `block_on_close`: in `socketserver.ThreadingMixIn` the two are
@@ -97,19 +122,30 @@ class HttpStub:
         # `daemon_threads` is False. Leave this True and an in-flight handler
         # could append to `calls` after `close()` returned.
         server.daemon_threads = False
+        # A short poll interval: `serve_forever`'s default is 0.5s and
+        # `shutdown` waits for the current poll to finish, so every teardown
+        # paid up to half a second — which was most of one stub's runtime.
+        thread = threading.Thread(
+            target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            # `close()` would otherwise block forever: `shutdown` waits on an
+            # event only `serve_forever` sets, and `serve_forever` never ran.
+            server.server_close()
+            raise
+
+        # Everything below is set only once the listener is genuinely serving,
+        # so a `start` that raised leaves the object in the state it began in.
+        self.credential = credential
         # Read the bound address back off the socket rather than trusting what
         # we asked for. `host_bound` is asserted against, and an assertion on
         # the argument we passed in would stay green if the bind itself changed.
         self.host_bound = server.server_address[0]
         self.port = server.server_address[1]
         self._server = server
-        # A short poll interval: `serve_forever`'s default is 0.5s and
-        # `shutdown` waits for the current poll to finish, so every teardown
-        # paid up to half a second — which was most of one stub's runtime.
-        self._thread = threading.Thread(
-            target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
-        )
-        self._thread.start()
+        self._thread = thread
 
     def close(self) -> None:
         """Stop serving and release the socket. Idempotent."""

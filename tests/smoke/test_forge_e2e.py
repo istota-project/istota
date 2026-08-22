@@ -228,7 +228,11 @@ class TestTokenIsolation:
             "the forge token reached the model's transcript\n"
             + forge_stack.diagnostics(task)
         )
-        reached = [call for call in forge_stack.service("gitlab").calls if call.auth]
+        # `calls_matching()` rather than iterating `.calls`: the daemon's own
+        # tasks keep running after `wait_for_task` returns, so handler threads
+        # may still be appending, and only the accessor takes the lock.
+        forge = forge_stack.service("gitlab")
+        reached = [call for call in forge.calls_matching() if call.auth]
         assert reached, (
             "no credential reached the forge; the wrapper never injected one\n"
             + forge_stack.diagnostics(task)
