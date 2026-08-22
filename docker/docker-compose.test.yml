@@ -18,6 +18,24 @@ services:
       context: ..
       dockerfile: docker/istota/Dockerfile
 
+    # An explicit tag, because the project name is unique per test.
+    #
+    # Left to itself compose names a built image `<project>-<service>`, and
+    # every test in this tier invents a fresh project so that an interrupted
+    # run's stack is never adopted by the next one. That trade is right for
+    # containers and wrong for images: `down --volumes` reclaims containers and
+    # volumes and never images, so each test left one more permanent tag behind
+    # — measured at 32 after a few runs, each reported as 2.6 GB. The layers are
+    # shared, so the disk cost is far less than that suggests, but the tag list
+    # grows without bound and nothing ever cleans it.
+    #
+    # Interpolated rather than hardcoded so concurrent checkouts do not share
+    # one tag: work in this repo runs in parallel git worktrees, and a second
+    # `up --build` would otherwise move the tag out from under the first run's
+    # containers mid-session. The harness supplies a checkout-scoped value; the
+    # default is for a hand-run `docker compose -f` outside the harness.
+    image: ${ISTOTA_TEST_LEAN_IMAGE:-istota-test/lean:local}
+
     # The command the shipped entrypoint execs, run directly. Bypassing
     # entrypoint.sh is the whole point: everything it does before this line is
     # Nextcloud provisioning, and the config it would generate has already been
@@ -39,6 +57,28 @@ services:
       - >-
         uv run istota -c /data/config/config.toml init &&
         exec uv run istota-scheduler --daemon -c /data/config/config.toml
+
+    # bubblewrap needs to create a user namespace, and Docker's default seccomp
+    # profile blocks the `unshare(CLONE_NEWUSER)` that takes — measured on
+    # Docker Desktop 29.x: `bwrap --unshare-user` reports "No permissions to
+    # create new namespace, likely because the kernel does not allow
+    # non-privileged user namespaces", which reads as a host misconfiguration
+    # rather than as a container policy. Without this, every task that runs a
+    # Bash tool call fails, and the forge scenarios below cannot reach the
+    # wrapper at all.
+    #
+    # This is the *whole* grant: `--cap-add=SYS_ADMIN` is not needed and is not
+    # given. `/proc/sys` stays read-only, so `--disable-userns` is unavailable
+    # here — `executor._bwrap_supports_disable_userns` probes for it and omits
+    # it, which is the same accommodation `tests/linux/` documents. So the
+    # sandbox this tier exercises is the real one minus one hardening flag, and
+    # nothing here may assert about nested-userns behaviour.
+    #
+    # A test-harness concession, not a deployment recipe. The supported
+    # production shape is bare metal via Ansible, where nothing blocks the
+    # syscall; docker-compose.yml deliberately does not carry this line.
+    security_opt:
+      - seccomp:unconfined
 
     environment:
       # Config generation already happened on the host, so almost nothing is

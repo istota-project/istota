@@ -1,0 +1,24 @@
+# An overlay that runs the lean stack against an image somebody else built.
+#
+# Used for exactly one thing today: the negative control. Every assertion in
+# tests/smoke/ is a claim that the tier can see a broken deployment, and without
+# something known-broken to point it at, that claim is unfalsified — the whole
+# file would pass identically if the daemon never ran a forge command at all.
+# `docker/test/Dockerfile.no-forge` is the broken artifact; this is how the
+# stack is pointed at it.
+#
+# `!reset` on `build` is the load-bearing line. A service carrying both `build`
+# and `image` is one compose will happily rebuild, tagging the result over the
+# name we asked it to run — so the control would quietly test the *correct*
+# image and pass, which is the exact silent non-execution this tier exists to
+# end. Resetting the key removes it from the merged model instead. Compose 2.24+
+# only; the repo's own tooling is well past that.
+#
+# It is an overlay rather than a flag inside docker-compose.test.yml because the
+# base file has no place to put a conditional build, and a second file cannot be
+# picked up by accident: nothing reads this unless a caller passes it with -f.
+
+services:
+  istota:
+    build: !reset null
+    image: ${ISTOTA_TEST_IMAGE:?the harness must export ISTOTA_TEST_IMAGE}

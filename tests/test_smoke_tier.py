@@ -32,6 +32,7 @@ from .support import compose as compose_support
 from .support.probe import Probe
 
 REPO = Path(__file__).resolve().parents[1]
+PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
 COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
 
 # Deliberately not `os.environ`: these checks are about what rides in the
@@ -246,6 +247,139 @@ class TestTheComposeFileIsAddressable:
         assert "${ISTOTA_TEST_CONFIG_DIR:?" in body, body[:400]
 
 
+class TestThePrebuiltOverlay:
+    """The overlay that points the stack at an image somebody else built.
+
+    Its only caller is the negative control, and the control is the one thing
+    proving the smoke tier can see a broken deployment — so an overlay that
+    silently failed to apply would disarm the tier's own falsification while
+    every test still passed.
+    """
+
+    def test_the_merged_model_runs_the_named_image_and_builds_nothing(self, tmp_path):
+        """`build: !reset null` is the whole point, so it is what is asserted.
+
+        A service carrying both `build` and `image` is one compose rebuilds,
+        tagging the result over the name we asked it to run — the control would
+        then test the *correct* image and pass. `config` renders the merged
+        model, which is the only place that outcome is visible before a
+        container exists.
+        """
+        _require_compose_cli()
+        env_file = tmp_path / "compose.env"
+        env_file.write_text(
+            f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n"
+            "ISTOTA_TEST_IMAGE=istota-test/no-forge:pinned\n"
+        )
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
+        )
+
+        result = subprocess.run(
+            args + ["config"], capture_output=True, text=True, timeout=60,
+            env=_MINIMAL_ENV,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "istota-test/no-forge:pinned" in result.stdout, result.stdout
+        assert "build:" not in result.stdout, (
+            "the overlay left a build section in the merged model, so compose "
+            "would rebuild and retag over the image the control asked for\n"
+            + result.stdout
+        )
+
+    def test_the_image_is_required_rather_than_defaulted(self, tmp_path):
+        """`:?` not `:-`. An empty default renders a service with no image at
+        all, and the failure arrives as a compose error about a malformed
+        service rather than as "the harness forgot to say which image"."""
+        _require_compose_cli()
+        env_file = tmp_path / "compose.env"
+        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
+        )
+
+        result = subprocess.run(
+            args + ["config"], capture_output=True, text=True, timeout=60,
+            env=_MINIMAL_ENV,
+        )
+
+        assert result.returncode != 0
+
+    def test_the_base_file_still_builds_when_no_overlay_is_applied(self, tmp_path):
+        """The control for the control. Without this, the assertion above
+        would pass on a base file that had stopped declaring a build at all."""
+        _require_compose_cli()
+        env_file = tmp_path / "compose.env"
+        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p", env_file=env_file
+        )
+
+        result = subprocess.run(
+            args + ["config"], capture_output=True, text=True, timeout=60,
+            env=_MINIMAL_ENV,
+        )
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "build:" in result.stdout, result.stdout
+
+
+class TestTheSeccompGrantStaysInTheTestFile:
+    """The lean stack loosens seccomp so bwrap can build a namespace.
+
+    That is a test-harness concession — the supported production shape is bare
+    metal via Ansible, where the syscall is not blocked — and the comment in
+    the test compose file says so. Nothing enforced it, so a copy across while
+    debugging would ship a container-escape-adjacent grant to every operator
+    running the Docker stack, and no test would notice.
+
+    Precedent for the shape: `TestVendoredCopy` and
+    `tests/test_private_data_scan.py` both guard a property whose violation is
+    otherwise silent.
+    """
+
+    @pytest.mark.parametrize(
+        "setting", ["seccomp", "privileged", "cap_add", "apparmor"]
+    )
+    def test_the_production_compose_grants_no_extra_privilege(self, setting):
+        lines = (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
+        offenders = []
+        for number, line in enumerate(lines, 1):
+            if setting not in line or line.strip().startswith("#"):
+                continue
+            # The key and the list under it, because a YAML sequence puts the
+            # value on the *following* lines — `cap_add:` alone says nothing
+            # about what is being added, and a line-at-a-time check reads the
+            # devbox's deliberate NET_RAW as an unexplained grant.
+            block = " ".join(part.strip() for part in lines[number - 1 : number + 3])
+            offenders.append(f"{number}: {block}")
+
+        # `cap_add: NET_RAW` on the devbox is pre-existing and deliberate — it
+        # is what lets that container run ping and traceroute, and it is not a
+        # sandbox grant. Excluded by name rather than by dropping the setting
+        # from the sweep, so a *second* cap_add anywhere still fails this.
+        offenders = [line for line in offenders if "NET_RAW" not in line]
+
+        assert not offenders, (
+            f"docker/docker-compose.yml grants {setting!r}: {offenders}. The "
+            "seccomp relaxation belongs to docker-compose.test.yml alone — see "
+            "the comment there."
+        )
+
+    def test_the_test_compose_still_carries_it(self):
+        """The control. Without this the assertion above would pass just as
+        well on a test file that had lost the grant, at which point the whole
+        smoke tier fails on bwrap and nothing explains why."""
+        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
+
+        assert "seccomp:unconfined" in body, (
+            "the lean stack no longer relaxes seccomp; bwrap cannot create a "
+            "user namespace under Docker's default profile, so every task "
+            "running a Bash tool call will fail"
+        )
+
+
 class TestTheStackStartsTheWayTheDeploymentDoes:
     def test_the_schema_is_created_before_the_scheduler_runs(self):
         """`init` is not optional, and nothing else does it.
@@ -283,6 +417,28 @@ class TestComposeArgs:
 
         assert "--project-name" in args and "p" in args
         assert str(COMPOSE_FILE) in args
+
+    def test_overlays_follow_the_base_file_in_order(self):
+        """Compose merges `-f` files left to right, so the order is the meaning.
+
+        An overlay placed *before* the base would be overridden by it rather
+        than overriding it — the same file list, the opposite result, and no
+        error either way.
+        """
+        args = compose_support.compose_args(
+            COMPOSE_FILE,
+            project="p",
+            overlays=[Path("/tmp/first.yml"), Path("/tmp/second.yml")],
+        )
+        files = [args[i + 1] for i, token in enumerate(args) if token == "-f"]
+
+        assert files == [str(COMPOSE_FILE), "/tmp/first.yml", "/tmp/second.yml"]
+
+    def test_no_overlays_leaves_the_argument_list_as_it_was(self):
+        """The default path, so the parameter cannot change existing callers."""
+        assert compose_support.compose_args(
+            COMPOSE_FILE, project="p"
+        ) == compose_support.compose_args(COMPOSE_FILE, project="p", overlays=[])
 
     def test_the_env_file_is_omitted_when_absent(self):
         # Passing `--env-file` with an empty value makes compose fail with a

@@ -34,6 +34,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # The forge-binary resolution rule lives in a stdlib-only leaf so `doctor` can
 # reach it without importing `istota.skills` (whose __init__ star-imports every
@@ -78,7 +79,86 @@ def _write_forge_cli(dev_bin: Path, name: str) -> Path:
     )
 
 
-def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
+def _plain_http_host_entry(forge_url: str) -> str:
+    """glab's config for a forge reached over plain HTTP, or "" for anything else.
+
+    glab discards the scheme inside ``GITLAB_HOST`` and keeps the port, so a
+    deployment configured against ``http://gitlab.internal:8080`` forces https
+    and every call dies with "tls: first record does not look like a TLS
+    handshake". Measured on glab 1.114.0, the version ``docker/devbox`` pins.
+    ``GITLAB_API_PROTOCOL`` is not read either; the one lever glab offers is a
+    per-host ``api_protocol`` in its own config file.
+
+    That file is the one ``_seed_cli_config_dir`` truncates on every task, so
+    the entry has to be written by the same code that empties it — a caller
+    cannot seed it and have it survive.
+
+    Returns "" for https, for an unset or unparseable URL, and for one carrying
+    userinfo (see below) — which keeps the file empty wherever it does not have
+    to carry something. Whatever is in it is honoured by both CLIs before
+    dispatch, so it is not a surface to grow idly.
+
+    The key is the lowercased host, its port if non-default, and the URL path.
+    All three are measured rather than assumed: glab lowercases its lookup key,
+    and it derives that key from the whole of ``GITLAB_HOST``, which
+    ``build_invocation`` sets to the whole URL because a sub-path install is a
+    supported shape.
+    """
+    if not forge_url:
+        return ""
+    try:
+        parts = urlsplit(forge_url if "://" in forge_url else f"https://{forge_url}")
+    except ValueError:
+        # An unparseable URL is the operator's problem and doctor's to report.
+        # This is a setup path; raising here would take the whole hook's return
+        # value with it (`dispatch_setup_env_hooks` keeps only what it returned),
+        # leaving a task that looks fine and cannot authenticate.
+        return ""
+    if parts.scheme != "http":
+        return ""
+
+    # A URL carrying userinfo gets nothing, deliberately. Measured on glab
+    # 1.114.0: its lookup key *includes* the userinfo, so an entry that actually
+    # matched `http://user:token@host` would have to carry the password — and
+    # this file lives under `.developer`, which is bound readable into the
+    # sandbox. That would hand the model a credential in order to support a
+    # shape that should not exist: the token belongs in `gitlab_token`, and
+    # `git_remote_scrub` exists to strip exactly this out of URLs. Better to
+    # leave the call failing the way it already did and let
+    # `doctor.check_forge_transport` say why.
+    if "@" in (parts.netloc or ""):
+        return ""
+
+    # `hostname`, not `netloc`: `hostname` is already lowercased and free of
+    # userinfo, and glab's lookup key is lowercased too — measured, an entry
+    # filed under `LOCALHOST:8080` is never found and the call forces https.
+    host = parts.hostname or ""
+    if not host:
+        return ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    # The path belongs in the key. `build_invocation` puts the whole URL in
+    # GITLAB_HOST because a subpath install is a supported shape, and glab
+    # derives its key from that — so an entry under the bare netloc is never
+    # consulted for `http://forge.internal/gitlab`.
+    path = (parts.path or "").rstrip("/")
+    if path:
+        host = f"{host}{path}"
+
+    # Quoted, because a key carrying a port or a path is a YAML mapping key
+    # containing a colon or a slash — unquoted, that is not the key it looks
+    # like.
+    return (
+        "hosts:\n"
+        f'  "{host}":\n'
+        "    api_protocol: http\n"
+        f'    api_host: "{host}"\n'
+    )
+
+
+def _seed_cli_config_dir(
+    dev_bin: Path, name: str, *, forge: str = "", forge_url: str = ""
+) -> Path:
     """A pre-seeded CLI config directory, at the modes each CLI will accept.
 
     ``config.yml`` is mode 0600, not 0400, because glab refuses to start on
@@ -90,17 +170,31 @@ def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
     Seeding an empty file rather than leaving the directory bare is
     deliberate. gh expands ``aliases`` from ``config.yml`` *before* command
     dispatch, so an absent file is one the model could otherwise supply.
+
+    ``forge`` and ``forge_url`` together decide whether anything is written at
+    all — see :func:`_plain_http_host_entry`. **Only glab gets an entry**, and
+    the rule lives here rather than at the call site because it is not merely
+    useless for gh, it is harmful: gh cannot address a non-443 forge at all
+    (``forge_cli._hostname`` strips the port by construction), and on finding a
+    ``hosts:`` block it runs its multi-account migration and writes a
+    ``hosts.yml`` beside the config. This function truncates ``config.yml`` and
+    nothing else, and ``user_temp_dir`` persists across tasks — so that file
+    would survive every later run, in a directory whose whole design is that
+    nothing does.
     """
     cfg = dev_bin / name
     cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
     config_yml = cfg / "config.yml"
-    # Truncated on every run, not seeded once. user_temp_dir persists across
-    # tasks, so a "write it only if absent" guard would make the seed a
-    # one-time act: anything that got an alias table in there once — a
-    # deployment without bwrap, or a host-side write — would have it honoured
-    # by every later task. The wrapper and the policy are both rewritten
-    # unconditionally; this is the file that most needs to be.
-    _atomic_write(config_yml, "", 0o600)
+    # Rewritten on every run, not seeded once, and *replaced* rather than
+    # appended to. user_temp_dir persists across tasks, so a "write it only if
+    # absent" guard would make the seed a one-time act: anything that got an
+    # alias table in there once — a deployment without bwrap, or a host-side
+    # write — would have it honoured by every later task. The wrapper and the
+    # policy are both rewritten unconditionally; this is the file that most
+    # needs to be. Everything written here is derived from config, so a
+    # non-empty body is as reproducible as the empty one it replaced.
+    entry = _plain_http_host_entry(forge_url) if forge == FORGE_GITLAB else ""
+    _atomic_write(config_yml, entry, 0o600)
     return cfg
 
 
@@ -229,7 +323,11 @@ def setup_env(ctx) -> dict[str, str]:
             )
             section["url"] = url
             section["real_bin"] = real_bin
-            section["config_dir"] = str(_seed_cli_config_dir(dev_bin, f"{forge}-config"))
+            section["config_dir"] = str(
+                _seed_cli_config_dir(
+                    dev_bin, f"{forge}-config", forge=forge, forge_url=url
+                )
+            )
             section["data_dir"] = str(_pinned_data_dir(dev_bin, f"{forge}-data"))
             section["state_dir"] = str(state_dir)
             # With the skill proxy off there is no socket to ask, and the

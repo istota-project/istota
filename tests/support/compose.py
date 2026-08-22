@@ -65,7 +65,11 @@ class ComposeError(RuntimeError):
 
 
 def compose_args(
-    compose_file: Path, *, project: str, env_file: Path | None = None
+    compose_file: Path,
+    *,
+    project: str,
+    env_file: Path | None = None,
+    overlays: list[Path] | None = None,
 ) -> list[str]:
     """The invariant prefix for every compose call against one stack.
 
@@ -73,8 +77,16 @@ def compose_args(
     the directory name: every stack in this repo's `docker/` directory would
     otherwise share one project, so a smoke run would adopt (and then tear down)
     a developer's running full stack.
+
+    `overlays` are extra `-f` files merged over the base, in order. Like the
+    base file they ride in the argument list, so every subcommand sees the same
+    merged model — an overlay applied only to `up` would leave `ps`, `logs` and
+    `down` reasoning about a different stack than the one running.
     """
-    args = ["docker", "compose", "-f", str(compose_file), "--project-name", project]
+    args = ["docker", "compose", "-f", str(compose_file)]
+    for overlay in overlays or []:
+        args += ["-f", str(overlay)]
+    args += ["--project-name", project]
     if env_file is not None:
         args += ["--env-file", str(env_file)]
     return args

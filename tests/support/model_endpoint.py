@@ -48,8 +48,45 @@ class ScriptedEndpoint:
     port: int
     host_bound: str
     requests: list[dict] = field(default_factory=list)
+    turns: list[dict] = field(default_factory=list)
+    served: int = 0
     _server: ThreadingHTTPServer | None = None
     _thread: threading.Thread | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def rescript(self, turns: list[dict]) -> None:
+        """Replace the script, and rewind.
+
+        A caller that only learns what to script *after* the endpoint is
+        listening needs this: a scripted command may have to name a port that
+        did not exist until something bound it. Starting a second endpoint
+        instead would mean re-rendering the config that carries the first one's
+        `base_url`, which is a stack restart.
+
+        Rewinding is part of it. Leaving the index where it was would make the
+        new script's first turn answer as though it were the Nth, and the
+        symptom is an exhausted-script error frame on a run that scripted
+        plenty.
+        """
+        with self._lock:
+            self.turns = list(turns)
+            self.served = 0
+            self.requests.clear()
+
+    def transcript(self) -> str:
+        """Every message the endpoint was ever sent, as one string.
+
+        The place tool *results* show up. A scenario asserting on what a
+        command printed has no other view of it: the output goes into the
+        conversation the daemon sends back, never into the task row.
+        """
+        with self._lock:
+            bodies = list(self.requests)
+        parts = []
+        for body in bodies:
+            for message in body.get("messages") or []:
+                parts.append(str(message.get("content")))
+        return "\n".join(parts)
 
     @property
     def base_url(self) -> str:
@@ -196,9 +233,9 @@ def serve_script(
     raises the macOS incoming-connections prompt, where the run appears to hang
     on a dialog nobody is looking at.
     """
-    endpoint = ScriptedEndpoint(port=0, host_bound=host)
-    state = {"index": 0}
-    lock = threading.Lock()
+    # The script lives on the endpoint rather than in this closure, so
+    # `rescript` can replace it after the server is listening.
+    endpoint = ScriptedEndpoint(port=0, host_bound=host, turns=list(turns))
 
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -234,22 +271,32 @@ def serve_script(
             length = int(self.headers.get("content-length") or 0)
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    # A body of `[]` or `"x"` parses fine and then raises
+                    # `AttributeError` on `.get` below — in a handler thread
+                    # whose `handle_error` is deliberately silent, so the client
+                    # sees a dropped connection. `transcript()` would raise the
+                    # same way later. `fake_gitlab._read_body` guards this; the
+                    # asymmetry between two files added together is what bites
+                    # when someone points a different client at one of them.
+                    raise ValueError("body was not a JSON object")
             except (ValueError, OSError):
                 # A 400 the caller can see beats a traceback in someone else's
                 # test output.
                 self.send_error(400, "expected a JSON body")
                 return
 
-            with lock:
-                index = state["index"]
-                state["index"] += 1
+            with endpoint._lock:
+                index = endpoint.served
+                endpoint.served += 1
                 endpoint.requests.append(body)
+                scripted = list(endpoint.turns)
 
             model = body.get("model", "")
-            if index < len(turns):
-                frames = _turn_frames(turns[index], model)
+            if index < len(scripted):
+                frames = _turn_frames(scripted[index], model)
             else:
-                frames = [_exhausted_frame(index, len(turns))]
+                frames = [_exhausted_frame(index, len(scripted))]
 
             payload = b"".join(frames)
             self.send_response(200)

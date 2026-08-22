@@ -15,9 +15,12 @@ slowly:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -26,12 +29,14 @@ import pytest
 from ..support import compose as compose_support
 from ..support.model_endpoint import serve_script
 from ..support.probe import Probe
+from . import fake_gitlab
 
 # Imported rather than re-derived. `--platform amd64` is a rootdir-level option
 # (tests/conftest.py) that both Docker tiers honour, and the normalization —
 # a bare `amd64` becoming `linux/amd64` — is the part that is easy to get
 # subtly wrong. A second copy here would drift, and the symptom of drift is a
 # native build wearing an amd64 label.
+from ..image import conftest as image_support
 from ..image.conftest import resolve_platform
 
 REPO = Path(__file__).resolve().parents[2]
@@ -49,6 +54,32 @@ _XDIST_MESSAGE = (
 # Every project this tier creates starts with it, which is what makes the
 # session-start sweep able to find leftovers without touching anything else.
 PROJECT_PREFIX = "istota-smoke-"
+
+# The non-terminal task statuses, from AGENTS.md's "Task Status" ladder
+# (pending -> locked -> running -> completed / failed / pending_confirmation /
+# cancelled). A task in one of these may still call the model.
+# `pending_confirmation` is deliberately absent: it is suspended waiting for a
+# human and will not move on its own, so treating it as in-flight would make
+# `script` wait out its whole timeout.
+_IN_FLIGHT = frozenset({"pending", "locked", "running"})
+
+
+def lean_image_tag() -> str:
+    """One image tag per checkout, shared by every stack this tier starts.
+
+    Compose names a built image after the project, and the project is unique
+    per test so an interrupted run's stack is never adopted by the next one.
+    Images are not reclaimed by `down --volumes`, so that left one permanent
+    tag per test. A single tag collapses them.
+
+    Scoped by checkout path rather than fixed, because work in this repo runs
+    in parallel git worktrees: two of them sharing a tag means the second
+    `up --build` moves it out from under the first run's containers, mid-run.
+    Same reasoning as `tests/image/conftest._tag_for`, which carries the same
+    component for the same reason.
+    """
+    digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
+    return f"istota-test/lean:{digest}"
 
 
 @pytest.hookimpl(trylast=True)
@@ -111,12 +142,19 @@ def _sweep_leftover_stacks():
     yield
 
 
-def _render_config(destination: Path, base_url: str) -> Path:
+def _render_config(
+    destination: Path, base_url: str, extra: dict[str, str] | None = None
+) -> Path:
     """Run the shipped render script on the host.
 
     This is the property that makes the shortcut legitimate: the file the lean
     stack boots from is produced by the same script the container would have
     run, not by a fixture that approximates it.
+
+    `extra` adds `ISTOTA_*` variables the script reads — how the forge stack
+    turns the `[developer]` block on. It is merged over the base rather than
+    replacing it, and it goes through the same script, so a block that the
+    render script would not have produced cannot be smuggled in here.
     """
     config_file = destination / "config.toml"
     # An explicit environment, NOT `**os.environ`. render-config.sh reads
@@ -144,6 +182,7 @@ def _render_config(destination: Path, base_url: str) -> Path:
         # should fail loudly rather than grind through a hundred attempts.
         "ISTOTA_BRAIN_NATIVE_MAX_TURNS": "4",
     }
+    environment.update(extra or {})
     result = subprocess.run(
         ["bash", str(RENDER_CONFIG)],
         capture_output=True,
@@ -196,7 +235,10 @@ def lean_stack(pytestconfig, tmp_path, request):
     # An --env-file rides along in the argument list, so every subcommand gets
     # it and no caller has to remember.
     env_file = tmp_path / "compose.env"
-    env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={config_dir}\n")
+    env_file.write_text(
+        f"ISTOTA_TEST_CONFIG_DIR={config_dir}\n"
+        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}\n"
+    )
     args = compose_support.compose_args(
         COMPOSE_FILE, project=project, env_file=env_file
     )
@@ -214,6 +256,202 @@ def lean_stack(pytestconfig, tmp_path, request):
         # make the next run's assertions depend on this one's rows.
         compose_support.down(args, volumes=True)
         endpoint.close()
+
+
+# The token the forge stack configures. Fabricated, and deliberately not
+# wearing a real forge prefix: the pre-commit scanner objects to `glpat-` on
+# exactly the reasoning that a fake value with a real prefix is
+# indistinguishable from a leak to anything reading the diff. Its *length* is
+# what the assertions use, via `ForgeCall.auth`.
+FORGE_TOKEN = "forge-token-for-the-smoke-tier"
+
+# The project the stub seeds and the scenarios work against.
+FORGE_PROJECT = "istota-test/smoke-project"
+
+
+NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
+PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
+
+
+@pytest.fixture(scope="session")
+def no_forge_image(pytestconfig) -> str:
+    """The shipped image with the forge binaries removed.
+
+    Built here rather than imported as a fixture from `tests/image/conftest.py`,
+    because a fixture defined in a sibling package's conftest is not visible to
+    this one — the *functions* are, and those are what this uses.
+
+    Two builds: the real image (usually a cache hit, since the compose stack in
+    this same session just built it from the same context) and then the control
+    on top of it. `Dockerfile.no-forge` takes the real tag as `BASE` precisely
+    so the second is one `rm -rf` layer.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+    platform = resolve_platform(pytestconfig)
+
+    # `ISTOTA_IMAGE_TAG` first, exactly as `image_support.istota_image` does.
+    # Without it the control is built from the local checkout while the
+    # correct-image half of the pair is whatever tag the environment named — so
+    # the two differ by more than the forge binaries, and the control measures
+    # the difference between two builds rather than the thing it exists for.
+    preexisting = os.environ.get("ISTOTA_IMAGE_TAG")
+    if preexisting:
+        base_tag = preexisting
+    else:
+        base_tag = image_support.build_image(
+            image_support.ISTOTA_DOCKERFILE, REPO, platform=platform, prefix="istota"
+        ).tag
+    tag = f"istota-test/no-forge:{base_tag.rsplit(':', 1)[-1]}"
+    argv = [
+        "docker", "build",
+        "-f", str(NO_FORGE_DOCKERFILE),
+        "--build-arg", f"BASE={base_tag}",
+        "-t", tag,
+    ]
+    if platform:
+        argv += ["--platform", platform]
+    argv.append(str(NO_FORGE_DOCKERFILE.parent))
+
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=image_support.BUILD_TIMEOUT
+    )
+    if result.returncode != 0:
+        # `fail`, not `exit`. A Docker hiccup building the control must not
+        # terminate the whole session and take any other tier queued behind it
+        # with it; every other failure path in this file uses `fail` too.
+        pytest.fail(
+            "could not build the no-forge control image:\n"
+            + "\n".join((result.stderr or result.stdout or "").splitlines()[-40:]),
+            pytrace=False,
+        )
+    return tag
+
+
+@pytest.fixture
+def forge_stack(pytestconfig, tmp_path, request):
+    """The lean stack with the developer skill wired to a fake GitLab.
+
+    Function-scoped like `lean_stack`, and for the same reason plus one: the
+    stub's port is baked into the rendered config, and its recorded calls are
+    per-scenario state that a shared stack would smear across tests.
+
+    Two things here are worth not rediscovering.
+
+    The stub binds all interfaces, because the daemon reaching it lives in a
+    container. `serve` defaults to loopback for the same reason
+    `model_endpoint.serve_script` does — this listener runs `git http-backend`,
+    and publishing one on every `uv run pytest` is not a thing to do by
+    default.
+
+    The `[developer]` block is produced by `render-config.sh` from
+    `ISTOTA_DEVELOPER_*` variables, not written by this fixture. So the config
+    the scenarios exercise is one the shipped script can actually generate, and
+    a change that breaks that generation fails here rather than in production.
+    """
+    yield from _forge_stack(pytestconfig, tmp_path, request)
+
+
+@pytest.fixture
+def broken_forge_stack(pytestconfig, tmp_path, request, no_forge_image):
+    """The same stack, on an image whose forge binaries are missing.
+
+    The negative control. Everything in `test_forge_e2e.py` is a claim that
+    this tier can see a broken deployment; without an artifact that *is*
+    broken, the claim is unfalsified and the whole file would pass identically
+    if the daemon never ran a forge command. This reproduces ISSUE-263 exactly:
+    a config naming `/usr/local/lib/istota_forge/glab`, and nothing at that
+    path.
+    """
+    yield from _forge_stack(
+        pytestconfig, tmp_path, request, image=no_forge_image
+    )
+
+
+def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
+    """The body both forge fixtures share.
+
+    A plain generator rather than a third fixture: the two differ only in which
+    image they run, and a variant that re-stated the other forty lines would
+    drift on the parts that are genuinely the same.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+
+    turns = getattr(request, "param", None) or [{"text": "nothing scripted"}]
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    # Both listeners are started inside the `try`, not before it. `lean_stack`
+    # carries the same rule and the reason it gives applies twice over here:
+    # `fake_gitlab.serve` does a `mkdir` and a bind, either of which can raise,
+    # and the endpoint started on the line above would then never be closed —
+    # leaking a bound port and a live thread for the rest of the session. Both
+    # bind all interfaces, so the leak is a publicly-bound socket.
+    endpoint = None
+    stub = None
+    project = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:8]}"
+
+    env_file = tmp_path / "compose.env"
+    lines = [
+        f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
+        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}",
+    ]
+    overlays = []
+    if image:
+        # Both the overlay and the variable it interpolates. Compose reads the
+        # env-file when it interpolates *every* subcommand, so a value supplied
+        # only to `up` makes `ps`, `logs` and `down` fail before they reach a
+        # container — the failure mode that once left two stacks running.
+        lines.append(f"ISTOTA_TEST_IMAGE={image}")
+        overlays.append(PREBUILT_OVERLAY)
+    env_file.write_text("\n".join(lines) + "\n")
+    args = compose_support.compose_args(
+        COMPOSE_FILE, project=project, env_file=env_file, overlays=overlays
+    )
+
+    try:
+        endpoint = serve_script(turns, host="0.0.0.0")
+        # The expected git credential, which is what makes
+        # `authenticated_git_calls()` mean "the helper produced the right
+        # token". It is also the access control: this listener is bound to all
+        # interfaces so the container can reach it, and it serves a real
+        # `git http-backend`.
+        stub = fake_gitlab.serve(
+            tmp_path / "forge", host="0.0.0.0", expect_git_password=FORGE_TOKEN
+        )
+        clone_url = stub.seed_repo(FORGE_PROJECT)
+        _render_config(
+            config_dir,
+            endpoint.container_base_url,
+            {
+                "ISTOTA_DEVELOPER_ENABLED": "true",
+                # A tmpfs the compose file already declares. The developer
+                # skill binds it read-write into the sandbox, which is where
+                # the scenarios clone.
+                "ISTOTA_DEVELOPER_REPOS_DIR": "/data/repos",
+                "ISTOTA_DEVELOPER_GITLAB_URL": stub.container_url,
+                "ISTOTA_DEVELOPER_GITLAB_TOKEN": FORGE_TOKEN,
+                "ISTOTA_DEVELOPER_GITLAB_USERNAME": "istota-test",
+                "ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE": FORGE_PROJECT.split("/")[0],
+            },
+        )
+        compose_support.up(args, platform=resolve_platform(pytestconfig))
+        compose_support.wait_ready(args, "istota", timeout=READY_TIMEOUT)
+        yield ForgeStack(
+            args=args,
+            endpoint=endpoint,
+            config_dir=config_dir,
+            stub=stub,
+            clone_url=clone_url,
+        )
+    finally:
+        compose_support.down(args, volumes=True)
+        # Guarded, because either may be None if the other's construction raised.
+        if stub is not None:
+            stub.close()
+        if endpoint is not None:
+            endpoint.close()
 
 
 class LeanStack:
@@ -275,3 +513,109 @@ class LeanStack:
 
     def logs(self, tail: int = 60) -> str:
         return compose_support.logs(self.args, "istota", tail=tail)
+
+
+class ForgeStack(LeanStack):
+    """A `LeanStack` plus the forge it was pointed at.
+
+    A subclass rather than a second class: everything a forge scenario does to
+    the daemon — submit a task, read the row back, pull the logs on failure — is
+    what `LeanStack` already does, and duplicating it would let the two drift on
+    the parts that are genuinely shared.
+    """
+
+    def __init__(self, *, stub, clone_url: str, **kwargs):
+        super().__init__(**kwargs)
+        self.stub = stub
+        self.clone_url = clone_url
+
+    def script(self, turns: list[dict], *, timeout: float = 60) -> None:
+        """Install a script, once the daemon is not going to consume it.
+
+        `rescript` rewinds the endpoint, and the endpoint routes by call order
+        alone — it has no notion of which task a request belongs to. The daemon
+        queues work of its own at startup (`LeanStack.submit` says as much), so
+        a task still in flight when a scenario rewinds would take turn 0, and
+        the submitted task would get turn 1. The symptom is either an assertion
+        about a merge request opened on behalf of a different task, or the
+        exhausted-script error frame that rewinding exists to prevent — and
+        both read as forge problems.
+
+        So: wait for the task table to hold nothing non-terminal, then rewind.
+        `wait_for_task` cannot express this — it waits for *a* task to reach a
+        status, and what is wanted here is the absence of any that have not.
+        """
+        deadline = time.monotonic() + timeout
+        busy: list = []
+        while time.monotonic() < deadline:
+            busy = [
+                task
+                for task in self.probe.tasks()
+                if task.get("status") in _IN_FLIGHT
+            ]
+            if not busy:
+                self.endpoint.rescript(turns)
+                return
+            time.sleep(0.5)
+
+        pytest.fail(
+            "the daemon still had work in flight after "
+            f"{timeout}s, so a scripted turn would have gone to it rather than "
+            f"to this scenario: {[(t.get('id'), t.get('status')) for t in busy]}",
+            pytrace=False,
+        )
+
+    def doctor(self, *, scope: str = "") -> list[dict]:
+        """`istota doctor --json` inside the running container.
+
+        Through the shipped CLI in the shipped image, which is the whole point:
+        a doctor run on the host would be asking about the developer's laptop.
+
+        The exit code is deliberately ignored — `doctor.exit_code` is non-zero
+        when a check FAILs, and the negative control exists to produce exactly
+        that. What matters is the payload, and it is valid JSON either way by
+        construction (`render_json`).
+        """
+        argv = self.args + [
+            "exec", "-T", "istota",
+            "uv", "run", "istota", "-c", "/data/config/config.toml",
+            "doctor", "--json",
+        ]
+        if scope:
+            argv += ["--scope", scope]
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=180
+        )
+        try:
+            return json.loads(result.stdout or "[]")
+        except ValueError:
+            pytest.fail(
+                f"`istota doctor --json` did not print JSON (exit "
+                f"{result.returncode})\n--- stdout ---\n{result.stdout}\n"
+                f"--- stderr ---\n{result.stderr}",
+                pytrace=False,
+            )
+
+    def merge_requests(self) -> list:
+        """The MRs opened against the stub, which is the happy path's assertion."""
+        return self.stub.rest_calls("POST", "/merge_requests")
+
+    def diagnostics(self, task: dict) -> str:
+        """One string carrying everything a failed forge scenario needs.
+
+        Assembled in one place because the useful context is spread over four
+        sources — the task row, the daemon log, the REST calls and the git
+        calls — and a scenario that printed only the first reports "the task
+        failed" for a wrapper that was denied, a token that never arrived and a
+        stub endpoint that answered 501, all identically.
+        """
+        rest = "\n".join(f"  {call}" for call in self.stub.calls) or "  (none)"
+        git = "\n".join(f"  {call}" for call in self.stub.git_calls) or "  (none)"
+        return (
+            f"task {task.get('id')} ended {task.get('status')!r}: "
+            f"{task.get('error')!r}\n"
+            f"--- result ---\n{task.get('result')}\n"
+            f"--- rest calls ---\n{rest}\n"
+            f"--- git calls ---\n{git}\n"
+            f"--- daemon logs ---\n{self.logs(150)}"
+        )

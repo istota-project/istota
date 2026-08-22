@@ -536,6 +536,134 @@ class TestBuildInvocation:
         assert "GH_HOST" in env  # host still set; only the credential is absent
 
 
+class TestGhPreflight:
+    """The gh half of the smoke tier's forge scenarios, without a server.
+
+    `tests/smoke/test_forge_e2e.py` drives glab through the whole chain against
+    a stub. gh cannot be driven the same way and the reason is a product
+    finding rather than a test-harness limitation: `forge_cli._hostname` returns
+    `urlsplit(url).hostname`, which discards the scheme and the port *by
+    construction* — the docstring says so, because the GH_TOKEN /
+    GH_ENTERPRISE_TOKEN split keys off the bare hostname. So a recorder at
+    `http://127.0.0.1:54321` yields `GH_HOST=127.0.0.1` and gh attempts
+    `https://127.0.0.1:443`. No arrangement on the test's side fixes that.
+
+    (`gh pr create` would also need a GraphQL stub — it resolves repo metadata
+    through `/api/graphql` before posting — and those queries are an
+    unpublished, version-specific contract.)
+
+    What the recorder would have proven is proven here instead, against a pure
+    function: for one policy and one argv, the resolved binary, the policy's
+    verdict, which variable the token lands in, and the host gh would talk to.
+    Everything except "a packet physically left the process", which is not
+    worth a TLS listener on a privileged port.
+    """
+
+    def _preflight(self, argv, *, url, token=SENTINEL):
+        """What the wrapper would do, short of the exec.
+
+        Assembled from the same three calls `main` makes, in the same order, so
+        a reordering that (say) fetched a credential before checking the deny
+        policy would show up as a changed answer here.
+        """
+        policy = build_policy(FORGE_GITHUB)
+        verdict = denied_reason(FORGE_GITHUB, argv, policy)
+        real_bin, args, env = build_invocation(
+            FORGE_GITHUB,
+            argv,
+            {"PATH": "/usr/local/bin:/usr/bin", "HOME": "/home/bot"},
+            None if verdict else token,
+            "/usr/local/lib/istota_forge/gh",
+            "/tmp/gh-config",
+            url,
+        )
+        return verdict, real_bin, args, env
+
+    def test_an_allowed_verb_reaches_the_shipped_binary_with_a_token(self):
+        verdict, real_bin, args, env = self._preflight(
+            ["pr", "create", "--title", "x"], url="https://github.com"
+        )
+
+        assert verdict is None
+        # The off-PATH location the image installs, which is the whole point of
+        # the wrapper being the only `gh` a task can resolve by name.
+        assert real_bin == "/usr/local/lib/istota_forge/gh"
+        assert args == ["gh", "pr", "create", "--title", "x"]
+        assert env["GH_TOKEN"] == SENTINEL
+        assert "GH_ENTERPRISE_TOKEN" not in env
+        assert env["GH_HOST"] == "github.com"
+
+    def test_a_self_hosted_host_gets_the_enterprise_variable(self):
+        _, _, _, env = self._preflight(["pr", "list"], url="https://ghe.example.com")
+
+        assert env["GH_ENTERPRISE_TOKEN"] == SENTINEL
+        assert "GH_TOKEN" not in env
+        assert env["GH_HOST"] == "ghe.example.com"
+
+    def test_a_denied_verb_is_refused_before_a_token_is_fetched(self):
+        """The ordering, not just the verdict.
+
+        `main` checks the deny policy before it touches the credential socket,
+        so a blocked verb never causes a token to be fetched at all. Asserting
+        only that the verb is denied would stay green on an implementation that
+        fetched first and refused after — which is a credential in the process
+        for a call that was never going to be made.
+        """
+        verdict, _, _, env = self._preflight(
+            ["repo", "delete", "someorg/somerepo"], url="https://github.com"
+        )
+
+        assert verdict == "repo delete"
+        assert "GH_TOKEN" not in env
+        assert "GH_ENTERPRISE_TOKEN" not in env
+
+    def test_a_non_443_port_is_dropped_and_that_is_the_product_finding(self):
+        """gh cannot address a forge on a non-standard port. Pinned, not fixed.
+
+        `_hostname` drops the port deliberately, so a self-hosted GitHub
+        Enterprise on `:8443` is unreachable: gh is told the bare host and goes
+        to 443. This is not this spec's to fix — it is asserted here so the
+        limitation is written down where someone debugging it will find it, and
+        so a later change to `_hostname` cannot alter the behaviour silently.
+
+        The glab branch does not share it: `GITLAB_HOST` carries the whole URL.
+        """
+        _, _, _, env = self._preflight(["pr", "list"], url="https://ghe.example.com:8443")
+
+        assert env["GH_HOST"] == "ghe.example.com"
+        assert "8443" not in env["GH_HOST"]
+
+    def test_the_ambient_token_cannot_survive_into_the_child(self):
+        """The isolation the smoke tier asserts for glab, for gh.
+
+        The smoke scenario proves the model's shell holds no token. This proves
+        the complement: even if one were in the wrapper's own parent
+        environment, it is scrubbed and replaced by the fetched one rather than
+        passed through.
+        """
+        planted = "a-token-the-model-planted"
+        policy = build_policy(FORGE_GITHUB)
+        _, _, env = build_invocation(
+            FORGE_GITHUB,
+            ["pr", "list"],
+            {
+                "PATH": "/usr/local/bin",
+                "GH_TOKEN": planted,
+                "GITHUB_TOKEN": planted,
+                "GH_HOST": "attacker.example.com",
+            },
+            SENTINEL,
+            "/usr/local/lib/istota_forge/gh",
+            "/tmp/gh-config",
+            "https://github.com",
+        )
+
+        assert env["GH_TOKEN"] == SENTINEL
+        assert planted not in env.values()
+        assert env["GH_HOST"] == "github.com"
+        assert policy  # the policy is what `real_bin` and the verdict come from
+
+
 # --------------------------------------------------------------------------- #
 # Guards
 # --------------------------------------------------------------------------- #

@@ -940,6 +940,133 @@ class TestForgePolicy:
         assert run_checks(config, only=("developer.forge_policy",))[0].status != FAIL
 
 
+class TestForgeTransport:
+    """A forge token sent over plain HTTP.
+
+    This became reachable when the developer skill started seeding glab's
+    `api_protocol` for an `http://` forge URL — before that a plain-HTTP forge
+    simply failed at the TLS handshake, so no token ever left. It works now,
+    and a working plaintext credential transport is worth one line in the
+    report rather than silence.
+    """
+
+    def test_https_is_ok(self, make_config, tmp_path):
+        config = _dev_config(make_config, tmp_path, gitlab_url="https://gitlab.com")
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+        assert r.status == OK
+
+    def test_plain_http_with_a_token_warns_naming_the_url(self, make_config, tmp_path):
+        config = _dev_config(
+            make_config, tmp_path, gitlab_url="http://gitlab.internal:8080"
+        )
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+        assert r.status == WARN
+        assert "http://gitlab.internal:8080" in r.detail
+        assert r.remedy
+
+    def test_the_token_value_is_never_in_the_report(self, make_config, tmp_path):
+        """The detail names the URL, and a URL can carry userinfo."""
+        config = _dev_config(
+            make_config,
+            tmp_path,
+            gitlab_url="http://gitlab.internal:8080",
+            gitlab_token="glpat-" + "s" * 20,
+        )
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+        assert "glpat-" not in (r.detail + (r.remedy or ""))
+
+    def test_loopback_still_warns(self, make_config, tmp_path):
+        """No carve-out for localhost.
+
+        A loopback forge URL in a real deployment is a proxy or a tunnel, and
+        what is on the far side of it is not knowable from here. The check is
+        cheap and a WARN costs nothing; guessing wrong is a silently plaintext
+        credential.
+        """
+        config = _dev_config(make_config, tmp_path, gitlab_url="http://127.0.0.1:18080")
+        assert run_checks(config, only=("developer.forge_transport",))[0].status == WARN
+
+    def test_skips_without_a_token(self, make_config, tmp_path):
+        config = _dev_config(
+            make_config,
+            tmp_path,
+            gitlab_url="http://gitlab.internal:8080",
+            gitlab_token="",
+            github_token="",
+        )
+        assert run_checks(config, only=("developer.forge_transport",))[0].status == SKIP
+
+    def test_a_plain_http_github_url_warns_too(self, make_config, tmp_path):
+        """Both forges, even though gh cannot reach a non-443 host.
+
+        gh drops the port, so it would reach `https://the-host:443` rather than
+        the plaintext one — but the scheme is still what the operator wrote,
+        and a check that stayed quiet about it would be reporting on the
+        deployment it wished it had.
+        """
+        config = _dev_config(
+            make_config,
+            tmp_path,
+            gitlab_url="https://gitlab.com",
+            github_url="http://ghe.internal",
+            github_token="g" * 20,
+        )
+        assert run_checks(config, only=("developer.forge_transport",))[0].status == WARN
+
+    def test_a_url_carrying_a_credential_is_warned_about(self, make_config, tmp_path):
+        """A forge URL is not where a credential belongs.
+
+        The token goes in `gitlab_token`, and `git_remote_scrub` exists to
+        strip exactly this out of URLs. It matters more since the plain-HTTP
+        entry landed: `_plain_http_host_entry` refuses to write an entry for
+        such a URL — writing one would mean putting the password in a file the
+        sandbox can read — so the call fails, and without this check nothing
+        says why.
+        """
+        config = _dev_config(
+            make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal"
+        )
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+
+        assert r.status == WARN
+        assert "gitlab.internal" in r.detail
+        assert "sekritvalue" not in (r.detail + (r.remedy or "")), r.detail
+
+    def test_the_redacted_url_still_shows_a_credential_was_there(
+        self, make_config, tmp_path
+    ):
+        """Removing the userinfo silently is its own failure.
+
+        An operator reading `https://gitlab.internal` cannot tell the
+        configured value carried a credential at all, which is the single most
+        useful thing this check could tell them.
+        """
+        config = _dev_config(
+            make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal"
+        )
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+
+        assert "@gitlab.internal" in r.detail, r.detail
+
+    def test_a_malformed_url_does_not_turn_a_warning_into_a_failure(
+        self, make_config, tmp_path
+    ):
+        """`urlsplit` raises on some inputs — `http://[::1` is `Invalid IPv6 URL`.
+
+        Unguarded, `run_checks` catches it and reports FAIL with the remedy
+        "this is a defect in the check": a WARN-only check emitting a FAIL, and
+        blaming itself for the operator's typo.
+        """
+        config = _dev_config(make_config, tmp_path, gitlab_url="http://[::1")
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+
+        assert r.status != FAIL, r.detail
+
+    def test_never_fails(self, make_config, tmp_path):
+        config = _dev_config(make_config, tmp_path, gitlab_url="http://gitlab.internal")
+        assert run_checks(config, only=("developer.forge_transport",))[0].status != FAIL
+
+
 class TestWebStatic:
     def test_skips_when_no_web_surface(self, make_config):
         r = run_checks(make_config(), only=("web.static",))[0]
