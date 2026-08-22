@@ -639,7 +639,7 @@ _FALLBACK_UNAVAILABLE_REASONS = frozenset(
 )
 
 
-def _run_fallback(config, brain_config, fallback_kind, task, req):
+def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=None):
     """Construct the fallback brain and run the same attempt through it.
 
     Returns ``(BrainResult | None, dropped_pin, effort_used)``. A ``None``
@@ -652,6 +652,14 @@ def _run_fallback(config, brain_config, fallback_kind, task, req):
     effort in its own namespace, so the request's original effort does not
     describe the attempt that ran — recording it on the usage row would name a
     setting the fallback never used.
+
+    ``on_start(model, dropped_pin)`` fires once the request is resolved and
+    immediately before the fallback brain runs (ISSUE-278). It exists so the
+    user-facing notice lands *in* the silence rather than after it: the fallback
+    run is the long part, and a notice emitted on the way out would arrive at
+    the end of the same wait it is there to explain. It is called only on the
+    path where a fallback actually runs — a construction failure returns above
+    it, since no substitution took place to report.
     """
     import dataclasses as _dc
 
@@ -685,6 +693,13 @@ def _run_fallback(config, brain_config, fallback_kind, task, req):
         else ""
     )
     fb_req = _dc.replace(req, model=fb_model, effort=fb_effort, advisor=fb_advisor)
+    if on_start is not None:
+        try:
+            on_start(fb_model, dropped_pin)
+        except Exception:
+            # The notice is cosmetic; the reroute is not. A surface that throws
+            # must never cost the user the answer.
+            logger.debug("brain fallback notice failed", exc_info=True)
     try:
         return _mark_if_exhausted(fb_brain.execute(fb_req)), dropped_pin, fb_effort
     except Exception as e:  # noqa: BLE001 — brains shouldn't raise, but be safe
@@ -754,6 +769,45 @@ def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
     # (e.g. `claude_code`), which would confuse underscore delimiters.
     note = f"⚠️ *Ran on* `{model_str}` *(*`{dropped_pin}` *unavailable).*"
     return f"{result_text}\n\n{note}"
+
+
+# Plain-language readings of the stop_reasons that open a fallback, for the
+# user-facing notice. `cooldown` is not a brain stop_reason — it's the executor's
+# own name for the breaker-open path, where no primary call was made at all.
+_FALLBACK_REASON_PHRASES = {
+    "usage_limit": "its usage limit was reached",
+    "not_found": "its CLI is not installed",
+    "transient_api_error": "the provider returned an error",
+    "fallback": "it could not start",
+}
+
+
+def fallback_notice_text(primary_kind, reason, fallback_kind, model, dropped_pin) -> str:
+    """The sentence every stream surface shows when a fallback is taken.
+
+    Composed here, not per surface: the web transcript and the REPL render
+    ``payload["text"]`` verbatim, so the wording lives in one place and two
+    surfaces can't drift apart. Pure string→string, no I/O.
+
+    ``model`` is what the fallback was *asked* for, which is empty whenever it
+    runs on its own default — the case ``dropped_pin`` describes. The notice
+    names the pin then rather than inventing a model name, because the model
+    that actually ran is not known until the run returns (the terminal ``done``
+    event carries it).
+    """
+    if reason == "cooldown":
+        lead = f"`{primary_kind}` is cooling down after a recent failure."
+    else:
+        phrase = _FALLBACK_REASON_PHRASES.get(reason, reason)
+        lead = f"`{primary_kind}` is unavailable — {phrase}."
+    if dropped_pin:
+        return (
+            f"{lead} Continuing on `{fallback_kind}`, which cannot use the "
+            f"pinned `{dropped_pin}`, so its default model runs instead."
+        )
+    if model:
+        return f"{lead} Continuing on `{fallback_kind}` with `{model}`."
+    return f"{lead} Continuing on `{fallback_kind}`."
 
 
 def _build_native_completer(native_config, timeout: float, *, on_usage=None):
@@ -4553,6 +4607,41 @@ def execute_task(
         # The effort the attempt actually ran at. The fallback re-resolves it in
         # its own namespace, so `req.effort` describes the primary only.
         _usage_effort = req.effort
+
+        def _notice(reason):
+            """A `brain_fallback` emitter bound to `reason`, for `on_start`.
+
+            Both reroute paths hand the same notice to the stream; only the
+            reason differs (a fresh primary failure vs. the breaker already
+            being open). Returns None when there is no stream to notify, so
+            `_run_fallback` skips the hook entirely.
+            """
+            if event_writer is None:
+                return None
+
+            def _emit(model, dropped_pin):
+                # A reroute is a stream boundary exactly like a tool call: what
+                # streamed before it came from the brain that just failed, and
+                # the fallback streams into these same buffers. Settle them
+                # first, or an unflushed primary tail is emitted as the opening
+                # of the fallback's answer — one paragraph, under a notice
+                # saying the primary failed — and the fallback's own narration
+                # gate starts pre-credited with the primary's characters.
+                if is_stream_surface:
+                    _flush_thinking()
+                    _settle_deltas_at_tool_boundary()
+                event_writer.emit("brain_fallback", {
+                    "primary": _primary_kind,
+                    "reason": reason,
+                    "fallback": _fallback_kind,
+                    "model": model,
+                    "dropped_pin": dropped_pin or "",
+                    "text": fallback_notice_text(
+                        _primary_kind, reason, _fallback_kind, model, dropped_pin,
+                    ),
+                })
+
+            return _emit
         _skip_primary = (
             _fallback_kind is not None
             and _cooldown > 0
@@ -4578,7 +4667,8 @@ def execute_task(
                         _primary_kind, _fallback_kind, task.id,
                     )
                     _fb, _dropped_pin, _fb_effort = _run_fallback(
-                        config, _brain_config, _fallback_kind, task, req
+                        config, _brain_config, _fallback_kind, task, req,
+                        on_start=_notice("cooldown"),
                     )
                     if _fb is not None:
                         # This branch is the steady state once the breaker
@@ -4641,7 +4731,8 @@ def execute_task(
                                     "tmux circuit-open alert failed", exc_info=True
                                 )
                         _fb, _dropped_pin, _fb_effort = _run_fallback(
-                            config, _brain_config, _fallback_kind, task, req
+                            config, _brain_config, _fallback_kind, task, req,
+                            on_start=_notice(brain_result.stop_reason),
                         )
                         if _fb is not None:
                             # The fallback *replaces* brain_result, so without

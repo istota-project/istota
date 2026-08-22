@@ -3,6 +3,7 @@ import {
   applyEvent,
   answerText,
   isRenderable,
+  messageCopyText,
   renderGroups,
   SUBSTANTIAL_TEXT_CHARS,
   type ChatMessage,
@@ -529,5 +530,130 @@ describe('renderGroups — body layout', () => {
     const groups = renderGroups(m);
     expect(kinds(groups)).toEqual(['activity', 'prose', 'activity', 'prose']);
     expect(proseTexts(groups)).toEqual([meaty, 'final answer']);
+  });
+});
+
+describe('brain_fallback notice (ISSUE-278)', () => {
+  const NOTICE =
+    '`claude_code` is unavailable — the provider returned an error. Continuing on `native`.';
+
+  function notices(m: ChatMessage): Extract<Segment, { kind: 'notice' }>[] {
+    return m.segments.filter((s): s is Extract<Segment, { kind: 'notice' }> => s.kind === 'notice');
+  }
+
+  it('lands as a notice segment carrying the executor sentence', () => {
+    const m = freshAssistant();
+    feed(m, [['brain_fallback', { text: NOTICE, primary: 'claude_code', fallback: 'native' }]]);
+    expect(notices(m)).toHaveLength(1);
+    expect(notices(m)[0].text).toBe(NOTICE);
+  });
+
+  it('is never mistaken for the answer', () => {
+    // The whole failure mode: a fallback arriving mid-turn must not become the
+    // reply, and the real answer that follows must not overwrite it.
+    const m = freshAssistant();
+    feed(m, [
+      ['brain_fallback', { text: NOTICE }],
+      ['text_delta', { text: 'The answer is 42.' }],
+      ['result', { text: 'The answer is 42.' }],
+      ['done', {}],
+    ]);
+    expect(answerText(m)).toBe('The answer is 42.');
+    expect(m.text).toBe('The answer is 42.');
+    expect(notices(m)).toHaveLength(1);
+    expect(notices(m)[0].text).toBe(NOTICE);
+  });
+
+  it('a notice arriving after streamed text does not clobber the answer', () => {
+    // `setTrailingText` overwrites a trailing *text* segment. A notice pushed
+    // after streamed text must not be the thing a later result overwrites, nor
+    // make the answer unreachable.
+    const m = freshAssistant();
+    feed(m, [
+      ['text_delta', { text: 'partial' }],
+      ['brain_fallback', { text: NOTICE }],
+      ['result', { text: 'final answer' }],
+    ]);
+    expect(answerText(m)).toBe('final answer');
+    expect(notices(m)).toHaveLength(1);
+    // The pre-notice text settled rather than being reopened and appended to.
+    expect(texts(m).map((t) => t.text)).toEqual(['partial', 'final answer']);
+  });
+
+  it('settles an open text block so the answer starts fresh', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['text_delta', { text: 'Let me check' }],
+      ['brain_fallback', { text: NOTICE }],
+    ]);
+    expect(texts(m)[0].settled).toBe(true);
+  });
+
+  it('keeps the ack verb — the fallback run is the long part of the wait', () => {
+    // A notice is static and the reroute is followed by a whole brain run.
+    // Clearing the verb here would take the turn's only live cue away at the
+    // moment the wait gets longest, which is the failure ISSUE-278 reports.
+    const m = freshAssistant();
+    m.progress = 'Probing…';
+    feed(m, [['brain_fallback', { text: NOTICE }]]);
+    expect(m.progress).toBe('Probing…');
+  });
+
+  it('a real content event still retires the ack verb', () => {
+    const m = freshAssistant();
+    m.progress = 'Probing…';
+    feed(m, [
+      ['brain_fallback', { text: NOTICE }],
+      ['text_delta', { text: 'answering now' }],
+    ]);
+    expect(m.progress).toBeUndefined();
+  });
+
+  it('an empty or whitespace-only text is ignored rather than rendering a blank aside', () => {
+    // Trimmed, not truthy: a blank notice renders nowhere but would still
+    // settle the open block, costing the turn a paragraph break for nothing.
+    const m = freshAssistant();
+    feed(m, [['brain_fallback', { primary: 'claude_code' }]]);
+    expect(m.segments).toHaveLength(0);
+
+    const m2 = freshAssistant();
+    m2.progress = 'Probing…';
+    feed(m2, [
+      ['text_delta', { text: 'open block' }],
+      ['brain_fallback', { text: '   ' }],
+    ]);
+    expect(m2.segments.filter((s) => s.kind === 'notice')).toHaveLength(0);
+    expect(texts(m2)[0].settled).toBe(false);
+  });
+
+  it('renders as its own group, however short, and flushes the open tool run', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['tool_start', { tool_call_id: 'c1', tool_name: 'Read', description: 'Reading' }],
+      ['brain_fallback', { text: NOTICE }],
+      ['tool_start', { tool_call_id: 'c2', tool_name: 'Read', description: 'Reading' }],
+      ['result', { text: 'done' }],
+    ]);
+    const groups = renderGroups(m);
+    expect(groups.map((g) => g.kind)).toEqual(['activity', 'notice', 'activity', 'prose']);
+    expect((groups[1] as { text: string }).text).toBe(NOTICE);
+    // The tool runs on either side did NOT coalesce — the notice sits between
+    // them in true segment order.
+    expect((groups[0] as { steps: Segment[] }).steps).toHaveLength(1);
+    expect((groups[2] as { steps: Segment[] }).steps).toHaveLength(1);
+  });
+
+  it('is renderable, and an empty one is not', () => {
+    expect(isRenderable({ kind: 'notice', id: 'n1', text: NOTICE })).toBe(true);
+    expect(isRenderable({ kind: 'notice', id: 'n2', text: '  ' })).toBe(false);
+  });
+
+  it('stays off the clipboard — it is about the run, not the content', () => {
+    const m = freshAssistant();
+    feed(m, [
+      ['brain_fallback', { text: NOTICE }],
+      ['result', { text: 'the answer' }],
+    ]);
+    expect(messageCopyText(m)).toBe('the answer');
   });
 });

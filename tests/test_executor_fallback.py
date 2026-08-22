@@ -12,15 +12,23 @@ from unittest.mock import patch
 import pytest
 
 from istota.brain._fallback import get_availability_breaker, reset_availability_breaker
+from istota.brain._events import TextDeltaEvent
 from istota.brain._types import BrainResult
 from istota.config import BrainConfig
-from istota.executor import FALLBACK_EXHAUSTED_MARKER, execute_task
+from istota.executor import (
+    FALLBACK_EXHAUSTED_MARKER,
+    _run_fallback,
+    execute_task,
+    fallback_notice_text,
+)
 
 # Reuse the streaming test harness (config/task/patches).
 from tests.test_executor_streaming import (
+    _RecordingSubscriber,
     _make_config,
     _make_task,
     _patch_executor,
+    _writer,
     contextmanager_chain,
 )
 
@@ -80,6 +88,7 @@ def _run(
     fallback_on_transient=False,
     cooldown=900,
     n_runs=1,
+    recorder=None,
 ):
     config = _make_config(tmp_path)
     config.brain = BrainConfig(
@@ -117,7 +126,14 @@ def _run(
     with contextmanager_chain(patches):
         for _ in range(n_runs):
             task = _make_task(source_type="cli", model=task_model)
-            results.append(execute_task(task, config, []))
+            # An event writer only where a test asked for one: the stream-surface
+            # tests are the only ones that assert on events, and threading a
+            # writer through the rest would put every rerouted task on the
+            # streaming path for no gain.
+            kw = {}
+            if recorder is not None:
+                kw["event_writer"] = _writer(task, config, subscriber=recorder)
+            results.append(execute_task(task, config, [], **kw))
     return results, primary, fb, alerts
 
 
@@ -394,3 +410,296 @@ class TestTmuxFolding:
         assert fb.calls == 1  # claude_code fallback ran
         # "fallback" is not in the cooldown set → availability breaker stays closed.
         assert get_availability_breaker().should_skip("tmux_claude", 900) is False
+
+
+class TestFallbackIsVisibleOnStreamSurfaces:
+    """ISSUE-278: a fallback used to be silent on every stream surface.
+
+    The task ran for minutes with `task_started` as its only event, so nothing
+    told the reader that the primary had failed or — when a pin was dropped —
+    that the answer was coming from a different model than the room is
+    configured for. The executor emits a `brain_fallback` event at the moment
+    it reroutes, before the fallback brain runs, so the notice lands in the
+    silence rather than after it.
+    """
+
+    def test_event_emitted_when_primary_fails(self, tmp_path):
+        rec = _RecordingSubscriber()
+        results, _primary, fb, _a = _run(
+            tmp_path,
+            recorder=rec,
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        assert results[0][0] is True
+        events = [e for e in rec.events if e.kind == "brain_fallback"]
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["primary"] == "claude_code"
+        assert p["fallback"] == "native"
+        assert p["reason"] == "usage_limit"
+        assert p["text"]
+
+    def test_event_precedes_the_fallback_run(self, tmp_path):
+        """The notice is the point: emitted before the fallback brain is called,
+        not after it returns. Emitting afterwards would land it at the end of
+        the same silence it exists to break."""
+        rec = _RecordingSubscriber()
+        seen_at_execute = []
+
+        class _Watcher(_FakeBrain):
+            def execute(self, req):
+                seen_at_execute.append([e.kind for e in rec.events])
+                return super().execute(req)
+
+        # Swap the fallback brain for one that snapshots the event log as it
+        # starts, so ordering is asserted against the real call, not a proxy.
+        import istota.executor as ex
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native",
+                                   fallback_cooldown_seconds=900)
+        config.security.sandbox_enabled = False
+        primary = _FakeBrain(
+            "claude_code",
+            BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        fb = _Watcher(
+            "native",
+            BrainResult(True, "answer", stop_reason="completed", model_used="fb-model"),
+        )
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain",
+                  side_effect=lambda bc: primary if getattr(bc, "kind", "") == "claude_code" else fb),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.notifications.send_notification", side_effect=lambda *a, **k: None),
+        ]
+        with contextmanager_chain(patches):
+            task = _make_task(source_type="cli")
+            ex.execute_task(task, config, [], event_writer=_writer(task, config, subscriber=rec))
+
+        assert seen_at_execute, "fallback brain was never called"
+        assert "brain_fallback" in seen_at_execute[0]
+
+    def test_event_names_the_model_when_the_alias_carried_over(self, tmp_path):
+        rec = _RecordingSubscriber()
+        _run(
+            tmp_path,
+            recorder=rec,
+            task_model="smart",
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        p = [e for e in rec.events if e.kind == "brain_fallback"][0].payload
+        assert p["model"] == "native-smart-model"
+        # Always present, per the payload contract in events.py.
+        assert p["dropped_pin"] == ""
+        assert "native-smart-model" in p["text"]
+
+    def test_event_names_the_dropped_pin(self, tmp_path):
+        """The reported case. `opus-high` can't cross the provider boundary, so
+        the fallback runs on its own default and the *pin* is what the notice
+        has to name — the resolved model isn't known until the run returns."""
+        rec = _RecordingSubscriber()
+        _run(
+            tmp_path,
+            recorder=rec,
+            task_model="opus-high",
+            primary_result=BrainResult(
+                False, "API Error: 529", stop_reason="transient_api_error",
+            ),
+            fallback_on_transient=True,
+        )
+        p = [e for e in rec.events if e.kind == "brain_fallback"][0].payload
+        assert p["dropped_pin"] == "opus-high"
+        assert p["model"] == ""
+        assert "opus-high" in p["text"]
+
+    def test_event_emitted_on_the_cooldown_path(self, tmp_path):
+        """The steady state once the breaker opens: every task for the window
+        skips the primary entirely. Those runs are degraded too, so they carry
+        the notice as well."""
+        rec = _RecordingSubscriber()
+        results, primary, fb, _a = _run(
+            tmp_path,
+            recorder=rec,
+            n_runs=2,
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        assert primary.calls == 1 and fb.calls == 2  # second task skipped the primary
+        events = [e for e in rec.events if e.kind == "brain_fallback"]
+        assert len(events) == 2
+        assert events[1].payload["reason"] == "cooldown"
+
+    def test_no_event_when_no_fallback_is_taken(self, tmp_path):
+        rec = _RecordingSubscriber()
+        _run(
+            tmp_path,
+            recorder=rec,
+            primary_result=BrainResult(True, "ok", stop_reason="completed", model_used="cc"),
+        )
+        assert [e for e in rec.events if e.kind == "brain_fallback"] == []
+
+    def test_no_event_when_the_fallback_brain_cannot_be_built(self, tmp_path):
+        """Construction failed → the primary's result stands and no reroute
+        happened, so a notice would report a substitution that never occurred."""
+        rec = _RecordingSubscriber()
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native",
+                                   fallback_cooldown_seconds=900)
+        config.security.sandbox_enabled = False
+        primary = _FakeBrain(
+            "claude_code",
+            BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+
+        def _make(bc):
+            if getattr(bc, "kind", "") == "claude_code":
+                return primary
+            raise RuntimeError("misconfigured nested block")
+
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain", side_effect=_make),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.notifications.send_notification", side_effect=lambda *a, **k: None),
+        ]
+        with contextmanager_chain(patches):
+            task = _make_task(source_type="cli")
+            execute_task(task, config, [], event_writer=_writer(task, config, subscriber=rec))
+
+        assert [e for e in rec.events if e.kind == "brain_fallback"] == []
+
+    def test_a_failing_subscriber_does_not_break_the_fallback(self, tmp_path):
+        """The notice is cosmetic; the reroute is not. A subscriber that throws
+        must not cost the user the answer. (This one is caught inside
+        `EventWriter.emit`, which never lets a subscriber escape — the guard in
+        `_run_fallback` is for the emitter itself, tested below.)"""
+        class _Boom:
+            def on_event(self, event):
+                raise RuntimeError("kaboom")
+
+            def on_finish(self):
+                pass
+
+        results, _primary, fb, _a = _run(
+            tmp_path,
+            recorder=_Boom(),
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        assert results[0][0] is True
+        assert results[0][1] == "fallback answer"
+        assert fb.calls == 1
+
+    def test_a_raising_on_start_hook_does_not_break_the_fallback(self, tmp_path):
+        """The guard in `_run_fallback` itself. Nothing between the hook and the
+        `execute` call may turn a recoverable reroute into a failed task, so the
+        hook is called defensively even though today's emitter is total."""
+        from istota.brain._types import BrainRequest
+
+        called = []
+
+        class _Boom(_FakeBrain):
+            def execute(self, req):
+                called.append(req)
+                return super().execute(req)
+
+        fb = _Boom("native", BrainResult(True, "answer", stop_reason="completed"))
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback="native")
+        task = _make_task(source_type="cli")
+        req = BrainRequest(
+            prompt="p", allowed_tools=[], cwd=tmp_path, env={}, timeout_seconds=60,
+        )
+
+        with contextmanager_chain([
+            patch("istota.executor.make_brain", return_value=fb),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+        ]):
+            result, _pin, _effort = _run_fallback(
+                config, config.brain, "native", task, req,
+                on_start=lambda *_: 1 / 0,
+            )
+
+        assert called, "a throwing hook stopped the fallback from running"
+        assert result is not None and result.success is True
+
+    def test_the_reroute_settles_the_primarys_buffered_stream(self, tmp_path):
+        """A reroute is a stream boundary. Whatever the primary streamed into
+        the shared delta buffer must be resolved *before* the notice, or the
+        fallback's first `text_delta` opens with the failed brain's abandoned
+        tail — presented, under a notice saying the primary failed, as the
+        fallback's own words."""
+        rec = _RecordingSubscriber()
+        gate = 20  # small enough that the primary's narration unlocks
+
+        def _streaming_primary(req):
+            # The primary streams past the narration gate, then fails.
+            for _ in range(3):
+                req.on_progress(TextDeltaEvent(text="primary-tail "))
+            return BrainResult(False, "529", stop_reason="transient_api_error")
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(
+            kind="claude_code", fallback="native", fallback_on_transient=True,
+        )
+        config.scheduler.stream_text_gate_chars = gate
+        config.security.sandbox_enabled = False
+
+        primary = _FakeBrain("claude_code", None)
+        primary.execute = _streaming_primary
+        fb = _FakeBrain(
+            "native",
+            BrainResult(True, "fallback answer", stop_reason="completed"),
+        )
+
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain",
+                  side_effect=lambda bc: primary if getattr(bc, "kind", "") == "claude_code" else fb),
+            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.transport.registry.task_is_stream_surface", return_value=True),
+            patch("istota.notifications.send_notification", side_effect=lambda *a, **k: None),
+        ]
+        with contextmanager_chain(patches):
+            task = _make_task(source_type="web")
+            execute_task(task, config, [], event_writer=_writer(task, config, subscriber=rec))
+
+        kinds = [e.kind for e in rec.events]
+        assert "brain_fallback" in kinds
+        notice_at = kinds.index("brain_fallback")
+        # Every delta carrying the primary's text sits BEFORE the notice; none
+        # after it re-emits words the failed brain produced.
+        after = [
+            e for e in rec.events[notice_at + 1:]
+            if e.kind == "text_delta" and "primary-tail" in e.payload.get("text", "")
+        ]
+        assert after == [], "the primary's abandoned text leaked past the reroute"
+
+
+class TestFallbackNoticeText:
+    """The one place the notice's wording lives. Every stream surface renders
+    `payload["text"]` rather than composing its own sentence, so a surface can't
+    drift from the others."""
+
+    def test_names_both_brains_and_the_reason(self):
+        text = fallback_notice_text("claude_code", "usage_limit", "native", "", None)
+        assert "claude_code" in text
+        assert "native" in text
+        assert "usage limit" in text
+
+    def test_names_the_model_when_it_is_known(self):
+        text = fallback_notice_text("claude_code", "usage_limit", "native", "vendor/model-x", None)
+        assert "vendor/model-x" in text
+
+    def test_names_the_dropped_pin_instead_of_a_model(self):
+        text = fallback_notice_text(
+            "claude_code", "transient_api_error", "native", "", "claude-opus-5",
+        )
+        assert "claude-opus-5" in text
+        # The resolved model is unknown at this point — don't imply otherwise.
+        assert "default" in text
+
+    def test_cooldown_reads_as_cooling_down_not_as_a_fresh_failure(self):
+        text = fallback_notice_text("claude_code", "cooldown", "native", "", None)
+        assert "cooling down" in text
+
+    def test_unknown_reason_passes_through(self):
+        text = fallback_notice_text("claude_code", "weird_new_reason", "native", "", None)
+        assert "weird_new_reason" in text

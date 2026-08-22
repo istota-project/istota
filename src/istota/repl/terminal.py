@@ -84,6 +84,20 @@ class TerminalSubscriber:
             text = (p.get("text") or "").rstrip()
             if text:
                 self._print(self._c(_DIM, f"    {text}"))
+        elif kind == "brain_fallback":
+            # ISSUE-278: the reroute is the reason the next stretch is slow and
+            # possibly on a different model. Print the executor's sentence
+            # verbatim — every stream surface shows the same one.
+            text = (p.get("text") or "").strip()
+            if text:
+                self._print(self._c(_YELLOW, f"  ⚠ {text}"))
+            # Same reconcile reset a tool boundary does, and for a stronger
+            # reason: whatever streamed before this came from the brain that
+            # just failed. Leaving it in the buffer means `result` compares the
+            # fallback's answer against `primary tail + fallback answer`, never
+            # matches, and re-prints the whole answer in green under the text
+            # already on screen.
+            self._streamed = ""
         elif kind == "progress_text":
             text = (p.get("text") or "").rstrip()
             if text:

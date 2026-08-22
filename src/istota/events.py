@@ -111,6 +111,7 @@ EventKind = Literal[
     "thinking",            # extended thinking / reasoning — stream surfaces only, pruned after result
     "text_delta",          # incremental answer text — stream surfaces only, pruned after result
     "context_management",  # brain compacted context
+    "brain_fallback",      # primary brain was unavailable; the run continues on the fallback
     "confirmation",        # task paused for user confirmation
     "result",              # final output text
     "error",               # task failed
@@ -145,11 +146,20 @@ class TaskEvent:
       thinking:            {"text"}
       text_delta:          {"text"}
       context_management:  {}
+      brain_fallback:      {"primary", "reason", "fallback", "model", "dropped_pin", "text"}
       confirmation:        {"prompt"}
       result:              {"text", "truncated"}
       error:               {"message", "stop_reason"}
       cancelled:           {}
       done:                {"stop_reason", "duration_seconds", "model"?}
+
+    ``brain_fallback`` carries both a structured description and a rendered
+    ``text``. The text is composed once, in the executor, because every stream
+    surface shows the same sentence and a per-surface formatter is a drift
+    surface for wording that has to agree. ``model`` is the model the fallback
+    was asked for; it is empty when the fallback runs on its own default, which
+    is exactly the case ``dropped_pin`` names — the resolved model is not known
+    until the run returns, and the terminal ``done`` event is what carries it.
     """
 
     task_id: int

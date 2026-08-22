@@ -27,7 +27,22 @@ export interface ToolEntry {
 export type Segment =
   | { kind: 'text'; id: string; text: string; settled: boolean }
   | { kind: 'thinking'; id: string; text: string; settled: boolean }
-  | { kind: 'tool'; id: string; tool: ToolEntry };
+  | { kind: 'tool'; id: string; tool: ToolEntry }
+  // An out-of-band notice about the run itself rather than about its content —
+  // today only a brain fallback (ISSUE-278). It sits in the segment list so it
+  // renders at the point in the turn where it happened, and it is never the
+  // answer: `answerText` and `setTrailingText` both look for `text` segments
+  // only, so a notice can neither become the answer nor be overwritten by it.
+  //
+  // LIVE-ONLY, deliberately. A finished turn is rebuilt from the brain's
+  // `execution_trace` (`web_app._trace_segments` → `historySegments`), which
+  // has no notice in it, so a reload shows the answer without the notice that
+  // preceded it. Persisting one would mean writing into the trace contract that
+  // `_compose_full_result` also reads, which is a bigger change than the
+  // reported failure needs: the durable record of a model substitution is the
+  // italic note `executor._append_model_note` appends to the reply on a dropped
+  // pin, plus the model in the turn's meta from the `done` event.
+  | { kind: 'notice'; id: string; text: string };
 
 // One structured !search result. Mirrors the backend `_build_search_data`
 // per-result shape; a conversation card carries the `task_id` the client jumps
@@ -235,6 +250,11 @@ function nextThinkId(): string {
   return `k${++_thinkSegSeq}`;
 }
 
+let _noticeSegSeq = 0;
+function nextNoticeId(): string {
+  return `n${++_noticeSegSeq}`;
+}
+
 /** The last segment if it is an open (unsettled) text segment; otherwise push a
  * fresh open text segment and return it. Only called from the `text_delta`
  * branch, so a tool-first turn never gets an empty leading text segment. */
@@ -324,6 +344,8 @@ export function finalizeTools(m: ChatMessage): void {
  * is empty is suppressed (no empty collapsed narration row). */
 export function isRenderable(seg: Segment): boolean {
   if (seg.kind === 'tool') return true;
+  // A notice has no settled/unsettled life — it is emitted complete and stays.
+  if (seg.kind === 'notice') return seg.text.trim() !== '';
   if (seg.settled && seg.text.trim() === '') return false;
   return true;
 }
@@ -349,7 +371,9 @@ export const SUBSTANTIAL_TEXT_CHARS = 280;
 
 /** One renderable unit of an assistant turn's body, in true segment order. */
 export type RenderGroup =
-  { kind: 'prose'; id: string; text: string } | { kind: 'activity'; id: string; steps: Segment[] };
+  | { kind: 'prose'; id: string; text: string }
+  | { kind: 'activity'; id: string; steps: Segment[] }
+  | { kind: 'notice'; id: string; text: string };
 
 /** Reduce an assistant turn's ordered segments into the body's render groups —
  * substantial prose blocks and activity chips, interleaved in the model's true
@@ -384,6 +408,16 @@ export function renderGroups(m: ChatMessage, threshold = SUBSTANTIAL_TEXT_CHARS)
   m.segments.forEach((s, i) => {
     if (s.kind === 'tool') {
       toolRun.push(s);
+      return;
+    }
+    if (s.kind === 'notice') {
+      // Always rendered, however short, and never coalesced into a chip: it is
+      // the one thing in the turn the reader has to see without expanding
+      // anything. Flushing first keeps it in true segment order.
+      if (s.text.trim()) {
+        flushTools();
+        groups.push({ kind: 'notice', id: s.id, text: s.text });
+      }
       return;
     }
     if (s.kind === 'thinking') return; // reasoning never renders in the body
@@ -463,6 +497,29 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
       const seg = openTextSegment(m);
       seg.text += String(payload.text ?? '');
       m.progress = undefined;
+      break;
+    }
+
+    case 'brain_fallback': {
+      // ISSUE-278: the primary brain failed (or was already cooling down) and
+      // the run continues elsewhere, possibly on a different model. Rendered
+      // where it happened rather than folded into the answer, so the reader
+      // learns it during the wait it explains and not after.
+      const text = String(payload.text ?? '');
+      // Trimmed, not truthy: a whitespace-only text renders nowhere (see
+      // `renderGroups`) but would still settle the open block and so cost the
+      // turn a paragraph break with nothing to show for it.
+      if (!text.trim()) break;
+      // Settle whatever was streaming: the notice interrupts the turn, and an
+      // open text block that resumed after it would read as one paragraph.
+      settleOpenBlock(m);
+      m.segments.push({ kind: 'notice', id: nextNoticeId(), text });
+      // `m.progress` is deliberately LEFT ALONE. The fallback run is the long
+      // part of the wait, and the notice is a static sentence — clearing the
+      // ack verb here would take away the turn's only live cue at exactly the
+      // moment the reader needs it, which is the complaint ISSUE-278 opens
+      // with. Message.svelte keeps the pulsing dot alive under a turn whose
+      // only groups are notices.
       break;
     }
 

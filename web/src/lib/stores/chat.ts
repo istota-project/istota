@@ -197,6 +197,7 @@ const STREAM_KINDS = [
   'thinking',
   'text_delta',
   'context_management',
+  'brain_fallback',
   'confirmation',
   'result',
   'error',
