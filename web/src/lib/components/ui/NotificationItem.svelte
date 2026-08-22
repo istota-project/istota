@@ -16,7 +16,7 @@
    * resolves the click for you.
    */
   import { base } from '$app/paths';
-  import type { NotificationAction, ResolvedNotification } from '$lib/api';
+  import { isSafeActionPath, type NotificationAction, type ResolvedNotification } from '$lib/api';
   import Button from './Button.svelte';
 
   interface Props {
@@ -32,7 +32,21 @@
    *  The rest are in the detail modal, which renders every action there is. */
   const INLINE_ACTIONS = 2;
 
-  const actions = $derived((item.actions ?? []).slice(0, INLINE_ACTIONS));
+  /** Renderable first, **then** sliced.
+   *
+   * Sliced first, an action the path allowlist rejects would still consume one
+   * of the two slots and render nothing — so a row with a bad LINK plus two good
+   * POSTs would show one button where two were intended, with nothing saying an
+   * action had been dropped. */
+  const renderable = $derived(
+    (item.actions ?? []).filter(
+      (a) =>
+        (a.method === 'POST' && isSafeActionPath(a.endpoint)) ||
+        (a.method === 'LINK' && isSafeActionPath(a.href)),
+    ),
+  );
+
+  const actions = $derived(renderable.slice(0, INLINE_ACTIONS));
 
   /** Severity `warning` maps to the `warn` token family — the store's vocabulary
    *  and the token roster spell it differently, and this is the one place that

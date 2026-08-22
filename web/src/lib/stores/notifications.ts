@@ -82,6 +82,27 @@ let consecutiveFailures = 0;
 let activeFilter: NotificationFilter = 'all';
 let visibilityHandler: (() => void) | null = null;
 
+/** Bumped by every `start`/`stop`, and captured before each request.
+ *
+ * A response already on the wire when the loop stops would otherwise resolve
+ * afterwards and re-publish a badge over a page that has logged out — the
+ * `AuthError` branch zeroes the counts, and a concurrent list success would
+ * write a non-zero `open` straight back over them. Clearing the timer cannot
+ * recall a request; a generation can refuse its answer. */
+let generation = 0;
+
+/** Bumped by every `refreshItems`; only the newest response may publish.
+ *
+ * Two overlapping loads are easy to produce — the two filter chips, or a chip
+ * click racing the refresh an action fires — and without this the slower one
+ * wins by landing last. The visible symptom is one filter's rows under the
+ * other filter's chip, with `aria-pressed` on the chip that did not fetch them. */
+let listRequest = 0;
+
+/** How many loads are in flight. A boolean cleared in the first `finally`
+ *  reports "loaded" while the second request is still running. */
+let listInFlight = 0;
+
 function pollDelay(): number {
   return consecutiveFailures >= POLL_FAILURES_BEFORE_BACKOFF
     ? BACKOFF_INTERVAL_MS
@@ -107,10 +128,14 @@ async function tick() {
  * until a success or a focus event resets it.
  */
 export async function refreshCounts(): Promise<void> {
+  const mine = generation;
   try {
-    counts.set(await getNotificationCounts());
+    const next = await getNotificationCounts();
+    if (mine !== generation) return;
+    counts.set(next);
     consecutiveFailures = 0;
   } catch (e) {
+    if (mine !== generation) return;
     if (e instanceof AuthError) {
       // The session is gone. The layout redirects to login on its own; keeping
       // the loop running would spend the interval hammering a 401 and leave a
@@ -130,41 +155,83 @@ export async function refreshCounts(): Promise<void> {
  * rather than up to thirty seconds later. `actionable` is not in this payload —
  * the page is truncated and the filter may have cut it — so the count is
  * re-read rather than derived from the rows.
+ *
+ * **Returns the rows it published, or `null` if it published nothing.** The
+ * caller needs the listing rather than the store: on failure this deliberately
+ * leaves the previous rows on screen, so a caller reading the store afterwards
+ * would report rows it did not fetch — and `markPanelSeen` doing that would
+ * stamp `seen_at` on a list the user is not currently being shown, behind an
+ * error banner. A superseded response returns `null` for the same reason.
+ *
+ * **Only the newest request may publish.** Two overlapping loads are ordinary
+ * (the two filter chips; a chip click racing the refresh an action fires), and
+ * without the guard the slower one wins by landing last — putting one filter's
+ * rows under the other filter's chip.
  */
-export async function refreshItems(filter: NotificationFilter = activeFilter): Promise<void> {
+export async function refreshItems(
+  filter: NotificationFilter = activeFilter,
+): Promise<ResolvedNotification[] | null> {
   activeFilter = filter;
+  const mine = ++listRequest;
+  const gen = generation;
+  listInFlight += 1;
   notificationsLoading.set(true);
   try {
     const listing = await listNotifications(filter, PANEL_LIMIT);
-    notificationItems.set(listing.notifications ?? []);
+    // Superseded, or the session ended under us: publish nothing at all rather
+    // than half of it. Every write below moves a store another tab is reading.
+    if (mine !== listRequest || gen !== generation) return null;
+    const items = listing.notifications ?? [];
+    notificationItems.set(items);
     notificationTotalOpen.set(listing.total_open ?? 0);
     counts.update((c) => ({ ...c, open: listing.total_open ?? 0 }));
     notificationsError.set('');
     consecutiveFailures = 0;
     void refreshCounts();
+    return items;
   } catch (e) {
+    if (mine !== listRequest || gen !== generation) return null;
     if (e instanceof AuthError) stopNotificationPoll();
     // Deliberately leaves whatever was on screen rather than blanking the list:
     // an empty panel reads as "nothing is waiting on you", which is the one
     // thing this feature must never say wrongly.
     notificationsError.set('Could not load your notifications.');
+    return null;
   } finally {
-    notificationsLoading.set(false);
+    listInFlight = Math.max(0, listInFlight - 1);
+    // A counter, not a flag: the first of two overlapping loads would otherwise
+    // clear it here while the second is still running, so the panel would stop
+    // saying "Loading…" over a list it is still fetching.
+    if (listInFlight === 0) notificationsLoading.set(false);
   }
 }
 
+/** Take the row off the list immediately, and leave the counters alone.
+ *
+ * The row goes so the panel responds to the tap. The counters do **not**,
+ * because the refresh that follows within one round trip is authoritative and
+ * decrementing here first makes the badge bounce N → N-1 → N → N-1 whenever the
+ * server still considers the row open — which is not hypothetical: approving a
+ * draft leaves it `sending`, and that resolver deliberately returns a live view
+ * carrying "this message is being sent" rather than `None`. The row coming back
+ * with that note is correct and worth seeing; the badge flickering twice on its
+ * way there is not.
+ */
 function dropItem(id: number) {
   notificationItems.update((items) => items.filter((item) => item.id !== id));
-  notificationTotalOpen.update((n) => Math.max(0, n - 1));
-  counts.update((c) => ({ ...c, open: Math.max(0, c.open - 1) }));
 }
 
 /** Take an action a resolver offered on a row.
  *
  * The endpoint is the producer's own route — `/chat/tasks/12/confirm` — and is
- * checked against the path allowlist in `api.ts` before it is fetched. Removal
- * is pessimistic on success, like the confirmations banner: a row that vanished
- * and came back would read as the question having been asked twice.
+ * checked against the path allowlist in `api.ts` before it is fetched.
+ *
+ * The row is dropped on success so the panel answers the tap, and the refresh
+ * that follows is authoritative. That is deliberately **not** a promise the row
+ * will stay gone: approving a draft moves it to `sending`, where its resolver
+ * returns a live view reading "this message is being sent" rather than `None`,
+ * so the row comes back saying what actually happened. Suppressing it would be
+ * hiding a true state, not preventing a flicker.
  */
 export async function runAction(id: number, action: NotificationAction): Promise<boolean> {
   if (action.method !== 'POST' || !action.endpoint) return false;
@@ -225,6 +292,7 @@ export async function markPanelSeen(seen: NotificationSeen[]): Promise<void> {
 export function startNotificationPoll(): void {
   if (polling) return;
   polling = true;
+  generation += 1;
   consecutiveFailures = 0;
   if (typeof document !== 'undefined') {
     // A background tab's timer is throttled and a suspended PWA's is stopped
@@ -244,6 +312,9 @@ export function startNotificationPoll(): void {
 
 export function stopNotificationPoll(): void {
   polling = false;
+  // Clearing the timer cannot recall a request already on the wire. Bumping the
+  // generation is what stops its answer being published over a logged-out page.
+  generation += 1;
   if (timer !== null) {
     clearTimeout(timer);
     timer = null;
@@ -264,7 +335,15 @@ export function currentNotificationFilter(): NotificationFilter {
   return activeFilter;
 }
 
-/** Drop every trace of the signed-in user. Called on logout, and by tests. */
+/** Drop every trace of the signed-in user.
+ *
+ * **Nothing calls this on logout today, and that is not an oversight to fix by
+ * wiring it up blindly.** `LogoutButton` navigates the browser to
+ * `/istota/logout` rather than routing within the SPA, so the whole page — and
+ * this module's state with it — is torn down by the platform. The function
+ * exists for the case that is not true: a test running several sessions in one
+ * process, and a future in-SPA sign-out. Said here because a docstring claiming
+ * a logout hook that does not exist reads as teardown already handled. */
 export function resetNotifications(): void {
   stopNotificationPoll();
   counts.set({ open: 0, actionable: 0 });

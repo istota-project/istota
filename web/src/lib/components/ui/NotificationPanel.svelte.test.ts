@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import type { ResolvedNotification } from '$lib/api';
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => {
@@ -94,6 +95,11 @@ async function openPanel() {
 
 beforeEach(() => {
   vi.mocked(refreshItems).mockReset();
+  // The real one returns the rows it published, or null when the load failed or
+  // was superseded — the panel marks seen from that value rather than from the
+  // store, so the double must honour the same contract or every seen assertion
+  // below passes vacuously.
+  vi.mocked(refreshItems).mockImplementation(async () => get(notificationItems));
   vi.mocked(markPanelSeen).mockReset();
   vi.mocked(runAction).mockReset();
   vi.mocked(dismissNotification).mockReset();
@@ -123,6 +129,16 @@ describe('opening', () => {
       { id: 1, updated_at: '2026-08-01T00:00:00.000Z' },
       { id: 2, updated_at: '2026-08-02T00:00:00.000Z' },
     ]);
+  });
+
+  it('reports nothing when the load failed', async () => {
+    // `refreshItems` leaves the previous rows on screen on failure, so reading
+    // the store here would stamp `seen_at` on a list the user is not being
+    // shown, behind an error banner.
+    set(notificationItems, [row(1)]);
+    vi.mocked(refreshItems).mockResolvedValue(null);
+    await openPanel();
+    expect(markPanelSeen).not.toHaveBeenCalled();
   });
 
   it('reports only the rows it actually rendered', async () => {
@@ -170,6 +186,24 @@ describe('the list', () => {
     await openPanel();
     expect(await screen.findByText(/Showing 1 of 60 open/)).toBeInTheDocument();
   });
+
+  it('states it on the filtered tab too, which is the one that hides rows', async () => {
+    // Gated on `all`, the one tab that can show a short list without saying why
+    // was the filtered one.
+    set(notificationItems, [row(1)]);
+    set(notificationTotalOpen, 60);
+    await openPanel();
+    await fireEvent.click(await screen.findByText(/Needs action/));
+    expect(await screen.findByText(/Showing 1 of 60 open/)).toBeInTheDocument();
+  });
+
+  it('says nothing about a total the page already shows in full', async () => {
+    set(notificationItems, [row(1)]);
+    set(notificationTotalOpen, 1);
+    await openPanel();
+    await screen.findByText('Question 1');
+    expect(screen.queryByText(/Showing/)).toBeNull();
+  });
 });
 
 describe('the filter tabs', () => {
@@ -191,6 +225,21 @@ describe('the filter tabs', () => {
     await openPanel();
     await fireEvent.click(await screen.findByText(/Needs action/));
     expect(refreshItems).toHaveBeenLastCalledWith('action');
+  });
+
+  it('lands back on All on the next open, not on the filter last picked', async () => {
+    // The component stays mounted for the life of the tab, so a filter that
+    // persisted would make "Needs action" sticky — and the whole reason for the
+    // All default is that *opening the bell* renders both classes. Sticky, a
+    // fire-and-forget row would never render for that user, never be seen,
+    // never resolve, and climb until the 14-day sweep caught it.
+    const trigger = await openPanel();
+    await fireEvent.click(await screen.findByText(/Needs action/));
+    expect(refreshItems).toHaveBeenLastCalledWith('action');
+
+    await fireEvent.keyDown(trigger, { key: 'Escape' });
+    await fireEvent.keyDown(trigger, { key: 'Enter' });
+    expect(refreshItems).toHaveBeenLastCalledWith('all');
   });
 
   it('says something different when the action tab is empty', async () => {
@@ -237,6 +286,31 @@ describe('actions', () => {
     // Past two the row is a form rather than a line in a list; the rest live in
     // the detail modal, which renders every action there is.
     expect(screen.queryByText('Third')).toBeNull();
+  });
+
+  it('does not let an unusable action consume an inline slot', async () => {
+    // Sliced before filtering, a rejected LINK would eat one of the two slots
+    // and render nothing — one button where two were intended, with nothing
+    // saying an action had been dropped.
+    set(notificationItems, [
+      row(1, {
+        actions: [
+          {
+            id: 'bad',
+            label: 'Bad link',
+            kind: 'default',
+            method: 'LINK',
+            endpoint: null,
+            href: 'https://evil.example',
+          },
+          ...row(1).actions,
+        ],
+      }),
+    ]);
+    await openPanel();
+    expect(await screen.findByText('Confirm')).toBeInTheDocument();
+    expect(screen.getByText('Discard')).toBeInTheDocument();
+    expect(screen.queryByText('Bad link')).toBeNull();
   });
 
   it('opens the detail modal from the row', async () => {

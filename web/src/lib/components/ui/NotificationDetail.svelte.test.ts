@@ -139,6 +139,39 @@ describe('actions', () => {
     expect(screen.getByText('Dismiss')).toBeInTheDocument();
   });
 
+  it('does not offer an action whose path fails the allowlist', () => {
+    // The modal renders every action, so nothing is being truncated here — an
+    // action that cannot be issued is simply not offered, rather than rendered
+    // as a button that refuses when pressed.
+    const { container } = open({
+      actions: [
+        action({
+          id: 'bad',
+          label: 'Bad link',
+          method: 'LINK',
+          endpoint: null,
+          href: 'https://evil.example',
+        }),
+        action({ id: 'trav', label: 'Traversal', endpoint: '/chat/tasks/1/../../admin' }),
+        action(),
+      ],
+    });
+    expect(screen.getByText('Confirm')).toBeInTheDocument();
+    expect(screen.queryByText('Bad link')).toBeNull();
+    expect(screen.queryByText('Traversal')).toBeNull();
+    expect(container.ownerDocument.querySelector('a[href*="evil.example"]')).toBeNull();
+  });
+
+  it('does not render a link the allowlist refuses', () => {
+    const { container } = open({ link: 'javascript:alert(1)' });
+    expect(container.ownerDocument.querySelector('.detail-link')).toBeNull();
+  });
+
+  it('renders a link the allowlist accepts', () => {
+    const { container } = open({ link: '/health/bloodwork' });
+    expect(container.ownerDocument.querySelector('a[href$="/health/bloodwork"]')).not.toBeNull();
+  });
+
   it('renders a LINK action as a real anchor', () => {
     const { container } = open({
       actions: [

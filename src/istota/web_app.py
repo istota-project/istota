@@ -6515,6 +6515,13 @@ async def chat_cancel_task(
 # `test_web_notifications.py` pins the two together so the copy cannot drift.
 _SEEN_BATCH_MAX = 500
 
+# Ceiling on one `updated_at` in that batch. The value is only ever compared
+# against `db.iso_utc_now()`, which is 24 characters, so anything longer cannot
+# match any stored row — it is not a timestamp, it is a client putting an
+# unbounded string on a write path. Generous against the format rather than
+# tight to it, since the column also holds the schema default's spelling.
+_SEEN_VERSION_MAX_CHARS = 64
+
 
 def _notification_counts(username: str) -> dict:
     from . import db, notification_store  # noqa: PLC0415
@@ -6601,6 +6608,16 @@ async def notifications_dismiss(
     existence is not the other user's business to confirm, and the same reply
     covers an id that never existed. A second dismiss of an already-dismissed
     row is a 200, so a duplicate tap reports what happened rather than an error.
+
+    **The 404 also covers a store failure**, and that conflation is worth
+    stating rather than leaving to be discovered. `notification_store.dismiss`
+    never raises — it logs at WARNING and returns False — so a swallowed
+    `sqlite3.OperationalError` is indistinguishable here from "not yours". The
+    user is then told the notification is gone while the row is still open. It
+    is left this way because the alternative reply is worse: a 500 on a
+    transient lock would put an error banner over a panel that is about to
+    correct itself, and the client refreshes after every action, so the row
+    reappears on its own. The log line is where that case is diagnosed.
     """
     owned = await asyncio.to_thread(
         _notification_dismiss, user["username"], notification_id,
@@ -6653,6 +6670,8 @@ async def notifications_seen(
         if isinstance(notification_id, bool) or not isinstance(notification_id, int):
             return JSONResponse({"error": "malformed entry"}, status_code=422)
         if not isinstance(updated_at, str):
+            return JSONResponse({"error": "malformed entry"}, status_code=422)
+        if len(updated_at) > _SEEN_VERSION_MAX_CHARS:
             return JSONResponse({"error": "malformed entry"}, status_code=422)
         seen.append((notification_id, updated_at))
     await asyncio.to_thread(_notification_mark_seen, user["username"], seen)

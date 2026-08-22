@@ -12,21 +12,29 @@
    */
   interface Props {
     count: number;
-    /** Native tooltip. The count alone is not self-describing out of context. */
+    /** Native tooltip. The count alone is not self-describing out of context,
+     *  and `title` is valid on any element — unlike `aria-label`, see below. */
     title?: string;
-    /** Screen-reader name. Falls back to `title`, then to the rendered digits —
-     *  which are the truncated `99+` rather than the real number, hence the
-     *  preference order. */
-    label?: string;
   }
 
-  let { count, title, label }: Props = $props();
+  let { count, title }: Props = $props();
 
   const shown = $derived(count > 99 ? '99+' : String(count));
 </script>
 
+<!--
+  No `aria-label`. This is a bare <span>, so its implicit role is `generic`,
+  which does not support an accessible name — assistive tech drops the
+  attribute, and a prop named "screen-reader name" that names nothing is worse
+  than none, because it reads as covered. The digits stay as text content, which
+  a generic element *does* expose, so the count reaches AT either way.
+
+  Naming belongs on the interactive element that owns the pill, the way
+  `IconButton` requires: `NotificationBell` puts the real, untruncated count in
+  its button's own `aria-label`, which overrides descendant content entirely.
+-->
 {#if count > 0}
-  <span class="count-pill" {title} aria-label={label ?? title ?? undefined}>{shown}</span>
+  <span class="count-pill" {title}>{shown}</span>
 {/if}
 
 <style>

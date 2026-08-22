@@ -442,7 +442,22 @@ class TestSeen:
 
     async def test_a_malformed_body_is_a_422(self, client):
         cookies = await _login(client, "alice")
-        for body in ({"seen": "everything"}, {"seen": [1, 2, 3]}, ["nope"]):
+        for body in (
+            {"seen": "everything"},
+            {"seen": [1, 2, 3]},
+            ["nope"],
+            # `bool` is an `int` subclass, so an unguarded isinstance check
+            # would take `True` as the id 1 and stamp somebody's first row.
+            {"seen": [{"id": True, "updated_at": "x"}]},
+            {"seen": [{"id": False, "updated_at": "x"}]},
+            # The version is compared as a string against the stored column; a
+            # number would never match and would silently never resolve.
+            {"seen": [{"id": 1, "updated_at": 5}]},
+            {"seen": [{"id": 1, "updated_at": None}]},
+            {"seen": [{"id": "1", "updated_at": "x"}]},
+            {"seen": [{"updated_at": "x"}]},
+            {"seen": [None]},
+        ):
             resp = await client.post(
                 "/istota/api/notifications/seen", json=body,
                 cookies=cookies, headers=ORIGIN,
@@ -466,6 +481,37 @@ class TestSeen:
         from istota.notification_store import LIVENESS_SCAN_MAX
         from istota.web_app import _SEEN_BATCH_MAX
         assert _SEEN_BATCH_MAX >= LIVENESS_SCAN_MAX
+
+    async def test_an_oversized_version_string_is_a_422(self, client):
+        """The one field on this write path with no shape of its own.
+
+        `updated_at` is only ever compared against `db.iso_utc_now()`, which is
+        24 characters, so a longer value cannot match any stored row — it is not
+        a timestamp, it is an unbounded string arriving at a write path.
+        """
+        cookies = await _login(client, "alice")
+        resp = await client.post(
+            "/istota/api/notifications/seen",
+            json={"seen": [{"id": 1, "updated_at": "x" * 5000}]},
+            cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 422
+
+    async def test_a_real_timestamp_fits_the_version_cap(self, client):
+        """The cap must not refuse the value the store actually writes."""
+        from istota import db as _db
+        from istota.web_app import _SEEN_VERSION_MAX_CHARS
+        assert len(_db.iso_utc_now()) <= _SEEN_VERSION_MAX_CHARS
+
+        cookies = await _login(client, "alice")
+        nid = _bare_row()
+        resp = await client.post(
+            "/istota/api/notifications/seen",
+            json={"seen": [{"id": nid, "updated_at": _row(nid)["updated_at"]}]},
+            cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 200
+        assert _row(nid)["seen_at"]
 
     async def test_the_batch_is_bounded(self, client):
         """A client cannot post an unbounded id list at the write path."""

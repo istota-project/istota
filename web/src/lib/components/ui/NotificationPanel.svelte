@@ -58,16 +58,31 @@
 
   async function load(next: NotificationFilter) {
     filter = next;
-    await refreshItems(next);
-    // Reported after the rows are in hand, as `(id, updated_at)` pairs — the
-    // version is what stops a row bumped between the fetch and this call being
-    // closed by a user who never saw the new occurrence.
-    void markPanelSeen(seenPairs($notificationItems));
+    // Seen is reported from the rows this call *returned*, never from the store.
+    // `refreshItems` deliberately leaves the previous list on screen when it
+    // fails, and returns null then and when a newer request has superseded it —
+    // so reading the store here would stamp `seen_at` on rows the user is not
+    // being shown, behind an error banner, and on a failed open would report a
+    // list nothing had just fetched.
+    const items = await refreshItems(next);
+    if (!items) return;
+    // `(id, updated_at)` pairs, not bare ids: the version is what stops a row
+    // bumped between the fetch and this call being closed by a user who never
+    // saw the new occurrence.
+    void markPanelSeen(seenPairs(items));
   }
 
   function onOpenChange(next: boolean) {
     open = next;
-    if (next) void load(filter);
+    // **Every** open lands on "All", not just the first. The component stays
+    // mounted for the life of the tab, so a filter that persisted would make
+    // "Needs action" sticky — and the spec's reason for the default is that
+    // opening the bell renders both classes, so a fire-and-forget row is seen
+    // on any ordinary use of the feature. Sticky, a user who picked "Needs
+    // action" once would never render that class again, so it would never be
+    // seen, never resolve, and climb until the 14-day sweep caught it: exactly
+    // the unbounded case the "All" default exists to close.
+    if (next) void load('all');
   }
 
   function onAction(item: ResolvedNotification, action: NotificationAction) {
@@ -124,7 +139,11 @@
         {/if}
       </div>
 
-      {#if $notificationTotalOpen > $notificationItems.length && filter === 'all'}
+      <!-- Not gated on the filter. `total_open` is the whole open set either
+           way, so on "Needs action" this reads "Showing 4 of 60 open" — which is
+           what that tab means. Gated on `all`, the one tab that can hide rows
+           without saying so was the filtered one. -->
+      {#if $notificationTotalOpen > $notificationItems.length}
         <p class="panel-foot caption">
           Showing {$notificationItems.length} of {$notificationTotalOpen} open.
         </p>

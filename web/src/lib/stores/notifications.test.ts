@@ -290,6 +290,65 @@ describe('refreshItems', () => {
     expect(get(store.notificationsError)).toBe('');
   });
 
+  it('lets only the newest request publish', async () => {
+    // Two overlapping loads are ordinary — the two filter chips, or a chip
+    // click racing the refresh an action fires. Without the guard the slower
+    // one wins by landing last, putting one filter's rows under the other
+    // filter's chip.
+    let releaseSlow: (v: unknown) => void = () => {};
+    const slow = new Promise((r) => (releaseSlow = r));
+    api.listNotifications
+      .mockImplementationOnce(async () => {
+        await slow;
+        return { notifications: [row(1), row(2)], total_open: 2 };
+      })
+      .mockImplementationOnce(async () => ({ notifications: [row(3)], total_open: 9 }));
+
+    const first = store.refreshItems('all');
+    const second = store.refreshItems('action');
+    await second;
+    releaseSlow(null);
+
+    expect(await first).toBeNull();
+    expect(get(store.notificationItems).map((i) => i.id)).toEqual([3]);
+    expect(get(store.notificationTotalOpen)).toBe(9);
+  });
+
+  it('reports "loading" until the last in-flight load finishes', async () => {
+    let release: (v: unknown) => void = () => {};
+    const slow = new Promise((r) => (release = r));
+    api.listNotifications
+      .mockImplementationOnce(async () => {
+        await slow;
+        return { notifications: [], total_open: 0 };
+      })
+      .mockImplementationOnce(async () => ({ notifications: [], total_open: 0 }));
+
+    const first = store.refreshItems('all');
+    const second = store.refreshItems('action');
+    await second;
+    // A boolean cleared in the first `finally` would say "loaded" here.
+    expect(get(store.notificationsLoading)).toBe(true);
+    release(null);
+    await first;
+    expect(get(store.notificationsLoading)).toBe(false);
+  });
+
+  it('returns the rows it published, so a caller need not re-read the store', async () => {
+    api.listNotifications.mockResolvedValue({ notifications: [row(1)], total_open: 1 });
+    const items = await store.refreshItems('all');
+    expect(items?.map((i) => i.id)).toEqual([1]);
+  });
+
+  it('returns null on failure rather than the stale rows it left on screen', async () => {
+    api.listNotifications.mockResolvedValue({ notifications: [row(1)], total_open: 1 });
+    await store.refreshItems('all');
+    api.listNotifications.mockRejectedValue(new Error('offline'));
+    expect(await store.refreshItems('all')).toBeNull();
+    // Still on screen, deliberately — but not something a caller may report.
+    expect(get(store.notificationItems)).toHaveLength(1);
+  });
+
   it('remembers the filter for a later refresh', async () => {
     await store.refreshItems('action');
     expect(store.currentNotificationFilter()).toBe('action');
@@ -304,6 +363,24 @@ describe('actions', () => {
     const item = row(9);
     await store.runAction(item.id, item.actions[0] as never);
     expect(api.runNotificationAction).toHaveBeenCalledWith('/chat/tasks/9/confirm');
+  });
+
+  it('leaves the counters to the refresh rather than bouncing them', async () => {
+    // Decrementing here first makes the badge read N → N-1 → N → N-1 whenever
+    // the server still considers the row open — which happens for real:
+    // approving a draft leaves it `sending`, and that resolver returns a live
+    // view rather than None.
+    api.listNotifications.mockResolvedValue({ notifications: [row(1)], total_open: 1 });
+    api.getNotificationCounts.mockResolvedValue({ open: 1, actionable: 1 });
+    await store.refreshItems('all');
+    const item = get(store.notificationItems)[0];
+
+    const seen: number[] = [];
+    const unsub = store.notificationCounts.subscribe((c) => seen.push(c.open));
+    await store.runAction(item.id, item.actions[0]);
+    unsub();
+    // Monotone: never down-then-up-then-down.
+    expect(seen).toEqual([...seen].sort((a, b) => b - a));
   });
 
   it('drops the row and refreshes on success', async () => {

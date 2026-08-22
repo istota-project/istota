@@ -118,9 +118,22 @@ describe('CountPill', () => {
     expect(screen.getByText('99+')).toBeInTheDocument();
   });
 
-  it('prefers an explicit label over the truncated digits', () => {
-    render(CountPill, { count: 400, label: '400 unread' });
-    expect(screen.getByLabelText('400 unread')).toBeInTheDocument();
+  it('sets no aria-label, which a bare span cannot carry anyway', () => {
+    // The implicit role of a <span> is `generic`, which does not support an
+    // accessible name — AT drops the attribute. A prop named "screen-reader
+    // name" that names nothing is worse than none, because it reads as covered.
+    // The digits are text content, which a generic element does expose, and the
+    // real untruncated count is on the bell button's own aria-label above.
+    const { container } = render(CountPill, { count: 400 });
+    const pill = container.querySelector('.count-pill');
+    expect(pill).not.toBeNull();
+    expect(pill!.hasAttribute('aria-label')).toBe(false);
+    expect(pill!.textContent).toBe('99+');
+  });
+
+  it('still carries a native tooltip, which is valid on any element', () => {
+    render(CountPill, { count: 4, title: '4 unread' });
+    expect(screen.getByTitle('4 unread')).toBeInTheDocument();
   });
 
   it('sizes on --text-xs, the 0.7rem the chat chip hardcodes', () => {

@@ -3254,7 +3254,10 @@ export interface NotificationSeen {
  * is for. */
 const SAFE_ACTION_PATH = /^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/;
 
-export function isSafeActionPath(path: string | null | undefined): boolean {
+/** A type predicate, so a caller that checks a nullable `href` also narrows it —
+ *  otherwise every call site needs a second truthiness test the compiler can see,
+ *  and the two can disagree about which one is the guard. */
+export function isSafeActionPath(path: string | null | undefined): path is string {
   return typeof path === 'string' && SAFE_ACTION_PATH.test(path);
 }
 

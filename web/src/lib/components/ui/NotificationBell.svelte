@@ -40,7 +40,7 @@
       aria-label={label}
     >
       <Bell size={15} />
-      <CountPill count={open} {label} />
+      <CountPill count={open} />
     </button>
   {/snippet}
 </NotificationPanel>

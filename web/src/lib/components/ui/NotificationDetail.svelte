@@ -13,7 +13,7 @@
    * renders its line breaks without turning any of it into markup.
    */
   import { base } from '$app/paths';
-  import type { NotificationAction, ResolvedNotification } from '$lib/api';
+  import { isSafeActionPath, type NotificationAction, type ResolvedNotification } from '$lib/api';
   import Button from './Button.svelte';
   import Modal from './Modal.svelte';
 
@@ -32,6 +32,20 @@
     default: 'secondary',
     danger: 'danger',
   };
+
+  /** Only the actions that can actually be issued.
+   *
+   * The modal renders every action the row has, unlike the row itself which
+   * takes the first two — so this drops nothing a user could have used. An
+   * action whose path fails the allowlist is not offered rather than rendered
+   * as a button that refuses when pressed. */
+  const actions = $derived(
+    (item?.actions ?? []).filter(
+      (a) =>
+        (a.method === 'POST' && isSafeActionPath(a.endpoint)) ||
+        (a.method === 'LINK' && isSafeActionPath(a.href)),
+    ),
+  );
 </script>
 
 {#if item}
@@ -45,12 +59,18 @@
            source", which are different things to tell someone. -->
       <p class="banner info detail-note">{item.status_note}</p>
     {/if}
-    {#if item.link}
+    {#if isSafeActionPath(item.link)}
+      <!-- Checked, not merely truthy-tested. `link` and `href` are the *worse*
+           pair of the three URL fields: they land in an anchor, where a
+           text-node rule buys nothing and a `javascript:` or off-origin
+           absolute URL would sail straight through. The server validates every
+           view it emits, but the browser is the side that follows the link, so
+           it checks too. A path that fails is simply not offered. -->
       <p class="detail-link"><a href="{base}{item.link}">Open</a></p>
     {/if}
     {#snippet footer()}
       <Button variant="subtle" size="sm" onclick={() => onDismiss(item!)}>Dismiss</Button>
-      {#each item?.actions ?? [] as action (action.id)}
+      {#each actions as action (action.id)}
         {#if action.method === 'LINK' && action.href}
           <Button
             variant={variants[action.kind] ?? 'secondary'}
