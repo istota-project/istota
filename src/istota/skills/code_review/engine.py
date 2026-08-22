@@ -184,45 +184,11 @@ class Finding:
 # The hardened git runner
 # --------------------------------------------------------------------------
 
-# Repo-local `.git/config` cannot be switched off by environment variable,
-# which is why these are `-c` overrides: a later `-c` beats the repository's
-# own value.
-#
-# Every entry here is a config key that either runs a command or reshapes
-# output this module parses. `core.fsmonitor`, `diff.external` and the `gpg.*`
-# programs are the run-a-command ones — `gpg.program` is reached from a plain
-# `git log` whenever `log.showSignature` is on, which is itself just a
-# repo-local boolean, and that pair was a working escape past the first three.
-# `color.ui` is not an execution route but is just as load-bearing: with colour
-# forced on, every diff header arrives wrapped in ANSI escapes, `_split_
-# sections` matches none of them, and the reviewer is handed an empty diff with
-# nothing anywhere reporting a loss.
-GIT_HARDENING = (
-    "-c",
-    "core.fsmonitor=",
-    "-c",
-    "diff.external=",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "log.showSignature=false",
-    "-c",
-    "gpg.program=/nonexistent",
-    "-c",
-    "gpg.openpgp.program=/nonexistent",
-    "-c",
-    "gpg.ssh.program=/nonexistent",
-    "-c",
-    "gpg.x509.program=/nonexistent",
-    "-c",
-    "color.ui=false",
-    "-c",
-    "diff.noprefix=false",
-    "-c",
-    "diff.mnemonicPrefix=false",
-    "-c",
-    "core.quotePath=false",
-)
+# The list lives in `istota.git_hardening` so `worktree_reaper` can have it
+# too: it runs `git status` inside the same model-writable checkouts, and it
+# cannot import from `istota.skills` (whose __init__ star-imports every skill).
+# Re-exported here because this module's call sites and tests use the name.
+from istota.git_hardening import GIT_HARDENING  # noqa: E402,F401 - re-export
 
 # Flags, because a flag is the only thing that covers the per-attribute route.
 # `-c diff.external=` clears the global external driver but does nothing about
