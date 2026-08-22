@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The assistant is no longer told that the dev container cannot reach your internal services, because in several cases it can. The instructions now say plainly what the network filtering does and does not cover, and tell it to keep away from internal addresses whether or not anything stops it. Nothing changes about what is actually blocked.
+
+- Turning the dev container off now removes the firewall rules it added, instead of leaving them behind. The rules were created with a label and deleted without one, and a delete that does not match its target reports success having done nothing — so a machine kept filtering a private address range it no longer had any container on, until the next reboot.
+
 - Resetting the dev container no longer costs the assistant a failed attempt first. Its own reference listed the command without the confirmation flag the command requires, so the documented form was refused and had to be retried; the reference now shows the form that runs, and says accurately what it does — it wipes the container's home directory and restarts it, rather than rebuilding it from the base image.
 
 - A self-hosted GitLab reached over plain `http://` now works, including on a non-standard port or a sub-path. The GitLab CLI ignores the scheme in the address it is given and always tries HTTPS, so every forge command against such a server died on the TLS handshake with an error naming a protocol nobody had configured. The bot now tells the CLI which protocol to use for that address. `istota doctor` warns while this is in effect, because a forge token then crosses the network in the clear — treat an HTTPS address as the default and plain HTTP as something you chose.
