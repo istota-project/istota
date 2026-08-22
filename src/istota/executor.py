@@ -1725,11 +1725,20 @@ def build_bwrap_cmd(
         elif p.exists():
             _ro_bind(p)
 
-    # Selective /etc binds — only what's needed for DNS, TLS, user lookup, timezone
+    # Selective /etc binds — only what's needed for DNS, TLS, user lookup,
+    # timezone, and for the binaries in the /usr bind above to resolve.
+    #
+    # /etc/alternatives is the last of those and the least obvious: Debian ships
+    # awk, cc, vi, editor, pager, which and nc as /usr/bin symlinks into it, so
+    # binding /usr alone carries the links in and leaves every one of them
+    # dangling. The command then fails with "No such file or directory" for a
+    # binary ls shows sitting right there, inside the sandbox only. It holds
+    # nothing but symlinks back into /usr, which is already bound.
     etc_files = [
         "/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf",
         "/etc/hosts", "/etc/nsswitch.conf", "/etc/ld.so.cache",
         "/etc/localtime", "/etc/passwd", "/etc/group",
+        "/etc/alternatives",
     ]
     for ef in etc_files:
         _ro_bind(Path(ef))
