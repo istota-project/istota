@@ -46,8 +46,8 @@ When to run each:
 | Tier | Run it when | Cost |
 |---|---|---|
 | `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
-| `-m image` | you touched `docker/istota/Dockerfile`, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache |
-| `-m image --platform amd64` | before a release | about ten minutes under emulation, and it is the only thing that ever executes the amd64-only devbox image |
+| `-m image` | you touched either Dockerfile, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache; builds both images natively |
+| `-m image --platform amd64` | before a release, on a non-amd64 machine | about ten minutes under emulation. It checks the deployment architecture rather than reaching tests nothing else runs — since ISSUE-280 the devbox image builds natively too, so its assertions are covered by a plain `-m image` |
 | `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about three minutes |
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |

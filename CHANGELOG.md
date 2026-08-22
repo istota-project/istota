@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The Go toolchain inside the dev container is now checked against a known hash before it is unpacked, as the other tools in that image already were. It was the one download in the image that was taken on trust.
+
 - A sender can no longer compose the version of their email that you read. The bot wraps an incoming message in tags that mark it as text from outside, and the chat transcript strips those before showing it to you. A subject line or an attachment name can legally carry a line break, and one carrying the right text could close the wrapper early and open a replacement — so the transcript would show a message the sender had written in full, headers and all, under the real sender's name, with the actual message never displayed. Those values are now flattened to a single line before the wrapper is built, the sender shown is the first one given rather than the last, and a message body that tries the same trick now displays the attempt instead of hiding what follows it. This was only reachable once the stripping started working, which is a fix in the same release.
 
 - A task can no longer rewrite the helper scripts that fetch its own credentials. Those scripts are written into a `.developer` directory inside each task's scratch space, and the sandbox has always kept them read-only — but the in-process agent, which runs without the sandbox, treated the whole scratch space as writable. A task could therefore replace the script that asks for a forge token with one that did something else with it. That directory is now excluded from what a task may write on both paths.
@@ -69,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Forge commands in the dev container now say why they cannot work on the Docker-compose install, instead of pointing at a missing file. That install has no credential service and is not meant to have one, so GitHub and GitLab commands and pushes cannot work inside the container there — the assistant is now told that up front and told to do the work outside the box, rather than discovering it and retrying. The Ansible install is unaffected.
+
+- The dev container image now builds on ARM machines, Apple Silicon included. Three of its downloads asked for Intel builds by name, so the only way to build it on an ARM machine was under emulation, taking tens of minutes instead of a few. Nothing changes for the deployment, which is Intel either way; what changes is that the image can be built and tested locally, so the checks that cover it now run as a matter of course rather than once before a release.
 
 - The dev container can be built from the Docker-compose file again. It was pointed at the wrong directory, so the build failed on the first file it tried to copy. Only the standalone install was affected; the Ansible one always used the right path.
 

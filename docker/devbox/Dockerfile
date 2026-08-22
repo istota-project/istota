@@ -27,11 +27,40 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 
 # Layer 3: Go (latest stable). Pinned to a versioned URL so rebuilds are
 # reproducible — bump deliberately, not opportunistically.
+#
+# The asset is chosen per architecture, the same way docker/istota/Dockerfile
+# picks its forge assets, and for the same reason: this image had a hardcoded
+# linux-amd64 tarball, which meant an arm64 developer machine could only build
+# it under emulation — tens of minutes — so the only tier that tests this image
+# ran once before a release, if then (ISSUE-280).
+#
+# The arch comes from `dpkg --print-architecture` rather than BuildKit's
+# TARGETARCH: dpkg's names are the ones Go and both forge projects already use
+# for their assets, and it is correct under the legacy builder, where TARGETARCH
+# is simply empty.
+#
+# Two checksums per artifact rather than one is the real cost of this change,
+# and the honest one — the existing pins are a verified-download guard rather
+# than a version floor, and that property has to survive. Go publishes no
+# checksum file alongside the tarball, so this layer had no verification at all
+# before; it does now. An architecture with no pinned checksum fails the build
+# rather than going unverified.
 ARG GO_VERSION=1.22.2
-RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
-        -o /tmp/go.tar.gz \
-    && tar -C /usr/local -xzf /tmp/go.tar.gz \
-    && rm /tmp/go.tar.gz
+ARG GO_SHA256_AMD64=5901c52b7a78002aeff14a21f93e0f064f74ce1360fce51c6ee68cd471216a17
+ARG GO_SHA256_ARM64=36e720b2d564980c162a48c7e97da2e407dfcc4239e1e58d98082dfa2486a0c1
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) go_sha="${GO_SHA256_AMD64}" ;; \
+        arm64) go_sha="${GO_SHA256_ARM64}" ;; \
+        *) echo "no pinned go checksum for ${arch}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
+        -o /tmp/go.tar.gz; \
+    echo "${go_sha}  /tmp/go.tar.gz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz; \
+    /usr/local/go/bin/go version
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Non-root user with passwordless sudo (it's the user's box; sudo unlocks
@@ -76,21 +105,34 @@ ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 # truncated stream. The `--version` calls at the end of this layer are what
 # actually catches that — a truncated ELF cannot exec — so do not remove them
 # thinking they are decorative.
+#
+# Per-architecture assets and checksums, matching docker/istota/Dockerfile
+# exactly — same `dpkg --print-architecture` source, same case statement, same
+# refusal on an architecture with no pin (ISSUE-280). The two files pinning the
+# same six values is what `tests/test_docker_forge_clis.py` holds.
 USER root
 ARG GH_VERSION=2.98.0
-ARG GH_DEB_SHA256=f65a3fa2fa0eb2e97c445ee3f5e087a40aae03b64847f45a8f13805e504535d6
+ARG GH_DEB_SHA256_AMD64=f65a3fa2fa0eb2e97c445ee3f5e087a40aae03b64847f45a8f13805e504535d6
+ARG GH_DEB_SHA256_ARM64=bbc4ac7964c2a091fd555cd1758d10a7cfcfdc472e405f0b0fb958f05d535cb6
 ARG GLAB_VERSION=1.114.0
-ARG GLAB_DEB_SHA256=6df680f88a2a45700d1dd6a08a44a74838473ef3dcc5cb1ad243f4d1fd704ad0
+ARG GLAB_DEB_SHA256_AMD64=6df680f88a2a45700d1dd6a08a44a74838473ef3dcc5cb1ad243f4d1fd704ad0
+ARG GLAB_DEB_SHA256_ARM64=c2bcb44cc10d849cccb879e687f3b9e102a3415c3d02f0cecfd9ce1442519350
 RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) gh_sha="${GH_DEB_SHA256_AMD64}"; glab_sha="${GLAB_DEB_SHA256_AMD64}" ;; \
+        arm64) gh_sha="${GH_DEB_SHA256_ARM64}"; glab_sha="${GLAB_DEB_SHA256_ARM64}" ;; \
+        *) echo "no pinned gh/glab checksum for ${arch}" >&2; exit 1 ;; \
+    esac; \
     mkdir -p /usr/local/lib/istota_forge; \
     curl -fsSL -o /tmp/gh.deb \
-        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.deb"; \
-    echo "${GH_DEB_SHA256}  /tmp/gh.deb" | sha256sum -c -; \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.deb"; \
+    echo "${gh_sha}  /tmp/gh.deb" | sha256sum -c -; \
     dpkg-deb --fsys-tarfile /tmp/gh.deb \
         | tar -xO ./usr/bin/gh > /usr/local/lib/istota_forge/gh; \
     curl -fsSL -o /tmp/glab.deb \
-        "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}/glab_${GLAB_VERSION}_linux_amd64.deb"; \
-    echo "${GLAB_DEB_SHA256}  /tmp/glab.deb" | sha256sum -c -; \
+        "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}/glab_${GLAB_VERSION}_linux_${arch}.deb"; \
+    echo "${glab_sha}  /tmp/glab.deb" | sha256sum -c -; \
     dpkg-deb --fsys-tarfile /tmp/glab.deb \
         | tar -xO ./usr/bin/glab > /usr/local/lib/istota_forge/glab; \
     rm -f /tmp/gh.deb /tmp/glab.deb; \
