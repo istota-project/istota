@@ -965,6 +965,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
+    # And then the inbox's one-shot seed, which needs that table to exist. It
+    # takes a transaction of its own, so it commits whatever the migrations
+    # above left open first (ISSUE-261); nothing after it depends on the
+    # inherited one, which is the other reason it goes last.
+    _backfill_notifications(conn)
 
 
 def _resolve_schema_path() -> Path:
@@ -5409,6 +5414,212 @@ def _migrate_notifications(conn: sqlite3.Connection) -> None:
         # The next boot retries; the bell is empty until then rather than init
         # failing outright.
         logger.warning("notifications table migration failed, will retry: %s", e)
+
+
+# The one-shot guard on `_backfill_notifications`.
+_NOTIFICATIONS_BACKFILL_MARKER = "notifications_backfill_v1"
+
+
+def _iso_z(value: str | None) -> str:
+    """A `datetime('now')` timestamp in the notifications table's ISO-Z form.
+
+    `tasks.created_at` and `outbound_drafts.created_at` store
+    `YYYY-MM-DD HH:MM:SS`; `notifications.created_at` stores the ISO-Z
+    millisecond form `iso_utc_now` writes. The column is compared
+    lexicographically — by the two sweeps' bounds, by `ORDER BY updated_at`, and
+    by `mark_seen`'s version check — so a second spelling in it would sort and
+    compare against the first in ways nobody intended. Anything unparseable
+    falls back to now: a first-seen date is worth having right and is not worth
+    dropping an inbox row over.
+    """
+    text = (value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        return parsed.strftime("%Y-%m-%dT%H:%M:%S.") + "000Z"
+    return iso_utc_now()
+
+
+def _backfill_notifications(conn: sqlite3.Connection) -> None:
+    """Seed the inbox from the two queues that already exist (one-shot).
+
+    Every task in `pending_confirmation` and every `outbound_drafts` row in
+    `pending` is something waiting on a user *right now*. Before the inbox, the
+    web UI showed both in two floating strips above the chat transcript; those
+    come out in the same change as this, so without the backfill an upgrade
+    silently empties a user's held queue — the objects stay parked, and nothing
+    in the app says so.
+
+    Three things this has to get right, all of them load-bearing:
+
+    **The keys are the producers' own.** `source`, `dedup_key`, `object_type`
+    and `object_id` all come from the resolver modules the producers call, not
+    from strings retyped here. Idempotency is claimed from
+    `UNIQUE (user_id, source, dedup_key)`, so one character of drift means every
+    held item shows twice, permanently, with only one of the two closable — and
+    the constraint that is supposed to catch it never fires, because the keys
+    differ. `INSERT OR IGNORE` rather than the store's own `write_notification`:
+    that call is a read-modify-write whose `open` branch bumps `occurrences`, and
+    a backfill is not a second occurrence of the thing being notified about.
+
+    **It commits the transaction it inherited before beginning its own.**
+    `_run_migrations` shares one connection in Python's legacy `isolation_level`
+    mode, where a DML statement — a zero-row UPDATE is enough — opens an implicit
+    transaction and holds it open. `BEGIN IMMEDIATE` under one of those raises
+    "cannot start a transaction within a transaction" on exactly the DBs with
+    the most to lose, and passes on a fresh install: the ISSUE-261 shape, which
+    shipped green and killed inbound email for two days. It wants its own
+    transaction so the rows and the marker land together — a marker written over
+    a half-inserted pass would strand the rest for good.
+
+    **The title never comes from `tasks.prompt`.** For a gated email that column
+    is the untrusted body the gate is withholding. It comes from
+    `confirmations.describe`, which reads sender and subject off
+    `processed_emails` and flattens both. `confirmations` imports this module,
+    so the import is function-local.
+
+    Nothing here delivers. A migration that pushed would fan every held item in
+    the backlog out to Talk and ntfy at once, and `last_delivered_at` is left
+    null so a later re-delivery sweep still knows nobody was told.
+
+    Markered (`notifications_backfill_v1`) and structurally idempotent
+    regardless. Any failure returns without writing the marker, so the next
+    `istota init` retries the whole pass.
+    """
+    from . import confirmations  # noqa: PLC0415 — `confirmations` imports db
+    from .notification_resolvers import confirmation as confirmation_source  # noqa: PLC0415
+    from .notification_resolvers import outbound_draft as draft_source  # noqa: PLC0415
+
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = ?",
+            (_NOTIFICATIONS_BACKFILL_MARKER,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+
+    # Read before the write lock is taken, so a large backlog is not held over
+    # the whole scan. Re-reading under the lock would buy nothing: the objects
+    # can only stop being held, and `INSERT OR IGNORE` plus the resolvers'
+    # close paths handle one that did.
+    try:
+        held_tasks = conn.execute(
+            "SELECT id FROM tasks WHERE status = 'pending_confirmation' ORDER BY id"
+        ).fetchall()
+        held_drafts = conn.execute(
+            "SELECT id, user_id, to_addrs, cc_addrs, bcc_addrs, subject, "
+            "       room_token, created_at "
+            "  FROM outbound_drafts WHERE status = 'pending' ORDER BY id"
+        ).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # fresh install — the tables arrive with schema.sql below
+        logger.warning("notification backfill could not read the queues: %s", e)
+        return
+
+    rows: list[tuple] = []
+    now = iso_utc_now()
+    for record in held_tasks:
+        task = get_task(conn, record[0])
+        if task is None or not task.user_id:
+            continue
+        rows.append((
+            task.user_id,
+            confirmation_source.SOURCE,
+            confirmation_source.dedup_key(task.id),
+            confirmation_source.OBJECT_TYPE,
+            str(task.id),
+            confirmation_source.SEVERITY,
+            confirmations.describe(conn, task),
+            confirmation_source.body_for(task.confirmation_prompt),
+            # Deliberately null, unlike the draft rows below. `room_token` is
+            # provenance and nothing reads it yet; the two producers disagree
+            # about it (the email gate writes none), and a held task's
+            # `conversation_token` may be a synthetic thread hash naming no room
+            # at all — which is the case the strips existed for. A guess is
+            # worse than the absence.
+            None,
+            _iso_z(task.created_at),
+            now,
+        ))
+    for record in held_drafts:
+        user_id = record["user_id"]
+        if not user_id:
+            # `notifications.user_id` is NOT NULL and the panel is per-user, so
+            # a row nobody owns is unreachable — writing one would only fail
+            # the pass that rescues everybody else's.
+            logger.warning(
+                "notification backfill skipped draft %s: no user", record["id"],
+            )
+            continue
+        to_addrs = _json_list(record["to_addrs"])
+        # To and Cc by address, Bcc by count only — `!drafts`' rule, and the
+        # same reason: a row's stored text can be delivered into a shared room.
+        recipients = draft_source.visible_recipients(
+            to_addrs,
+            _json_list(record["cc_addrs"]),
+            _json_list(record["bcc_addrs"]),
+        )
+        rows.append((
+            user_id,
+            draft_source.SOURCE,
+            draft_source.dedup_key(record["id"]),
+            draft_source.OBJECT_TYPE,
+            str(record["id"]),
+            draft_source.SEVERITY,
+            draft_source.title_for(to_addrs[0] if to_addrs else ""),
+            draft_source.delivery_body_for(
+                record["subject"], record["id"], recipients,
+            ),
+            record["room_token"],
+            _iso_z(record["created_at"]),
+            now,
+        ))
+
+    # See the docstring: commit the inherited transaction, then take our own.
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany(
+            "INSERT OR IGNORE INTO notifications "
+            "(user_id, source, dedup_key, object_type, object_id, severity, "
+            " actionable, title, body, room_token, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES (?)",
+            (_NOTIFICATIONS_BACKFILL_MARKER,),
+        )
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        # `sqlite3.Error`, not OperationalError alone: an IntegrityError out of
+        # the insert would otherwise escape and abort `init_db` outright.
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        logger.warning(
+            "notification backfill failed and was rolled back; the held queue "
+            "is unchanged and the backfill will be retried: %s", e,
+        )
+        return
+    if rows:
+        logger.info("notification backfill seeded %d held item(s)", len(rows))
+
+
+def _json_list(value) -> list[str]:
+    """A stored JSON array of addresses, or an empty list."""
+    try:
+        parsed = json.loads(value or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [a for a in parsed if isinstance(a, str)] if isinstance(parsed, list) else []
 
 
 def list_tasks(
