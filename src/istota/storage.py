@@ -1,9 +1,11 @@
 """Bot-managed Nextcloud storage operations."""
 
 import logging
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1178,7 +1180,10 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
         memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
         if not memory_path.exists():
             return None
-        content = memory_path.read_text()
+        # Explicit UTF-8 both ways: the web save hashes the content as UTF-8 to
+        # build its revision tag, so a locale-dependent decode here would make
+        # the same bytes hash two ways and every save read as a conflict.
+        content = memory_path.read_text(encoding="utf-8")
         if not content.strip():
             return None
         return content
@@ -1188,6 +1193,66 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
         if content is None or not content.strip():
             return None
         return content
+
+
+def write_channel_memory(
+    config: "Config", conversation_token: str, content: str,
+) -> bool:
+    """Replace the channel's memory file with `content` (mount-aware).
+
+    Returns False on a write that failed; raises `ValueError` on a token that
+    isn't filesystem-safe.
+
+    On the mount the write is tmp + `os.replace`: a reader — the executor
+    loading the file into a prompt, or the sleep cycle re-indexing it — must
+    never see a half-written file. The caller owns the read-modify-write window
+    around it (`memory_md_lock` plus a revision check); this only guarantees the
+    write itself is not observable half-done.
+
+    **The staging name is unique per writer, not `CHANNEL.md.tmp`.** `os.replace`
+    is atomic but the staging is not, and a fixed name is shared: the memory
+    skill CLI computes the byte-identical path for the same target, and its lock
+    anchor is per-user (`ISTOTA_DEFERRED_DIR`), so a web save by one member of a
+    shared Talk room and a task write by another are genuinely concurrent under
+    different locks. Two interleaved writes into one staging file publish a
+    mixture of both, which the revision check cannot catch — it guards against a
+    lost update, and the tearing happens after it. `mkstemp` is what makes the
+    promise above true rather than merely intended.
+
+    The rclone branch is **not** atomic: `rclone rcat` streams the object, so a
+    concurrent reader can observe a partial one. Nothing local exists to stage
+    through there, and the caller's lock does not help because a remote is
+    shared across hosts.
+    """
+    if config.use_mount:
+        memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
+        tmp_path = None
+        try:
+            memory_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=memory_path.parent, prefix=f".{memory_path.name}.", suffix=".tmp",
+            )
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            # mkstemp is 0600; the file is about to become CHANNEL.md, which the
+            # user reads over Nextcloud like any other file in their channel dir.
+            os.chmod(tmp_path, 0o644)
+            os.replace(tmp_path, memory_path)
+            return True
+        except OSError as e:
+            logger.warning("channel memory write failed for %s: %s", conversation_token, e)
+            if tmp_path is not None:
+                # A stray staging file would otherwise sit in the user's own
+                # channel directory forever.
+                tmp_path.unlink(missing_ok=True)
+            return False
+    else:
+        return _rclone_rcat(
+            config.rclone_remote,
+            get_channel_memory_path(conversation_token),
+            content,
+        )
 
 
 def init_channel_memory(config: "Config", conversation_token: str) -> bool:

@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from istota.memory.curation.audit import (
@@ -166,10 +167,28 @@ def _read_text(path: Path) -> str:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Replace `path` with `text` via a uniquely-named staging file.
+
+    The staging name is per-writer rather than `<name>.tmp`, because that fixed
+    name is shared with the web save path (`storage.write_channel_memory`) and
+    the lock anchor is per-user — so two members of a shared Talk room writing
+    the same CHANNEL.md hold different locks and would interleave into one
+    staging file, publishing a mixture of both. `os.replace` is atomic; the
+    staging is what had to be made unique. UTF-8 is explicit for the same reason
+    the readers pin it: the revision tag the web save compares is a UTF-8 hash.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        # mkstemp is 0600; this becomes a file the user reads over Nextcloud.
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _audit_for(args, op: dict, outcome_or_reason: str, *,

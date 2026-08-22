@@ -3,6 +3,7 @@
   import type { ChatRoom } from '$lib/api';
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import { getBaseModelChoices } from '$lib/components/chat/autocomplete/providers';
+  import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
 
   interface Props {
     open?: boolean;
@@ -65,6 +66,7 @@
   // room so reusing one component instance across rooms never leaks state.
   let name = $state(untrack(() => room.name));
   let showDeleteConfirm = $state(false);
+  let showMemory = $state(false);
   let copied = $state(false);
   let copyError = $state('');
   let lastRoomId = $state(untrack(() => room.id));
@@ -76,6 +78,7 @@
       modelValue = room.model ?? '';
       effortValue = room.effort ?? '';
       showDeleteConfirm = false;
+      showMemory = false;
       copied = false;
       copyError = '';
     }
@@ -160,6 +163,17 @@
   </div>
 
   <div class="field">
+    <span>Memory</span>
+    <button class="pane-btn" type="button" onclick={() => (showMemory = true)}>
+      Edit room memory
+    </button>
+    <p class="caption">
+      Standing notes in <code>CHANNEL.md</code>, read at the start of every message in this room.
+      {#if isImported}Shared with everyone in the room.{/if}
+    </p>
+  </div>
+
+  <div class="field">
     <span>Room token</span>
     <div class="token-row">
       <input class="token" type="text" readonly value={room.token} />
@@ -179,7 +193,7 @@
       </p>
     {:else if onPromote}
       <button
-        class="talk-btn"
+        class="pane-btn"
         type="button"
         disabled={!canPromote || promoting}
         onclick={handlePromote}
@@ -213,6 +227,13 @@
     <Button variant="primary" onclick={handleSave} disabled={!canSave}>Save</Button>
   {/snippet}
 </Modal>
+
+<RoomMemory
+  bind:open={showMemory}
+  roomId={room.id}
+  roomName={room.name}
+  onClose={() => (showMemory = false)}
+/>
 
 <ConfirmDialog
   bind:open={showDeleteConfirm}
@@ -291,7 +312,7 @@
     margin: 0 0 var(--space-2);
   }
 
-  .talk-btn {
+  .pane-btn {
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     color: var(--text-primary);
@@ -304,10 +325,10 @@
       background var(--transition-fast),
       color var(--transition-fast);
   }
-  .talk-btn:hover:not(:disabled) {
+  .pane-btn:hover:not(:disabled) {
     background: var(--surface-raised);
   }
-  .talk-btn:disabled {
+  .pane-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

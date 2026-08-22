@@ -3341,6 +3341,24 @@ def count_active_web_tasks(
     return int(row[0]) if row else 0
 
 
+def count_active_room_tasks(conn: sqlite3.Connection, token: str) -> int:
+    """Count non-terminal tasks targeting a room's token, **across every user**.
+
+    The token-scoped sibling of `count_active_web_tasks`, for a guard on state
+    that is room-global rather than per-user. A room's `CHANNEL.md` is one file
+    shared by every member, so any member's worker may be writing it — filtering
+    by the caller the way the delete guard does would refuse nothing in exactly
+    the shared-room case that needs the guard most. Delete is per-user because
+    it drops only the caller's own handle; this is not.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? "
+        "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
+        (token,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def delete_web_chat_room(
     conn: sqlite3.Connection, room_id: int, user_id: str,
 ) -> bool:
