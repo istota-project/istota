@@ -9,18 +9,38 @@ conventional in-sandbox path ``/var/run/docker.sock`` instead, and only
 forwards a tightly-scoped allowlist of operations against the user's own
 ``devbox-<user_id>`` container.
 
-The Docker daemon speaks HTTP/1.1 over its unix socket. The proxy:
+The Docker daemon speaks HTTP/1.1 over its unix socket, and HTTP/1.1 is a
+keep-alive protocol: one connection carries as many requests as the client
+cares to send. So this is a real HTTP/1.1 intermediary, not a gate standing
+in front of a tunnel — it reads, classifies and answers *every* request on
+a connection, and where it cannot do that it ends the connection instead:
 
 * parses each request's method + path (and, for exec-create, the body),
 * decides allow/deny with a pure :func:`classify_request`,
-* for every allowed op **except exec-create**, splices the client socket
-  full-duplex to the real docker socket and never interprets the stream
-  (``cp`` streams tar archives; ``exec start`` hijacks the connection for
-  bidirectional stdio),
-* for exec-create — the one fully-mediated op — buffers and parses the
-  request body (to enforce the no-``Privileged`` check) and the response
-  body (to capture the issued exec ``Id`` for exec-id tracking), then
-  writes the response through unchanged.
+* for the ordinary request/response ops — ping, version, container list,
+  inspect, restart, exec inspect, exec create — fully mediates: reads the
+  whole request, forwards it, reads the whole response, writes it back,
+  then loops and classifies the next head on the same connection,
+* for ``archive``, which streams an opaque tar body, relays the bytes and
+  then closes the connection: it copies no more from the client than the
+  request declared, so nothing can be pipelined behind the tar,
+* for ``exec start``, waits to find out. An exec start usually hands the
+  connection over to a raw stdio stream, and the proxy does not interpret
+  that. But it does not always: moby hijacks only when the start body does
+  not say ``Detach: true``, and an error answers with ordinary framed HTTP
+  too. So the head and its declared body go up, the *response* head comes
+  back, and only a hijack gets the full-duplex pump — otherwise it is a
+  normal response, relayed, with the client-to-daemon direction never
+  opened. Either way the connection ends there.
+
+The head is forwarded to the daemon verbatim, so the proxy's parse of it and
+the daemon's have to agree, or classification decides nothing:
+:func:`head_structure_error` refuses anything the two could read
+differently.
+
+Every deny is terminal for the same reason: a refused request may have an
+unread body still in the stream, and a leftover body would be parsed as the
+next request head — request smuggling against ourselves.
 
 Forbidden everything else: container create/run/build/pull, volumes,
 networks, swarm, daemon reconfiguration, delete, update. Those → ``403``
@@ -136,10 +156,11 @@ def classify_request(
     if _VERSION_RE.match(p) and method == "GET":
         return True, "version"
 
-    # Container list. Allowed per the allowlist; note the spliced response
-    # is not filtered (we never interpret a spliced stream). Container names
-    # are not secrets and the dangerous ops (create/run/privileged) are
-    # blocked regardless, so this is an accepted, documented limitation.
+    # Container list. Allowed per the allowlist; the response is relayed
+    # unfiltered, so it names every container on the host and not just this
+    # user's. Container names are not secrets and the dangerous ops
+    # (create/run/privileged) are blocked regardless, so this is an
+    # accepted, documented limitation.
     if _CONTAINERS_LIST_RE.match(p) and method == "GET":
         return True, "containers_list"
 
@@ -212,11 +233,63 @@ _HEADER_END = b"\r\n\r\n"
 # The request head (request line + headers) is bounded by the StreamReader's
 # default 64 KiB limit; readuntil raises LimitOverrunError past it. A legit
 # docker request head is a few hundred bytes.
-# Cap on a fully-mediated body (exec-create request + response). Exec-create
-# JSON is tiny; 1 MiB is far above any real payload and bounds the buffered
-# read.
+# Cap on a buffered request body on the mediated path. None of those ops has
+# a streaming body — the largest is exec-create's JSON, which is tiny — so
+# 1 MiB is far above any real payload and bounds the read.
 _MAX_MEDIATED_BODY = 1024 * 1024
+# Cap on a buffered upstream response. The mediated ops all return small
+# JSON — the largest is a container list, a few KB per container — so this
+# is far above any real payload and bounds the read. Past it the proxy
+# answers 502 rather than relaying a truncated response.
+_MAX_MEDIATED_RESPONSE = 8 * 1024 * 1024
+# Largest single chunk this proxy will relay. A chunk-size line is written by
+# whoever is sending the body, so an uncapped one is an allocation the client
+# gets to choose — and this daemon runs on the host, outside any task cgroup.
+_MAX_CHUNK_BYTES = 8 * 1024 * 1024
+# Drop a connection that has been sitting idle between requests. Keep-alive
+# means a client can hold a connection open indefinitely, and connections
+# are a capped resource (see MAX_CONCURRENT_CONNECTIONS).
+_HEAD_IDLE_TIMEOUT_SECONDS = 60
+# The same idea for a body: a client that sends a valid head declaring a body
+# and then stalls would otherwise hold a connection slot forever. Applied per
+# read rather than as a total deadline, because a legitimate ``docker cp`` of
+# a large tar is slow but never idle.
+_BODY_IDLE_TIMEOUT_SECONDS = 60
 MAX_CONCURRENT_CONNECTIONS = 64
+
+# The two ops the proxy relays without mediating what follows: ``exec start``
+# may hand the connection over to a raw stdio stream, and ``archive`` streams
+# a tar body whose framing is deliberately not parsed. Either way the
+# connection cannot carry a further classified request, so both end it.
+_TERMINAL_REASONS = frozenset({"exec_start", "archive"})
+
+
+def is_terminal_op(reason: str) -> bool:
+    """True if an allowed op ends the connection instead of looping."""
+    return reason in _TERMINAL_REASONS
+
+
+# How moby answers an exec start it has hijacked: 101 when the client asked
+# to upgrade, otherwise a 200 carrying one of these content types.
+_HIJACK_CONTENT_TYPES = (
+    "application/vnd.docker.raw-stream",
+    "application/vnd.docker.multiplexed-stream",
+)
+
+
+def is_hijack_response(status: int, headers: dict[str, str]) -> bool:
+    """True if the daemon has switched this connection to a raw stdio stream.
+
+    An exec start does *not* always hijack. moby calls ``HijackConnection``
+    only when the start body does not say ``Detach: true``, and an error — a
+    stopped container, an exec id that already ran — returns an ordinary
+    framed response as well. On those paths the daemon is still speaking
+    HTTP, so anything copied to it is parsed as the next request.
+    """
+    if status == 101:
+        return True
+    content_type = headers.get("content-type", "").lower()
+    return any(content_type.startswith(t) for t in _HIJACK_CONTENT_TYPES)
 
 
 def _http_response(status_code: int, reason_phrase: str, message: str) -> bytes:
@@ -253,12 +326,217 @@ def _parse_request_head(raw: bytes) -> tuple[str, str, dict[str, str]]:
     return method, path, headers
 
 
+# Header names are RFC 7230 tokens. Anything outside this set either makes
+# the daemon reject the request or — worse — makes it read the head
+# differently from the way this proxy read it.
+_TOKEN_BYTES = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789"
+    b"abcdefghijklmnopqrstuvwxyz"
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+# Bound the trailer section of a chunked body: individual lines are capped by
+# the stream reader, the number of them is not.
+_MAX_TRAILER_BYTES = 8192
+
+
+def head_structure_error(raw_head: bytes) -> str | None:
+    """Reason to reject a head this proxy and the daemon could read differently.
+
+    The proxy classifies the head it parsed and then forwards the original
+    bytes, so the two parses have to agree or the allowlist decides nothing.
+    The Docker daemon is Go: ``net/textproto`` ends a line at a bare ``\n``,
+    and folds a line starting with space or tab into the previous header's
+    value. This parser does neither, and either difference is enough to carry
+    a whole second request past classification — a blob holding exactly one
+    CRLFCRLF is one request here and three to the daemon, and the smuggled
+    one can be ``POST /containers/create`` with the host root bind-mounted.
+
+    So anything the two could read differently is a 400 rather than a guess.
+    Header names are held to tokens for the same reason: the daemon rejects
+    the rest today, and relying on that is relying on someone else's parser
+    to stay strict.
+    """
+    if not raw_head.endswith(_HEADER_END):
+        return "malformed_head"
+    for index, byte in enumerate(raw_head):
+        if byte == 0x0A and (index == 0 or raw_head[index - 1] != 0x0D):
+            return "bare_lf_in_head"
+        if byte == 0x0D and raw_head[index + 1:index + 2] != b"\n":
+            return "bare_cr_in_head"
+
+    for line in raw_head[:-len(_HEADER_END)].split(_CRLF)[1:]:
+        if not line:
+            return "empty_header_line"
+        if line[0:1] in (b" ", b"\t"):
+            return "obs_fold_header"
+        name, sep, _ = line.partition(b":")
+        if not sep or not name:
+            return "malformed_header_line"
+        if not all(byte in _TOKEN_BYTES for byte in name):
+            return "bad_header_name"
+    return None
+
+
+def request_framing_error(raw_head: bytes) -> str | None:
+    """Reason to reject a request head whose body framing is ambiguous.
+
+    A head that declares its body length two ways — ``Content-Length``
+    together with ``Transfer-Encoding``, or two disagreeing
+    ``Content-Length`` values — lets the proxy and the daemon disagree about
+    where the body ends. That disagreement *is* request smuggling: bytes one
+    of them treats as body, the other treats as the next request. No real
+    docker client sends either shape, so reject rather than pick a winner.
+
+    A lone ``Transfer-Encoding`` is fine here and handled per-op: the
+    mediated path refuses it (it has to find the body's end to read the next
+    head), the archive path copies it chunk by chunk.
+    """
+    content_lengths: list[str] = []
+    transfer_encodings: list[str] = []
+    for line in raw_head.split(_CRLF)[1:]:
+        if not line:
+            continue
+        key, sep, value = line.decode("latin-1").partition(":")
+        if not sep:
+            continue
+        name = key.strip().lower()
+        if name == "content-length":
+            content_lengths.append(value.strip())
+        elif name == "transfer-encoding":
+            transfer_encodings.append(value.strip())
+
+    if content_lengths and transfer_encodings:
+        return "smuggling_cl_and_te"
+    # Identical duplicates are fine and deliberate: Go's fixLength dedups
+    # equal values and errors only on distinct ones, so the two agree.
+    if len(set(content_lengths)) > 1:
+        return "smuggling_duplicate_cl"
+    # RFC 7230 requires the final transfer coding to be exactly ``chunked``,
+    # and Go enforces that. A substring test would accept ``xchunked`` and
+    # ``chunked, gzip`` — both of which this proxy would chunk-frame and the
+    # daemon would refuse, which is the parser disagreement the head checks
+    # exist to prevent.
+    if transfer_encodings:
+        if len(transfer_encodings) > 1:
+            return "unsupported_transfer_encoding"
+        if transfer_encodings[0].split(",")[-1].strip().lower() != "chunked":
+            return "unsupported_transfer_encoding"
+    for value in content_lengths:
+        if not (value.isascii() and value.isdigit()):
+            return "bad_content_length"
+    return None
+
+
+def _with_connection_close(raw_head: bytes) -> bytes:
+    """Rewrite a request head so the upstream connection is not persistent.
+
+    Only for ops relayed opaquely, where the proxy has already decided the
+    connection ends with this request. Saying so upstream stops the daemon
+    holding the socket open for a second request that will never arrive.
+
+    Not used for ``exec start``: that request carries ``Connection: Upgrade``
+    and rewriting it would break the hijack. Terminality there is structural
+    — the handler returns and the connection closes — not a header.
+    """
+    lines = raw_head.split(_CRLF)
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if not line:
+            continue
+        name = line.split(b":", 1)[0].strip().lower()
+        if name in (b"connection", b"keep-alive", b"proxy-connection"):
+            continue
+        kept.append(line)
+    kept.append(b"Connection: close")
+    return _CRLF.join(kept) + _HEADER_END
+
+
+def _client_wants_keep_alive(raw_head: bytes, headers: dict[str, str]) -> bool:
+    """Whether to keep the connection after answering this request.
+
+    HTTP/1.1 persists unless the client says ``close``; HTTP/1.0 is the other
+    way round. Getting this backwards for a 1.0 client means it waits for an
+    end-of-response that only a close will signal.
+    """
+    connection = headers.get("connection", "").lower()
+    if raw_head.split(_CRLF, 1)[0].upper().endswith(b"HTTP/1.0"):
+        return "keep-alive" in connection
+    return "close" not in connection
+
+
+def _parse_response_head(raw_head: bytes) -> tuple[int, dict[str, str]]:
+    """Parse a response head into ``(status_code, lower-cased headers)``."""
+    lines = raw_head.split(_CRLF)
+    parts = lines[0].decode("latin-1").split(" ")
+    try:
+        status = int(parts[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError("malformed status line") from exc
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if not line:
+            continue
+        key, sep, value = line.decode("latin-1").partition(":")
+        if not sep:
+            continue
+        headers[key.strip().lower()] = value.strip()
+    return status, headers
+
+
+def _response_has_body(status: int, request_method: str) -> bool:
+    """RFC 7230 s3.3.3: these responses carry no body, whatever they declare."""
+    if request_method.upper() == "HEAD":
+        return False
+    return not (100 <= status < 200 or status in (204, 304))
+
+
+def _chunk_size(size_line: bytes) -> int:
+    """Parse a chunk-size line (hex, optional ``;ext``) into an int."""
+    field = size_line.split(b";", 1)[0].strip()
+    if not field or not all(c in b"0123456789abcdefABCDEF" for c in field):
+        raise ValueError("malformed chunk size")
+    return int(field, 16)
+
+
+def _decode_chunked(raw: bytes) -> bytes:
+    """Concatenate the payloads of a chunked body; empty on malformed input."""
+    out = bytearray()
+    pos = 0
+    while True:
+        line_end = raw.find(_CRLF, pos)
+        if line_end == -1:
+            return b""
+        try:
+            size = _chunk_size(raw[pos:line_end + len(_CRLF)])
+        except ValueError:
+            return b""
+        pos = line_end + len(_CRLF)
+        if size == 0:
+            return bytes(out)
+        out.extend(raw[pos:pos + size])
+        pos += size + len(_CRLF)
+
+
 def _parse_response_body_id(raw_response: bytes) -> str | None:
-    """Extract the exec ``Id`` from a buffered exec-create response."""
+    """Extract the exec ``Id`` from a buffered exec-create response.
+
+    Decodes a chunked body first. The daemon frames a small JSON response
+    either way depending on how it wrote it, and chunk framing parsed as
+    JSON yields no id — which leaves the exec untracked and makes every
+    following exec start a 403, presenting as a broken ``docker exec``
+    rather than as a parsing bug.
+    """
     sep = raw_response.find(_HEADER_END)
     if sep == -1:
         return None
+    head = raw_response[:sep + len(_HEADER_END)]
     body = raw_response[sep + len(_HEADER_END):]
+    try:
+        _, headers = _parse_response_head(head)
+    except ValueError:
+        return None
+    if "transfer-encoding" in headers:
+        body = _decode_chunked(body)
     try:
         data = json.loads(body.decode("utf-8", errors="replace") or "{}")
     except ValueError:
@@ -312,11 +590,15 @@ class DockerApiProxy:
         """Read bytes up to and including the blank line ending the head.
 
         Returns the raw head bytes, or ``None`` on a clean EOF before any
-        data (idle close). Raises ``ValueError`` if the head exceeds the cap
-        or the connection closes mid-head.
+        data (idle close) or on an idle timeout. Raises ``ValueError`` if the
+        head exceeds the cap or the connection closes mid-head.
         """
         try:
-            return await reader.readuntil(_HEADER_END)
+            return await asyncio.wait_for(
+                reader.readuntil(_HEADER_END), _HEAD_IDLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return None  # idle keep-alive connection; give the slot back
         except asyncio.IncompleteReadError as exc:
             if not exc.partial:
                 return None  # clean idle close, nothing buffered
@@ -325,55 +607,16 @@ class DockerApiProxy:
             raise ValueError("request head too large") from exc
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        start = time.monotonic()
-        method = path = "?"
+        """Serve one client connection, one classified request at a time.
+
+        The loop is what makes the allowlist a filter on *requests* rather
+        than on the first request of each connection (ISSUE-294). Nothing is
+        ever copied through unclassified: :meth:`_handle_one` either answers
+        the request it read or returns False, and False always means close.
+        """
         try:
-            try:
-                raw_head = await self._read_head(reader)
-            except ValueError as exc:
-                await self._deny(writer, 400, "Bad Request", str(exc))
-                _audit(user_id=self.user_id, method=method, path=path,
-                       result="deny", reason="bad_head", dur_ms=_elapsed_ms(start))
-                return
-            if raw_head is None:
-                return  # idle close, nothing to do
-
-            try:
-                method, path, headers = _parse_request_head(raw_head)
-            except ValueError:
-                await self._deny(writer, 400, "Bad Request", "malformed request")
-                _audit(user_id=self.user_id, method="?", path="?",
-                       result="deny", reason="malformed", dur_ms=_elapsed_ms(start))
-                return
-
-            self._sweep_exec_ids()
-            tracked = set(self._exec_ids)
-
-            if is_exec_create(method, path):
-                await self._handle_exec_create(raw_head, headers, reader, writer, start)
-                return
-
-            allowed, reason = classify_request(
-                method, path, None,
-                container_name=self.container_name,
-                tracked_exec_ids=tracked,
-            )
-            if not allowed:
-                await self._deny(writer, 403, "Forbidden", reason)
-                _audit(user_id=self.user_id, method=method, path=path,
-                       result="deny", reason=reason, dur_ms=_elapsed_ms(start))
-                return
-
-            # exec start is single-use: evict the id now so a replay on the
-            # same connection-batch is denied.
-            if reason == "exec_start":
-                m = _EXEC_START_RE.match(_normalize_path(path))
-                if m:
-                    self._exec_ids.pop(m.group(1), None)
-
-            await self._splice(raw_head, reader, writer)
-            _audit(user_id=self.user_id, method=method, path=path,
-                   result="allow", reason=reason, dur_ms=_elapsed_ms(start))
+            while await self._handle_one(reader, writer):
+                pass
         except Exception:
             logger.exception("docker_proxy connection error")
             try:
@@ -387,6 +630,254 @@ class DockerApiProxy:
             except Exception:
                 pass
 
+    async def _handle_one(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    ) -> bool:
+        """Read, classify and serve one request. True to keep the connection.
+
+        Returning False tells :meth:`_handle` to close. Every path that does
+        not fully consume the request body returns False, because a body
+        left in the stream would be read as the next request head.
+        """
+        start = time.monotonic()
+        method = path = "?"
+
+        try:
+            raw_head = await self._read_head(reader)
+        except ValueError as exc:
+            await self._deny(writer, 400, "Bad Request", str(exc))
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason="bad_head", dur_ms=_elapsed_ms(start))
+            return False
+        if raw_head is None:
+            return False  # idle close, nothing to do
+
+        # Validate the head's shape before parsing it: everything below —
+        # the classification, the body length, the decision to keep the
+        # connection — assumes this proxy and the daemon read these bytes
+        # the same way.
+        structure_error = head_structure_error(raw_head)
+        if structure_error:
+            await self._deny(writer, 400, "Bad Request", structure_error)
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason=structure_error, dur_ms=_elapsed_ms(start))
+            return False
+
+        try:
+            method, path, headers = _parse_request_head(raw_head)
+        except ValueError:
+            await self._deny(writer, 400, "Bad Request", "malformed request")
+            _audit(user_id=self.user_id, method="?", path="?",
+                   result="deny", reason="malformed", dur_ms=_elapsed_ms(start))
+            return False
+
+        framing_error = request_framing_error(raw_head)
+        if framing_error:
+            await self._deny(writer, 400, "Bad Request", framing_error)
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason=framing_error, dur_ms=_elapsed_ms(start))
+            return False
+
+        if "expect" in headers:
+            # Both body-reading paths below read the whole request body
+            # before opening an upstream connection, so neither can run a
+            # 100-continue handshake: the client would wait for an interim
+            # response only the daemon can send, and the proxy would wait for
+            # the body, forever, holding a connection slot. No docker client
+            # sends Expect, and these bodies are small.
+            await self._deny(writer, 417, "Expectation Failed", "expect_unsupported")
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason="expect_unsupported", dur_ms=_elapsed_ms(start))
+            return False
+
+        self._sweep_exec_ids()
+
+        if is_exec_create(method, path):
+            return await self._handle_exec_create(raw_head, headers, reader, writer, start)
+
+        allowed, reason = classify_request(
+            method, path, None,
+            container_name=self.container_name,
+            tracked_exec_ids=set(self._exec_ids),
+        )
+        if not allowed:
+            await self._deny(writer, 403, "Forbidden", reason)
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason=reason, dur_ms=_elapsed_ms(start))
+            return False
+
+        if not is_terminal_op(reason):
+            return await self._mediate(raw_head, headers, method, path, reason, reader, writer, start)
+
+        if reason == "exec_start":
+            # Single-use: evict the id before relaying, so a replay is denied.
+            m = _EXEC_START_RE.match(_normalize_path(path))
+            if m:
+                self._exec_ids.pop(m.group(1), None)
+            relayed = await self._relay_exec_start(raw_head, headers, reader, writer)
+        else:
+            relayed = await self._stream_archive(raw_head, headers, reader, writer)
+
+        _audit(user_id=self.user_id, method=method, path=path,
+               result="allow" if relayed else "deny",
+               reason=reason if relayed else "upstream_unavailable",
+               dur_ms=_elapsed_ms(start))
+        return False  # relayed opaquely: nothing may follow on this connection
+
+    async def _mediate(
+        self,
+        raw_head: bytes,
+        headers: dict[str, str],
+        method: str,
+        path: str,
+        reason: str,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        start: float,
+    ) -> bool:
+        """Forward one ordinary request/response pair, keeping the connection.
+
+        Ping, version, container list, inspect, restart and exec inspect are
+        plain HTTP with no streaming and no hijack, so the proxy can be a
+        real intermediary for them: read the whole request, read the whole
+        response, write it back, and let the caller classify the next head.
+        """
+        if "transfer-encoding" in headers:
+            # Finding the next head means knowing where this body ends, and
+            # this proxy does not decode chunked request bodies on the
+            # mediated path. None of these ops has a streaming body anyway.
+            await self._deny(writer, 400, "Bad Request", "unsupported_transfer_encoding")
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason="unsupported_transfer_encoding",
+                   dur_ms=_elapsed_ms(start))
+            return False
+
+        body = b""
+        content_length = headers.get("content-length")
+        if content_length is not None:
+            # request_framing_error already proved this is all digits.
+            length = int(content_length)
+            if length > _MAX_MEDIATED_BODY:
+                await self._deny(writer, 403, "Forbidden", "request body too large")
+                _audit(user_id=self.user_id, method=method, path=path,
+                       result="deny", reason="body_too_large", dur_ms=_elapsed_ms(start))
+                return False
+            try:
+                body = await _read_exactly(reader, length)
+            except ValueError as exc:
+                await self._deny(writer, 408, "Request Timeout", str(exc))
+                _audit(user_id=self.user_id, method=method, path=path,
+                       result="deny", reason="body_read_failed", dur_ms=_elapsed_ms(start))
+                return False
+
+        try:
+            up_reader, up_writer = await asyncio.open_unix_connection(self.upstream_socket)
+        except OSError:
+            await self._deny(writer, 502, "Bad Gateway", "upstream_unavailable")
+            _audit(user_id=self.user_id, method=method, path=path,
+                   result="deny", reason="upstream_unavailable", dur_ms=_elapsed_ms(start))
+            return False
+
+        try:
+            up_writer.write(raw_head)
+            if body:
+                up_writer.write(body)
+            await up_writer.drain()
+            try:
+                interim, response, reusable = await self._read_full_response(
+                    up_reader, request_method=method,
+                )
+            except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+                await self._deny(writer, 502, "Bad Gateway", "bad upstream response")
+                _audit(user_id=self.user_id, method=method, path=path,
+                       result="deny", reason="bad_upstream_response",
+                       dur_ms=_elapsed_ms(start))
+                return False
+            writer.write(interim + response)
+            await writer.drain()
+        finally:
+            try:
+                up_writer.close()
+                await up_writer.wait_closed()
+            except Exception:
+                pass
+
+        _audit(user_id=self.user_id, method=method, path=path,
+               result="allow", reason=reason, dur_ms=_elapsed_ms(start))
+        return reusable and _client_wants_keep_alive(raw_head, headers)
+
+    async def _stream_archive(
+        self,
+        raw_head: bytes,
+        headers: dict[str, str],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> bool:
+        """Relay a ``docker cp`` tar stream, then let the connection end.
+
+        Returns True if the stream was relayed, False if upstream could not
+        be reached (the caller audits accordingly — a 502 is not an allow).
+
+        The tar body is opaque by design, so the proxy cannot mediate what
+        comes after it and does not try. What it does instead is read from
+        the client only as far as the request declared — exactly
+        Content-Length bytes, or exactly one chunked body — and not one byte
+        further. A pipelined follow-up request therefore never reaches the
+        daemon, which is the property the old splice gave away.
+
+        The copy runs concurrently with the response, because the daemon may
+        answer before the body is finished (a ``PUT`` to a path that does not
+        exist is a 404 straight away) and then stop reading. Serializing the
+        two would push the rest of the body into a socket nobody drains and
+        lose the daemon's answer behind the write error.
+        """
+        try:
+            up_reader, up_writer = await asyncio.open_unix_connection(self.upstream_socket)
+        except OSError:
+            await self._deny(writer, 502, "Bad Gateway", "upstream_unavailable")
+            return False
+
+        try:
+            up_writer.write(_with_connection_close(raw_head))
+            await up_writer.drain()
+
+            response = asyncio.create_task(_pump(up_reader, writer))
+            try:
+                await self._copy_archive_body(headers, reader, up_writer)
+            except Exception:
+                # The daemon has very likely answered and stopped reading.
+                # Its response is already on its way to the client through
+                # ``response``; don't replace it with a 500. The bare except
+                # is deliberate: whatever went wrong on the client side, the
+                # response task must still be awaited below or it is dropped
+                # while writing into a socket about to be closed.
+                logger.debug("docker_proxy archive body ended early", exc_info=True)
+            finally:
+                await response
+        finally:
+            try:
+                up_writer.close()
+                await up_writer.wait_closed()
+            except Exception:
+                pass
+        return True
+
+    async def _copy_archive_body(
+        self,
+        headers: dict[str, str],
+        reader: asyncio.StreamReader,
+        up_writer: asyncio.StreamWriter,
+    ) -> None:
+        """Copy exactly the request body the archive head declared, and stop."""
+        content_length = headers.get("content-length")
+        if content_length is not None:
+            await _copy_exact(reader, up_writer, int(content_length))
+        elif "transfer-encoding" in headers:
+            # request_framing_error already proved this is exactly "chunked".
+            await _copy_chunked(reader, up_writer)
+        # Otherwise the request has no body (GET/HEAD): read nothing at all
+        # from the client, so nothing at all can be forwarded.
+
     async def _handle_exec_create(
         self,
         raw_head: bytes,
@@ -394,7 +885,13 @@ class DockerApiProxy:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         start: float,
-    ) -> None:
+    ) -> bool:
+        """Mediate an exec-create. True to keep the client connection open.
+
+        The one op whose body the proxy parses in both directions: the
+        request body carries the no-``Privileged`` check, and the response
+        body carries the exec ``Id`` that authorizes the matching exec start.
+        """
         method, path = "POST", "?"
         try:
             _, path, _ = _parse_request_head(raw_head)
@@ -404,19 +901,20 @@ class DockerApiProxy:
         cl_raw = headers.get("content-length")
         body: bytes | None = None
         if cl_raw is not None:
-            try:
-                length = int(cl_raw)
-            except ValueError:
-                await self._deny(writer, 400, "Bad Request", "bad content-length")
-                _audit(user_id=self.user_id, method=method, path=path,
-                       result="deny", reason="bad_content_length", dur_ms=_elapsed_ms(start))
-                return
+            # request_framing_error already proved this is all ASCII digits.
+            length = int(cl_raw)
             if length > _MAX_MEDIATED_BODY:
                 await self._deny(writer, 403, "Forbidden", "exec body too large")
                 _audit(user_id=self.user_id, method=method, path=path,
                        result="deny", reason="body_too_large", dur_ms=_elapsed_ms(start))
-                return
-            body = await reader.readexactly(length)
+                return False
+            try:
+                body = await _read_exactly(reader, length)
+            except ValueError as exc:
+                await self._deny(writer, 408, "Request Timeout", str(exc))
+                _audit(user_id=self.user_id, method=method, path=path,
+                       result="deny", reason="body_read_failed", dur_ms=_elapsed_ms(start))
+                return False
 
         allowed, reason = classify_request(
             method, path, body,
@@ -427,7 +925,7 @@ class DockerApiProxy:
             await self._deny(writer, 403, "Forbidden", reason)
             _audit(user_id=self.user_id, method=method, path=path,
                    result="deny", reason=reason, dur_ms=_elapsed_ms(start))
-            return
+            return False
 
         # Fully mediate: forward head+body upstream, read the whole response,
         # capture the issued exec Id, write the response through unchanged.
@@ -437,7 +935,7 @@ class DockerApiProxy:
             await self._deny(writer, 502, "Bad Gateway", "upstream_unavailable")
             _audit(user_id=self.user_id, method=method, path=path,
                    result="deny", reason="upstream_unavailable", dur_ms=_elapsed_ms(start))
-            return
+            return False
 
         try:
             up_writer.write(raw_head)
@@ -445,12 +943,21 @@ class DockerApiProxy:
                 up_writer.write(body)
             await up_writer.drain()
 
-            response = await self._read_full_response(up_reader)
+            try:
+                interim, response, reusable = await self._read_full_response(
+                    up_reader, request_method=method,
+                )
+            except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+                await self._deny(writer, 502, "Bad Gateway", "bad upstream response")
+                _audit(user_id=self.user_id, method=method, path=path,
+                       result="deny", reason="bad_upstream_response",
+                       dur_ms=_elapsed_ms(start))
+                return False
             exec_id = _parse_response_body_id(response)
             if exec_id:
                 self._track_exec(exec_id)
 
-            writer.write(response)
+            writer.write(interim + response)
             await writer.drain()
             _audit(user_id=self.user_id, method=method, path=path,
                    result="allow", reason="exec_create", dur_ms=_elapsed_ms(start))
@@ -461,61 +968,133 @@ class DockerApiProxy:
             except Exception:
                 pass
 
-    async def _read_full_response(self, reader: asyncio.StreamReader) -> bytes:
-        """Read a complete HTTP response head + (Content-Length) body."""
-        buf = bytearray()
-        while _HEADER_END not in buf:
-            chunk = await reader.read(4096)
-            if not chunk:
-                return bytes(buf)
-            buf.extend(chunk)
-            if len(buf) > _MAX_MEDIATED_BODY:
-                break
-        sep = bytes(buf).find(_HEADER_END)
-        if sep == -1:
-            return bytes(buf)
-        head = bytes(buf[:sep])
-        already = len(buf) - (sep + len(_HEADER_END))
-        content_length = None
-        for line in head.split(_CRLF):
-            decoded = line.decode("latin-1")
-            if decoded.lower().startswith("content-length:"):
-                try:
-                    content_length = int(decoded.split(":", 1)[1].strip())
-                except ValueError:
-                    content_length = None
-                break
-        if content_length is None:
-            return bytes(buf)
-        remaining = content_length - already
-        while remaining > 0:
-            chunk = await reader.read(min(4096, remaining))
-            if not chunk:
-                break
-            buf.extend(chunk)
-            remaining -= len(chunk)
-        return bytes(buf)
+        return reusable and _client_wants_keep_alive(raw_head, headers)
 
-    async def _splice(
+    async def _read_full_response(
+        self, reader: asyncio.StreamReader, *, request_method: str,
+    ) -> tuple[bytes, bytes, bool]:
+        """Read one complete HTTP response.
+
+        Returns ``(interim_heads, response, reusable)``. Interim 1xx heads
+        are handed back separately from the response they precede: both get
+        relayed to the client, but only the response is a reply, and folding
+        them together would make :func:`_parse_response_body_id` read an
+        interim head's "body" and lose the exec id.
+
+        ``reusable`` is False when the response's own framing ends at
+        connection close rather than at a Content-Length or a terminal
+        chunk. A client cannot find the end of such a body either, so the
+        proxy must not invite another request onto the connection.
+
+        Raises ``ValueError`` on anything it cannot frame; the caller turns
+        that into a 502 rather than relaying a response of unknown length.
+        """
+        # A 1xx is interim, not an answer: relay it and keep reading for the
+        # real response. curl adds ``Expect: 100-continue`` on its own for a
+        # request body over 1 KiB, so treating the interim head as the whole
+        # response would strand the client waiting for a reply already
+        # discarded — and, on exec-create, lose the issued exec Id with it.
+        # A 101 never reaches here; an upgrade only follows exec start, which
+        # is spliced rather than mediated.
+        interim = bytearray()
+        while True:
+            try:
+                head = await reader.readuntil(_HEADER_END)
+            except asyncio.IncompleteReadError as exc:
+                raise ValueError("upstream closed mid-response-head") from exc
+            except asyncio.LimitOverrunError as exc:
+                raise ValueError("upstream response head too large") from exc
+
+            status, headers = _parse_response_head(head)
+            if not 100 <= status < 200:
+                break
+            interim.extend(head)
+            if len(interim) > _MAX_MEDIATED_RESPONSE:
+                raise ValueError("too many interim responses")
+
+        response, reusable = await _read_response_body(
+            reader, head, status, headers, request_method=request_method,
+        )
+        return bytes(interim), response, reusable
+
+    async def _relay_exec_start(
         self,
         raw_head: bytes,
-        client_reader: asyncio.StreamReader,
-        client_writer: asyncio.StreamWriter,
-    ) -> None:
-        """Open upstream, replay the buffered head, then full-duplex copy."""
+        headers: dict[str, str],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> bool:
+        """Relay an exec start, going full-duplex only once the daemon hijacks.
+
+        Returns True if the exchange reached the daemon, False on a 502.
+
+        An exec start is *usually* a hijack: the connection stops being HTTP
+        and becomes a raw bidirectional stdio stream, which is why the proxy
+        does not interpret it. But it is not always. moby hijacks only when
+        the start body does not say ``Detach: true``, and an error — a
+        stopped container, an exec id that already ran — is an ordinary
+        framed response too. On those paths the daemon is still parsing HTTP,
+        so copying client bytes to it on the assumption of a hijack hands it
+        a request nobody classified. That is ISSUE-294 again, and a
+        privileged host-mounting ``POST /containers/create`` rides through it.
+
+        So the order matters: send the head and exactly the body it declared,
+        read the *response* head, and only then decide. A hijack gets the
+        full-duplex pump. Anything else is a normal response — relay it and
+        close, having never copied a client byte past the declared body.
+        """
+        body = b""
+        content_length = headers.get("content-length")
+        if content_length is not None:
+            # request_framing_error already proved this is all ASCII digits.
+            length = int(content_length)
+            if length > _MAX_MEDIATED_BODY:
+                await self._deny(writer, 403, "Forbidden", "exec start body too large")
+                return False
+            body = await _read_exactly(reader, length)
+
         try:
             up_reader, up_writer = await asyncio.open_unix_connection(self.upstream_socket)
         except OSError:
-            await self._deny(client_writer, 502, "Bad Gateway", "upstream_unavailable")
-            return
+            await self._deny(writer, 502, "Bad Gateway", "upstream_unavailable")
+            return False
 
         try:
             up_writer.write(raw_head)
+            if body:
+                up_writer.write(body)
             await up_writer.drain()
+
+            try:
+                head = await up_reader.readuntil(_HEADER_END)
+                status, response_headers = _parse_response_head(head)
+            except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError):
+                await self._deny(writer, 502, "Bad Gateway", "bad upstream response")
+                return False
+
+            if not is_hijack_response(status, response_headers):
+                # Still HTTP. Relay the response and end the connection —
+                # never open the client-to-daemon direction.
+                try:
+                    response, _ = await _read_response_body(
+                        up_reader, head, status, response_headers, request_method="POST",
+                    )
+                except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+                    await self._deny(writer, 502, "Bad Gateway", "bad upstream response")
+                    return False
+                writer.write(response)
+                await writer.drain()
+                return True
+
+            # Hijacked: from here the bytes are stdio, not HTTP, and neither
+            # side parses them as such. Full duplex until the stream dies.
+            writer.write(head)
+            await writer.drain()
             await asyncio.gather(
-                _pump(client_reader, up_writer),
-                _pump(up_reader, client_writer),
+                _pump(reader, up_writer),
+                _pump(up_reader, writer),
             )
+            return True
         finally:
             try:
                 up_writer.close()
@@ -570,6 +1149,184 @@ class DockerApiProxy:
                 sock_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+async def _read_response_body(
+    reader: asyncio.StreamReader,
+    head: bytes,
+    status: int,
+    headers: dict[str, str],
+    *,
+    request_method: str,
+) -> tuple[bytes, bool]:
+    """Read the body belonging to an already-read response head.
+
+    Returns ``(head + body, reusable)``. ``reusable`` is False when the body
+    was framed by end-of-stream rather than by Content-Length or a terminal
+    chunk — a client cannot find the end of such a body either, so the
+    connection must not carry another request.
+    """
+    reusable = "close" not in headers.get("connection", "").lower()
+
+    if not _response_has_body(status, request_method):
+        return head, reusable
+
+    if "transfer-encoding" in headers:
+        body = await _read_chunked_body(reader, limit=_MAX_MEDIATED_RESPONSE)
+        return head + body, reusable
+
+    content_length = headers.get("content-length")
+    if content_length is not None and content_length.isascii() and content_length.isdigit():
+        length = int(content_length)
+        if length > _MAX_MEDIATED_RESPONSE:
+            raise ValueError("upstream response too large")
+        try:
+            return head + await reader.readexactly(length), reusable
+        except asyncio.IncompleteReadError as exc:
+            raise ValueError("upstream closed mid-response-body") from exc
+
+    # Neither framed nor chunked: the body runs to end of stream, which a
+    # persistent connection cannot express. A daemon doing that has to have
+    # said "Connection: close"; if it did not, the response is unframed and
+    # reading on would hang for a close that never comes.
+    if reusable:
+        raise ValueError("unframed upstream response")
+    body = bytearray()
+    while True:
+        chunk = await reader.read(65536)
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > _MAX_MEDIATED_RESPONSE:
+            raise ValueError("upstream response too large")
+    return head + bytes(body), False
+
+
+async def _read_exactly(reader: asyncio.StreamReader, count: int) -> bytes:
+    """Read exactly ``count`` bytes, refusing to wait forever for them."""
+    try:
+        return await asyncio.wait_for(
+            reader.readexactly(count), _BODY_IDLE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise ValueError("timed out reading request body") from exc
+    except asyncio.IncompleteReadError as exc:
+        raise ValueError("client closed mid-body") from exc
+
+
+async def _read_line(reader: asyncio.StreamReader) -> bytes:
+    """Read one CRLF-terminated line, refusing to wait forever for it."""
+    try:
+        return await asyncio.wait_for(
+            reader.readuntil(_CRLF), _BODY_IDLE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise ValueError("timed out reading chunk header") from exc
+    except asyncio.IncompleteReadError as exc:
+        raise ValueError("closed mid-chunk-header") from exc
+    except asyncio.LimitOverrunError as exc:
+        raise ValueError("chunk header too large") from exc
+
+
+async def _copy_exact(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, count: int,
+) -> None:
+    """Copy exactly ``count`` bytes from the client upstream, then stop.
+
+    Stopping at the declared length is the whole point. A byte read past it
+    is the start of a pipelined follow-up request, and copying that upstream
+    is the tunnel this proxy exists to prevent.
+    """
+    remaining = count
+    while remaining > 0:
+        try:
+            chunk = await asyncio.wait_for(
+                reader.read(min(65536, remaining)), _BODY_IDLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ValueError("timed out reading request body") from exc
+        if not chunk:
+            raise ValueError("client closed mid-body")
+        writer.write(chunk)
+        await writer.drain()
+        remaining -= len(chunk)
+
+
+async def _copy_chunked(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+) -> None:
+    """Copy one chunked request body verbatim, stopping after its last chunk.
+
+    Same contract as :func:`_copy_exact`: the body's own framing says where
+    it ends and nothing past that is read from the client. Each size line is
+    validated *before* any of it is relayed, so a malformed or oversized
+    chunk is refused rather than half-forwarded, and the chunk data itself
+    moves in bounded pieces — a size line is client-chosen, and buffering a
+    whole chunk before writing would let one request name the allocation.
+    """
+    while True:
+        size_line = await _read_line(reader)
+        size = _chunk_size(size_line)
+        if size > _MAX_CHUNK_BYTES:
+            raise ValueError("chunk too large")
+        writer.write(size_line)
+        if size == 0:
+            break
+        await _copy_exact(reader, writer, size)
+        terminator = await _read_exactly(reader, len(_CRLF))
+        if terminator != _CRLF:
+            raise ValueError("malformed chunk terminator")
+        writer.write(terminator)
+        await writer.drain()
+
+    # Trailers, terminated by a blank line. Each line is bounded by the
+    # stream reader; the number of them is not, so bound that here.
+    trailer_bytes = 0
+    while True:
+        line = await _read_line(reader)
+        trailer_bytes += len(line)
+        if trailer_bytes > _MAX_TRAILER_BYTES:
+            raise ValueError("chunked trailers too large")
+        writer.write(line)
+        if line == _CRLF:
+            break
+    await writer.drain()
+
+
+async def _read_chunked_body(reader: asyncio.StreamReader, *, limit: int) -> bytes:
+    """Read a chunked response body verbatim, through trailers.
+
+    Returns the raw chunked bytes rather than the decoded payload, so the
+    caller can relay them under the response's own ``Transfer-Encoding``
+    header without re-framing anything. Every size is checked against the
+    limit *before* the read that would honour it — a cap tested after the
+    allocation is not a cap.
+    """
+    out = bytearray()
+    while True:
+        size_line = await reader.readuntil(_CRLF)
+        size = _chunk_size(size_line)
+        if size > _MAX_CHUNK_BYTES or len(out) + len(size_line) + size > limit:
+            raise ValueError("upstream response too large")
+        out.extend(size_line)
+        if size == 0:
+            break
+        out.extend(await reader.readexactly(size))
+        terminator = await reader.readexactly(len(_CRLF))
+        if terminator != _CRLF:
+            raise ValueError("malformed chunk terminator")
+        out.extend(terminator)
+
+    trailer_bytes = 0
+    while True:
+        line = await reader.readuntil(_CRLF)
+        trailer_bytes += len(line)
+        if trailer_bytes > _MAX_TRAILER_BYTES:
+            raise ValueError("chunked trailers too large")
+        out.extend(line)
+        if line == _CRLF:
+            break
+    return bytes(out)
 
 
 async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
