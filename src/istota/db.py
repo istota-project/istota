@@ -5420,8 +5420,13 @@ def _migrate_notifications(conn: sqlite3.Connection) -> None:
 _NOTIFICATIONS_BACKFILL_MARKER = "notifications_backfill_v1"
 
 
-def _iso_z(value: str | None) -> str:
+def _iso_z_from_sql_datetime(value: str | None) -> str:
     """A `datetime('now')` timestamp in the notifications table's ISO-Z form.
+
+    Named for both formats on purpose. `web_app` has its own `_iso_z`, which
+    takes a `datetime` and is the other half of the same hazard `web-ui.md`
+    records: this database stores two timestamp spellings, `' '` sorts below
+    `'T'`, and a bound built in the wrong one silently drops a boundary day.
 
     `tasks.created_at` and `outbound_drafts.created_at` store
     `YYYY-MM-DD HH:MM:SS`; `notifications.created_at` stores the ISO-Z
@@ -5543,7 +5548,7 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
             # at all — which is the case the strips existed for. A guess is
             # worse than the absence.
             None,
-            _iso_z(task.created_at),
+            _iso_z_from_sql_datetime(task.created_at),
             now,
         ))
     for record in held_drafts:
@@ -5576,7 +5581,7 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
                 record["subject"], record["id"], recipients,
             ),
             record["room_token"],
-            _iso_z(record["created_at"]),
+            _iso_z_from_sql_datetime(record["created_at"]),
             now,
         ))
 
