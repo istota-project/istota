@@ -15,9 +15,25 @@ echo "Configuring git hooks..."
 git config core.hooksPath .githooks
 echo "  Git hooks configured"
 
+# Presence is not enough to report the gate as armed: `gitleaks git` arrived in
+# 8.19 and Debian 13 ships 8.16, so an apt-installed binary is present, looks
+# fine here, and fails at the first commit. Probe the subcommand the hook
+# actually calls.
 if ! command -v gitleaks &> /dev/null; then
-    echo "  WARNING: gitleaks not found — the pre-commit secret scan will be skipped"
-    echo "  Install: brew install gitleaks"
+    gitleaks_problem="not found"
+elif ! gitleaks git --help &> /dev/null; then
+    gitleaks_problem="too old (no \`git\` subcommand — that arrived in 8.19)"
+else
+    gitleaks_problem=""
+fi
+
+if [ -n "$gitleaks_problem" ]; then
+    echo "  WARNING: gitleaks $gitleaks_problem"
+    echo "  Half the pre-commit gate is inactive: the private-data scan matches"
+    echo "  patterns somebody wrote down, and gitleaks is what catches a"
+    echo "  credential by shape and entropy. Nothing else covers that."
+    echo "  Install: brew install gitleaks (macOS), or the release tarball from"
+    echo "  https://github.com/gitleaks/gitleaks/releases (Linux)"
 fi
 
 if [ ! -f ".private-data-local" ]; then

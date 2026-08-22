@@ -1255,11 +1255,22 @@ def build_stripped_env() -> dict[str, str]:
     Fernet key (``ISTOTA_SECRET_KEY``) is no longer preserved here. Skill
     subprocesses that need per-user encrypted secrets get them
     pre-resolved via the manifest ``env:`` blocks.
+
+    ``PRECOMMIT_SCANS_REQUIRED`` is added rather than filtered (ISSUE-291).
+    The repository's pre-commit hook refuses a commit whose secret scan could
+    not run, but only where it can tell nobody is watching, and the markers it
+    reads for that — ``ISTOTA_SANDBOXED``, ``DEVELOPER_REPOS_DIR`` — are built
+    per task by ``build_claude_env``. This env is the daemon's own, so a cron
+    ``command`` job or a heartbeat shell command carries neither and would be
+    read as a human at a terminal. It is as unattended as any of them, so it
+    says so.
     """
-    return {
+    env = {
         k: v for k, v in os.environ.items()
         if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
     }
+    env["PRECOMMIT_SCANS_REQUIRED"] = "1"
+    return env
 
 
 # Defense-in-depth: instance-wide credentials that must never be returned
