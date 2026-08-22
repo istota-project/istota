@@ -898,9 +898,16 @@ async def cmd_status(ctx: CommandContext):
 # cannot do as compactly.
 _USAGE_BAR_WIDTH = 20
 
-# A reading younger than this gets no age footer. A timestamp on every reply is
-# noise; past a minute the number is old enough that a reader deciding whether to
-# start a long run deserves to know how old it is.
+# A reading younger than this gets no age footer; past it, the reply says how
+# old the number is. Note what this does *not* mean: the module's default cache
+# TTL is 300s and a warm cache is shared with the dashboard and the doctor
+# sweep, so a reading the module considers perfectly current is routinely one to
+# five minutes old and the footer is therefore common rather than exceptional.
+# That is the intent — the alternative reading of "only when something is wrong"
+# would leave an admin unable to tell a live percentage from a four-minute-old
+# one, which is the pair that matters when deciding whether to start a long run.
+# What the threshold buys is only that a reply rendered off a fetch this second
+# does not carry a pointless "0s old".
 _USAGE_FRESH_SECONDS = 60
 
 # The `user_id` filter for a non-admin whose id is empty. `task_usage.user_id`
@@ -947,6 +954,24 @@ async def cmd_usage(ctx: CommandContext):
     config, user_id = ctx.config, ctx.user_id
     is_admin = config.is_admin(user_id)
 
+    # Commit the caller's transaction before blocking, the same way `cmd_drafts`
+    # does below and for the same reason. The Talk poller wraps its whole batch
+    # in one transaction and hands `dispatch` that connection, already mid-write
+    # (the message cache upsert, the room membership touch) by the time a
+    # `!command` runs. Everything this handler then does is blocking and some of
+    # it is a network round trip bounded by `subscription_usage_timeout_seconds`,
+    # so leaving the poll's write lock held across it stalls every other writer
+    # in the daemon — scheduler, workers, web — on their busy timeout, for a
+    # command that only reads. Nothing here writes, so unlike the drafts case
+    # there is no durability question, only the lock.
+    if ctx.conn is not None:
+        try:
+            ctx.conn.commit()
+        except sqlite3.Error:
+            # A connection we could not commit is the caller's problem, not a
+            # reason to refuse a read-only report.
+            logger.debug("!usage could not commit the caller's transaction", exc_info=True)
+
     # Both halves block — SQLite queries, and on a cache miss an HTTPS GET — and
     # this coroutine runs on the loop that polls every Talk conversation. Hence
     # `to_thread` rather than `cmd_check`'s bare `subprocess.run`.
@@ -975,9 +1000,12 @@ def _usage_token_sections(config: Config, user_id: str, is_admin: bool) -> list[
     but the one that made it, which in `dispatch` is the event loop's.
     `outbound_drafts.release` reaches the database from `!drafts` the same way.
     """
-    now = datetime.now(timezone.utc)
-    day_since = _usage_since(now, 1)
-    month_since = _usage_since(now, 30)
+    # `db.iso_utc_days_ago`, not a local one: it sits beside
+    # `db.sql_datetime_days_ago` precisely so a caller picks between the two
+    # date formats by name. `' '` sorts below `'T'`, so the wrong one against
+    # `task_usage.created_at` is silently wrong rather than an error.
+    day_since = db.iso_utc_days_ago(1)
+    month_since = db.iso_utc_days_ago(30)
     # A non-admin is filtered to their own rows and learns nothing about anyone
     # else's consumption; an admin gets the fleet. `None` is the *only* way to
     # ask for the fleet, so the non-admin branch must never produce a value
@@ -997,17 +1025,26 @@ def _usage_token_sections(config: Config, user_id: str, is_admin: bool) -> list[
                 else []
             )
     except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc):
+        # The table is named, and named with a word boundary. "no such table"
+        # alone would catch a *different* missing table and report it as this
+        # one — a real fault dressed up as a fresh deployment, with a remedy
+        # that fixes nothing. A bare substring test is not enough either: the
+        # child table `task_usage_models` contains this one's name, and `\b`
+        # does not fire between `e` and `_`, which is exactly why it is here.
+        if not re.search(r"no such table: task_usage\b", str(exc)):
             raise
-        # A fresh deployment, not a fault: the table is created on the next
-        # database open. Guarded because `dispatch` turns anything raised here
-        # into "Command `!usage` failed: no such table: task_usage" in a chat
-        # room, and because section 3 is still worth rendering underneath.
+        # A fresh deployment, not a fault. `db.get_db` only connects — it is
+        # `init_db` that runs `schema.sql` — so the remedy names something that
+        # actually creates the table rather than telling the reader to try again
+        # and get the same line forever. `istota usage` says the same words.
+        # Guarded because `dispatch` would otherwise put "no such table:
+        # task_usage" into a chat room, and because section 3 is still worth
+        # rendering underneath.
         return [
             "**Token usage**",
             "",
-            "No usage data yet — the `task_usage` table is created on the next "
-            "database open.",
+            "No usage data yet — the `task_usage` table is created when the "
+            "database is initialized. Restart the daemon, or run `istota init`.",
         ]
 
     lines = [f"**Token usage** — {'fleet' if is_admin else user_id}", ""]
@@ -1030,16 +1067,6 @@ def _usage_token_sections(config: Config, user_id: str, is_admin: bool) -> list[
                 f"{render_cost(group['cost_by_basis'])}"
             )
     return lines
-
-
-def _usage_since(now: datetime, days: int) -> str:
-    """A window bound in the format `task_usage.created_at` stores.
-
-    ISO-Z, not `datetime('now')`. `' '` sorts below `'T'`, so a space-separated
-    bound against this column is silently wrong rather than an error.
-    """
-    start = now - timedelta(days=days)
-    return start.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start.microsecond // 1000:03d}Z"
 
 
 def _usage_totals_line(summary: dict) -> str:
@@ -1089,9 +1116,14 @@ def _usage_plan_section(
     zone, zone_is_fallback = _usage_timezone(config, user_id)
     lines = ["", "**Claude Code subscription**", ""]
     for window in snapshot.windows:
+        # Sanitized once and read twice. Formatting `window.percent` directly
+        # beside a defended bar would put the defence on one half of the line
+        # only — a string percent survives `float()` and then raises on `:.0f`,
+        # and a NaN draws an empty bar labelled `nan`.
+        percent = _usage_percent(window.percent)
         lines.append(
-            f"- {window.label}: [{_usage_bar(window.percent)}] "
-            f"{window.percent:.0f}%{_usage_reset(window, zone, zone_is_fallback)}"
+            f"- {window.label}: [{_usage_bar(percent)}] "
+            f"{percent:.0f}%{_usage_reset(window, zone, zone_is_fallback)}"
         )
 
     spend = snapshot.spend
@@ -1115,20 +1147,44 @@ def _usage_plan_section(
     return lines
 
 
-def _usage_bar(percent: float) -> str:
-    """A 20-character bar, filled proportionally.
+def _usage_percent(value) -> float:
+    """A finite percentage in [0, 100], whatever arrives.
 
-    The module clamps `percent` to [0, 100] on the way in; the clamp is repeated
-    because this renders a fixed-width field and a value arriving some other way
-    would otherwise produce a ragged one, or a negative repeat count.
+    `subscription_usage._percent` already guarantees this for a live reading;
+    the repeat is because the cache is a file on disk and this renders a
+    fixed-width field, where a NaN or a string would produce a ragged bar or a
+    `nan` label rather than a wrong number. `OverflowError` is caught explicitly:
+    `round(inf)` raises it and it is neither a `TypeError` nor a `ValueError`.
     """
     try:
-        ratio = float(percent) / 100.0
+        number = float(value)
     except (TypeError, ValueError):
-        ratio = 0.0
-    if ratio != ratio:  # NaN, which compares false against everything including 0
-        ratio = 0.0
-    filled = min(_USAGE_BAR_WIDTH, max(0, round(ratio * _USAGE_BAR_WIDTH)))
+        return 0.0
+    if number != number:  # NaN, which compares false against everything, 0 included
+        return 0.0
+    return min(100.0, max(0.0, number))
+
+
+def _usage_bar(percent: float) -> str:
+    """A 20-character bar, filled by floor rather than by rounding.
+
+    Floor, and a full bar reserved for 100, because the two ends are what a
+    quota display is read for: `round` fills all twenty blocks from 97.5% up, so
+    a window with headroom left draws as one with none, and empties the bar
+    below 2.5% so a window that is being consumed draws as untouched. Floor also
+    makes the fill monotonic, where `round`'s banker's rule gives 12.5% two
+    blocks and 17.5% four. A non-zero percentage always shows at least one block
+    for the same reason: "some" must not render as "none".
+
+    The spec's own sample output agrees on every value it shows — 40% is eight
+    blocks, 21% is four, 0% is none.
+    """
+    if percent >= 100.0:
+        return "#" * _USAGE_BAR_WIDTH
+    filled = int(percent / 100.0 * _USAGE_BAR_WIDTH)
+    if percent > 0.0:
+        filled = max(1, filled)
+    filled = min(_USAGE_BAR_WIDTH - 1, filled)
     return "#" * filled + "-" * (_USAGE_BAR_WIDTH - filled)
 
 
@@ -1145,17 +1201,27 @@ def _usage_reset(window: "UsageWindow", zone: tzinfo, zone_is_fallback: bool) ->
     try:
         text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         parsed = datetime.fromisoformat(text)
-    except (AttributeError, TypeError, ValueError):
-        # The module carries an unparseable value through verbatim rather than
-        # dropping the window. It is not a clock time, so it does not go on the
-        # line — the percentage is still the reading.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        local = parsed.astimezone(zone)
+        # Built field by field rather than with `%-d`, which is a glibc/BSD
+        # extension rather than a portable strftime directive.
+        stamp = f"{local:%b} {local.day} {local:%H:%M}"
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        # The whole conversion is inside the guard, not just the parse, and
+        # `OverflowError` is in the tuple for one specific reason: a date at the
+        # edge of the range parses cleanly and then overflows on the shift into
+        # the reader's zone. `9999-12-31T23:00:00Z` is *canonical* — it survives
+        # `subscription_usage._normalize_resets_at` unchanged — and raises for a
+        # reader east of UTC while rendering fine for one west of it, so which
+        # admin typed `!usage` would decide whether the command worked. The
+        # module has the same note for the same value, one keystroke from the
+        # sentinel expiry this codebase writes into credential files.
+        #
+        # A reset stamp that cannot be rendered degrades to no stamp, exactly as
+        # an unparseable one does. The percentage is still the reading, and
+        # `dispatch` would otherwise post the raw exception to the room.
         return ""
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    local = parsed.astimezone(zone)
-    # Built field by field rather than with `%-d`, which is a glibc/BSD
-    # extension rather than a portable strftime directive.
-    stamp = f"{local:%b} {local.day} {local:%H:%M}"
     if zone_is_fallback:
         # Name the clock, because it is not the reader's own.
         stamp += " UTC"
@@ -1206,7 +1272,9 @@ def _usage_money(minor: int, spend: "Spend") -> str:
     except (TypeError, ValueError):
         return COST_PLACEHOLDER
     text = f"{major:.{exponent}f}"
-    currency = str(spend.currency or "USD")
+    # ISO 4217 codes are uppercase, but nothing upstream normalizes the field,
+    # so a `"usd"` off the wire would otherwise render `1.25 usd`.
+    currency = str(spend.currency or "USD").upper()
     return f"${text}" if currency == "USD" else f"{text} {currency}"
 
 

@@ -2810,6 +2810,53 @@ class TestCmdUsage:
         assert "(resets Aug 22 09:00 UTC)" in result
 
     @pytest.mark.asyncio
+    async def test_a_range_edge_reset_drops_its_stamp_instead_of_raising(
+        self, make_config, db_path, monkeypatch
+    ):
+        """`astimezone` raises `OverflowError` at the edge of the date range.
+
+        `9999-12-31T23:00:00Z` is *canonical* — it survives
+        `subscription_usage._normalize_resets_at` unchanged — and it is one
+        keystroke from the sentinel expiry this codebase writes into credential
+        files. Shifting it east of UTC overflows, and `dispatch` would post the
+        raw exception to the room. The percentage is still the reading.
+        """
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        config.users = {"bob": UserConfig(timezone="Australia/Eucla")}
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(percent=40.0, resets_at="9999-12-31T23:00:00Z")]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "- 5-hour: [########------------] 40%" in result
+        assert "resets" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_bar_reserves_its_two_ends(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A quota display is read at the ends, so neither may lie.
+
+        `round` fills all twenty blocks from 97.5% up and empties the bar below
+        2.5% — drawing a window with headroom as exhausted, and one being
+        consumed as untouched.
+        """
+        snapshot = _snapshot([
+            _window(key="a", label="Nearly", percent=97.6),
+            _window(key="b", label="Barely", percent=0.4),
+        ])
+        result = await self._render(make_config, db_path, monkeypatch, snapshot)
+
+        assert "- Nearly: [###################-] 98%" in result
+        assert "- Barely: [#-------------------] 0%" in result
+
+    @pytest.mark.asyncio
     async def test_a_window_with_no_reset_says_nothing_about_one(
         self, make_config, db_path, monkeypatch
     ):
@@ -2948,6 +2995,9 @@ class TestCmdUsage:
         assert isinstance(result, str)
         assert "no such table" not in result
         assert "task_usage" in result
+        # The remedy has to name something that actually creates the table.
+        # `db.get_db` only connects; `init_db` runs the schema.
+        assert "istota init" in result
         assert "**Claude Code subscription**" in result
 
     @pytest.mark.asyncio
@@ -2965,6 +3015,29 @@ class TestCmdUsage:
             raise _sqlite3.OperationalError("database is locked")
 
         monkeypatch.setattr(db_mod, "usage_summary", _locked)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            with pytest.raises(_sqlite3.OperationalError):
+                await cmd_usage(_ctx(config, conn, "bob"))
+
+    @pytest.mark.asyncio
+    async def test_a_different_missing_table_is_not_reported_as_task_usage(
+        self, make_config, db_path, monkeypatch
+    ):
+        """"no such table" alone would dress a real fault up as a fresh
+        deployment, and point the reader at a remedy that fixes nothing."""
+        import sqlite3 as _sqlite3
+
+        from istota import db as db_mod
+        from istota.commands import cmd_usage
+
+        def _other(*args, **kwargs):
+            raise _sqlite3.OperationalError("no such table: task_usage_models")
+
+        monkeypatch.setattr(db_mod, "usage_summary", _other)
 
         config = make_config()
         config.admin_users = {"bob"}
@@ -3011,8 +3084,12 @@ class TestCmdUsage:
             su.cache_path(config.db_path.parent),
             _snapshot([_window(percent=40.0)]),
         )
+        # The TTL comes off the config the handler will use, not a literal:
+        # otherwise the precondition checks one policy and the behaviour under
+        # test another, and the test passes only while the two agree.
+        ttl = float(config.brain.claude_code.subscription_usage_cache_ttl_seconds)
         assert su.read_cache(
-            su.cache_path(config.db_path.parent), 300.0, now_ts=time.time()
+            su.cache_path(config.db_path.parent), ttl, now_ts=time.time()
         ) is not None
 
         with db.get_db(db_path) as conn:
