@@ -4048,7 +4048,16 @@ def set_message_external_id(
     conn: sqlite3.Connection, message_id: int, surface: str, external_id: str,
 ) -> None:
     """Record where a message has been materialized on a surface (the
-    loop-prevention ledger). Merges into the existing JSON map."""
+    loop-prevention ledger). Merges into the existing JSON map.
+
+    The merge is a read-modify-write with no locking above SQLite's own, and
+    since ISSUE-287 two processes reach it for the same row — the web send
+    path and the Talk poller's echo reconciliation. That is safe only because
+    both write the same key (`talk`) with the same value (the echo *is* the
+    post), so a lost update loses nothing. A second surface key landing on a
+    web-origin user row would make it a real lost-update hazard; make this one
+    statement (`json_patch`) before adding one.
+    """
     row = conn.execute(
         "SELECT external_ids FROM messages WHERE id = ?", (message_id,)
     ).fetchone()
@@ -4082,6 +4091,59 @@ def user_turn_has_external_id(
     except (ValueError, TypeError):
         return False
     return isinstance(ext, dict) and surface in ext
+
+
+def stamp_webmirror_echo(
+    conn: sqlite3.Connection, room_token: str, message_id: int, talk_id: str,
+    actor_id: str,
+) -> bool:
+    """Record a post-as-user mirror's Talk id from the echo of the message
+    itself, when the send-time stamp never landed. Returns whether it stamped.
+
+    `_post_as_user` runs inline in the web send path under a 5 s timeout, so a
+    slow Nextcloud hands the caller a timeout for a post it has already stored.
+    Nothing then records the Talk id; the scheduler reads the missing stamp as
+    "the web process never mirrored this turn" and posts its legacy attributed
+    repost, so the question shows twice. The echo carries both halves — the
+    canonical row id in `referenceId`, the Talk id in the message — so the
+    poller can close the gap with no extra request, and it closes it for a
+    crash or a web restart as well as for a timeout.
+
+    **`message_id` is untrusted, and so is `talk_id`.** Both are read off a
+    message any participant in the room can compose: `referenceId` is free
+    text on Talk's chat API, and `messages.id` is a sequential integer, so
+    without a check on *who sent the echo* a participant could spray
+    `istota:webmirror:<n>` over a range and stamp every unstamped web turn in
+    the room with Talk ids of their choosing. Scoping the row is not enough to
+    stop that — it bounds which row may be stamped and not which id it gets,
+    and the ledger is read back by the scheduler's repost suppression (which
+    would then drop the question from Talk entirely), by the `replyTo`
+    resolution for web replies, and by the Talk-side delete path. `actor_id`
+    is the echo's author, and it must match the row's own `author_user_id`:
+    a genuine post-as-user echo is authored by the same user as the turn it
+    mirrors, so equality is the whole test. A NULL `author_user_id` fails it,
+    leaving such a row unreconciled rather than reconciled on no evidence.
+    """
+    if not actor_id:
+        return False
+    row = conn.execute(
+        "SELECT role, origin_surface, author_user_id, external_ids "
+        "FROM messages WHERE id = ? AND room_token = ?",
+        (message_id, room_token),
+    ).fetchone()
+    if row is None or row["role"] != "user" or row["origin_surface"] != "web":
+        return False
+    if row["author_user_id"] != actor_id:
+        return False
+    if row["external_ids"]:
+        try:
+            ext = json.loads(row["external_ids"])
+        except (ValueError, TypeError):
+            ext = {}
+        if isinstance(ext, dict) and "talk" in ext:
+            return False
+    set_message_external_id(conn, message_id, "talk", talk_id)
+    return True
 
 
 def room_max_talk_synced_message_id(

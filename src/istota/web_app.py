@@ -4893,9 +4893,13 @@ async def _post_as_user(
             )
             return None
         except Exception as e:
+            # The type, not just the message: an httpx timeout stringifies to
+            # the empty string, so every one of these read as a bare trailing
+            # colon and an operator could not tell a timeout from a transport
+            # error — which is what made ISSUE-287 unreadable from the log.
             logger.warning(
-                "post-as-user Talk post failed user=%s room=%s: %s",
-                username, talk_ref, e,
+                "post-as-user Talk post failed user=%s room=%s: %s: %s",
+                username, talk_ref, type(e).__name__, e,
             )
             return None
         finally:
@@ -4918,6 +4922,25 @@ async def _mirror_web_turn_as_user(
     feature off, no binding, no live token, post error — nothing is stamped
     and the scheduler's legacy attributed repost covers the mirror leg exactly
     as before. Never raises into the request path.
+
+    The stamp taken here is best-effort, and deliberately so: the 5 s timeout
+    on `_post_as_user` exists to keep this out of the user's send latency, and
+    it fires on posts Nextcloud has already stored, leaving a message in the
+    room that nothing here knows about (ISSUE-287). The poller's echo skip
+    (`transport/talk/inbound.py`) reconciles those from the message itself, so
+    a stamp missing here is usually repaired within a poll interval rather
+    than standing.
+
+    Two processes therefore write this one ledger entry, and what keeps them
+    off each other is not symmetric: the `_lookup` early return above skips
+    the post entirely when a stamp already exists, so this path re-stamps only
+    a row it believes unstamped, while the poller refuses outright to
+    overwrite. Neither ordering is guaranteed against the scheduler's
+    suppression read, which happens once at delivery time — a task that
+    finishes before the poller's batch commits still draws the attributed
+    repost. The reconciliation narrows that window (the echo lands in ~1 poll
+    interval against a 5 s timeout on a task that usually runs for minutes);
+    it does not close it.
     """
     from . import db, web_tokens
 
@@ -4987,8 +5010,8 @@ async def _mirror_web_turn_as_user(
         await asyncio.to_thread(_stamp)
     except Exception as e:  # noqa: BLE001 — never fail the send request
         logger.warning(
-            "post-as-user mirror failed user=%s room=%s: %s",
-            username, room_token, e,
+            "post-as-user mirror failed user=%s room=%s: %s: %s",
+            username, room_token, type(e).__name__, e,
         )
 
 
