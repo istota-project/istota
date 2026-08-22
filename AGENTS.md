@@ -151,7 +151,7 @@ Python:
 
 ```bash
 ruff check --output-format concise src tests
-scripts/qtest uv run pytest      # pyproject pins `-m 'not integration and not live' -n auto`
+scripts/qtest uv run pytest      # pyproject deselects every marker below; `-n auto`
 ```
 
 Web, from the repo root (needs `npm ci` in `web/` first):
@@ -162,6 +162,17 @@ npm --prefix web run check       # svelte-check
 scripts/qtest npm --prefix web run test    # vitest run
 npm --prefix web run format:check
 ```
+
+**Five markers are deselected by default, and none of them runs unless you ask.** Each has a different prerequisite, so they are selectable independently: `integration` (a live Nextcloud or Garmin credentials), `live` (a real LLM key; costs money), `linux` (a real kernel and a usable bubblewrap), `image` and `smoke` (a Docker daemon). A sixth, `requires_dac`, is not deselected — it skips itself where the process can bypass permission bits, which is what happens as root inside the Linux runner. The four discretionary tiers, none automatic:
+
+```bash
+scripts/test-linux.sh            # the suite + the linux tests, on a real kernel
+uv run pytest -m image -n0       # the built image's contract
+uv run pytest -m smoke -n0       # end-to-end against the lean compose stack
+scripts/test-upgrade.sh          # the current image over an older release's state
+```
+
+`image` and `smoke` require `-n0`: their fixtures are session-scoped and build one tagged image, and N xdist workers would each race to build it. Before a release, add `-m image -n0 --platform amd64` (the only run that ever executes the amd64-only devbox image) and `scripts/test-upgrade.sh --from-floor --shape volume`. Two of the tiers carry a negative control that must go **red** — `scripts/test-image-negative-control.sh`, and the same broken image handed to the upgrade tier through `ISTOTA_IMAGE_TAG`. On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail. Details and a when-to-run-each table in `docs/development/testing.md`.
 
 Chain them in one shell invocation rather than one call each, and use `-x` / `--bail=1` while iterating so the first real failure stops the run. Drop those flags for the full run before a commit. Never read the result through a pipe: a pipeline reports its *last* command's status, so `uv run pytest … | tail` exits 0 on a suite that failed. Set `set -o pipefail` in the same shell, or redirect to a file and check `$?` before reading it.
 
