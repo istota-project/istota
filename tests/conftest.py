@@ -245,3 +245,23 @@ def pytest_addoption(parser):
             "Defaults to native, or to $ISTOTA_TEST_PLATFORM."
         ),
     )
+
+
+def resolve_platform(config) -> str:
+    """`--platform`, else `$ISTOTA_TEST_PLATFORM`, else native.
+
+    A bare architecture is accepted and normalized — `amd64` is what a person
+    types and `linux/amd64` is what Docker wants, and getting that wrong builds
+    natively while the tag claims otherwise.
+
+    Here rather than in ``tests/image/conftest.py`` because three Docker tiers
+    now read it. The smoke tier used to import it across package boundaries
+    (``from ..image.conftest import resolve_platform``), which meant one tier's
+    fixtures depended on another's conftest for a five-line pure function; the
+    option it reads is declared just above, so this is where it belongs.
+    """
+    raw = config.getoption("--platform") or os.environ.get("ISTOTA_TEST_PLATFORM") or ""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    return raw if "/" in raw else f"linux/{raw}"
