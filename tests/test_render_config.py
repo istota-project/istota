@@ -277,6 +277,25 @@ class TestTheDeveloperBlock:
         assert config.developer.gitlab_token == "fabricated-gitlab-token"
         assert config.developer.gitlab_url == "http://gitlab.test"
 
+    def test_the_reviewer_username_reaches_the_rendered_config(self, tmp_path):
+        """ISSUE-289. The compose stack renders its own `[developer]` block, so
+        a setting the Ansible role gained is unreachable here until this file
+        gains it too — and the symptom is an MR with no reviewer, not an
+        error."""
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_DEVELOPER_ENABLED="true",
+                ISTOTA_DEVELOPER_REPOS_DIR="/data/repos",
+                ISTOTA_DEVELOPER_GITLAB_REVIEWER="reviewer-user",
+                ISTOTA_DEVELOPER_GITLAB_REVIEWER_ID="1234567",
+            )
+        )
+
+        assert config.developer.gitlab_reviewer == "reviewer-user"
+        assert config.developer.gitlab_reviewer_id == "1234567"
+
     def test_the_forge_binary_paths_can_be_overridden(self, tmp_path):
         # 30bb7c83's bug: the Ansible role installs to /usr/bin and renders that
         # path, while the dataclass default is /usr/local/bin. Both deployments
@@ -555,6 +574,43 @@ class TestTheEntrypointStillOwnsWhatItKept:
             f"render-config.sh reads {missing}, which entrypoint.sh does not "
             "export to it. Each would render as its default or empty on a real "
             "boot while every test in this file still passes."
+        )
+
+    def test_every_developer_var_the_render_reads_is_passed_by_compose(self):
+        """The other half of the hand-off, which nothing checked.
+
+        The test above excludes ``ISTOTA_*`` on the grounds that compose puts
+        those in the container. Nothing held compose to it, and the failure is
+        the same silent one: the render substitutes its ``:-`` default and the
+        setting is simply absent from the config, in production, with the suite
+        green.
+
+        Scoped to ``ISTOTA_DEVELOPER_*`` because those are wholly operator-set
+        — no other layer assigns one, so any name the render reads has to come
+        through compose. ISSUE-289 is why the scope is worth having: the
+        reviewer setting existed in the Ansible role and the render for months,
+        and adding one to the render without adding it to compose costs nothing
+        until an MR opens with nobody on it.
+        """
+        code = "\n".join(
+            line
+            for line in RENDER_CONFIG.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        read = {
+            name
+            for name in re.findall(r"\$\{?(ISTOTA_DEVELOPER_[A-Z0-9_]*)", code)
+        }
+        assert read, "the scan found no ISTOTA_DEVELOPER_* reads; the regex has rotted"
+
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+        passed = set(re.findall(r"^\s*(ISTOTA_DEVELOPER_[A-Z0-9_]*):", compose, re.M))
+
+        missing = sorted(read - passed)
+        assert not missing, (
+            f"render-config.sh reads {missing}, which docker-compose.yml does "
+            "not pass into the container. Each renders as its default or empty "
+            "on a real boot, unsettable by the operator."
         )
 
     def test_the_backfill_passes_stayed_in_the_entrypoint(self):

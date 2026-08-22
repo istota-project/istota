@@ -469,7 +469,8 @@ enabled: bool = False        repos_dir: str = ""
 gitlab_url: str = "https://gitlab.com"
 gitlab_token: str = ""       gitlab_username: str = ""
 gitlab_default_namespace: str = ""  # Default namespace for short repo names
-gitlab_reviewer_id: str = ""        # A GitLab *username*, despite the name
+gitlab_reviewer: str = ""           # GitLab username to assign as MR reviewer
+gitlab_reviewer_id: str = ""        # That user's numeric id, recorded not consumed
 github_url: str = "https://github.com"
 github_token: str = ""       github_username: str = ""
 github_default_owner: str = ""  # Default org/user for short repo names
@@ -485,7 +486,7 @@ devbox_proxy_audit_log: str = ""
 review: ReviewConfig
 ```
 
-`gitlab_reviewer_id` is a **username**. `glab mr create --reviewer` takes usernames, not the numeric IDs the retired REST wrapper wanted; the name predates the CLI wrapper and renaming it would touch the env spec, the Ansible var and every rendered `config.toml`, so the comment carries the truth instead. An operator who configures a number gets an MR with no reviewer on it: `skill.md` tells the model to drop the flag and report the misconfiguration rather than send a value `glab` will reject.
+`gitlab_reviewer` is the value the developer skill exports as `GITLAB_REVIEWER` and hands to `glab mr create --reviewer`, which resolves by username. `gitlab_reviewer_id` holds the same person's numeric id and is read by nothing — it kept its name and lost its consumer in ISSUE-289, where the name was the bug: operators put the id `users/<id>` reports into the field the skill consumed, `glab` answered `failed to find user by name`, and because the recipe builds the flag rather than failing, every agent-authored MR opened with nobody assigned. The `developer.gitlab_reviewer` doctor check WARNs on an all-digits username, and on an `_id` set with no username beside it — the shape a host that has not re-run Ansible is in.
 
 `gitlab_api_allowlist` / `github_api_allowlist` and `api_timeout_seconds` are **gone** (unified-forge-cli-wrapper spec). An endpoint allowlist cannot describe what a real `gh` invocation does — `gh pr create` is several calls, `gh pr checks` paginates — so the deny list moved into `forge_cli.py`'s argv policy, and `api_timeout_seconds` lost its last consumer when the devbox proxy's httpx client went. The loader ignores unknown keys by design, so a `config.toml` still carrying any of the three loads clean and inert; `config.toml.j2` no longer renders them, but a host keeps its last-rendered file until Ansible runs again.
 

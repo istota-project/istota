@@ -126,6 +126,31 @@ def test_forge_policy_and_binary_paths_are_rendered(block):
         assert key in rendered, f"config.toml.j2 does not render [developer] {key}"
 
 
+def test_both_reviewer_keys_are_rendered(block):
+    """ISSUE-289. `gitlab_reviewer` is the username the skill consumes;
+    `gitlab_reviewer_id` is the numeric id, kept beside it so an operator who
+    recorded one does not lose it on the next deploy. Unrendered, either is
+    unsettable from the inventory."""
+    rendered = set(_KEY_RE.findall(block))
+    for key in ("gitlab_reviewer", "gitlab_reviewer_id"):
+        assert key in rendered, f"config.toml.j2 does not render [developer] {key}"
+
+
+def test_settings_to_vars_maps_both_reviewer_keys():
+    text = SETTINGS_TO_VARS.read_text()
+    for key in ("gitlab_reviewer", "gitlab_reviewer_id"):
+        assert f'"{key}":' in text, f"settings_to_vars.py does not map {key}"
+
+
+def test_the_username_reviewer_var_has_its_own_default():
+    """The role has to define `istota_developer_gitlab_reviewer` in its own
+    right rather than aliasing the `_id` var — a template that fell back to the
+    id would put a number back in front of `glab --reviewer`."""
+    defaults = DEFAULTS.read_text()
+    assert re.search(r'^istota_developer_gitlab_reviewer:', defaults, re.MULTILINE)
+    assert re.search(r'^istota_developer_gitlab_reviewer_id:', defaults, re.MULTILINE)
+
+
 def test_every_referenced_var_has_an_ansible_default(block):
     defaults = DEFAULTS.read_text()
     referenced = set(_VAR_RE.findall(block))
