@@ -1511,6 +1511,117 @@ class TestNeedFilesRoundTrip:
         assert stub_brain.calls == ["conformance"]
         assert [f["claim"] for f in envelope["findings"]] == ["found early"]
         assert "gitdir refused" in envelope["need_files_note"]
+        assert envelope["round_trip_refused"] is True
+
+    def test_the_envelope_says_whether_a_wanted_round_was_refused(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
+    ):
+        """Three states, and prose in `need_files_note` was the only thing that
+        told them apart. A caller deciding how much to trust an `unverified`
+        finding branches on this: nobody asked, it asked and got its round, or
+        it asked and was refused one — and only the middle case cost a call."""
+        from istota.skills.code_review import engine
+
+        developer_config(max_need_files=6)
+
+        # Nobody asked.
+        stub_brain.replies["conformance"] = [findings_json(finding())]
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+        assert envelope["round_trip_refused"] is False
+        assert envelope["rounds"] == 1
+
+        # Asked, and got the round.
+        stub_brain.calls.clear()
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py"),
+            findings_json(finding()),
+        ]
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+        assert envelope["round_trip_refused"] is False
+        assert envelope["rounds"] == 2
+
+        # Asked, and nothing could be served, so no second call was made.
+        stub_brain.calls.clear()
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py"),
+            findings_json(finding(claim="never reached")),
+        ]
+        monkeypatch.setattr(
+            engine, "collect_needed_files",
+            lambda *a, **k: engine.NeededFiles(refused=["helper.py"]),
+        )
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main"
+        )
+        assert envelope["round_trip_refused"] is True
+        assert envelope["rounds"] == 1
+        assert stub_brain.calls == ["conformance"]
+
+    def test_one_reviewer_refused_and_one_served_reports_both(
+        self, capsys, monkeypatch, worktree, review_env, developer_config,
+        stub_brain, review_db,
+    ):
+        """The field is collapsed across agents with `any()`, like
+        `files_served` beside it — so on a two-agent review it reads true while
+        `rounds` is 2. That is not a contradiction: `rounds` is what the run
+        cost, this is whether a round somebody wanted went unbought, and the
+        note names which reviewer. Two agents is the ordinary shape on any diff
+        over `both_agents_threshold_lines`, so this is the common case."""
+        from istota.skills.code_review import engine
+
+        developer_config(max_need_files=6, max_calls_per_task=8)
+        stub_brain.replies["conformance"] = [
+            need_files_json("helper.py"),
+            findings_json(finding()),
+        ]
+        stub_brain.replies["bughunt"] = [
+            need_files_json("app.py", findings=[finding(claim="asked in vain")]),
+            findings_json(finding(claim="never reached")),
+        ]
+
+        # Serve conformance's request and refuse bughunt's, so exactly one
+        # reviewer takes its round.
+        real = engine.collect_needed_files
+
+        def serve_only_helper(worktree_path, rev, paths, **kwargs):
+            if paths == ["app.py"]:
+                return engine.NeededFiles(refused=["app.py"])
+            return real(worktree_path, rev, paths, **kwargs)
+
+        monkeypatch.setattr(engine, "collect_needed_files", serve_only_helper)
+
+        code, envelope = drive(
+            capsys, "run", "--worktree", str(worktree), "--base", "main",
+            "--agents", "both",
+        )
+
+        assert code == 0
+        assert envelope["status"] == "ok"
+        assert sorted(stub_brain.calls) == ["bughunt", "conformance", "conformance"]
+        assert envelope["rounds"] == 2, "conformance's round was made and charged"
+        assert envelope["round_trip_refused"] is True, "bughunt's was not"
+        assert "bughunt" in envelope["need_files_note"]
+        assert envelope["files_served"] == ["helper.py"]
+        assert envelope["files_refused"] == ["app.py"]
+
+    def test_an_envelope_that_never_reached_a_reviewer_still_carries_the_field(
+        self, capsys, empty_worktree, review_env, developer_config, stub_brain
+    ):
+        """`run_review` promises every return path the same key set. A consumer
+        reading this without first branching on `empty` must not hit a
+        KeyError."""
+        developer_config(max_need_files=6)
+
+        _, envelope = drive(
+            capsys, "run", "--worktree", str(empty_worktree), "--base", "main"
+        )
+
+        assert envelope["empty"] is True
+        assert envelope["round_trip_refused"] is False
 
     def test_a_bare_string_request_is_accepted_rather_than_retried(
         self, capsys, worktree, review_env, developer_config, stub_brain

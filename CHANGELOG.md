@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When a code reviewer asks to read a file, the extra round is now started only if there is time left to finish it. The check was a flat fifteen seconds against a budget of two to four minutes, so a reviewer that had already used most of its time was sent back out anyway — charged a call, and then timed out with nothing to show for it. It is now measured against the slowest call that reviewer has actually made, which is the only evidence of what a second, larger one will cost. A quick reviewer still gets its round; a slow one is told plainly that it was refused, and the review report says whether a round was refused or was made and failed, since only the second costs anything.
+
 - The Linux test tier builds again on a machine where BuildKit is switched off. It passed a flag only the newer builder accepts, so the build was refused before it started — on exactly the setup that needs the older builder, which is the documented way past a broken build service. The runner now asks the Docker command line which builder it is about to use and only passes the flag when it applies.
 
 - The four deployment test tiers now say plainly that they cannot run inside the assistant's sandbox, instead of failing several minutes in with an unrelated-looking error. All four need to start containers, which a task is not allowed to do and should not be. The two shell runners refuse up front and say what to do instead — mention it in the merge request and ask for the run before merge — and the developer documentation now says the same thing where it tells the assistant to run them.
