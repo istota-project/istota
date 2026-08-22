@@ -730,7 +730,13 @@ class TestTheMarker:
         """Otherwise `uv run pytest` boots six containers."""
         body = (REPO / "pyproject.toml").read_text()
 
-        assert "and not full'" in body
+        addopts = next(
+            line for line in body.splitlines() if line.startswith("addopts = ")
+        )
+        # Not `and not full'` — that spelling asserted `full` was the *last*
+        # marker in the expression, so adding any marker after it broke a test
+        # about a different tier. Assert membership, not position.
+        assert "not full" in addopts, addopts
 
     def test_every_full_test_carries_the_marker(self):
         files = sorted((REPO / "tests" / "full").glob("test_*.py"))
