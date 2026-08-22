@@ -1443,7 +1443,22 @@ class Stack:
         for name, service in self.services.items():
             if name == "model":
                 continue
-            service.reset()
+            try:
+                service.reset()
+            except StackError:
+                raise
+            except Exception as exc:
+                # Translated rather than propagated raw, because of where it
+                # lands: the `stack` fixture turns `StackError` into a
+                # `pytest.fail(..., pytrace=False)` naming the condition, and
+                # anything else into a fixture traceback attributed to whichever
+                # test happened to be next. A service that could not clean up
+                # after the *previous* test is a harness condition, and the one
+                # line worth reading is which service it was.
+                raise StackError(
+                    f"the {name} service could not reset, so this test would "
+                    f"run against the previous one's state: {exc}"
+                ) from exc
         self.clear_container_state()
         self.script(
             list(turns or []), timeout=max(1.0, deadline - time.monotonic())

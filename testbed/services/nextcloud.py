@@ -74,11 +74,15 @@ DEFAULT_TEST_USER = "testuser"
 #: therefore joinable by anyone holding its token.
 ROOM_TYPE_GROUP = 2
 
-#: The two `files_external` mount points `provision-nc.sh` creates, which are
-#: what a WebDAV path under `/mnt/shared` is prefixed with. The bot gets the
-#: whole volume; the human user gets only the bot workspace, named after the
-#: bot. Neither is `/Users/...`, which is the shape `storage.py` writes and the
-#: shape `resolve_scoped_path` produces — see `files()`.
+#: The bot's `files_external` mount point (`provision-nc.sh:56`), which is what
+#: a WebDAV path under `/mnt/shared` is prefixed with in the *bot's* tree. The
+#: human user's mount is a second one, named after `ISTOTA_BOT_NAME` rather than
+#: written down, so there is no constant for it: a test asserting on that tree
+#: derives the name from the running config, since a hardcoded one would pass
+#: for the wrong reason after a rename.
+#:
+#: Neither mount point is `/Users/...`, which is both the shape `storage.py`
+#: writes on disk and the shape `resolve_scoped_path` produces — see `files()`.
 BOT_MOUNT_POINT = "Shared Files"
 
 _HREF = re.compile(r"<d:href>([^<]*)</d:href>")
@@ -224,23 +228,76 @@ class NextcloudService:
         may have deleted its own) and loud about anything else: a room that
         survives a reset is a cross-test dependency, and those get diagnosed as
         flake rather than as leakage.
+
+        **Three things about the failure path, each of which was wrong in the
+        first version and each of which fails in the same direction.** Every
+        room is attempted, so one bad room does not hide the rest. The list is
+        cleared whatever happens, because a reset that left it populated would
+        re-attempt the same delete before *every* remaining test in the session
+        and report the first test's problem against all of them. And a 404 is
+        confirmed rather than believed: Talk answers 404 for a room the actor
+        can no longer see as well as for one that is gone, so the token is
+        looked for in the bot's own room list before it is written off.
+
+        `reset` runs *before* each test rather than after, so the last test of a
+        session leaves its rooms behind. That is deliberate — a failed test's
+        state is still there to inspect — and it leaks nothing, because the
+        stack is torn down with its volumes at session end and `tests/full/`
+        refuses to run under `ISTOTA_TESTBED_KEEP` at all.
         """
         failures = []
-        for token, actor in list(self._created_rooms):
-            answer = self._ocs(
-                f"/ocs/v2.php/apps/spreed/api/v4/room/{token}",
-                user=actor,
-                method="DELETE",
-                missing_ok=True,
-            )
-            if answer.status_code not in (100, 200, 404):
-                failures.append(f"{token} ({answer.status_code}: {answer.message})")
-        self._created_rooms.clear()
+        unconfirmed = []
+        try:
+            for token, actor in list(self._created_rooms):
+                try:
+                    answer = self._ocs(
+                        f"/ocs/v2.php/apps/spreed/api/v4/room/{token}",
+                        user=actor,
+                        method="DELETE",
+                        tolerate=(404,),
+                    )
+                except NextcloudError as exc:
+                    # OCS v2 reflects its status in the HTTP status, so a
+                    # refusal arrives here as an exception rather than as an
+                    # `OcsResponse` — which is why this is a `try` and not an
+                    # `if` on the status code.
+                    failures.append(f"{token}: {exc}")
+                    continue
+                if answer.status_code == 404:
+                    unconfirmed.append((token, actor))
+                elif answer.status_code not in (100, 200):
+                    failures.append(
+                        f"{token}: {answer.status_code} {answer.message}"
+                    )
+        finally:
+            self._created_rooms.clear()
+        failures.extend(self._still_visible(unconfirmed))
         if failures:
             raise NextcloudError(
                 "these rooms survived the reset, so the next test would see "
                 f"them: {failures}"
             )
+
+    def _still_visible(self, rooms: list[tuple[str, str]]) -> list[str]:
+        """Of the rooms that answered 404, the ones the bot can still see.
+
+        Talk answers 404 both for a room that is gone and for one the actor is
+        no longer a participant of, and only the first is what `reset` wants to
+        conclude. The bot is in every room a scenario made — that is what makes
+        the room pollable in the first place — so its own listing settles it.
+        One call, and only when something 404'd.
+        """
+        if not rooms:
+            return []
+        try:
+            visible = {room.get("token", "") for room in self.rooms()}
+        except NextcloudError as exc:  # pragma: no cover - diagnostic
+            return [f"could not confirm {[t for t, _ in rooms]} were deleted: {exc}"]
+        return [
+            f"{token}: answered 404 but the bot still sees it"
+            for token, _ in rooms
+            if token in visible
+        ]
 
     def close(self) -> None:
         """Nothing to stop. The container belongs to the stack."""
@@ -294,16 +351,25 @@ class NextcloudService:
         user: str = "",
         method: str = "GET",
         body: dict | None = None,
-        missing_ok: bool = False,
+        tolerate: tuple[int, ...] = (),
     ) -> OcsResponse:
         """One OCS call as admin, or as whoever the caller names.
 
         The `OCS-APIRequest` header is not optional: without it Nextcloud
         answers a 401 with an HTML login page, which reads as bad credentials.
 
-        `missing_ok` turns a 404 into an `OcsResponse` carrying it rather than
-        an exception, for the one caller that has to tolerate one: `reset`
-        deleting a room a scenario already deleted itself.
+        **Everything else non-2xx raises**, and that is not the shape it looks
+        like from the `OcsResponse` return type. OCS v2 reflects the OCS status
+        in the HTTP status — which is why `src/istota/nextcloud/_http.py:213`
+        has an explicit `http_status >= 400` branch — so a refusal arrives here
+        as an `HTTPError` and leaves as a `NextcloudError`. A caller that means
+        to branch on a status has to name it in `tolerate`; the status-code
+        guards elsewhere in this file only fire for the narrower case of a 2xx
+        carrying a non-2xx OCS status.
+
+        `tolerate` is for the two statuses that are answers rather than
+        failures: 404, when `reset` deletes a room a scenario already deleted,
+        and 304, which is how Talk says a room has no messages.
         """
         actor = user or self.admin_user
         if actor not in self._passwords:
@@ -321,34 +387,48 @@ class NextcloudService:
             request.add_header("Content-Type", "application/json")
         _add_basic_auth(request, actor, self._passwords[actor])
 
-        # Retried on a *connection* error only, and only for a bounded window.
-        # These calls do not reach Nextcloud directly — they go through the
-        # stack's nginx, which is not in the tier's readiness set because it
-        # legitimately restarts while its `web` upstream is coming up. So the
-        # first call after a boot can land on a moment when nothing is listening
-        # on the published port, and an unretried failure arrives as whichever
-        # assertion happened to run first, saying "connection refused" about
-        # Nextcloud. An `HTTPError` is *not* retried: that is Nextcloud
-        # answering, and answering wrongly is what the caller wants told.
-        deadline = time.monotonic() + CONNECT_RETRY_SECONDS
+        # Retried on a *connection* error only, only for a bounded window, and
+        # only for a read. These calls do not reach Nextcloud directly — they go
+        # through the stack's nginx, which is not in the tier's readiness set
+        # because it legitimately restarts while its `web` upstream is coming
+        # up. So the first call after a boot can land on a moment when nothing
+        # is listening on the published port, and an unretried failure arrives
+        # as whichever assertion happened to run first, saying "connection
+        # refused" about Nextcloud.
+        #
+        # An `HTTPError` is *not* retried: that is Nextcloud answering, and
+        # answering wrongly is what the caller wants told. Neither is a write,
+        # and that restriction arrived with the write verbs: a `URLError` can be
+        # raised after the request reached the server, so replaying a POST is
+        # how you get a second room whose token nothing recorded — which `reset`
+        # then cannot delete — or a duplicate inbound message, which turns
+        # "exactly one reply" into a flake. A write that cannot connect fails
+        # immediately and says so.
+        retryable = method in ("GET", "PROPFIND")
+        deadline = time.monotonic() + (CONNECT_RETRY_SECONDS if retryable else 0)
         while True:
             try:
                 with urlopen(request, timeout=TIMEOUT) as response:
                     payload = json.loads(response.read() or b"{}")
                 break
             except HTTPError as exc:
-                if missing_ok and exc.code == 404:
-                    return OcsResponse(status_code=404, message="not found", data=None)
+                if exc.code in tolerate:
+                    return OcsResponse(
+                        status_code=exc.code, message=exc.reason or "", data=None
+                    )
                 raise NextcloudError(
                     f"{method} {path} answered HTTP {exc.code}: "
                     f"{exc.read()[:400].decode('utf-8', 'replace')}"
                 ) from None
             except URLError as exc:
                 if time.monotonic() >= deadline:
+                    waited = (
+                        f"within {CONNECT_RETRY_SECONDS}s" if retryable
+                        else "and a write is not retried"
+                    )
                     raise NextcloudError(
-                        f"{method} {path} never connected within "
-                        f"{CONNECT_RETRY_SECONDS}s (the stack's nginx, on "
-                        f"{self.base_url}): {exc}"
+                        f"{method} {path} never connected {waited} (the "
+                        f"stack's nginx, on {self.base_url}): {exc}"
                     ) from None
                 time.sleep(1.0)
             except ValueError as exc:
@@ -478,15 +558,29 @@ class NextcloudService:
     def messages(self, token: str, *, user: str = "", limit: int = 50) -> list[dict]:
         """A room's recent messages, newest first, as Talk returns them.
 
-        `lookIntoFuture=0` deliberately: the daemon's own poller uses the
-        long-poll form and a test that did the same would block for the poll
-        timeout on a quiet room.
+        Three parameters that are not defaults:
+
+        - `lookIntoFuture=0`, because the daemon's own poller uses the long-poll
+          form and a test that did the same would block for the poll timeout on
+          a quiet room.
+        - `setReadMarker=0`, because Talk's receive endpoint advances the
+          reading account's read marker by default — and the account doing the
+          reading here is the one the daemon is concurrently polling. A
+          diagnostic that mutates the state under test is not a diagnostic, and
+          `describe()` issues this for every created room on every failure.
+        - `304` tolerated, because that is how Talk says "nothing to return".
+          `urllib` raises for anything outside 2xx, so an empty room would
+          otherwise come back as an exception from a method whose signature
+          promises a list.
         """
         answer = self._ocs(
             f"/ocs/v2.php/apps/spreed/api/v1/chat/{token}"
-            f"?lookIntoFuture=0&limit={int(limit)}",
+            f"?lookIntoFuture=0&setReadMarker=0&limit={int(limit)}",
             user=user or self.bot_user,
+            tolerate=(304,),
         )
+        if answer.status_code == 304:
+            return []
         if answer.status_code not in (100, 200):
             raise NextcloudError(f"reading {token}: {answer.message}")
         return list(answer.data or [])
@@ -524,9 +618,14 @@ class NextcloudService:
     def files(self, path: str = "", *, user: str = "", depth: str = "1") -> list[str]:
         """WebDAV PROPFIND under `path`, as a flat list of decoded paths.
 
-        Relative to the account's own DAV root, with the collection itself
-        dropped, so a caller compares against names rather than against hrefs
-        carrying `/remote.php/dav/files/<user>/`.
+        Relative to the account's own DAV root, so a caller compares against
+        names rather than against hrefs carrying `/remote.php/dav/files/<user>/`.
+
+        **The requested collection is dropped, and that matters more than it
+        looks.** A depth-1 PROPFIND answers with the collection itself first, so
+        leaving it in makes `assert service.files(some_dir)` non-empty for an
+        *empty* directory — an assertion that cannot fail, which is the shape
+        this repo has already been bitten by twice.
 
         **The paths are not the ones `storage.py` writes.** On this shape the
         daemon writes POSIX paths under `/mnt/shared`, and Nextcloud serves that
@@ -547,10 +646,20 @@ class NextcloudService:
                 f"{body[:300].decode('utf-8', 'replace')}"
             )
         prefix = f"/remote.php/dav/files/{actor}/"
+        requested = path.strip("/")
         found = []
         for href in _HREF.findall(body.decode("utf-8", "replace")):
-            relative = unquote(href)[len(unquote(prefix)):].rstrip("/")
-            if relative:
+            decoded = unquote(href)
+            # Checked rather than sliced blind: stripping by length cannot fail
+            # loudly, and every way it goes wrong — an absolute-URL href, an
+            # instance served under a path prefix, a `%` in the account name —
+            # produces a plausible-looking wrong path list rather than an error.
+            if not decoded.startswith(prefix):
+                raise NextcloudError(
+                    f"a PROPFIND href is not under {prefix!r}: {decoded!r}"
+                )
+            relative = decoded[len(prefix):].rstrip("/")
+            if relative and relative != requested:
                 found.append(relative)
         return sorted(found)
 

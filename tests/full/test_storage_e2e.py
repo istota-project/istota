@@ -140,15 +140,16 @@ class TestAFileWrittenThroughStorage:
         )
         for private in ("inbox", "memories", "shared", "Users", "Channels"):
             assert private not in user_tree, (private, user_tree)
-        workspace = [
-            entry for entry in user_tree
-            if entry.lower() in (bot_dir, bot_dir.replace("_", " "))
-        ]
+        wanted = {bot_dir.lower(), bot_dir.replace("_", " ").lower()}
+        workspace = [entry for entry in user_tree if entry.lower() in wanted]
         assert workspace, (
             f"the human user cannot see the bot workspace ({bot_dir}): {user_tree}"
         )
+        # `files()` drops the requested collection, so this is "the mount has
+        # contents" rather than "the mount was asked for" — the difference
+        # between an assertion and a no-op.
         assert nextcloud.files(workspace[0], user=nextcloud.test_user), (
-            "the bot workspace mount resolves to nothing"
+            "the bot workspace mount resolves to an empty directory"
         )
 
 
@@ -219,19 +220,34 @@ class TestNotifications:
 
         nextcloud.create_room(name=name, participants=[nextcloud.bot_user])
 
+        # `limit=0` means "no client-side slice", and it is not a stylistic
+        # choice: the default is 25, the bot accumulates a notification per room
+        # invite and per message for the whole session, and a test whose
+        # notification fell off the end of that slice would report that it was
+        # never raised.
         deadline = time.monotonic() + NOTIFICATION_TIMEOUT
-        subjects: list[str] = []
+        seen: list[list] = []
         while time.monotonic() < deadline:
-            subjects = json.loads(_tagged(_run(stack, (
+            seen = json.loads(_tagged(_run(stack, (
                 "from istota.nextcloud import notifications;"
                 "print('NOTIFY', json.dumps([(r.get('app'), r.get('subject'))"
-                " for r in notifications.list_notifications(c)]))"
+                " for r in notifications.list_notifications(c, limit=0)]))"
             )), "NOTIFY"))
-            if any(name in (subject or "") for _, subject in subjects):
+            if any(name in (subject or "") for _, subject in seen):
                 break
             time.sleep(2)
 
-        assert any(name in (subject or "") for _, subject in subjects), (
-            f"no notification for {name!r} reached the bot: {subjects}"
+        assert any(name in (subject or "") for _, subject in seen), (
+            f"no notification for {name!r} reached the bot through "
+            f"nextcloud/notifications.py: {seen}"
         )
-        assert any(app == "spreed" for app, _ in subjects), subjects
+        assert any(app == "spreed" for app, _ in seen), seen
+        # The same fact read a second way, from outside the container and
+        # without going through the client under test. A client that filtered,
+        # truncated or reshaped its answer would agree with itself and disagree
+        # with this.
+        direct = nextcloud.notifications(nextcloud.bot_user)
+        assert any(name in (row.get("subject") or "") for row in direct), (
+            "the client saw the notification and a plain OCS read did not: "
+            f"{[(row.get('app'), row.get('subject')) for row in direct]}"
+        )

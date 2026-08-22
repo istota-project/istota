@@ -1413,6 +1413,50 @@ class TestStackReset:
 
         assert stack.reset([{"text": "answer"}]) == {"tasks": 7}
 
+    def test_a_service_that_cannot_reset_is_named_as_a_harness_condition(
+        self, monkeypatch
+    ):
+        """A service's own exception type is not one the fixture translates.
+
+        The `stack` fixture turns `StackError` and `TimeoutError` into a
+        `pytest.fail(..., pytrace=False)` naming the condition, and anything
+        else into a fixture traceback attributed to whichever test happened to
+        be next — which is precisely the wrong test. `NextcloudService.reset`
+        raises its own `NextcloudError` when a room survives, and it is the
+        first service reset that can fail at all.
+        """
+        broken = _FakeService("nextcloud", {})
+
+        def refuse():
+            raise RuntimeError("a room survived")
+
+        broken.reset = refuse
+        stack, _, _ = self._stack(
+            monkeypatch, busy_sequence=[[], []], services={"nextcloud": broken}
+        )
+
+        with pytest.raises(compose_support.StackError) as failure:
+            stack.reset([{"text": "answer"}])
+
+        assert "nextcloud" in str(failure.value)
+        assert "a room survived" in str(failure.value)
+
+    def test_a_stack_error_from_a_service_is_not_wrapped_twice(self, monkeypatch):
+        broken = _FakeService("gitlab", {})
+
+        def refuse():
+            raise compose_support.StackError("the forge said no")
+
+        broken.reset = refuse
+        stack, _, _ = self._stack(
+            monkeypatch, busy_sequence=[[], []], services={"gitlab": broken}
+        )
+
+        with pytest.raises(compose_support.StackError) as failure:
+            stack.reset([{"text": "answer"}])
+
+        assert str(failure.value) == "the forge said no"
+
     def test_a_task_appearing_after_the_swap_makes_it_try_again(self, monkeypatch):
         """The half the barrier structurally cannot see: a poller created the
         row while the table was being read, and it has not called yet."""

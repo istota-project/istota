@@ -52,6 +52,11 @@ TALK_TIMEOUT = 240
 
 CONTAINER_CONFIG = "/data/config/config.toml"
 
+#: The three group rooms `entrypoint.sh` provisions, by display name. The same
+#: three `provision_rooms.DEFAULT_ROOMS` names, which is the point of the test
+#: that drives it.
+GROUP_ROOMS = ("general", "logs", "alerts")
+
 
 def _room_name() -> str:
     """A name no other test and no boot-provisioned room can collide with.
@@ -63,16 +68,22 @@ def _room_name() -> str:
     return f"testbed-{uuid.uuid4().hex[:8]}"
 
 
-def _delivered(stack, token: str, timeout: float = 60) -> dict:
+def _delivered(stack, task_id: int, timeout: float = 60) -> dict:
     """The task row, re-read until the ids delivery writes are actually on it.
 
-    `wait_for_task` returns the moment the row reaches a terminal status, and
-    `talk_response_id` is written *after* that by `db.update_talk_response_id`
-    — a separate transaction on the far side of the Talk post. So a scenario
-    that asserts on the column straight off the waited-for row is reading it
-    mid-write, which passes on a quiet machine and fails on a busy one. Measured
-    the hard way: the first run of this file failed exactly there, with the
-    reply visible in the room and the column still NULL.
+    `wait_for_task` returns the moment the row reaches a terminal status
+    (`db.update_task_status` in `scheduler.py`), and the Talk post and
+    `db.update_talk_response_id` both run *after* that, outside that
+    transaction. So a scenario that asserts on the column — or on the room's
+    contents — straight off the waited-for row is reading it mid-write, which
+    passes on a quiet machine and fails on a busy one. Measured the hard way:
+    the first run of this file failed exactly there, with the reply visible in
+    the room and the column still NULL.
+
+    Filtered by task id rather than by room token, because a room can hold more
+    than one task and polling the newest would wait out the timeout on a row
+    that is never going to carry a response id — reporting "the reply was never
+    recorded" about a task that did nothing of the sort.
 
     Polling rather than sleeping, and it returns the row so the caller's own
     assertions still name what they compared.
@@ -80,30 +91,32 @@ def _delivered(stack, token: str, timeout: float = 60) -> dict:
     deadline = time.monotonic() + timeout
     latest: dict = {}
     while time.monotonic() < deadline:
-        rows = stack.probe.tasks(conversation_token=token)
-        latest = rows[-1] if rows else {}
+        rows = stack.probe.tasks(task_id=task_id)
+        latest = rows[0] if rows else {}
         if latest.get("talk_response_id"):
             return latest
         time.sleep(1.0)
     raise AssertionError(
-        "the task completed but never recorded the id of its Talk reply "
+        f"task {task_id} completed but never recorded the id of its Talk reply "
         f"(talk_response_id stayed NULL for {timeout:.0f}s): {latest}\n"
         + stack.diagnostics(latest)
     )
 
 
-def _assistant_row(stack, token: str, timeout: float = 60) -> dict:
-    """The room's assistant turn, re-read until its Talk id is stamped.
+def _assistant_row(stack, token: str, task_id: int, timeout: float = 60) -> dict:
+    """This task's assistant turn, re-read until its Talk id is stamped.
 
     Same race, one table over: the scheduler writes the assistant row when it
-    delivers and stamps `external_ids` afterwards, in a third transaction.
+    delivers and stamps `external_ids` afterwards, in a third transaction. Also
+    scoped to the task, for the same reason `_delivered` is.
     """
     deadline = time.monotonic() + timeout
     rows: list[dict] = []
     while time.monotonic() < deadline:
         rows = [
             row for row in stack.probe.query(
-                "SELECT * FROM messages WHERE room_token = ? ORDER BY id", [token]
+                "SELECT * FROM messages WHERE room_token = ? AND task_id = ? "
+                "ORDER BY id", [token, task_id]
             )
             if row["role"] == "assistant"
         ]
@@ -111,8 +124,38 @@ def _assistant_row(stack, token: str, timeout: float = 60) -> dict:
             return rows[0]
         time.sleep(1.0)
     raise AssertionError(
-        f"no assistant turn in {token} carried a Talk id within {timeout:.0f}s: "
-        f"{rows}"
+        f"no assistant turn for task {task_id} in {token} carried a Talk id "
+        f"within {timeout:.0f}s: {rows}"
+    )
+
+
+def _second_task(stack, token: str, *, after: int, timeout: float = TALK_TIMEOUT) -> dict:
+    """The room's next task after `after`, once it reaches a terminal status.
+
+    The room is already known to the daemon by the time this is called, so this
+    waits a poll interval rather than a conversation-cache window — but the
+    same timeout is used, because a machine slow enough to need the first one is
+    slow enough to need the second.
+    """
+    deadline = time.monotonic() + timeout
+    seen: list[dict] = []
+    while time.monotonic() < deadline:
+        seen = [
+            row for row in stack.probe.tasks(conversation_token=token)
+            if row["id"] > after
+        ]
+        terminal = [
+            row for row in seen
+            if row.get("status") in ("completed", "failed", "cancelled",
+                                     "pending_confirmation")
+        ]
+        if terminal:
+            return terminal[0]
+        time.sleep(1.0)
+    raise AssertionError(
+        f"the reply to task {after} in {token} produced no finished task "
+        f"within {timeout:.0f}s; saw "
+        f"{[(row.get('id'), row.get('status')) for row in seen]}"
     )
 
 
@@ -124,8 +167,20 @@ def _bot_messages(nextcloud, token: str, *, user: str = "") -> list[dict]:
     ]
 
 
+#: The same answer several times over, and the repetition is insurance rather
+#: than need. `Stack.script` guards the *install* instant three ways — the
+#: barrier across the swap, a served-count of zero, and a re-read of the task
+#: table — and nothing constrains the daemon afterwards. These scenarios then
+#: wait out a conversation-cache window before their own request arrives, which
+#: is a far wider gap than any lean scenario opens, and a poller's task landing
+#: in it would take turn 0 and leave the Talk task with the endpoint's
+#: exhausted-script frame. That failure presents as a broken Talk transport.
+#: Spare turns cost nothing.
+SCRIPT = [{"text": ANSWER}] * 4
+
+
 @FULL
-@pytest.mark.script([{"text": ANSWER}])
+@pytest.mark.script(SCRIPT)
 class TestATalkRoundTrip:
     """A message arrives, a task runs, the answer comes back to the same room."""
 
@@ -154,6 +209,12 @@ class TestATalkRoundTrip:
         assert task["source_type"] == "talk", stack.diagnostics(task)
         assert task["talk_message_id"] == inbound, stack.diagnostics(task)
 
+        # Before reading the room, not after: `completed` is written before the
+        # post is made, so a Talk read taken here would sometimes find nothing
+        # and fail saying the reply went to the wrong room — the single most
+        # expensive misdiagnosis this file could produce. `talk_response_id`
+        # being set is exactly the proof the post landed.
+        task = _delivered(stack, task["id"])
         replies = [
             row for row in _bot_messages(nextcloud, token)
             if ANSWER in (row.get("message") or "")
@@ -163,7 +224,6 @@ class TestATalkRoundTrip:
             f"hold it at {_where_the_answer_went(nextcloud, token)}\n"
             + stack.diagnostics(task)
         )
-        task = _delivered(stack, token)
         assert task["talk_response_id"] == replies[0]["id"], (
             "the task recorded a different message id than the one this room "
             "holds, so the reply went somewhere else\n" + stack.diagnostics(task)
@@ -202,15 +262,29 @@ class TestATalkRoundTrip:
     def test_the_turn_carries_the_linkage_the_web_chat_surface_reads(self, stack):
         """A Talk exchange has to be a room in `messages`, not only in Talk.
 
-        Web chat renders a Talk-bound room out of the canonical tables, so a
-        turn that reached Talk and not those tables is a room whose transcript
-        is empty in one surface and full in the other. Three rows have to line
-        up for that to work, and each is written by a different piece of code:
-        `rooms` by the poller's lazy registration, the user row by
-        `transport/ingest.py`, and the assistant row by the scheduler after
-        delivery. The `external_ids` ledger is the join between a canonical id
-        and a Talk one — the two namespaces `db.py` warns never to assign
-        across.
+        Two claims against one round trip, and they are in one test because the
+        second needs the first's assistant turn to reply *to*. The provisioning
+        suite makes the same trade for the same reason.
+
+        **The mirror.** Web chat renders a Talk-bound room out of the canonical
+        tables, so a turn that reached Talk and not those tables is a room whose
+        transcript is empty in one surface and full in the other. Three rows
+        have to line up, each written by a different piece of code: `rooms` by
+        the poller's lazy registration, the user row by `transport/ingest.py`,
+        and the assistant row by the scheduler after delivery.
+
+        **The reply citation**, which is the linkage `.claude/rules/web-chat.md`
+        names and the one with a trap in it. A reply's parent is addressed by
+        *canonical* `messages.id` on `tasks.reply_to_message_id` and
+        `messages.reply_to_message_id`, while the surface-native Talk id goes to
+        `tasks.reply_to_talk_id`. Both are small integers in the same room, so
+        a Talk id stored in the canonical slot resolves to whichever turn
+        happens to share the number and nothing at any layer notices — the rule
+        file says so in as many words. `record_inbound` resolves the canonical
+        id through the `external_ids` ledger, which is why the mirror above has
+        to be right for this to be right, and why the assertion checks the two
+        ids are *different* numbers before comparing: a scenario where they
+        happened to coincide would pass under the bug.
         """
         nextcloud = stack.service("nextcloud")
         token = nextcloud.create_room(
@@ -230,8 +304,8 @@ class TestATalkRoundTrip:
         assert rooms, "the poller registered no room for a room it polled"
         assert rooms[0]["origin"] == "talk", rooms[0]
 
-        assistant = _assistant_row(stack, token)
-        task = _delivered(stack, token)
+        assistant = _assistant_row(stack, token, task["id"])
+        task = _delivered(stack, task["id"])
         rows = stack.probe.query(
             "SELECT * FROM messages WHERE room_token = ? ORDER BY id", [token]
         )
@@ -247,6 +321,38 @@ class TestATalkRoundTrip:
             + stack.diagnostics(task)
         )
 
+        # --- the reply citation, against the turn the bot just posted
+        bot_talk_id = task["talk_response_id"]
+        assert assistant["id"] != bot_talk_id, (
+            "the canonical id and the Talk id of the same turn are the same "
+            "number here, so the assertion below could not tell them apart; "
+            f"canonical={assistant['id']} talk={bot_talk_id}"
+        )
+        nextcloud.post_message(
+            token, message="and this replies to it", reply_to=bot_talk_id
+        )
+
+        second = _second_task(stack, token, after=task["id"])
+        assert second["status"] == "completed", stack.diagnostics(second)
+        assert second["reply_to_talk_id"] == bot_talk_id, stack.diagnostics(second)
+        assert second["reply_to_message_id"] == assistant["id"], (
+            "the canonical reply parent is not the assistant turn's canonical "
+            "id; a Talk id stored here resolves to whichever turn shares the "
+            "number\n" + stack.diagnostics(second)
+        )
+        reply_rows = [
+            row for row in stack.probe.query(
+                "SELECT * FROM messages WHERE room_token = ? AND role = 'user' "
+                "ORDER BY id", [token]
+            )
+        ]
+        assert len(reply_rows) == 2, stack.diagnostics(second)
+        assert reply_rows[1]["reply_to_message_id"] == assistant["id"], (
+            "the transcript row carries no citation, so the turn would render "
+            "as an ordinary message after retention deletes the task\n"
+            + stack.diagnostics(second)
+        )
+
 
 @FULL
 class TestProvisionRoomsAgainstARealServer:
@@ -259,11 +365,25 @@ class TestProvisionRoomsAgainstARealServer:
     """
 
     def test_a_second_provisioning_run_reuses_the_rooms_the_boot_made(self, stack):
+        """Scoped to the rooms provisioning could have touched, not to a count.
+
+        Two things this test is careful not to do. It does not compare the
+        bot's whole room list before and after: that list holds the four rooms
+        the boot made and the two Talk adds per account, and anything appearing
+        there for an unrelated reason would fail this test while naming the
+        provisioning code — the discipline `NextcloudService.reset`'s docstring
+        argues for, applied here. And it does not let an empty `rooms` list pass
+        as idempotence: every per-room claim is inside a loop, so a run that
+        reported nothing at all would satisfy all of them.
+        """
         nextcloud = stack.service("nextcloud")
         before = {
             room["token"]: room.get("displayName", "")
             for room in nextcloud.rooms()
         }
+        before_defaults = sorted(
+            name for name in before.values() if name in GROUP_ROOMS
+        )
 
         result = stack.exec(
             [
@@ -276,15 +396,27 @@ class TestProvisionRoomsAgainstARealServer:
         assert result.returncode == 0, result.stderr
         payload = _first_json_object(result.stdout)
         assert payload["state"] == "noop", payload
-        for room in payload["rooms"]:
+        reported = payload["rooms"]
+        # Not `== 3`: the CLI drops a name whose channel column is already
+        # seeded, so `logs` and `alerts` are filtered out by
+        # `pending_channel_rooms` and only `general` — which seeds no column —
+        # comes back on every run.
+        assert reported, "the CLI reported no rooms at all, so nothing below ran"
+        assert "general" in [room["name"] for room in reported], reported
+        assert {room["name"] for room in reported} <= set(GROUP_ROOMS), reported
+        for room in reported:
             assert room["created"] is False, room
             assert before.get(room["token"]) == room["name"], (room, before)
+
         after = {
             room["token"]: room.get("displayName", "")
             for room in nextcloud.rooms()
         }
-        assert after == before, (
-            "a provisioning run over existing rooms created or lost one"
+        assert sorted(
+            name for name in after.values() if name in GROUP_ROOMS
+        ) == before_defaults, (
+            "a provisioning run over existing rooms created or lost a default "
+            f"room: before={before_defaults} after={sorted(after.values())}"
         )
 
 

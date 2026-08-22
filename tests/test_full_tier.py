@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
@@ -746,7 +747,7 @@ class TestTheNextcloudReset:
         )
         calls: list[tuple[str, str, str]] = []
 
-        def fake_ocs(path, *, user="", method="GET", body=None, missing_ok=False):
+        def fake_ocs(path, *, user="", method="GET", body=None, tolerate=()):
             calls.append((method, path, user))
             token = path.rsplit("/", 1)[-1]
             if method == "POST" and path.endswith("/room"):
@@ -754,7 +755,12 @@ class TestTheNextcloudReset:
                     200, "OK", {"token": f"token-{len(calls)}"}
                 )
             if token in fail:
-                return nextcloud_service.OcsResponse(403, "no", None)
+                # An OCS v2 refusal *raises* — the HTTP status carries it, so
+                # `_ocs` never returns a 403. A fake that returned one would
+                # verify the guard against a shape the real client cannot
+                # produce, which is how the first version of this test passed
+                # while the code aborted the loop.
+                raise nextcloud_service.NextcloudError(f"DELETE {path} HTTP 403")
             return nextcloud_service.OcsResponse(200, "OK", {})
 
         monkeypatch.setattr(service, "_ocs", fake_ocs)
@@ -800,15 +806,32 @@ class TestTheNextcloudReset:
     ):
         """A leaked room is a cross-test dependency, and those get diagnosed as
         flake in whichever later scenario happens to trip over it."""
-        service, _ = self._service(monkeypatch)
+        service, _ = self._service(monkeypatch, fail={"token-1"})
         service.create_room(name="one")
-        monkeypatch.setattr(
-            service, "_ocs",
-            lambda *a, **k: nextcloud_service.OcsResponse(403, "denied", None),
-        )
 
         with pytest.raises(nextcloud_service.NextcloudError, match="survived"):
             service.reset()
+
+    def test_one_bad_room_does_not_hide_the_others(self, monkeypatch):
+        """Every room is attempted, and the list is cleared whatever happened.
+
+        Both halves matter and both were wrong first time. Aborting at the
+        first bad room leaves the rest of the session's rooms behind it; not
+        clearing the list re-attempts the same delete before *every* remaining
+        test and reports the first test's problem against all of them.
+        """
+        service, calls = self._service(monkeypatch, fail={"token-1"})
+        service.create_room(name="one")
+        service.create_room(name="two")
+        calls.clear()
+
+        with pytest.raises(nextcloud_service.NextcloudError):
+            service.reset()
+
+        assert [path.rsplit("/", 1)[-1] for _, path, _ in calls] == [
+            "token-1", "token-2",
+        ]
+        assert service._created_rooms == []
 
     def test_a_room_already_gone_is_not_a_failure(self, monkeypatch):
         """A scenario may delete its own room to assert on the deletion."""
@@ -818,8 +841,27 @@ class TestTheNextcloudReset:
             service, "_ocs",
             lambda *a, **k: nextcloud_service.OcsResponse(404, "not found", None),
         )
+        monkeypatch.setattr(service, "rooms", lambda **k: [])
 
         service.reset()
+
+    def test_a_404_the_bot_can_still_see_is_a_failure(self, monkeypatch):
+        """Talk answers 404 for a room the *actor* cannot see, too.
+
+        Believing it would write off a room that is still there, still polled,
+        and still in the next test's way — the one outcome this reset promises
+        to be loud about.
+        """
+        service, _ = self._service(monkeypatch)
+        token = service.create_room(name="one")
+        monkeypatch.setattr(
+            service, "_ocs",
+            lambda *a, **k: nextcloud_service.OcsResponse(404, "not found", None),
+        )
+        monkeypatch.setattr(service, "rooms", lambda **k: [{"token": token}])
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="still sees it"):
+            service.reset()
 
     def test_the_baseline_the_boot_creates_is_named_in_the_docstring(self):
         """The scope is only usable if it is written where a reader will find it.
@@ -834,6 +876,71 @@ class TestTheNextcloudReset:
             assert baseline in body, baseline
 
 
+class TestTheConnectionRetry:
+    """Reads are retried through a cold nginx. Writes are not, and must not be."""
+
+    @staticmethod
+    def _service():
+        return nextcloud_service.attach(
+            base_url="http://localhost:1",
+            admin_password="unit-admin",
+            bot_password="unit-bot",
+            test_password="unit-user",
+        )
+
+    def test_a_write_that_cannot_connect_fails_at_once(self, monkeypatch):
+        """A `URLError` can be raised after the request reached the server.
+
+        Replaying a POST is how you get a second Talk room whose token nothing
+        recorded — which `reset` then cannot delete — or a duplicate inbound
+        message, which turns "exactly one reply" into a flake.
+        """
+        service = self._service()
+        attempts = []
+
+        def refuse(*args, **kwargs):
+            attempts.append(1)
+            raise URLError("connection refused")
+
+        monkeypatch.setattr(nextcloud_service, "urlopen", refuse)
+        monkeypatch.setattr(nextcloud_service.time, "sleep", lambda _: None)
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="not retried"):
+            service._ocs("/ocs/v2.php/x", method="POST", body={"a": 1})
+
+        assert len(attempts) == 1
+
+    def test_a_read_is_retried_until_the_window_closes(self, monkeypatch):
+        service = self._service()
+        attempts = []
+
+        def refuse(*args, **kwargs):
+            attempts.append(1)
+            raise URLError("connection refused")
+
+        monkeypatch.setattr(nextcloud_service, "urlopen", refuse)
+        monkeypatch.setattr(nextcloud_service.time, "sleep", lambda _: None)
+        monkeypatch.setattr(nextcloud_service, "CONNECT_RETRY_SECONDS", 3)
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="within 3s"):
+            service._ocs("/ocs/v2.php/x")
+
+        assert len(attempts) > 1
+
+
+#: One depth-1 PROPFIND answer: the collection, then one file whose name needs
+#: decoding. Shared by the tests below so the two claims are made against the
+#: same bytes.
+_PROPFIND = (
+    "<d:multistatus xmlns:d='DAV:'>"
+    "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+    "</d:href></d:response>"
+    "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+    "Users/testuser/inbox/a%20note.txt</d:href></d:response>"
+    "</d:multistatus>"
+).encode()
+
+
 class TestTheWebdavPathTranslation:
     """`files()` reports paths relative to the account's own DAV root."""
 
@@ -846,24 +953,36 @@ class TestTheWebdavPathTranslation:
             test_password="unit-user",
         )
 
-    def test_the_dav_prefix_and_the_collection_itself_are_dropped(
+    def test_the_dav_prefix_is_dropped_and_the_path_is_decoded(
         self, monkeypatch
     ):
         service = self._service()
-        body = (
-            "<d:multistatus xmlns:d='DAV:'>"
-            "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
-            "</d:href></d:response>"
-            "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
-            "Users/testuser/inbox/a%20note.txt</d:href></d:response>"
-            "</d:multistatus>"
-        ).encode()
-        monkeypatch.setattr(service, "_dav", lambda *a, **k: (body, 207))
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (_PROPFIND, 207))
 
         assert service.files("Shared Files") == [
-            "Shared Files",
             "Shared Files/Users/testuser/inbox/a note.txt",
         ]
+
+    def test_the_requested_collection_is_not_in_its_own_listing(
+        self, monkeypatch
+    ):
+        """Otherwise `assert files(d)` is non-empty for an *empty* directory.
+
+        A depth-1 PROPFIND answers with the collection first, so a caller
+        checking "the mount resolves to something" would be checking that it
+        asked for something — an assertion that cannot fail, which this repo
+        has shipped twice.
+        """
+        service = self._service()
+        only_itself = (
+            "<d:multistatus xmlns:d='DAV:'>"
+            "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+            "</d:href></d:response></d:multistatus>"
+        ).encode()
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (only_itself, 207))
+
+        assert service.files("Shared Files") == []
+        assert service.files("/Shared Files/") == []
 
     def test_a_non_multistatus_answer_names_the_status(self, monkeypatch):
         """A 404 here means the path does not exist in that account's tree,
