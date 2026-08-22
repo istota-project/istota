@@ -691,6 +691,36 @@ class TestCronAutoDisable:
         assert [r["occurrences"] for r in rows] == [2]
         assert len(sent) == 1, "the second failure pushed a duplicate"
 
+    def test_a_module_job_disable_writes_no_row(self, config, monkeypatch):
+        """`_sync_module_jobs` re-enables these hourly whether or not they work.
+
+        Raised on the disable, marked `stale` once the rescue zeroes the
+        counter, then reopened — and a reopen delivers — the row would be an
+        hourly push about something with no user-facing verb to fix it. A module
+        job that fails for an actionable reason has a source of its own that
+        says so in terms the user can act on.
+        """
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config, name="_module.health.garmin_sync")
+        sent = _count_sends(monkeypatch, delivered=True)
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (False, "boom", None, None),
+        )
+
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            # The disable itself still happens — only the notification is
+            # withheld, or the test would pass against a job that never tripped.
+            assert db.get_scheduled_job(conn, job_id).enabled is False
+            assert conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE source = 'cron_job'",
+            ).fetchone()[0] == 0
+        assert sent == []
+
     def test_a_recovered_job_closes_its_row_on_the_success_path(
         self, config, monkeypatch,
     ):

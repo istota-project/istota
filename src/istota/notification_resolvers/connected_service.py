@@ -59,6 +59,10 @@ SERVICES: dict[str, str] = {
     "garmin": "Garmin Connect",
 }
 
+# `notification_store._STALE_SWEEP_BUSY_TIMEOUT_MS`, for the same reason: see
+# :func:`close_for_service`.
+_CLOSE_BUSY_TIMEOUT_MS = 2000
+
 
 def dedup_key(service: str) -> str:
     """``service:{name}``, verbatim — see the note on the confirmation source."""
@@ -88,6 +92,22 @@ def body_for(service: str, reason: str = "") -> str:
     return f"{lead} Reconnect under Settings → Connected services."
 
 
+def _row_kwargs(service: str, reason: str) -> dict:
+    """The row itself, spelled once for all three entry points below."""
+    return {
+        "source": SOURCE,
+        "dedup_key": dedup_key(service),
+        "title": title_for(service),
+        "body": body_for(service, reason),
+        "severity": SEVERITY,
+        "actionable": True,
+        "object_type": OBJECT_TYPE,
+        "object_id": service,
+        "params": {"service": service, "reason": reason},
+        "purpose": "alert",
+    }
+
+
 def write(
     conn: "sqlite3.Connection",
     user_id: str,
@@ -98,19 +118,7 @@ def write(
     """Write the row on the caller's connection, inside its transaction."""
     from ..notification_store import write_notification
 
-    return write_notification(
-        conn, user_id,
-        source=SOURCE,
-        dedup_key=dedup_key(service),
-        title=title_for(service),
-        body=body_for(service, reason),
-        severity=SEVERITY,
-        actionable=True,
-        object_type=OBJECT_TYPE,
-        object_id=service,
-        params={"service": service, "reason": reason},
-        purpose="alert",
-    )
+    return write_notification(conn, user_id, **_row_kwargs(service, reason))
 
 
 def raise_for_service(
@@ -124,22 +132,50 @@ def raise_for_service(
     framework DB only through `secrets_store`, and every one of those helpers
     opens and closes a connection of its own around a single statement — there
     is no open write lock for a second connection to wait thirty seconds on.
-    """
-    from ..notification_store import raise_notification
 
-    return raise_notification(
-        config, user_id,
-        source=SOURCE,
-        dedup_key=dedup_key(service),
-        title=title_for(service),
-        body=body_for(service, reason),
-        severity=SEVERITY,
-        actionable=True,
-        object_type=OBJECT_TYPE,
-        object_id=service,
-        params={"service": service, "reason": reason},
-        purpose="alert",
-    )
+    Never raises: the whole point of this source is a sync that failed, and the
+    failure must not turn into a traceback out of the sync engine. The guard is
+    here rather than only in the store because `_row_kwargs` is evaluated in
+    *this* frame, outside the store's own.
+    """
+    try:
+        from ..notification_store import raise_notification
+
+        return raise_notification(config, user_id, **_row_kwargs(service, reason))
+    except Exception:
+        logger.warning(
+            "could not raise the %s notification for %r", service, user_id,
+            exc_info=True,
+        )
+        return None
+
+
+def write_for_service(
+    db_path: "Path", user_id: str, service: str, reason: str = "",
+) -> None:
+    """Write the row and deliver nothing, on a connection of this call's own.
+
+    For the skill-CLI leg of `sync_garmin`: a short-lived host-side process the
+    skill proxy spawns, where `send_notification`'s Talk and ntfy fan-out does
+    not belong. The *row* still has to be written there — this source exists
+    because a Garmin auth failure removes the job that would have noticed it
+    again, so "no config, no row" would leave the one process that saw the
+    failure saying nothing at all. Same split the email skill CLI takes for a
+    held outbound draft.
+
+    Never raises, for the reason above.
+    """
+    try:
+        from .. import db
+        from ..notification_store import write_notification
+
+        with db.get_db(db_path) as conn:
+            write_notification(conn, user_id, **_row_kwargs(service, reason))
+    except Exception:
+        logger.warning(
+            "could not write the %s notification for %r", service, user_id,
+            exc_info=True,
+        )
 
 
 def resolve_for_service(
@@ -164,7 +200,13 @@ def close_for_service(db_path: "Path", user_id: str, service: str, *, by: str) -
     try:
         from .. import db
 
-        with db.get_db(db_path) as conn:
+        # A short lock budget rather than `get_db`'s 30-second default. This runs
+        # from `store_tokens`, which `acquire_client` calls while holding a
+        # host-local exclusive flock, so a close that queued behind an unrelated
+        # writer would hold that lock for half a minute. Losing the race is the
+        # case the resolver backstop covers: the row goes `stale` on the next
+        # panel read instead of `resolved` now.
+        with db.get_db(db_path, busy_timeout_ms=_CLOSE_BUSY_TIMEOUT_MS) as conn:
             resolve_for_service(conn, user_id, service, by=by)
     except Exception:
         logger.warning(

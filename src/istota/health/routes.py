@@ -781,15 +781,13 @@ async def api_replace_biomarkers(
     if n is None:
         raise HTTPException(404, "panel not found")
 
-    if confirm:
+    if confirm and ctx.framework_db_path is not None:
         # The panel just left `draft`, which is the state the inbox row watches.
         # Framework DB and session user, for the reason given on the upload path.
-        config = getattr(request.app.state, "istota_config", None)
-        if config is not None and ctx.framework_db_path is not None:
-            await asyncio.to_thread(
-                notification_health_panel.close_for_panel,
-                config, ctx.user_id, panel_id, by="web",
-            )
+        await asyncio.to_thread(
+            notification_health_panel.close_for_panel,
+            ctx.framework_db_path, ctx.user_id, panel_id, by="web",
+        )
 
     return {"status": "ok", "count": n}
 
@@ -875,14 +873,13 @@ async def api_panel_upload(
     # The panel is a draft, and a draft is excluded from the dashboard *and*
     # from the trends — so an upload whose review is never finished is data the
     # user cannot see again unless they think to ask for drafts by hand. The row
-    # goes in the **framework** DB (`ctx.framework_db_path`, which is
-    # `config.db_path`), never `ctx.db_path`: that is this user's health module
-    # DB, and every user has a panel `12` in theirs.
-    config = getattr(request.app.state, "istota_config", None)
-    if config is not None and ctx.framework_db_path is not None:
+    # goes in the **framework** DB (`ctx.framework_db_path`), never
+    # `ctx.db_path`: that is this user's health module DB, and every user has a
+    # panel `12` in theirs. Written, not delivered — see `write_for_panel`.
+    if ctx.framework_db_path is not None:
         await asyncio.to_thread(
-            notification_health_panel.raise_for_panel,
-            config, ctx.user_id,
+            notification_health_panel.write_for_panel,
+            ctx.framework_db_path, ctx.user_id,
             panel_id=pid, drawn_at=drawn_at, lab_name=lab_name or None,
         )
 

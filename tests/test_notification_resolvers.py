@@ -337,11 +337,30 @@ class TestCronJobResolver:
         # "Needs action" — the store's own rule, asserted at the source.
         assert item.actionable is False
 
-    def test_re_enabling_closes_the_row_without_a_panel_read(self, config, conn):
-        job_id = _disabled_job(conn)
-        db.enable_scheduled_job(conn, job_id)
-        cron_source.resolve_for_job(conn, "alice", job_id, by="talk")
-        assert _state(conn, "cron_job") == ("resolved", "talk")
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["enable", "disable"])
+    async def test_the_cron_command_closes_the_row(self, config, conn, verb):
+        """Both verbs, driven through the real handler.
+
+        `disable` is the one the resolver cannot cover: disabling by hand leaves
+        `consecutive_failures` where it was, so the row would keep telling the
+        user to re-enable a job they have just switched off — forever, since
+        object-backed rows are never age-swept.
+        """
+        from istota.commands import CommandContext, cmd_cron
+
+        _disabled_job(conn, name="nightly-digest")
+        if verb == "disable":
+            conn.execute("UPDATE scheduled_jobs SET enabled = 1")
+
+        result = await cmd_cron(CommandContext(
+            config=config, conn=conn, user_id="alice",
+            conversation_token="room1", args=f"{verb} nightly-digest",
+            surface="web",
+        ))
+
+        assert "nightly-digest" in result
+        assert _state(conn, "cron_job") == ("resolved", "web")
 
     def test_a_row_left_open_over_a_recovered_job_goes_stale(self, config, conn):
         """The backstop: the counter went to zero and nobody closed the row."""
@@ -388,17 +407,39 @@ class TestCronJobResolver:
         items, _total = store.list_open(config, conn, "alice")
         assert items == []
 
-    def test_a_module_job_gets_a_different_note(self, config, conn):
-        """`!cron enable` operates on CRON.md, and a module job is not in it.
+    def test_a_module_job_is_not_worth_notifying_about(self):
+        """`_sync_module_jobs` re-enables these hourly whether or not they work.
 
-        The prefix is matched on the raw name. `flatten` maps `_` to a space, so
-        a check against the flattened name would never fire for a name that
-        starts with one.
+        A row would ride that loop — raised on the disable, `stale` after the
+        rescue zeroed the counter, then *reopened* an hour later, and the reopen
+        branch delivers. A permanently broken module job would become an hourly
+        push about something with no `!cron enable` to run against it.
         """
-        _disabled_job(conn, name="_module.health.garmin_sync")
+        assert cron_source.should_notify("nightly-digest") is True
+        assert cron_source.should_notify("_module.health.garmin_sync") is False
+        assert cron_source.is_module_job("_module.feeds.poll") is True
+
+    def test_the_module_prefix_is_matched_on_the_raw_name(self):
+        """`flatten` maps `_` to a space, so a flattened name never matches."""
+        from istota.confirmations import flatten
+
+        name = "_module.health.garmin_sync"
+        assert not flatten(name).startswith(cron_source.MODULE_JOB_PREFIX)
+        assert cron_source.is_module_job(name) is True
+
+    def test_a_long_job_name_is_capped_in_the_title(self, config, conn):
+        """The title reaches ntfy as an HTTP header; an oversized one is refused.
+
+        `confirmations.describe_email` caps both its halves for exactly this
+        reason and says so. `flatten` does not truncate — the caller always does.
+        """
+        _disabled_job(conn, name="d" * 400)
         items, _total = store.list_open(config, conn, "alice")
-        assert "!cron enable" not in items[0].status_note
-        assert "automatically" in items[0].status_note
+        stored = conn.execute(
+            "SELECT title FROM notifications WHERE source = 'cron_job'",
+        ).fetchone()["title"]
+        assert len(stored) < 200
+        assert items[0].title == stored
 
     def test_a_job_name_carrying_markup_is_not_printed_as_a_command(
         self, config, conn,

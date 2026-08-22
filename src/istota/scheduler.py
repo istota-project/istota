@@ -2180,19 +2180,39 @@ def _note_job_auto_disabled(
     earlier, so a `ScheduledJob` fetched before it carries the previous run's
     error. `job.user_id` is the owner of the row, not `task.user_id` — they are
     the same today and only one of them is the authority.
+
+    **Guarded, and that is not belt-and-braces.** Everything here except
+    `write_notification` itself runs in the caller's frame, inside a transaction
+    that has just recorded the task as failed and charged the job a failure — so
+    an exception escaping would skip `db.get_db`'s commit and roll all of that
+    back, leaving the task stuck `running` and the job enabled. An inbox row is
+    not worth that.
     """
-    job = db.get_scheduled_job(conn, job_id)
-    if job is None:
+    try:
+        job = db.get_scheduled_job(conn, job_id)
+        if job is None:
+            return None
+        if not cron_job_source.should_notify(job.name):
+            return None
+        return cron_job_source.write(
+            conn, job.user_id,
+            job_id=job_id,
+            job_name=job.name,
+            fail_count=fail_count,
+            cron_expression=job.cron_expression,
+            # Provenance only. Nothing reads `notifications.room_token` on the
+            # send path — `deliver_pending` routes by purpose through the user's
+            # routing table — so a job with `output_target` set still pushes to
+            # their alert destination, not into that room.
+            room_token=job.conversation_token,
+            last_error=job.last_error,
+        )
+    except Exception:
+        logger.warning(
+            "could not raise the auto-disable notification for job %s",
+            job_id, exc_info=True,
+        )
         return None
-    return cron_job_source.write(
-        conn, job.user_id,
-        job_id=job_id,
-        job_name=job.name,
-        fail_count=fail_count,
-        cron_expression=job.cron_expression,
-        last_error=job.last_error,
-        room_token=job.conversation_token,
-    )
 
 
 def process_one_task(

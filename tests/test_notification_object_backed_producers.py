@@ -1,4 +1,4 @@
-"""The two producers that raise on their own connection, and why that is safe.
+"""The two producers that write on a connection of their own, and why that is safe.
 
 The cron auto-disable sites are in `test_notification_transactions.py` with the
 other buffered writers. These two are the exceptions the store's
@@ -6,13 +6,16 @@ other buffered writers. These two are the exceptions the store's
 
 - `sync_garmin` reaches the framework DB only through `secrets_store`, whose
   helpers each open and close a connection around a single statement. There is
-  no open write lock for a second connection to wait thirty seconds on.
+  no open write lock for a second connection to wait thirty seconds on. That is
+  asserted rather than argued: `_LockProbe` takes `BEGIN IMMEDIATE` on a second
+  connection at the moment the store is entered.
 - the health panel upload handler's only open connection is to the *health
-  module* DB — a different file, a different lock.
+  module* DB — a different file, a different lock. It also **writes without
+  delivering**, so there is no fan-out on the request path at all.
 
-Both are asserted here rather than argued: each test opens the framework DB
-independently while the producer runs and takes `BEGIN IMMEDIATE`, which can
-only succeed if the caller is holding nothing.
+The two also differ in a way worth stating: Garmin delivers because nothing else
+will ever notice the failure again, and the panel does not because the user is
+looking at the review screen the upload returned them to.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ from istota.health import garmin as gm
 from istota.health import garmin_sync
 from istota.health._migrate import ensure_initialised
 from istota.health.workspace import synthesize_health_context
-from istota.notification_resolvers import connected_service as service_source
 
 try:
     import fastapi  # noqa: F401
@@ -118,6 +120,41 @@ class _AuthFailAdapter:
         return _boom
 
 
+class _LateAuthFailAdapter:
+    """Serves one good day, then fails auth. The shape `_AuthFailAdapter` misses.
+
+    Every other Garmin test here fails on the first endpoint of the first day,
+    so `inserted == skipped == 0` and the post-loop token write-back never runs
+    — which is exactly the branch that used to undo the raise.
+    """
+
+    def __init__(self, good_day: str):
+        self.good_day = good_day
+
+    def load_tokens(self, tokens):
+        return None
+
+    def serialize_tokens(self):
+        return {"oauth1_token": "rotated"}
+
+    def get_steps_data(self, iso):
+        self._check(iso)
+        return {"totalSteps": 9000}
+
+    def _check(self, iso):
+        if iso != self.good_day:
+            raise gm.GarminAuthError("token expired")
+
+    def __getattr__(self, name):
+        # `_gather_for_day` calls every fetcher with the ISO date, so the
+        # fallback can decide from its own argument. `get_steps_data` above is
+        # the one that returns data; the rest answer None for the good day.
+        def _fetch(iso, *_a, **_k):
+            self._check(iso)
+            return None
+        return _fetch
+
+
 def _ctx(config, user_id="alice"):
     ctx = synthesize_health_context(
         user_id, Path(config.nextcloud_mount_path) / "workspace",
@@ -198,13 +235,17 @@ class TestGarminTokenExpiry:
         )
         assert len(_rows(config, "connected_service")) == 1
 
-    def test_the_skill_cli_leg_writes_nothing_and_delivers_nothing(
+    def test_the_skill_cli_leg_writes_a_row_and_delivers_nothing(
         self, config, monkeypatch,
     ):
-        """No `config`, no row — the same rule the email skill CLI follows.
+        """No `config` suppresses the *push*, never the row.
 
-        `sync_garmin` runs in a short-lived host-side process there, and
-        `send_notification`'s Talk and ntfy fan-out does not belong in it.
+        `sync_garmin` runs in a short-lived host-side process there and
+        `send_notification`'s Talk and ntfy fan-out does not belong in it — the
+        same split the email skill CLI takes for a held draft. Suppressing the
+        row as well would leave the one process that saw the failure saying
+        nothing, and there is no second chance: the wiped blob takes the sync
+        job with it on the scheduler's next pass.
         """
         ctx = _ctx(config)
         gm.set_adapter_factory(_AuthFailAdapter)
@@ -215,8 +256,48 @@ class TestGarminTokenExpiry:
         )
 
         assert res.auth_error is True
-        assert _rows(config, "connected_service") == []
+        rows = _rows(config, "connected_service")
+        assert len(rows) == 1
+        assert rows[0]["state"] == "open"
+        assert rows[0]["last_delivered_at"] is None
         assert sent == []
+
+    def test_an_auth_failure_after_a_good_day_does_not_undo_itself(
+        self, config, monkeypatch,
+    ):
+        """Day 1 pulls, day 2's token is dead. The write-back must not run.
+
+        `inserted or skipped` alone was true here, so the post-loop rotation
+        write-back restored the blob `mark_token_error` had just wiped, cleared
+        the `error` flag and stamped `last_sync` — the settings card then read
+        "Connected" over credentials the remote had refused, and the reconnect
+        row `store_tokens` closes went with it. The user is pushed a warning the
+        bell then denies all knowledge of.
+        """
+        ctx = _ctx(config)
+        gm.store_tokens(config.db_path, "alice", {"oauth1_token": "old"})
+        sent = _sends(monkeypatch)
+
+        res = garmin_sync.sync_garmin(
+            ctx, config.db_path, days_back=2, today=date(2026, 5, 15),
+            # `_iter_dates` walks oldest-first and ends yesterday, so with
+            # days_back=2 the first day pulled is the 13th and the token
+            # dies on the 14th.
+            adapter=_LateAuthFailAdapter(good_day="2026-05-13"), config=config,
+        )
+
+        assert res.auth_error is True
+        assert res.inserted > 0, "the first day must have landed, or nothing is proved"
+
+        rows = _rows(config, "connected_service")
+        assert len(rows) == 1
+        assert rows[0]["state"] == "open", "the raise was undone by the write-back"
+        assert len(sent) == 1
+
+        status = gm.get_status(config.db_path, "alice")
+        assert status["connected"] is False
+        assert status["error"] == "token_expired"
+        assert status["last_sync"] is None
 
     def test_the_token_error_flag_is_still_set(self, config, monkeypatch):
         """The notification is additive; the existing signal must survive."""
@@ -238,7 +319,7 @@ class TestGarminTokenExpiry:
         ctx = _ctx(config)
         gm.set_adapter_factory(_AuthFailAdapter)
         monkeypatch.setattr(
-            service_source, "raise_for_service",
+            "istota.notification_store.raise_notification",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("inbox down")),
         )
 
@@ -307,7 +388,11 @@ class TestDraftHealthPanel:
         assert rows[0]["object_id"] == str(panel_id)
         assert rows[0]["state"] == "open"
         assert "Quest" in rows[0]["title"]
-        assert len(sent) == 1
+        # Written, never delivered: the user is looking at the review screen the
+        # upload returns them to, and a push saying "lab results are waiting to
+        # be reviewed" is a notice about what they are in the middle of doing.
+        assert sent == []
+        assert rows[0]["last_delivered_at"] is None
 
         # And nowhere near the module DB, which is the trap the whole source
         # exists to avoid: panel ids are per-user, so a row there would be
@@ -372,6 +457,22 @@ class TestDraftHealthPanel:
             items, total = store.list_open(config, conn, "alice")
         assert items == [] and total == 0
         assert _rows(config, "health_panel")[0]["state"] == "stale"
+
+    def test_a_long_lab_name_is_capped_in_the_title(self, config, health_client):
+        """`lab_name` is an unchecked form field and the title reaches ntfy.
+
+        An oversized HTTP header is refused by the server and the push is lost
+        with `last_delivered_at` correctly null and nothing saying why — which
+        is why `confirmations.describe_email` caps both its halves.
+        """
+        client, _ctx_ = health_client
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("report.pdf", b"%PDF-1.4 fake", "application/pdf")},
+            data={"drawn_at": "2026-05-08", "lab_name": "L" * 500},
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(_rows(config, "health_panel")[0]["title"]) < 200
 
     def test_the_open_row_renders_a_review_link(self, config, health_client):
         client, _ctx = health_client

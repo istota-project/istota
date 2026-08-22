@@ -374,25 +374,24 @@ def _note_token_expired(
     pass deletes the job row and the failure stops recurring. There is no second
     chance to tell them.
 
-    `config` is optional and its absence means "write no row": the skill-CLI
-    caller is a short-lived host-side process the skill proxy spawns, and
-    `send_notification`'s Talk and ntfy fan-out does not belong in it — the same
-    rule the email skill CLI follows for outbound drafts.
+    `config` decides only whether the row is *delivered*, never whether it is
+    written. Absent, the caller is the skill CLI — a short-lived host-side
+    process the skill proxy spawns, where `send_notification`'s Talk and ntfy
+    fan-out does not belong; the row is still written there, because the whole
+    point of this source is that there is no second chance to notice. Same split
+    the email skill CLI takes for a held outbound draft.
     """
+    from istota.notification_resolvers import connected_service
+
     gm.mark_token_error(framework_db_path, ctx.user_id, reason)
     if config is None:
+        connected_service.write_for_service(
+            framework_db_path, ctx.user_id, gm.SECRET_SERVICE, reason=reason,
+        )
         return
-    try:
-        from istota.notification_resolvers import connected_service
-
-        connected_service.raise_for_service(
-            config, ctx.user_id, gm.SECRET_SERVICE, reason=reason,
-        )
-    except Exception:  # noqa: BLE001 - a sync must not fail over a notification
-        logger.warning(
-            "could not raise the Garmin reconnect notification for user=%s",
-            ctx.user_id, exc_info=True,
-        )
+    connected_service.raise_for_service(
+        config, ctx.user_id, gm.SECRET_SERVICE, reason=reason,
+    )
 
 
 def sync_garmin(
@@ -516,7 +515,18 @@ def sync_garmin(
     # Persist any rotated SDK state (H1) — garth's refresh can rotate
     # the OAuth tokens mid-run. Doing this on success only avoids
     # overwriting a previously-good blob with a transiently-broken one.
-    if result.inserted or result.skipped:
+    #
+    # `not auth_error` is the other half of that, and it was missing: a sync
+    # that pulled day 1 and then hit an expired token on day 2 satisfies
+    # `inserted or skipped`, so the write-back ran anyway and undid the
+    # `mark_token_error` from four statements earlier — the wiped blob restored,
+    # the `error` flag cleared, `last_sync` stamped to now. The settings card
+    # then read "Connected" with no error over credentials the remote had just
+    # refused, and since the notification inbox now closes its reconnect row on
+    # the same call, the user was pushed a warning the bell then denied all
+    # knowledge of. A token the remote rejected mid-run is exactly the
+    # "transiently-broken blob" this branch already says it will not write.
+    if (result.inserted or result.skipped) and not result.auth_error:
         try:
             new_tokens = adapter.serialize_tokens()
         except Exception as exc:  # noqa: BLE001

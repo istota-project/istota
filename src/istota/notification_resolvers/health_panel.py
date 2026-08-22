@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import sqlite3
+    from pathlib import Path
 
     from ..config import Config
     from ..notification_sources import NotificationRow, NotificationView
@@ -53,6 +54,16 @@ SEVERITY = "info"
 # (no query strings, deliberately), so the list is where the link goes.
 REVIEW_HREF = "/health/bloodwork"
 
+# How much of a lab name survives into the title. `lab_name` arrives as a form
+# field on the upload with no length check anywhere on that path, and the title
+# is handed to `send_notification(title=…)`, which reaches ntfy as an HTTP
+# header — an oversized one is refused and the push is lost with nothing saying
+# why. Same cap and same reasoning as `confirmations.describe_email`.
+_LAB_CHARS = 60
+
+# `notification_store._STALE_SWEEP_BUSY_TIMEOUT_MS`; see `close_for_panel`.
+_CLOSE_BUSY_TIMEOUT_MS = 2000
+
 
 def dedup_key(panel_id: int | str) -> str:
     """``panel:{id}``, verbatim — see the note on the confirmation source."""
@@ -63,7 +74,7 @@ def title_for(drawn_at: str | None, lab_name: str | None) -> str:
     """The one-line label. One spelling for the producer and the resolver."""
     from ..confirmations import flatten
 
-    lab = flatten(lab_name or "")
+    lab = flatten(lab_name or "")[:_LAB_CHARS]
     when = flatten(drawn_at or "")[:10]
     who = f" from {lab}" if lab else ""
     dated = f" ({when})" if when else ""
@@ -73,7 +84,7 @@ def title_for(drawn_at: str | None, lab_name: str | None) -> str:
 def body_for(drawn_at: str | None, lab_name: str | None) -> str:
     from ..confirmations import flatten
 
-    lab = flatten(lab_name or "")
+    lab = flatten(lab_name or "")[:_LAB_CHARS]
     when = flatten(drawn_at or "")[:10]
     bits = []
     if lab:
@@ -97,12 +108,7 @@ def write(
     drawn_at: str | None = None,
     lab_name: str | None = None,
 ) -> "RaiseResult | None":
-    """Write the row on the caller's connection to the **framework** DB.
-
-    The caller is a web handler that holds a health-module connection, not a
-    framework one, so in practice it goes through :func:`raise_for_panel`. This
-    exists for a producer that does already hold the framework connection.
-    """
+    """Write the row on the caller's connection to the **framework** DB."""
     from ..notification_store import write_notification
 
     return write_notification(
@@ -120,37 +126,50 @@ def write(
     )
 
 
-def raise_for_panel(
-    config: "Config",
+def write_for_panel(
+    db_path: "Path",
     user_id: str,
     *,
     panel_id: int,
     drawn_at: str | None = None,
     lab_name: str | None = None,
-) -> int | None:
-    """Write **and** deliver, on a connection of the store's own.
+) -> None:
+    """Write the row and deliver nothing, on a connection of this call's own.
 
-    `raise_notification` rather than the buffered pair, and the reason its
-    docstring demands be named: the caller is the panel-upload handler, whose
-    only open connection is to the *health module* DB. It holds no write lock on
-    the framework DB — different file, different lock — so there is nothing here
-    for a second connection to wait thirty seconds on.
+    Takes the framework DB path rather than a `Config`, so the one thing the
+    stage line insists on — `ctx.framework_db_path`, never `ctx.db_path` — is
+    the value actually written to rather than a field the caller checks beside
+    one it passes.
+
+    **No delivery, deliberately.** The producer is the upload handler, and the
+    user is looking at the review screen it returns them to; pushing "lab
+    results are waiting to be reviewed" into Talk or ntfy at that moment is a
+    notice about something they are in the middle of doing. It is written
+    always, delivered never — the same split stage 2 records for a confirmation
+    whose question the Talk leg already carried, and `last_delivered_at` is left
+    null so a later re-delivery sweep can tell. The bell is what carries this
+    one, which is the whole point of the item: what makes an abandoned draft
+    panel invisible is not a missing push, it is being excluded from the
+    dashboard and the trends with nowhere else to appear.
+
+    The caller holds no write lock on the framework DB — its only open
+    connection is to the health module DB, a different file with a different
+    lock — so opening one here waits on nothing. Never raises: an inbox row must
+    not be able to fail an upload.
     """
-    from ..notification_store import raise_notification
+    try:
+        from .. import db
 
-    return raise_notification(
-        config, user_id,
-        source=SOURCE,
-        dedup_key=dedup_key(panel_id),
-        title=title_for(drawn_at, lab_name),
-        body=body_for(drawn_at, lab_name),
-        severity=SEVERITY,
-        actionable=True,
-        object_type=OBJECT_TYPE,
-        object_id=str(panel_id),
-        params={"drawn_at": drawn_at or "", "lab_name": lab_name or ""},
-        purpose="alert",
-    )
+        with db.get_db(db_path) as conn:
+            write(
+                conn, user_id, panel_id=panel_id,
+                drawn_at=drawn_at, lab_name=lab_name,
+            )
+    except Exception:
+        logger.warning(
+            "could not write the health panel notification for %r panel %s",
+            user_id, panel_id, exc_info=True,
+        )
 
 
 def resolve_for_panel(
@@ -168,17 +187,18 @@ def resolve_for_panel(
     )
 
 
-def close_for_panel(config: "Config", user_id: str, panel_id: int, *, by: str) -> None:
+def close_for_panel(db_path: "Path", user_id: str, panel_id: int, *, by: str) -> None:
     """`resolve_for_panel` for a caller holding only its health-module connection.
 
-    Never raises: closing an inbox row must not be able to fail a confirmation.
+    Framework DB path in, for the reason given on :func:`write_for_panel`. A
+    short lock budget rather than `get_db`'s thirty-second default: losing the
+    race is the case the resolver backstop covers, and a confirmation must not
+    wait half a minute on an unrelated writer. Never raises.
     """
     try:
         from .. import db
 
-        if getattr(config, "db_path", None) is None:
-            return
-        with db.get_db(config.db_path) as conn:
+        with db.get_db(db_path, busy_timeout_ms=_CLOSE_BUSY_TIMEOUT_MS) as conn:
             resolve_for_panel(conn, user_id, panel_id, by=by)
     except Exception:
         logger.warning(
@@ -188,14 +208,28 @@ def close_for_panel(config: "Config", user_id: str, panel_id: int, *, by: str) -
 
 
 def _panel_id(row: "NotificationRow") -> int | None:
-    """The row's ``object_id`` as an integer, or None. See the confirmation source."""
+    """The row's ``object_id`` as a positive integer, or None.
+
+    Positive, unlike the other integer-keyed sources, because this is the one
+    that opens a *different database* on the strength of the id. A panel id is
+    an AUTOINCREMENT rowid, so `0` or a negative names no panel that has ever
+    existed — the row is malformed rather than stale-but-live, and resolving a
+    user's health module to look one up is work done on a value already known to
+    be wrong. See the confirmation source for the coercion itself.
+    """
     try:
-        return int(str(row.object_id).strip())
+        panel_id = int(str(row.object_id).strip())
     except (TypeError, ValueError):
         logger.warning(
             "notification %s names a non-numeric panel id %r", row.id, row.object_id,
         )
         return None
+    if panel_id <= 0:
+        logger.warning(
+            "notification %s names an impossible panel id %r", row.id, row.object_id,
+        )
+        return None
+    return panel_id
 
 
 class HealthPanelResolver:
@@ -225,7 +259,12 @@ class HealthPanelResolver:
         # ever raise it again — the producer fires once, at upload.
 
         if not ctx.db_path.exists():
-            return None
+            # Not "the panel is gone": the module DB being absent is a fault,
+            # and returning None would close a real draft the producer will
+            # never raise again — it fires once, at upload. Raising instead
+            # lands in `list_open`'s per-row guard, which degrades this row to
+            # its stored text and leaves it open.
+            raise FileNotFoundError(ctx.db_path)
 
         with health_db.connect(ctx.db_path) as health_conn:
             panel = health_db.get_panel(health_conn, panel_id)

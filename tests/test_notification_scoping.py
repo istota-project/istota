@@ -208,28 +208,37 @@ def _panel_state(config, notification_id):
 def health_panels(config, conn):
     """Alice and Bob each hold a draft panel `12`, and each an inbox row for it.
 
-    Written through `raise_for_panel`, which is what the upload route calls, so
+    Written through `write_for_panel`, which is what the upload route calls, so
     the dedup key and the `object_id` under test are the producer's own rather
-    than a hand-built approximation of them. The fixture commits and drops the
-    session connection first: `raise_for_panel` opens one of its own, exactly as
-    the route does, and would otherwise wait out the busy timeout.
+    than a hand-built approximation of them — and it is handed
+    `ctx.framework_db_path`, the value the stage line insists on. The fixture
+    commits and drops the session connection's transaction first: the producer
+    opens a connection of its own, exactly as the route does, and would
+    otherwise wait out the busy timeout.
     """
     conn.commit()
     made = {}
     for user in ("alice", "bob"):
         ctx = _health_ctx(config, user)
         _make_panel(ctx)
-        made[user] = {
-            "ctx": ctx,
-            "notification_id": panel_source.raise_for_panel(
-                config, user, panel_id=PANEL_ID,
-                drawn_at="2026-08-01", lab_name="Test Lab",
-            ),
-        }
+        panel_source.write_for_panel(
+            ctx.framework_db_path, user, panel_id=PANEL_ID,
+            drawn_at="2026-08-01", lab_name="Test Lab",
+        )
+        made[user] = {"ctx": ctx, "notification_id": _notification_id(config, user)}
     assert made["alice"]["notification_id"] is not None
     assert made["bob"]["notification_id"] is not None
     assert made["alice"]["notification_id"] != made["bob"]["notification_id"]
     return made
+
+
+def _notification_id(config, user_id):
+    with db.get_db(config.db_path) as c:
+        row = c.execute(
+            "SELECT id FROM notifications WHERE user_id = ? AND source = ?",
+            (user_id, panel_source.SOURCE),
+        ).fetchone()
+    return row["id"] if row else None
 
 
 def test_a_panel_row_appears_when_the_upload_creates_a_draft(config, health_panels):
@@ -248,7 +257,9 @@ def test_confirming_one_users_panel_12_leaves_the_others_row_open(
     config, health_panels,
 ):
     """The defect the index and the `user_id` argument exist for."""
-    panel_source.close_for_panel(config, "alice", PANEL_ID, by="web")
+    panel_source.close_for_panel(
+        health_panels["alice"]["ctx"].framework_db_path, "alice", PANEL_ID, by="web",
+    )
 
     assert _panel_state(config, health_panels["alice"]["notification_id"]) == "resolved"
     assert _panel_state(config, health_panels["bob"]["notification_id"]) == "open"

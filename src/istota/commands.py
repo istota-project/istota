@@ -982,11 +982,20 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
+        from .notification_resolvers import cron_job as cron_job_source
+
+        # Closed here too, and `disable` is the case the resolver cannot cover:
+        # disabling by hand leaves `consecutive_failures` where it was, so an
+        # inbox row raised by an earlier auto-disable would keep telling the
+        # user to re-enable a job they have just switched off on purpose —
+        # forever, since object-backed rows are never age-swept.
         if update_job_enabled_in_cron_md(config, user_id, job_name, False):
             db.disable_scheduled_job(conn, job.id)
+            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
             return f"Disabled scheduled job '{job_name}'."
         # Fallback: no CRON.md file, update DB directly
         db.disable_scheduled_job(conn, job.id)
+        cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
         return f"Disabled scheduled job '{job_name}'. Note: no CRON.md file found — change is DB-only and may not persist."
 
     # Default: list all jobs
