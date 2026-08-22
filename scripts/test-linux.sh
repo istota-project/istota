@@ -274,7 +274,7 @@ fi
 # no test carries is harmless. tests/test_linux_runner.py fails if this set
 # ever falls behind addopts — which is the direction that would silently start
 # running a marker meant to be off by default.
-default_markers='linux or (not integration and not live and not image and not smoke and not full and not ml)'
+default_markers='linux or (not integration and not live and not image and not smoke and not full and not testbed and not ml)'
 pytest_args=(-m "$default_markers" "$@")
 
 # pytest writes its cache beside the rootdir, and the rootdir is the read-only

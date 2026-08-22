@@ -2,7 +2,7 @@
 
 Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 13,900 tests across ~414 files; the frontend has its own vitest suite under `web/`.
 
-Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The five discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
+Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The six discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
 
 ## What to install
 
@@ -37,7 +37,7 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Every run ends with one verdict line on stderr — `qtest: PASS exit=0 time=3m41s cmd: uv run pytest`, or `FAIL`, or `KILLED-SIGKILL`, or `NO-SLOT` — so a run read through `| tail`, which reports the pipe's exit code rather than the suite's, still says plainly how it went; stdout is left untouched. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
-Seven marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
+Eight marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
 |---|---|---|
@@ -47,11 +47,12 @@ Seven marker sets are deselected by default (also via `addopts`), each with a di
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
 | `smoke` | a Docker daemon | `uv run pytest -m smoke -n0` |
 | `full` | a Docker daemon, and the network — see below | `uv run pytest -m full -n0` |
+| `testbed` | a Docker daemon, and no istota image | `uv run pytest -m testbed -n0` |
 | `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
 
 **The cgroup tests need a subtree the driver builds.** `task_cgroup.resolve_root()` reads `/proc/self/cgroup` and truncates at the `.service` / `.scope` component; under Docker's default private cgroup namespace that file reads `0::/`, so it answers `None` however writable the tree is, and the `linux`-marked cgroup tests would skip inside the one runner meant to execute them. `scripts/dev/linux-tier-cgroup.sh`, sourced by the driver, remounts `/sys/fs/cgroup` read-write, empties the container's own cgroup into a `supervisor/` leaf (the `DelegateSubgroup=` shape — cgroup v2 will not let one cgroup both hold processes and enable controllers for its children), turns on the controllers, and exports `ISTOTA_TEST_CGROUP_ROOT` only after proving a `memory.max` write succeeds. The tests treat that variable as a promise: set and unusable is a failure, unset is an honest skip. So a Docker without `SYS_ADMIN` or with a read-only cgroup2 mount loses those tests and keeps the rest of the tier.
 
-An eighth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
+A ninth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
 `image`, `smoke` and `full` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. The conftest fails the session with that reason rather than letting it happen.
 
@@ -61,17 +62,20 @@ An eighth marker, `requires_dac`, is not deselected: it skips itself when the pr
 
 ## Deployment tiers
 
-Five discretionary tiers, none of them automatic, each answering "does the artifact match what the code assumes?" rather than "does the code do the right thing?".
+Six discretionary tiers, none of them automatic. Five answer "does the artifact match what the code assumes?" rather than "does the code do the right thing?"; `testbed` is the exception and is described below.
 
 ```bash
 scripts/test-linux.sh                        # the suite + the linux tests, on a real kernel
 uv run pytest -m image -n0                   # the built image's contract
 uv run pytest -m smoke -n0                   # end-to-end against the lean compose stack
 uv run pytest -m full -n0                    # end-to-end against the full stack, incl. a real Nextcloud
+uv run pytest -m testbed -n0                 # wire-level email against a real IMAP/SMTP server
 scripts/test-upgrade.sh                      # the current image over an older release's state
 ```
 
-**All four need a Docker daemon that will create and start containers, so a sandboxed agent task cannot run any of them.** A task reaches Docker through the devbox allowlist proxy, which permits ping, version, container list, and inspect, archive, restart and exec against the task's own container — and nothing that creates or starts one. The Linux tier additionally wants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and unconfined seccomp, which is the exact capability the sandbox exists to deny. This is structural, not a misconfiguration: widening the allowlist to admit it would hand every task a host escape.
+**`testbed` is the odd one and is worth one paragraph.** It builds no istota image and brings up no stack: it runs a small mail server in a container and calls `poll_emails` and the email skill directly against it, over a local SQLite database. So it is not an artifact tier — it is the only place in the tree that opens a socket to a real IMAP or SMTP server, which is what inbound email routing, thread matching and the untrusted-sender gate have repeatedly needed and never had. It is deselected because it needs Docker, and it needs `-n0` because the mail container and its two mailboxes are session-scoped.
+
+**All of them need a Docker daemon that will create and start containers, so a sandboxed agent task cannot run any of them.** A task reaches Docker through the devbox allowlist proxy, which permits ping, version, container list, and inspect, archive, restart and exec against the task's own container — and nothing that creates or starts one. The Linux tier additionally wants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and unconfined seccomp, which is the exact capability the sandbox exists to deny. This is structural, not a misconfiguration: widening the allowlist to admit it would hand every task a host escape.
 
 The two shell drivers refuse up front when `ISTOTA_SANDBOXED` is set, and say so rather than failing later. They have to refuse *before* their daemon precheck, because `docker version` is on the proxy's allowlist — a task passes that precheck and would otherwise die minutes later inside `docker build`, reporting a buildx driver error that describes nothing about the real boundary. The `image` and `smoke` tiers precheck with `docker info`, which the proxy denies, so they skip on their own.
 
@@ -88,6 +92,7 @@ When to run each:
 | `-m image --platform amd64` | before a release, on a non-amd64 machine | about ten minutes under emulation. It checks the deployment architecture rather than reaching tests nothing else runs — since ISSUE-280 the devbox image builds natively too, so its assertions are covered by a plain `-m image` |
 | `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about a minute against a warm layer cache: one stack per profile rather than per test, so most of it is the three boots |
 | `-m full` | you touched `entrypoint.sh`, `provision-nc.sh`, `docker-compose.yml`, or anything about first-boot provisioning; and before a release | about a minute and a half against warm image and layer caches, most of it Nextcloud installing itself on a cold volume set |
+| `-m testbed` | you touched inbound email — routing, threading, the confirmation gate, the DMARC canary — or anything in `skills/email/` | about half a minute, one small container |
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |
 
