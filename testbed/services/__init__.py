@@ -147,6 +147,12 @@ def _nextcloud_service(*args, **kwargs) -> Service:
     return nextcloud.attach(*args, **kwargs)
 
 
+def _mail_service(*args, **kwargs) -> Service:
+    from . import mail
+
+    return mail.serve(*args, **kwargs)
+
+
 #: Profile service names to the factory that produces one. A profile names
 #: services by string, so a typo is a `KeyError` at fixture setup rather than an
 #: import error; `tests/test_testbed_services.py` closes that by checking every
@@ -155,6 +161,7 @@ REGISTRY: dict[str, Callable[..., Service]] = {
     "model": _model_service,
     "gitlab": _gitlab_service,
     "nextcloud": _nextcloud_service,
+    "mail": _mail_service,
 }
 
 #: Registry names that open a listening socket in the pytest process.
@@ -168,11 +175,14 @@ REGISTRY: dict[str, Callable[..., Service]] = {
 #: something false about half of it.
 HOST_STUBS = frozenset({"model", "gitlab"})
 
-#: Registry names that attach to something the compose stack already runs.
+#: Registry names that attach to something a compose file already runs.
 #:
-#: One member so far, and the shape it establishes is what the spec's `mail`
-#: service will join: a real server we control rather than one we wrote.
-ATTACHED = frozenset({"nextcloud"})
+#: Both are real servers we control rather than ones we wrote, which is the
+#: distinction this package draws between a service and a stub. `nextcloud` is
+#: declared by the shipped compose file; `mail` is added by the profile's own
+#: overlay. Neither opens a socket in the pytest process, so neither has a
+#: credential to publish and the credential rule does not reach them.
+ATTACHED = frozenset({"nextcloud", "mail"})
 
 
 def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
@@ -238,6 +248,16 @@ def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
             stub.close()
             raise
         return stub
+
+    if name == "mail":
+        from . import mail
+
+        # Starts nothing: the profile's mail overlay runs the container inside
+        # the compose project, where the daemon reaches it as `mail` on the
+        # standard ports — which is what keeps istota's port-based TLS branch
+        # under test. What this produces is the certificate that overlay binds
+        # and the variables that point the shipped generator at the server.
+        return mail.serve(scratch / "mail")
 
     if name == "nextcloud":
         from . import nextcloud

@@ -1,0 +1,86 @@
+# The mail overlay: a real mail server inside the project, and an istota that
+# trusts its certificate.
+#
+# A harness *addition* rather than a concession — unlike `testbed/compose/
+# testbed.yml`, which changes how the shipped deployment behaves. This adds a
+# service the deployment never has, and the only thing it changes about istota
+# is which certificate authority that container trusts. Merged over either
+# shape: `docker-compose.test.yml` for the lean `mail` profile,
+# `docker-compose.yml` (plus `testbed.yml`) for the full one. It goes on before
+# `testbed.yml` so nothing here can undo the seccomp grant.
+#
+# Maddy, not a stub, and the reasoning is in `testbed/services/mail.py`. What
+# matters at this level is the port pairing: istota picks its TLS mode by port
+# number alone — 993 and 465 mean implicit TLS, anything else means STARTTLS —
+# and inside this network the server is `mail` on exactly those two, so the
+# branch the daemon takes is the branch a real deployment takes.
+#
+# Every path here arrives through the compose env-file. Compose resolves a
+# relative bind against the *first* `-f` file's directory, which is `docker/`,
+# not this package — so a relative path would silently point somewhere else.
+# `MailService.compose_env()` is what writes them; `docker-compose.test.yml`
+# already handles the rendered config directory the same way.
+
+services:
+  mail:
+    image: ${ISTOTA_TESTBED_MAIL_IMAGE:?the harness must export ISTOTA_TESTBED_MAIL_IMAGE}
+    hostname: mail
+    environment:
+      MADDY_HOSTNAME: mail
+
+    # Both SQLite files — credentials and mailboxes — on tmpfs, so a recreated
+    # container is an empty server with no accounts, and the entrypoint below
+    # makes them again. Nothing about this server is meant to outlive a session.
+    tmpfs:
+      - /data
+
+    volumes:
+      - ${ISTOTA_TESTBED_MAIL_CONF:?the harness must export ISTOTA_TESTBED_MAIL_CONF}/maddy.conf:/data/maddy.conf:ro
+      - ${ISTOTA_TESTBED_MAIL_CONF}/accounts.conf:/data/accounts.conf:ro
+      - ${ISTOTA_TESTBED_MAIL_CONF}/entrypoint.sh:/data/entrypoint.sh:ro
+      - ${ISTOTA_TESTBED_MAIL_CERT:?the harness must export ISTOTA_TESTBED_MAIL_CERT}:/data/tls/fullchain.pem:ro
+      - ${ISTOTA_TESTBED_MAIL_KEY:?the harness must export ISTOTA_TESTBED_MAIL_KEY}:/data/tls/privkey.pem:ro
+
+    entrypoint:
+      - /bin/sh
+      - /data/entrypoint.sh
+
+    # All four, on an ephemeral host port each. The implicit-TLS pair is how the
+    # harness drives the server — putting mail in, reading replies out. The
+    # STARTTLS pair exists for a caller that has to hand istota's *own* config a
+    # host port: a published port is never 993, so such a config would take the
+    # STARTTLS branch whatever sat behind it, and this way the branch matches
+    # the endpoint. Loopback only: an unauthenticated laptop on a shared network
+    # is the hazard `HttpStub`'s credential rule exists for, and a mail server
+    # published on every interface is the same hazard with a bigger blast area.
+    ports:
+      - "127.0.0.1::993"
+      - "127.0.0.1::465"
+      - "127.0.0.1::143"
+      - "127.0.0.1::587"
+
+  istota:
+    depends_on:
+      mail:
+        condition: service_started
+
+    volumes:
+      - ${ISTOTA_TESTBED_MAIL_CERT}:/etc/istota-testbed/mail-ca.crt:ro
+
+    environment:
+      # The certificate is self-signed, so the leaf is its own trust anchor.
+      #
+      # `SSL_CERT_FILE` rather than an `ssl_context` parameter in the email
+      # code: `skills/email/__init__.py` builds every context with
+      # `ssl.create_default_context()` and has no custom-CA or no-verify path,
+      # which is a property worth keeping. Adding a TLS-weakening knob to
+      # production code so a test can run is the trade this avoids; OpenSSL
+      # reads this variable, so it works entirely outside the application.
+      #
+      # It *replaces* the public trust store in this container rather than
+      # adding to it, and that is the concession. Nothing in any profile makes
+      # an outbound TLS connection to anything else — the model endpoint, the
+      # forge stub and Nextcloud are all plain HTTP inside the project — so
+      # today it costs nothing. A scenario that needs a public CA has to
+      # concatenate one in here rather than assume it is present.
+      SSL_CERT_FILE: /etc/istota-testbed/mail-ca.crt

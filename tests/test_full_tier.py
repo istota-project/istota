@@ -117,10 +117,11 @@ class TestTheModuleSwitches:
     def test_every_owner_is_a_service_that_exists_or_is_planned(self):
         """A typo in an owner name silently leaves its module off forever.
 
-        `mail` and `feeds` are named by the map before the registry holds them,
-        because the switches they own are the ones a `full` profile most needs
-        turned *off* today. `PLANNED_SERVICES` is what keeps the guard from
-        degrading into "accept any string".
+        `feeds` is named by the map before the registry holds it, because the
+        switch it owns is one a `full` profile needs turned *off* today.
+        `PLANNED_SERVICES` is what keeps the guard from degrading into "accept
+        any string". `mail` was on that list until Stage 6 registered it, and
+        the ratchet below is what forced it off.
         """
         from testbed.services import REGISTRY
 
@@ -129,8 +130,10 @@ class TestTheModuleSwitches:
             assert owner == "" or owner in known, (variable, owner)
 
     def test_a_planned_service_that_landed_must_be_taken_off_the_list(self):
-        """The ratchet. Once `mail` is in the registry, leaving it named here
-        would let a typo in a *future* planned name pass unnoticed."""
+        """The ratchet, and it has fired once. `mail` went into the registry in
+        Stage 6 and this is what refused to pass until it came off the planned
+        list — because leaving a landed name there would let a typo in a
+        *future* planned one go unnoticed."""
         from testbed.services import REGISTRY
 
         assert not compose_support.PLANNED_SERVICES & set(REGISTRY)

@@ -24,6 +24,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+#: The compose overlay that runs the mail container, on either shape.
+#:
+#: A literal path rather than an import from `services.mail`, which would make
+#: this module import a service module and close a cycle: `services/__init__`
+#: is what resolves a profile's service names.
+MAIL_OVERLAY = Path(__file__).resolve().parent / "compose" / "mail" / "mail.yml"
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -70,6 +77,15 @@ class Profile:
     """Extra `-f` files, merged over the shape's base in order."""
 
 
+#: Both mail profiles poll every five seconds rather than every sixty.
+#:
+#: `ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL` is read by `render-config.sh` and
+#: passed through by `docker-compose.yml`, so this is a legitimate wiring rather
+#: than a fixture reaching past the generator. Sixty would put a minute of dead
+#: wait into every mail scenario, which on a session-scoped stack is a minute
+#: per test rather than one per session.
+MAIL_CONFIG = {"ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL": "5"}
+
 BASE = Profile("base")
 FORGE = Profile("forge", services=("model", "gitlab"))
 
@@ -88,16 +104,31 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 # is where the tier spends its cold boot, and the extra poller is what the
 # watermark discipline absorbs.
 #
-# The `mail` service the spec's sketch names is not here yet — Stage 6 adds it,
-# along with the overlay that runs the container. A profile naming a service the
-# registry does not hold fails the guard in `tests/test_testbed_services.py`,
-# which is the point of that guard.
-FULL = Profile("full", shape="full", services=("model", "nextcloud"))
+# And it carries mail, because a second full profile would be a second cold
+# boot of the same six containers to run one attachment scenario.
+FULL = Profile(
+    "full",
+    shape="full",
+    services=("model", "nextcloud", "mail"),
+    config=MAIL_CONFIG,
+    compose_overlays=(MAIL_OVERLAY,),
+)
+
+# The lean deployed mail path: a real mail server, a real daemon polling it, and
+# no Nextcloud. `poll_emails` needs none for attachment-free mail, so everything
+# except the attachment upload is reachable thirty seconds after `up` rather
+# than a minute.
+MAIL = Profile(
+    "mail",
+    services=("model", "mail"),
+    config=MAIL_CONFIG,
+    compose_overlays=(MAIL_OVERLAY,),
+)
 
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
-ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, FULL)
+ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, MAIL, FULL)
 
 
 def by_name(name: str) -> Profile:

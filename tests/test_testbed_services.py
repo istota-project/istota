@@ -22,7 +22,7 @@ import pytest
 from testbed import profiles, services
 from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
-from testbed.services import REGISTRY, ServiceCall, gitlab
+from testbed.services import REGISTRY, ServiceCall, gitlab, mail
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
@@ -336,12 +336,21 @@ class TestConfigEnvNamesOnlyShippedVariables:
 
     @pytest.fixture
     def services(self, tmp_path):
-        """One of each conforming service, on loopback, started and stopped."""
+        """One of each conforming service that has a `config_env()` to check.
+
+        `mail` is here and costs nothing: `serve()` starts no container — the
+        profile's compose overlay does that — so it is a certificate written
+        into `tmp_path` and a dictionary. `nextcloud` is absent because its
+        `config_env()` is empty by design, the shipped compose file already
+        pointing the daemon at its own service.
+        """
         endpoint = serve_script([{"text": "ok"}])
         forge = gitlab.serve(tmp_path / "repos")
+        post = mail.serve(tmp_path / "mail")
         try:
-            yield {endpoint.name: endpoint, forge.name: forge}
+            yield {endpoint.name: endpoint, forge.name: forge, post.name: post}
         finally:
+            post.close()
             forge.close()
             endpoint.close()
 

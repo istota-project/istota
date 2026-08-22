@@ -301,7 +301,7 @@ TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
 LEAN_READY_TIMEOUT = 120
 
 #: The tiers that must run `-n0`, and therefore the ones the guard below covers.
-SERIAL_TIER_MARKERS = ("smoke", "full")
+SERIAL_TIER_MARKERS = ("smoke", "full", "testbed")
 
 #: Every compose project these tiers create starts with it, which is what makes
 #: the session-start sweep able to find leftovers without touching anything else
@@ -314,10 +314,12 @@ PROJECT_PREFIX = "istota-testbed-"
 LEGACY_PROJECT_PREFIXES = ("istota-smoke-",)
 
 _XDIST_MESSAGE = (
-    "the smoke and full tiers must run with -n0. Session-scoped fixtures are "
-    "per-worker, so N workers would each build the image and bring up their own "
-    "stacks under one project prefix, race the same daemon, and sweep each "
-    "other's projects."
+    "the smoke, full and testbed tiers must run with -n0. Session-scoped "
+    "fixtures are per-worker, so N workers would each build the image and bring "
+    "up their own stacks under one project prefix, race the same daemon, and "
+    "sweep each other's projects. The wire tier is milder and still wrong: N "
+    "workers would each start a mail container, and the assertions there are "
+    "about what is in a mailbox."
 )
 
 # What a test gets when it declares no `script` marker. One plain answer, which

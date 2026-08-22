@@ -738,7 +738,7 @@ def render_config(
 #: the same as not checking for a typo at all. It is also a ratchet: a unit test
 #: asserts this set and `REGISTRY` stay disjoint, so registering `mail` fails
 #: until the name is removed from here.
-PLANNED_SERVICES = frozenset({"mail", "feeds"})
+PLANNED_SERVICES = frozenset({"feeds"})
 
 #: Every module `docker-compose.yml` turns on by default, mapped to the service
 #: whose presence in a profile is what turns it back on. Empty means nothing in
@@ -952,7 +952,56 @@ def full_env(
                 "owns; a profile cannot rename the users or move the port"
             )
         environment[variable] = value
+    environment.update(compose_env(services, claimed=claimed, reserved=reserved))
     return environment
+
+
+def compose_env(
+    services: dict[str, Service],
+    *,
+    claimed: dict[str, str] | None = None,
+    reserved: set[str] | None = None,
+) -> dict[str, str]:
+    """Interpolation variables the profile's overlays need, from the services.
+
+    Distinct from `config_env()`, and held to a different rule. That one points
+    the *daemon* at a service and may only name variables the shipped generator
+    reads and `docker-compose.yml` passes through — the property that makes the
+    whole tier honest. These are host paths and image tags a compose *overlay*
+    binds, which configure nothing about istota and appear in no shipped file.
+
+    They exist because compose resolves a relative bind against the first `-f`
+    file's directory, which is `docker/` rather than this package, so an overlay
+    living here can only name an absolute path handed to it. That is already how
+    `docker-compose.test.yml` receives the rendered config directory.
+
+    Optional on the protocol, read by `getattr`: five of the six services need
+    no overlay and would otherwise carry an empty method apiece. The same claim
+    and reservation guards apply as for `config_env`, so an overlay variable
+    cannot silently overwrite a config one or the stack's own identity.
+    """
+    claimed = {} if claimed is None else claimed
+    reserved = set() if reserved is None else reserved
+    collected: dict[str, str] = {}
+    for name, service in services.items():
+        provider = getattr(service, "compose_env", None)
+        if provider is None:
+            continue
+        for variable, value in provider().items():
+            if variable in claimed:
+                raise StackError(
+                    f"{name} and {claimed[variable]} both set {variable}; one "
+                    "of them would silently win and the stack would boot "
+                    "pointing at the other"
+                )
+            if variable in reserved:
+                raise StackError(
+                    f"{name} sets {variable}, which the stack itself owns; a "
+                    "service cannot rename the users or move the published port"
+                )
+            claimed[variable] = name
+            collected[variable] = value
+    return collected
 
 
 def write_env_file(path: Path, environment: dict[str, str]) -> Path:
@@ -1167,6 +1216,41 @@ class Stack:
                 text=True,
                 timeout=timeout,
             )
+
+    def published_port(self, service: str, container_port: int) -> int:
+        """Which host port compose published `service`'s `container_port` on.
+
+        Asked of compose rather than fixed in a file, because the overlays that
+        publish anything bind `127.0.0.1::<port>` and let Docker choose — a
+        fixed host port collides with a developer's own stack and with a second
+        worktree, which `docker-compose.yml`'s `NC_PORT` already taught this
+        tier once.
+
+        `docker compose port` answers `0.0.0.0:54321` or `127.0.0.1:54321`, and
+        may answer with more than one line when a port is published on several
+        interfaces; the first is taken and the address discarded, since the
+        caller reaches it on loopback either way.
+        """
+        result = subprocess.run(
+            self.args + ["port", service, str(container_port)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        first = (result.stdout or "").strip().splitlines()
+        if result.returncode != 0 or not first:
+            raise StackError(
+                f"compose could not say which host port {service}:"
+                f"{container_port} is published on (exit {result.returncode})\n"
+                f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            )
+        _, _, port = first[0].rpartition(":")
+        if not port.isdigit():
+            raise StackError(
+                f"compose answered {first[0]!r} for {service}:{container_port}, "
+                "which does not end in a port number"
+            )
+        return int(port)
 
     def submit(self, prompt: str, *, user_id: str = "testuser") -> int:
         """Enqueue a task through the shipped CLI and return its id.
@@ -1594,6 +1678,23 @@ class Stack:
         )
 
 
+def _bind_services(stack: "Stack") -> None:
+    """Hand the running stack to any service that cannot exist without one.
+
+    Two so far, for the same reason and on both shapes. `NextcloudService`
+    attaches to a container the boot just started and needs a way to run `occ`
+    inside it. `MailService` needs the host ports compose published, which are
+    ephemeral and do not exist until `up` returns.
+
+    Duck-typed rather than a protocol member, because four of the six services
+    have nothing to bind and would carry an empty method apiece.
+    """
+    for service in stack.services.values():
+        binder = getattr(service, "bind_stack", None)
+        if binder is not None:
+            binder(stack)
+
+
 @dataclass(frozen=True)
 class LeanShape:
     """Everything booting a lean stack needs that the profile does not carry.
@@ -1789,7 +1890,7 @@ class StackPool:
                 services[name] = service_support.build(
                     name, scratch=scratch, host=PUBLIC_BIND
                 )
-            args = self._compose_args(profile, scratch, config_dir)
+            args = self._compose_args(profile, scratch, config_dir, services)
             render_config(
                 self.lean.render_script,
                 config_dir,
@@ -1819,9 +1920,20 @@ class StackPool:
                     logger.debug("closing a service during a failed boot raised")
             raise
 
-        return Stack(
+        stack = Stack(
             profile=profile, args=args, services=services, config_dir=config_dir
         )
+        try:
+            _bind_services(stack)
+        except BaseException:
+            down(args, volumes=True)
+            for service in services.values():
+                try:
+                    service.close()
+                except Exception:  # pragma: no cover - cleanup is best effort
+                    logger.debug("closing a service during a failed boot raised")
+            raise
+        return stack
 
     def _boot_full(self, profile: Profile) -> Stack:
         """Bring up the deployment as shipped and wait for it to provision itself.
@@ -1894,15 +2006,7 @@ class StackPool:
             stack = Stack(
                 profile=profile, args=args, services=services, env=environment
             )
-            # The one service that cannot be built before the stack is: it
-            # attaches to a container this boot just started, and it needs a way
-            # to run `occ` inside it. Bound after the fact rather than by
-            # threading the argument list through `services.build`, which has no
-            # stack to give it.
-            for service in services.values():
-                binder = getattr(service, "bind_stack", None)
-                if binder is not None:
-                    binder(stack)
+            _bind_services(stack)
             # The health check answers "the tasks table exists", which
             # `entrypoint.sh` satisfies at `istota init` — several steps before
             # it execs the scheduler. A scenario submitting into that gap gets a
@@ -2013,7 +2117,11 @@ class StackPool:
         )
 
     def _compose_args(
-        self, profile: Profile, scratch: Path, config_dir: Path
+        self,
+        profile: Profile,
+        scratch: Path,
+        config_dir: Path,
+        services: dict[str, Service] | None = None,
     ) -> list[str]:
         """The compose prefix, and the env-file everything in it rides in.
 
@@ -2039,6 +2147,10 @@ class StackPool:
         if profile.image:
             lines.append(f"ISTOTA_TEST_IMAGE={profile.image}")
             overlays.append(self.lean.prebuilt_overlay)
+        # Whatever the profile's own overlays need to resolve their binds. Empty
+        # on every profile that names no overlay, which is most of them.
+        for variable, value in compose_env(services or {}).items():
+            lines.append(f"{variable}={value}")
         env_file.write_text("\n".join(lines) + "\n")
         return compose_args(
             self.lean.compose_file,
