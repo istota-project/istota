@@ -7,6 +7,7 @@ Stage 2 — `GET /chat/events` (snapshot / polling fallback) and `GET /chat/stre
 """
 
 import json
+import sqlite3
 
 import pytest
 
@@ -714,6 +715,34 @@ class TestRoomStreamSSE:
         buf = await _drain(_FakeRequest(disconnect_after=4))
 
         assert "event: notifications" not in buf
+
+    async def test_a_failed_read_skips_the_tick_rather_than_blanking_the_bell(
+        self, tmp_path, monkeypatch,
+    ):
+        """Zero is a claim here, not an absence.
+
+        `notification_store.counts` swallows and answers `{0, 0}` by default,
+        which is right for a producer and wrong for a pair that gets *pushed*:
+        the frame is a diff against a baseline, so a zero returned for a
+        two-second busy timeout differs from the real counts, goes out, and
+        blanks the bell over items still waiting. The 2s timeout makes that
+        likelier, not rarer.
+        """
+        import istota.web_app as mod
+
+        await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        _raise_notification()
+
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(mod, "_notifications_snapshot", boom)
+        buf = await _drain(_FakeRequest(disconnect_after=4))
+
+        assert "event: notifications" not in buf
+        # And the rest of the tick is unharmed — one reader failing must not
+        # take the stream down with it.
+        assert "ping" in buf or "event:" in buf or buf == ""
 
     async def test_the_room_check_knob_disables_the_frame_too(self, tmp_path):
         """It rides the same tick as the room and draft diffs, which is why

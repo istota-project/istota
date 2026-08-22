@@ -5487,13 +5487,31 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
 
     Nothing here delivers. A migration that pushed would fan every held item in
     the backlog out to Talk and ntfy at once, and `last_delivered_at` is left
-    null so a later re-delivery sweep still knows nobody was told.
+    null so nothing later mistakes these for rows a user was told about.
+
+    Two scope calls worth stating rather than leaving to be discovered:
+
+    `pending` drafts only, not `sending`. A row stuck in `sending` is one whose
+    process died between the claim and the finalize, and the resolver *does*
+    render it — with a status note and no actions, because nobody can say
+    whether the mail went out. Seeding it here would need a per-row `actionable`
+    and a stored body that does not say "Nothing was sent", which the spec
+    scoped to `pending` and this stage is not the place to widen. A pre-upgrade
+    row in that state stays invisible; noted so somebody can decide it.
+
+    The keys are the producers' own; the stored *text* deliberately is not
+    everywhere. The daemon's draft producer names only the single recipient it
+    held on, while this names the whole To/Cc set (Bcc by count) because the row
+    is right here to read. Both are fallback text — the resolver rebuilds title
+    and body from the live draft on every panel read — and the fuller one is the
+    better fallback.
 
     Markered (`notifications_backfill_v1`) and structurally idempotent
     regardless. Any failure returns without writing the marker, so the next
     `istota init` retries the whole pass.
     """
     from . import confirmations  # noqa: PLC0415 — `confirmations` imports db
+    from . import outbound_drafts as drafts  # noqa: PLC0415
     from .notification_resolvers import confirmation as confirmation_source  # noqa: PLC0415
     from .notification_resolvers import outbound_draft as draft_source  # noqa: PLC0415
 
@@ -5503,7 +5521,11 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
             (_NOTIFICATIONS_BACKFILL_MARKER,),
         ).fetchone()
     except sqlite3.OperationalError:
-        return  # marker table not created yet (very early fresh install)
+        # Not the fresh-install path — `_migration_state` is created earlier in
+        # `_run_migrations`, on this same connection. Reaching here means an
+        # earlier statement in that block already failed, so the honest move is
+        # to do nothing and let the next run try again.
+        return
     if already:
         return
 
@@ -5511,21 +5533,51 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
     # the whole scan. Re-reading under the lock would buy nothing: the objects
     # can only stop being held, and `INSERT OR IGNORE` plus the resolvers'
     # close paths handle one that did.
+    #
+    # Every read below is inside this block, not only the two queries. The row
+    # build calls `get_task` and `confirmations.describe`, both of which read —
+    # and `describe` reads `processed_emails`, whose `uidvalidity` column is
+    # created by a migration that logs and re-arms on failure rather than
+    # raising. An unguarded build therefore turned that migration's documented
+    # retry state into "no such column: uidvalidity" escaping out of
+    # `_run_migrations`, which aborts `init_db` before `schema.sql` runs and so
+    # kills every migration after this one. That is the ISSUE-261 blast radius
+    # reached by a different road.
+    rows: list[tuple] = []
     try:
         held_tasks = conn.execute(
-            "SELECT id FROM tasks WHERE status = 'pending_confirmation' ORDER BY id"
+            "SELECT id FROM tasks WHERE status = ? ORDER BY id",
+            (confirmation_source.HELD_STATUS,),
         ).fetchall()
+        # The statuses come from the modules that write them, never re-spelled
+        # here — the same rule the resolvers state about their own literals, and
+        # the other half of the keys being the producers' own.
         held_drafts = conn.execute(
             "SELECT id, user_id, to_addrs, cc_addrs, bcc_addrs, subject, "
             "       room_token, created_at "
-            "  FROM outbound_drafts WHERE status = 'pending' ORDER BY id"
+            "  FROM outbound_drafts WHERE status = ? ORDER BY id",
+            (drafts.STATUS_PENDING,),
         ).fetchall()
+        rows = _notification_backfill_rows(
+            conn, held_tasks, held_drafts, confirmations, confirmation_source,
+            draft_source,
+        )
     except sqlite3.OperationalError as e:
         if "no such table" in str(e).lower():
             return  # fresh install — the tables arrive with schema.sql below
         logger.warning("notification backfill could not read the queues: %s", e)
         return
+    except Exception as e:  # noqa: BLE001 — never be what aborts init_db
+        logger.warning("notification backfill could not read the queues: %s", e)
+        return
 
+    _notification_backfill_write(conn, rows)
+
+
+def _notification_backfill_rows(
+    conn, held_tasks, held_drafts, confirmations, confirmation_source, draft_source,
+) -> list[tuple]:
+    """The rows to insert. Reads only; the caller owns the guard."""
     rows: list[tuple] = []
     now = iso_utc_now()
     for record in held_tasks:
@@ -5584,24 +5636,54 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
             _iso_z_from_sql_datetime(record["created_at"]),
             now,
         ))
+    return rows
 
+
+def _notification_backfill_write(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    """Insert the rows and stamp the marker, in one transaction of our own."""
     # See the docstring: commit the inherited transaction, then take our own.
     if conn.in_transaction:
         conn.commit()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.executemany(
+        cursor = conn.executemany(
             "INSERT OR IGNORE INTO notifications "
             "(user_id, source, dedup_key, object_type, object_id, severity, "
             " actionable, title, body, room_token, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
             rows,
         )
+        # `OR IGNORE` is here for `UNIQUE (user_id, source, dedup_key)`, but it
+        # swallows NOT NULL and CHECK too — and the marker below lands in the
+        # same transaction, so a row dropped for any other reason is stranded
+        # for good with nothing said. Every skip is a duplicate today; counting
+        # them is what makes the day one is not into something greppable rather
+        # than an item silently missing from somebody's bell.
+        #
+        # `rowcount` is -1 when the driver will not say (an empty `executemany`
+        # among others), which is "unknown", not "none written" — so treat it as
+        # no information rather than letting it report a negative skip and a
+        # negative seed.
+        inserted = cursor.rowcount
+        skipped = len(rows) - inserted if inserted >= 0 else 0
+        if skipped > 0:
+            logger.warning(
+                "notification backfill skipped %d of %d row(s); expected only "
+                "rows a producer had already written", skipped, len(rows),
+            )
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES (?)",
             (_NOTIFICATIONS_BACKFILL_MARKER,),
         )
         conn.execute("COMMIT")
+        # Rows written, not rows offered. `OR IGNORE` means the two differ on
+        # the path `test_a_second_run_before_the_marker_lands_is_still_one_row`
+        # drives, where every row is a duplicate and none is inserted — and a
+        # log line claiming to have seeded them is one an operator would read as
+        # proof the queue came across.
+        written = inserted if inserted >= 0 else len(rows)
+        if written > 0:
+            logger.info("notification backfill seeded %d held item(s)", written)
     except sqlite3.Error as e:
         # `sqlite3.Error`, not OperationalError alone: an IntegrityError out of
         # the insert would otherwise escape and abort `init_db` outright.
@@ -5613,9 +5695,6 @@ def _backfill_notifications(conn: sqlite3.Connection) -> None:
             "notification backfill failed and was rolled back; the held queue "
             "is unchanged and the backfill will be retried: %s", e,
         )
-        return
-    if rows:
-        logger.info("notification backfill seeded %d held item(s)", len(rows))
 
 
 def _json_list(value) -> list[str]:

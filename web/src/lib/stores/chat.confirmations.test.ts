@@ -36,8 +36,15 @@ const api = vi.hoisted(() => ({
   cancelChatTask: vi.fn(),
   confirmChatTask: vi.fn(),
   chatStreamUrl: vi.fn(),
+  // Deliberately still here, on a module that no longer exports it: the point
+  // of the removal test is that the store never reaches for it, and a spy that
+  // does not exist cannot record not being called.
+  listPendingConfirmations: vi.fn(),
   ChatRoomBusyError: class extends Error {},
 }));
+
+/** The rooms reconciler's own interval, restated from `chat.ts`. */
+const ROOMS_REFRESH_MS = 30000;
 
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/stores/persisted', () => ({
@@ -88,6 +95,10 @@ function resetMocks() {
 describe('chat store — the banner is gone', () => {
   beforeEach(resetMocks);
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('exposes no confirmations slice', async () => {
     // Asserted rather than merely deleted: a store still publishing
     // `pendingConfirmations` would let a page mount a second answer path for a
@@ -104,9 +115,21 @@ describe('chat store — the banner is gone', () => {
     // The seed-on-entry call and the 30s rooms-reconciler call both went with
     // the slice. The bell's count is polled by the root layout, from every
     // route, and the room stream's `notifications` frame is the fast path.
+    //
+    // Asserted against a live mock that is still wired up, and driven past the
+    // reconciler's own interval. Asserting that the *mock* has no such key
+    // would pass whatever the store did, which is the shape of a test that
+    // cannot fail; this one fails against the pre-change store on both call
+    // sites.
+    vi.useFakeTimers();
+    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
     const s = await freshSession();
     await s.init();
-    expect((api as Record<string, unknown>).listPendingConfirmations).toBeUndefined();
+    expect(api.listPendingConfirmations).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(ROOMS_REFRESH_MS * 2);
+
+    expect(api.listPendingConfirmations).not.toHaveBeenCalled();
     s.teardown();
   });
 });

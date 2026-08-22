@@ -393,9 +393,18 @@ class TestBackfill:
             assert _rows(conn) == []
 
     def test_a_sending_draft_is_not_backfilled(self, held_db):
-        """`sending` is the claim taken before SMTP and is deliberately
-        terminal. Offering an approval for mail that may already be gone is
-        worse than showing nothing."""
+        """Scoped to `pending`, and this is the honest reason rather than a
+        safety one.
+
+        The resolver *does* render a `sending` row — with a status note and no
+        actions, because nobody can say whether the mail went out — so "it would
+        offer an approval for mail that may already be gone" is not true and
+        must not be written here as though it were. Seeding one would need a
+        per-row `actionable` and a stored body that does not read "Nothing was
+        sent", which the spec scoped to `pending`. A pre-upgrade row stuck in
+        `sending` therefore reaches no web surface at all; that is a known gap
+        recorded in `_backfill_notifications`, not a property worth defending.
+        """
         with db.get_db(held_db) as conn:
             conn.execute(
                 "INSERT INTO outbound_drafts "
@@ -601,6 +610,53 @@ class TestBackfill:
         with db.get_db(held_db) as check:
             assert len(_rows(check)) == 1
             assert _marked(check)
+
+    def test_a_raising_read_re_arms_instead_of_aborting_init(
+        self, held_db, monkeypatch,
+    ):
+        """The blast radius is the whole of `init_db`, not the inbox.
+
+        Building a row calls `get_task` and `confirmations.describe`, and
+        `describe` reads `processed_emails` — whose `uidvalidity` column is
+        created by a migration that logs and re-arms on failure rather than
+        raising. So the documented retry state of *that* migration used to make
+        this one raise "no such column" straight out of `_run_migrations`, which
+        runs before `schema.sql` and would therefore take every migration after
+        it down too. Any read here has to be caught, not just the two queries.
+        """
+        from istota import confirmations
+
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("no such column: uidvalidity")
+
+        with db.get_db(held_db) as conn:
+            _held_task(conn, "alice", "do the thing", "Do the thing?")
+            conn.commit()
+            monkeypatch.setattr(confirmations, "describe", boom)
+
+            db._backfill_notifications(conn)  # must not raise
+
+            assert _rows(conn) == []
+            assert not _marked(conn), "a pass that wrote nothing must re-arm"
+
+    def test_a_raising_read_does_not_abort_the_whole_init(self, held_db, monkeypatch):
+        """The same thing through the real entry point, which is where it bit."""
+        from istota import confirmations
+
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("no such column: uidvalidity")
+
+        with db.get_db(held_db) as conn:
+            _held_task(conn, "alice", "do the thing", "Do the thing?")
+            conn.commit()
+        monkeypatch.setattr(confirmations, "describe", boom)
+
+        db.init_db(held_db)  # must not raise
+
+        with db.get_db(held_db) as conn:
+            # `schema.sql` still ran: the migration after this one is not dead.
+            assert "notifications" in _table_names(conn)
+            assert not _marked(conn)
 
     def test_a_very_early_database_leaves_the_marker_unset(self, tmp_path):
         """No `tasks` table yet. The backfill must not be what breaks init, and

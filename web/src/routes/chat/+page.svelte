@@ -15,7 +15,6 @@
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
   import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
-  import DraftCard from '$lib/components/chat/DraftCard.svelte';
   import {
     isTap,
     nextActivation,

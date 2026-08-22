@@ -2748,13 +2748,21 @@ def _notifications_snapshot(username: str) -> dict[str, int]:
     tick must not park the generator on the scheduler's write lock. It rides the
     same tick as the room and draft diffs, so `room_stream_room_check_seconds =
     0` disables it too — which is why nothing may be tuned down on its account.
+
+    **`strict=True`, so a failed read raises instead of answering zero.** The
+    store never raises by default, which is right for a producer and wrong here:
+    this pair is *pushed*, the frame is a diff against a baseline, and a `{0, 0}`
+    handed back for a two-second busy timeout differs from the real counts, goes
+    out, and blanks the bell over items still waiting — and the low timeout makes
+    that more likely, not less. Raising puts it on the generator's skip-this-tick
+    path, which is what `_room_events_batch` and `_drafts_snapshot` already do.
     """
     from . import db, notification_store  # noqa: PLC0415
 
     with db.get_db(
         _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
     ) as conn:
-        return notification_store.counts(conn, username)
+        return notification_store.counts(conn, username, strict=True)
 
 
 def _room_delta_frames(before: dict[str, dict], after: dict[str, dict]) -> list[dict]:

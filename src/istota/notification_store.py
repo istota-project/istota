@@ -762,13 +762,27 @@ def sweep_retention(conn: sqlite3.Connection) -> int:
 # --- read path -----------------------------------------------------------
 
 
-def counts(conn: sqlite3.Connection, user_id: str) -> dict[str, int]:
+def counts(
+    conn: sqlite3.Connection, user_id: str, *, strict: bool = False,
+) -> dict[str, int]:
     """`{"open": N, "actionable": M}` — plain SQL, no resolvers.
 
     The bell polls this every thirty seconds, and a resolver pass on a timer
     would open per-user module DBs repeatedly. So it is exact immediately after
     any panel open (which runs the liveness pass) and can briefly over-count
     between one panel open and the next if a producer missed a close.
+
+    **`strict=True` is the one exception to this module's never-raises rule,
+    and it exists because zero is a meaningful answer here.** Everywhere else a
+    swallowed failure costs a caller nothing — a producer's row is not written,
+    a sweep does not run — but a caller that publishes this pair *pushes* the
+    zero, and "you have nothing waiting" is a claim, not an absence. The room
+    stream's `notifications` frame is that caller: it diffs against a baseline,
+    so a `{0, 0}` returned for a two-second busy timeout differs from the real
+    counts, goes out as a frame, and blanks the bell over items still waiting.
+    Its two sibling readers on the same tick already let `OperationalError`
+    through for exactly this reason, and the generator skips the tick. The
+    default stays False so every existing caller is unchanged.
     """
     try:
         row = _read(
@@ -783,6 +797,8 @@ def counts(conn: sqlite3.Connection, user_id: str) -> dict[str, int]:
             "actionable": int(row["actionable_count"] or 0),
         }
     except Exception:
+        if strict:
+            raise
         logger.warning("notification counts failed (user=%r)", user_id, exc_info=True)
         return {"open": 0, "actionable": 0}
 
