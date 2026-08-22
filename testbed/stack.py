@@ -40,6 +40,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import probe as probe_support
 from . import services as service_support
 from .probe import Probe
 from .profiles import Profile
@@ -68,33 +69,69 @@ CONTAINER_CONFIG = "/data/config/config.toml"
 # for the same reason.
 IN_FLIGHT = frozenset({"pending", "locked", "running"})
 
+# The same three, as SQL, because `Stack.in_flight` also has to reason about
+# `scheduled_for` and that comparison has to happen in the database.
+_IN_FLIGHT_SQL = "'pending', 'locked', 'running'"
+
 #: The interface a host-side stub binds so a container can reach it. Every stub
 #: bound here has to name a credential; `HttpStub.start` is what enforces that.
 PUBLIC_BIND = "0.0.0.0"
 
 READY_TIMEOUT = 120
 
-# Releasing a parked confirmation, through the daemon's own `cancel_task`
-# rather than a hand-written UPDATE — the harness should not be the second
-# implementation of a status transition.
+# The three pieces of framework state a reset has to *write*, all through the
+# daemon's own functions rather than hand-written SQL — the harness should not
+# be a second implementation of a status transition.
 #
-# Why release at all: `db.py` blocks any foreground task in a room that holds a
-# `locked`, `running` or `pending_confirmation` task, and
-# `confirmation_timeout_minutes` is 120. Under a session-scoped stack a
-# scenario that parks one deliberately would wedge that room for every later
-# test in the profile. It is *not* in-flight — the quiesce loop excludes it on
-# purpose, because a suspended task will not move on its own and treating it as
-# busy would make every reset wait out its whole timeout.
-_RELEASE_CONFIRMATIONS = """
+# A **parked confirmation** wedges a room: `db.py` blocks any foreground task
+# in a room that holds a `locked`, `running` or `pending_confirmation` task,
+# and `confirmation_timeout_minutes` is 120. It is deliberately *not* counted
+# as in-flight, because a suspended task will not move on its own and treating
+# it as busy would make every reset wait out its whole timeout.
+#
+# A **retry row** is a previous test's failed task waiting on the scheduler's
+# backoff (`db.set_task_pending_retry`: `pending`, `scheduled_for` one, four or
+# sixteen minutes out). Cancelled rather than waited on, because a retry of a
+# task some earlier test submitted can never be work this test wants — and if
+# it fires mid-test it consumes a scripted turn, which is the exact failure the
+# barrier exists to prevent, arriving by a route the barrier cannot see.
+#
+# **Trusted senders** are cleared rather than watermarked. A test that trusts
+# `catchall@ext.test` does not add a row a later test can filter past; it
+# changes what every later scenario *means*, silently converting each
+# untrusted-sender case into a trusted one.
+_RESET_FRAMEWORK_STATE = """
 import sys
 from istota import db
+released = retries = trusted = 0
 with db.get_db(sys.argv[1]) as conn:
-    parked = [row[0] for row in conn.execute(
+    for (task_id,) in conn.execute(
         "SELECT id FROM tasks WHERE status = 'pending_confirmation'"
-    ).fetchall()]
-    for task_id in parked:
+    ).fetchall():
         db.cancel_task(conn, task_id)
-print(len(parked))
+        released += 1
+    for (task_id,) in conn.execute(
+        "SELECT id FROM tasks WHERE status = 'pending' AND attempt_count > 0"
+    ).fetchall():
+        db.cancel_task(conn, task_id)
+        retries += 1
+    for user_id, sender in conn.execute(
+        "SELECT user_id, sender_email FROM trusted_email_senders"
+    ).fetchall():
+        db.remove_trusted_sender(conn, user_id, sender)
+        trusted += 1
+print(released, retries, trusted)
+"""
+
+# What decides whether the write above is worth an exec at all. `uv run python
+# -c` importing `istota.db` is one to two seconds, on a tier whose per-test
+# cost is now six-tenths of a second; this query is tens of milliseconds and
+# answers "no" on every profile with no mail and no failures in it.
+_DIRTY_STATE_SQL = """
+SELECT
+  (SELECT COUNT(*) FROM tasks WHERE status = 'pending_confirmation') AS parked,
+  (SELECT COUNT(*) FROM tasks WHERE status = 'pending' AND attempt_count > 0) AS retries,
+  (SELECT COUNT(*) FROM trusted_email_senders) AS trusted
 """
 
 # Emptying a container-side scratch directory without removing it — the ones in
@@ -109,6 +146,39 @@ _CLEAR_SCRATCH = (
     'if [ -d "$d" ]; then find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi; '
     "done"
 )
+
+#: Container paths the clearing above must never be pointed at, nor at any
+#: ancestor of. Everything the tier reads its assertions out of lives under one
+#: of them: the framework DB (`Probe.DEFAULT_DB_PATH`) and the rendered config
+#: the daemon booted from. A declaration is code-owned rather than
+#: model-supplied, so this is not an attack surface — it is the typo that would
+#: turn "the second scenario saw a stale checkout" into "the stack stopped
+#: answering", diagnosed as something else entirely.
+PROTECTED_CONTAINER_PATHS = ("/data/db", "/data/config")
+
+
+def _check_container_state_path(service: str, path: str) -> None:
+    """Refuse a path that `rm -rf` inside a container must not be aimed at."""
+    parts = [part for part in path.split("/") if part]
+    if not path.startswith("/") or len(parts) < 2 or ".." in parts:
+        raise StackError(
+            f"{service} declares container state path {path!r}; it must be "
+            "absolute, below a top-level directory, and free of '..', because "
+            "this is emptied with rm -rf inside a container"
+        )
+    normalized = "/" + "/".join(parts)
+    for protected in PROTECTED_CONTAINER_PATHS:
+        if normalized == protected or normalized.startswith(protected + "/"):
+            raise StackError(
+                f"{service} declares container state path {path!r}, which is "
+                f"inside {protected} — the tier reads its assertions out of it"
+            )
+        if protected.startswith(normalized + "/"):
+            raise StackError(
+                f"{service} declares container state path {path!r}, which "
+                f"contains {protected} — emptying it would take the tier's own "
+                "database or config with it"
+            )
 
 
 def docker_available() -> bool:
@@ -215,18 +285,35 @@ def _run(args: list[str], *, timeout: int, env: dict | None = None) -> str:
     return result.stdout
 
 
-def up(args: list[str], *, platform: str = "", env: dict | None = None) -> None:
+def up(
+    args: list[str],
+    *,
+    platform: str = "",
+    env: dict | None = None,
+    build: bool = True,
+) -> None:
     """Build and start the stack, detached.
 
     `--platform` is not a compose flag — compose has no per-invocation platform
     option — so it is passed through `DOCKER_DEFAULT_PLATFORM` instead. (The
     image tier one layer down uses a real `docker build --platform` flag; the
     two mechanisms differ, and only the effect is shared.)
+
+    `build=False` is for a caller that has already built this session's image.
+    Every stack in a session shares one tag, so a second `up --build` moves
+    that tag while the first stack's containers are running — they hold the
+    image *id* and are unaffected, but a third stack booted later could run a
+    different artifact than the first two with nothing recording it. That is
+    the moving-tag failure `docker-compose.test.yml` guards against across
+    worktrees, and there is no reason to reintroduce it within one session.
     """
     overrides = dict(env or {})
     if platform:
         overrides.setdefault("DOCKER_DEFAULT_PLATFORM", platform)
-    _run(args + ["up", "--build", "--detach"], timeout=UP_TIMEOUT, env=overrides)
+    command = args + ["up", "--detach"]
+    if build:
+        command.insert(len(args) + 1, "--build")
+    _run(command, timeout=UP_TIMEOUT, env=overrides)
 
 
 def down(args: list[str], *, volumes: bool = False, env: dict | None = None) -> None:
@@ -472,6 +559,11 @@ def render_config(
     machine and failing on another, with nothing in the repo to explain it.
     That is reproducibility, not test isolation: it does not stop the daemon
     queueing work of its own.
+
+    Nothing carries `HOME`, `LANG` or `TMPDIR`, and that is checked rather than
+    assumed: `render-config.sh` references none of them and expands no `~`.
+    `gitlab._base_env` does pass them, because it runs `git`, which reads all
+    three. If the generator ever grows a tool that does, it goes here.
     """
     config_file = destination / "config.toml"
     environment = {
@@ -536,6 +628,12 @@ class Stack:
         self.services = services
         self.config_dir = config_dir
         self.probe = Probe(compose_args=args, service=ISTOTA_SERVICE)
+        #: The watermark the most recent `reset` returned, for the negative
+        #: assertions in `Probe.rows_above`. Set by the fixture that drives the
+        #: reset, because the instant it is taken is what makes it useful: a
+        #: scenario taking its own would take it after `submit`, which is too
+        #: late for the row it wants to prove was never written.
+        self.mark: dict[str, int] = {}
 
     # -- the services -----------------------------------------------------
 
@@ -580,13 +678,20 @@ class Stack:
         that — `doctor` exits non-zero whenever a check FAILs, which the
         negative control exists to produce, and a scenario probing the
         container's environment expects a non-zero grep.
+
+        Counted alongside `Probe.query`, because both are the thing Open
+        question 4 asks about: this path carries `submit`, `doctor`, the
+        framework-state write and the container-state clearing, several of them
+        once per test, and a measurement that left them out would report a
+        fraction under a label that says `docker compose exec`.
         """
-        return subprocess.run(
-            self.args + ["exec", "-T", service, *argv],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        with probe_support.counted_exec():
+            return subprocess.run(
+                self.args + ["exec", "-T", service, *argv],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
 
     def submit(self, prompt: str, *, user_id: str = "testuser") -> int:
         """Enqueue a task through the shipped CLI and return its id.
@@ -620,22 +725,50 @@ class Stack:
         return int(match.group(1))
 
     def in_flight(self) -> list[dict]:
-        """Task rows in a status the daemon may still be working on."""
-        return [
-            task for task in self.probe.tasks() if task.get("status") in IN_FLIGHT
-        ]
+        """Task rows the daemon may act on *now*.
 
-    def _quiesce(self, deadline: float) -> None:
+        Not simply "status in `IN_FLIGHT`", and the difference is what stops a
+        session-scoped stack wedging itself. A task that fails goes back on the
+        scheduler's retry ladder as `status = 'pending'` with `scheduled_for`
+        one, then four, then sixteen minutes out (`db.set_task_pending_retry`).
+        Counting that row as busy makes every later reset in the profile wait
+        out a backoff it cannot shorten — sixteen minutes outlives the session,
+        and the failure surfaces as a setup error on tests that had nothing to
+        do with it.
+
+        `scheduled_for` is compared by SQLite rather than in Python, so the
+        clock is the database's. The host and the container do not have to
+        agree, and a `datetime('now')` written by the daemon is only
+        meaningfully comparable to a `datetime('now')` read the same way.
+        """
+        return self.probe.query(
+            f"SELECT * FROM tasks WHERE status IN ({_IN_FLIGHT_SQL}) "
+            "AND (scheduled_for IS NULL OR scheduled_for <= datetime('now')) "
+            "ORDER BY id"
+        )
+
+    def _quiesce(self, deadline: float, *, note: str = "") -> None:
+        """Poll until nothing is in flight, or raise saying what still was.
+
+        A `while True` with the deadline checked *after* the read, so an
+        already-expired deadline still reports what it saw. The `while
+        time.monotonic() < deadline` form raises with an empty list and a
+        message claiming work was in flight, which is the least useful thing it
+        could say.
+        """
         busy: list = []
-        while time.monotonic() < deadline:
+        while True:
             busy = self.in_flight()
             if not busy:
                 return
+            if time.monotonic() >= deadline:
+                break
             time.sleep(POLL_INTERVAL)
         raise TimeoutError(
             "the daemon still had work in flight, so a scripted turn would "
             "have gone to it rather than to this scenario: "
             f"{[(task.get('id'), task.get('status')) for task in busy]}"
+            + (f"\n{note}" if note else "")
         )
 
     def script(self, turns: list[dict], *, timeout: float = 60) -> None:
@@ -657,82 +790,105 @@ class Stack:
         them can create a task in the window between "the table read quiescent"
         and "the script is installed".
 
-        Two mechanisms close that, and they cover different halves. The
-        endpoint's `barrier()` refuses a request that arrives *during* the swap,
-        which turns a stolen turn into a task that failed saying why. Re-reading
-        the table afterwards catches the row that appeared but has not called
-        yet, which the barrier structurally cannot see. Either one firing means
-        going round again, and the loop is bounded by the same deadline as the
-        quiesce so a busy daemon fails with a list of ids rather than hanging.
+        Three mechanisms close that, and each covers a case the others cannot
+        see. The endpoint's `barrier()` refuses a request that arrives *during*
+        the swap. Re-reading the task table afterwards catches the row that
+        appeared but has not called yet. And `endpoint.served` catches the one
+        neither of those can: a poller's task created, served and finished
+        entirely between the barrier dropping and the table being read, which
+        is one `docker compose exec` round trip and therefore a window of
+        hundreds of milliseconds. `rescript` sets `served` to zero, so a
+        non-zero reading afterwards is exact and free — this scenario has not
+        submitted anything yet, so any turn served is not its own.
+
+        Any of the three firing means going round again. The loop is bounded by
+        the same deadline as the quiesce, so a busy daemon fails with a list of
+        ids rather than hanging, and the refusals seen along the way are
+        accumulated into that message — the cause is otherwise lost the moment
+        the next iteration recomputes it.
         """
         deadline = time.monotonic() + timeout
+        stolen = 0
         while True:
-            self._quiesce(deadline)
+            self._quiesce(
+                deadline,
+                note=(
+                    f"({stolen} request(s) had already been refused at the "
+                    "barrier, so a poller was competing for this script)"
+                    if stolen
+                    else ""
+                ),
+            )
             before = self.endpoint.refused
             with self.endpoint.barrier():
                 self.endpoint.rescript(turns)
-            stolen = self.endpoint.refused - before
+            # `this_round` decides whether to loop; `stolen` only accumulates
+            # for the message. Testing the running total would make the loop
+            # unable to exit once a single refusal had ever happened.
+            this_round = self.endpoint.refused - before
+            stolen += this_round
+            served = self.endpoint.served
             busy = self.in_flight()
-            if not stolen and not busy:
+            if not this_round and not served and not busy:
                 return
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     "a task kept appearing between quiescing and rescripting, "
-                    f"so this scenario's script could not be installed cleanly "
-                    f"({stolen} request(s) refused at the barrier, still in "
-                    f"flight: {[(t.get('id'), t.get('status')) for t in busy]})"
+                    "so this scenario's script could not be installed cleanly "
+                    f"({stolen} request(s) refused at the barrier, {served} "
+                    "turn(s) served before the scenario submitted anything, "
+                    f"still in flight: "
+                    f"{[(t.get('id'), t.get('status')) for t in busy]})"
                 )
 
-    def release_parked_confirmations(self) -> int:
-        """Cancel every `pending_confirmation` task, and say how many.
+    def reset_framework_state(self) -> tuple[int, int, int]:
+        """Clear the three things a reset has to *write*, and say what it cleared.
 
-        A parked confirmation is not in flight — it is suspended waiting for a
-        human — but it wedges the room it sits in: `db.py` refuses any
-        foreground task in a room already holding one, for the two hours
-        `confirmation_timeout_minutes` allows. Under a session-scoped stack the
-        next test in that room would fail for a reason that has nothing to do
-        with it.
+        Returns `(confirmations released, retries cancelled, senders untrusted)`.
+        Each is explained where `_RESET_FRAMEWORK_STATE` is defined; between
+        them they are the whole of what this harness writes to a live database,
+        and every one is done through the daemon's own function.
 
-        Through the daemon's own `cancel_task` inside the container, rather
-        than a hand-written UPDATE from the host: the harness should not be a
-        second implementation of a status transition, and the DB lives on a
-        named volume with no host path anyway.
-
-        Guarded by a read first, and the guard is worth more than it looks.
-        This exec is `uv run python -c` importing `istota.db`, which is one to
-        two seconds — every test, on a tier whose whole point is that the
-        per-test cost is now small. A `Probe` query answering "is there one" is
-        tens of milliseconds, and on every run but the mail scenarios the
-        answer is no.
+        Guarded by a read first, and the guard is worth more than it looks. The
+        write is `uv run python -c` importing `istota.db`, which is one to two
+        seconds — every test, on a tier whose whole point is that the per-test
+        cost is now small. The read is a single `Probe` query at tens of
+        milliseconds, and on a profile with no mail and no failed task in it
+        the answer is "nothing to do".
         """
-        if not self.probe.tasks(status="pending_confirmation"):
-            return 0
+        counts = self.probe.query(_DIRTY_STATE_SQL)
+        dirty = counts[0] if counts else {}
+        if not any(dirty.get(key) for key in ("parked", "retries", "trusted")):
+            return (0, 0, 0)
         result = self.exec(
-            ["uv", "run", "python", "-c", _RELEASE_CONFIRMATIONS, self.probe.db_path],
+            ["uv", "run", "python", "-c", _RESET_FRAMEWORK_STATE, self.probe.db_path],
             timeout=120,
         )
         if result.returncode != 0:
             raise StackError(
-                f"releasing parked confirmations exited {result.returncode}\n"
+                f"resetting framework state exited {result.returncode}\n"
                 f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
             )
-        return int((result.stdout or "0").strip().splitlines()[-1])
+        fields = (result.stdout or "").strip().splitlines()[-1].split()
+        return tuple(int(field) for field in fields)  # type: ignore[return-value]
 
     def container_state_paths(self) -> list[str]:
         """Container-side directories the profile's services say are per-test.
 
         Read off the services rather than off the profile, so a path cannot
         drift from the `config_env()` variable that pointed the daemon at it.
+
+        The guard is doing real work, because what follows is `rm -rf` inside a
+        container running as root. Counting slashes is not enough: `//`,
+        `/data/` and `/data/../data/db` all have two, and the last two empty
+        the database the tier reads all its assertions out of. So the path is
+        split into non-empty components, `..` is refused outright, and anything
+        that *is* or *contains* a load-bearing path is refused by name.
         """
         paths: list[str] = []
         for service in self.services.values():
             for path in getattr(service, "container_state_paths", ()):
-                if not path.startswith("/") or path.count("/") < 2:
-                    raise StackError(
-                        f"{service.name} declares container state path {path!r}; "
-                        "it must be absolute and below a top-level directory, "
-                        "because this is emptied with rm -rf inside a container"
-                    )
+                _check_container_state_path(service.name, path)
                 paths.append(path)
         return paths
 
@@ -747,6 +903,18 @@ class Stack:
         `git clone <url> project` fails on a directory that already exists,
         never reaches the listener, and reports itself as a forge that was
         never called.
+
+        **`/mnt/shared` is knowingly outside this**, and the omission is a
+        decision rather than an oversight. `render-config.sh` renders
+        `nextcloud_mount_path` as that literal on every profile, so memory
+        files, `TASKS.md` and per-user directories accumulate there for a whole
+        session — and the tasks-file poller reads one of them every 30 seconds.
+        No scenario in this tier writes there yet, and emptying it wholesale
+        would remove the tree the daemon built at boot (the seeded money ledger
+        among it) with nothing to recreate it. The stage that adds a scenario
+        writing under `/mnt/shared` is the one that has to settle what a
+        per-test clear of it means; declaring it here first would trade a
+        known gap for an unknown breakage.
         """
         paths = self.container_state_paths()
         if not paths:
@@ -764,33 +932,47 @@ class Stack:
         Called before each test rather than after, so a failed test's state is
         still there to inspect and the next test is still clean.
 
-        The order is forced. Parked confirmations go first, because releasing
-        one produces a `cancelled` row and nothing else — it cannot make the
-        table busy, and leaving it until after the quiesce would leave a wedged
-        room for the test about to run. Then `script`, which is the quiesce, the
-        barrier and the rewind. Then every *other* service, once nothing is
-        using them — the model is excluded because `script` has just installed
-        this test's turns and `ScriptedEndpoint.reset()` would throw them away
-        — and alongside them the container-side directories those services
-        declared, which no host-side `reset()` can reach. Then the watermark,
-        last, so it is taken after every row this reset itself produced.
+        The order is forced, and **the script goes last**. Every step before it
+        is slow — `reset_framework_state` may be a two-second exec,
+        `GitLabService.reset` rmtrees and re-seeds a repository,
+        `clear_container_state` is another container round trip — and the
+        script is only protected while `script` holds the barrier across the
+        swap. Installing it first and then spending seconds on the rest leaves
+        this test's turn 0 exposed for exactly as long as the rest takes, which
+        is the defect the barrier was added to close, moved a few lines later.
+
+        So: clear the framework state that has to be written, quiesce once so
+        nothing is using the services, reset every *other* service and the
+        container-side directories they declared, and only then quiesce again
+        and install the script. The model is excluded from the service loop
+        because `script` is what scripts it, and `ScriptedEndpoint.reset()`
+        would throw those turns away. The watermark is taken last, after every
+        row this reset itself produced.
 
         It deliberately does **not** truncate `tasks` or any other table. The
         daemon is running, and deleting rows underneath its dispatcher is a
-        race. Two exceptions, both narrow and both forced, and both above: the
-        parked confirmation, and whatever a service's own `reset()` restores.
+        race. The exceptions are narrow, forced, and all in
+        `reset_framework_state`: a parked confirmation, a previous test's retry
+        row, and the trusted-sender list.
 
         The returned watermark is what negative assertions scope to — see
         `Probe.rows_above`, which will not let one be written with the
-        watermark alone.
+        watermark alone. The `stack` fixture stashes it as `stack.mark`.
         """
-        self.release_parked_confirmations()
-        self.script(list(turns or []), timeout=timeout)
+        deadline = time.monotonic() + timeout
+        self.reset_framework_state()
+        # Once, before touching the services, so nothing is mid-clone when a
+        # repository is rebuilt underneath it. `script` quiesces again, which
+        # on a quiet daemon is one cheap query.
+        self._quiesce(deadline)
         for name, service in self.services.items():
             if name == "model":
                 continue
             service.reset()
         self.clear_container_state()
+        self.script(
+            list(turns or []), timeout=max(1.0, deadline - time.monotonic())
+        )
         return self.probe.watermark()
 
     def restart(self, service: str = ISTOTA_SERVICE) -> None:
@@ -933,6 +1115,7 @@ class StackPool:
         self._cached: dict[str, Stack] = {}
         self._private: list[Stack] = []
         self._booted = 0
+        self._built = False
 
     # -- the pool ---------------------------------------------------------
 
@@ -1018,7 +1201,13 @@ class StackPool:
                 extra=profile.config,
                 base_env=self.lean.render_env,
             )
-            up(args, platform=self.platform)
+            # Built once per session. A profile naming its own `image` builds
+            # nothing regardless — the prebuilt overlay runs a tag someone else
+            # made — so it must not be what marks the session as built.
+            build = not profile.image and not self._built
+            up(args, platform=self.platform, build=build)
+            if build:
+                self._built = True
             wait_ready(args, ISTOTA_SERVICE, timeout=self.lean.ready_timeout)
         except BaseException:
             # Both halves, and in this order. A stack that came up before

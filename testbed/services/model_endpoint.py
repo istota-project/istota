@@ -49,11 +49,24 @@ MAX_TURNS = 4
 # credential belongs to the service.
 ENDPOINT_CREDENTIAL = "unused-by-the-scripted-endpoint"
 
-# What a request refused by the barrier is answered with. 409 rather than 503:
-# an HTTP client that retries at all retries a 503, and a retry landing after
-# the barrier drops would take the turn the barrier exists to protect. A
-# conflict is not retried, so the refusal stays a refusal.
-BARRIER_STATUS = 409
+# What a request refused by the barrier is answered with, and it is chosen
+# against the *daemon's* classifier rather than for HTTP correctness.
+#
+# 409 Conflict is the semantically apt code and it is the wrong one. A refused
+# turn fails the task, and the scheduler then decides whether to retry:
+# `is_permanent` is `is_api_error_banner(result) and is_permanent_api_error(result)`,
+# and 409 appears in neither `TRANSIENT_STATUS_CODES` nor
+# `PERMANENT_STATUS_CODES` (`brain/claude_code.py`). Not-permanent means retry,
+# which writes the row back as `status = 'pending'` with `scheduled_for` one,
+# four, then sixteen minutes out — and a harness that counted that as in-flight
+# would wedge every remaining test in the profile.
+#
+# 403 is in `PERMANENT_STATUS_CODES`, so the daemon fails the task outright,
+# and it is in no HTTP client's retry set either. `Stack.in_flight` and
+# `Stack.reset_framework_state` close the retry hole independently, for the
+# tasks that fail for reasons this endpoint did not choose; this is the half
+# that stops the barrier's own remedy from creating one.
+BARRIER_STATUS = 403
 
 
 class ScriptedEndpoint(HttpStub):

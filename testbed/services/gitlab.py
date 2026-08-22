@@ -169,6 +169,9 @@ class GitLabService(HttpStub):
         # that lock to record a call, and two locks in one handler is how an
         # ordering bug gets made.
         self._git_in_flight = 0
+        # Set while `reset` rebuilds, so a request arriving mid-rebuild waits
+        # rather than reading a repository as it is deleted.
+        self._rebuilding = False
         self._git_idle = threading.Condition(self._lock)
 
     @property
@@ -237,9 +240,24 @@ class GitLabService(HttpStub):
         }
 
     @contextmanager
-    def serving_git(self):
-        """Mark a git-over-HTTP request in flight, for `reset`'s benefit."""
+    def serving_git(self, timeout: float | None = None):
+        """Mark a git-over-HTTP request in flight, for `reset`'s benefit.
+
+        The gate as well as the counter. Waiting for the counter to reach zero
+        is check-then-act on its own: `reset` would drop the lock and *then*
+        rmtree, and a request arriving in between would have `git http-backend`
+        reading a repository as it was deleted. Blocking a new request while
+        `_rebuilding` is set is what closes that, and it cannot deadlock —
+        `reset` sets the flag before it waits, so an in-flight request is never
+        waiting on a reset that is waiting on it.
+
+        The wait is bounded and gives up rather than blocking forever. A reset
+        that died holding the flag is a harness bug; serving the request is a
+        better failure than a handler thread parked for the session.
+        """
+        bound = GIT_IDLE_TIMEOUT if timeout is None else timeout
         with self._git_idle:
+            self._git_idle.wait_for(lambda: not self._rebuilding, timeout=bound)
             self._git_in_flight += 1
         try:
             yield
@@ -248,14 +266,44 @@ class GitLabService(HttpStub):
                 self._git_in_flight -= 1
                 self._git_idle.notify_all()
 
-    def await_git_idle(self, timeout: float = GIT_IDLE_TIMEOUT) -> bool:
-        """Block until no git request is being served. False on timeout."""
+    @contextmanager
+    def _rebuild_gate(self, timeout: float | None = None):
+        """Hold new git requests off, and wait for the ones already running.
+
+        Yields True when the repositories are safe to rebuild and False when
+        the wait expired — the caller decides, because refusing is right for a
+        reset and would be wrong for a diagnostic.
+        """
+        bound = GIT_IDLE_TIMEOUT if timeout is None else timeout
+        with self._git_idle:
+            self._rebuilding = True
+            idle = self._git_idle.wait_for(
+                lambda: self._git_in_flight == 0, timeout=bound
+            )
+        try:
+            yield idle
+        finally:
+            with self._git_idle:
+                self._rebuilding = False
+                self._git_idle.notify_all()
+
+    def await_git_idle(self, timeout: float | None = None) -> bool:
+        """Block until no git request is being served. False on timeout.
+
+        `timeout=None` reads `GIT_IDLE_TIMEOUT` *here* rather than binding it
+        as a default at definition time. The difference is not cosmetic: with
+        the module global as the default, a test lowering it to make the
+        timeout path cheap changed nothing, waited the full ten seconds, and
+        then read back a message quoting the value it had set. The test passed
+        and pinned nothing.
+        """
+        bound = GIT_IDLE_TIMEOUT if timeout is None else timeout
         with self._git_idle:
             return self._git_idle.wait_for(
-                lambda: self._git_in_flight == 0, timeout=timeout
+                lambda: self._git_in_flight == 0, timeout=bound
             )
 
-    def reset(self) -> None:
+    def reset(self, *, timeout: float | None = None) -> None:
         """Forget the calls, and rebuild the seeded repositories.
 
         Rebuilt rather than merely cleared: the happy path pushes a branch, and
@@ -271,16 +319,29 @@ class GitLabService(HttpStub):
         not "never": a `git` subprocess can outlive the task that spawned it,
         and rmtree under a running `http-backend` would answer a clone with a
         truncated packfile — a corrupt-repository error in whichever scenario
-        ran next, naming nothing. So the wait is bounded and its expiry is
-        reported rather than swallowed.
+        ran next, naming nothing.
+
+        So the whole rebuild happens behind `_rebuild_gate`, which both waits
+        for the requests already running and holds new ones off for the
+        duration. Waiting alone would be check-then-act: the lock drops, the
+        rmtree starts, and a request arriving in between lands in exactly the
+        window the wait was supposed to close.
         """
-        if not self.await_git_idle():
-            raise RuntimeError(
-                f"{type(self).__name__}.reset() waited {GIT_IDLE_TIMEOUT}s for "
-                f"{self._git_in_flight} in-flight git request(s) to finish and "
-                "they did not. Rebuilding the repositories now would corrupt "
-                "whatever is reading them."
-            )
+        with self._rebuild_gate(timeout=timeout) as idle:
+            if not idle:
+                with self._git_idle:
+                    stuck = self._git_in_flight
+                raise RuntimeError(
+                    f"{type(self).__name__}.reset() waited "
+                    f"{GIT_IDLE_TIMEOUT if timeout is None else timeout}s for "
+                    f"{stuck} in-flight git request(s) to finish and they did "
+                    "not. Rebuilding the repositories now would corrupt "
+                    "whatever is reading them."
+                )
+            self._rebuild()
+
+    def _rebuild(self) -> None:
+        """The body of `reset`, run with new git requests held off."""
         super().reset()
         with self._lock:
             self.git_calls.clear()

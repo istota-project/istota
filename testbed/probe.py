@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +82,33 @@ def reset_exec_stats() -> None:
         _EXEC_STATS.calls = 0
         _EXEC_STATS.seconds = 0.0
 
+
+@contextmanager
+def counted_exec():
+    """Count one `docker compose exec`, however it turned out.
+
+    Used by `Probe.query` and by `Stack.exec`, because both are the thing
+    Open question 4 asks about. Counting only the probe's polling would report
+    a fraction and print it under a label that says `docker compose exec` —
+    `Stack.exec` carries `submit`, `doctor`, the framework-state write and the
+    container-state clearing, and several of those run once per test.
+
+    The timing is taken in a `finally`, so a call that raised or timed out
+    still counts. It is the slow ones the measurement is about, and dropping
+    them would bias the total in the one direction that matters.
+
+    Lives here rather than in `stack.py` because `stack` imports `probe` and
+    not the other way round.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        with _EXEC_LOCK:
+            _EXEC_STATS.calls += 1
+            _EXEC_STATS.seconds += time.monotonic() - started
+
+
 # Read-only, and via a URI so SQLite enforces it. The daemon is writing this
 # file concurrently; a probe that took a write lock could stall the thing it is
 # observing and turn an assertion into a timeout somewhere else entirely.
@@ -116,8 +144,7 @@ class Probe:
             finally:
                 connection.close()
 
-        started = time.monotonic()
-        try:
+        with counted_exec():
             result = subprocess.run(
                 (self.compose_args or [])
                 + [
@@ -134,13 +161,6 @@ class Probe:
                 text=True,
                 timeout=QUERY_TIMEOUT,
             )
-        finally:
-            # In a `finally`, so a query that timed out still counts. It is the
-            # slow ones the measurement is about, and dropping them would bias
-            # the total in the one direction that matters.
-            with _EXEC_LOCK:
-                _EXEC_STATS.calls += 1
-                _EXEC_STATS.seconds += time.monotonic() - started
         if result.returncode != 0:
             raise RuntimeError(
                 f"probe query failed ({result.returncode})\n{sql}\n"

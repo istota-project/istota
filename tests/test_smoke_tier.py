@@ -19,12 +19,14 @@ a WHERE clause ignoring its filters and therefore matches every row.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1083,12 +1085,16 @@ class _FakeService:
     def __init__(self, name: str, env: dict) -> None:
         self.name = name
         self._env = env
+        #: Attached by a test that cares when `reset` was called relative to
+        #: the rest of the sequence; left alone otherwise.
+        self.order: list | None = None
 
     def config_env(self) -> dict:
         return dict(self._env)
 
     def reset(self) -> None:
-        pass
+        if self.order is not None:
+            self.order.append(f"{self.name}.reset")
 
     def close(self) -> None:
         pass
@@ -1149,7 +1155,23 @@ class TestContainerSideState:
         assert seen and seen[0][-1] == "/data/repos"
         assert seen[0][0] == "sh"
 
-    @pytest.mark.parametrize("path", ["relative/path", "/", "/data"])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "relative/path",
+            "/",
+            "/data",
+            # Two slashes each, so a `count("/") >= 2` shape check admits
+            # every one of them. `//` empties the container root, `/data/`
+            # and `/data/../data/db` take the database the tier reads all
+            # its assertions out of, and `/data/db` is that database.
+            "//",
+            "/data/",
+            "/data/db",
+            "/data/config",
+            "/data/repos/../db",
+        ],
+    )
     def test_a_path_that_could_empty_something_important_is_refused(self, path):
         """This runs `rm -rf` inside a container as root. A typo'd `/` or
         `/data` would take the database with it, and the symptom would be a
@@ -1157,8 +1179,18 @@ class TestContainerSideState:
         service = _FakeService("gitlab", {})
         service.container_state_paths = (path,)
 
-        with pytest.raises(compose_support.StackError, match="absolute"):
+        with pytest.raises(compose_support.StackError):
             self._stack({"gitlab": service}).container_state_paths()
+
+    def test_the_path_the_forge_declares_is_accepted(self):
+        """The guard has to admit the one real caller, or it is just a
+        refusal to work."""
+        service = _FakeService("gitlab", {})
+        service.container_state_paths = ("/data/repos",)
+
+        assert self._stack({"gitlab": service}).container_state_paths() == [
+            "/data/repos"
+        ]
 
     def test_the_clearing_command_reaches_dotfiles(self, tmp_path):
         """Driven against a real shell, because the bug it guards against is a
@@ -1185,3 +1217,330 @@ class TestContainerSideState:
             ],
             check=True,
         )
+
+
+class TestInFlightExcludesTheRetryLadder:
+    """The one query that decides whether a session-scoped stack wedges itself.
+
+    A task that fails goes back on the scheduler's ladder as `pending` with
+    `scheduled_for` one, four, then sixteen minutes out. Counting that as busy
+    makes every later reset in the profile wait out a backoff it cannot
+    shorten, and sixteen minutes outlives the session — so the failure lands as
+    a setup error on tests that had nothing to do with it.
+
+    Driven against a real SQLite file through the probe's local mode, because
+    the comparison happens in SQLite's own `datetime('now')` and a Python
+    reimplementation of it here would prove nothing about the SQL that ships.
+    """
+
+    def _stack_over(self, db: Path) -> compose_support.Stack:
+        stack = compose_support.Stack(
+            profile=profiles.BASE,
+            args=["docker", "compose", "--project-name", "p"],
+            services={},
+        )
+        stack.probe = Probe(local=db)
+        return stack
+
+    def test_a_row_scheduled_in_the_future_is_not_busy(self, framework_db):
+        connection = sqlite3.connect(framework_db)
+        connection.execute(
+            "INSERT INTO tasks (source_type, user_id, prompt, status, "
+            "attempt_count, scheduled_for) VALUES ('cli', 'dave', 'retry me', "
+            "'pending', 1, datetime('now', '+4 minutes'))"
+        )
+        connection.commit()
+        connection.close()
+
+        stack = self._stack_over(framework_db)
+        # The control, in the test, because without it this assertion is
+        # satisfied by a row that was never written. The status-only reading —
+        # which is what this used to be — puts the retry row in the result.
+        status_only = [
+            row
+            for row in stack.probe.tasks()
+            if row["status"] in compose_support.IN_FLIGHT
+        ]
+        assert "retry me" in [row["prompt"] for row in status_only]
+
+        busy = stack.in_flight()
+
+        assert [row["prompt"] for row in busy] == ["second"], (
+            "the retry row was counted as in flight, which is what wedges the "
+            "profile for the length of its backoff"
+        )
+
+    def test_a_row_scheduled_in_the_past_is_busy(self, framework_db):
+        """The other direction: a backoff that has elapsed is real work, and
+        skipping it would let a scenario script over a task about to run."""
+        connection = sqlite3.connect(framework_db)
+        connection.execute(
+            "INSERT INTO tasks (source_type, user_id, prompt, status, "
+            "attempt_count, scheduled_for) VALUES ('cli', 'dave', 'due now', "
+            "'pending', 1, datetime('now', '-1 minutes'))"
+        )
+        connection.commit()
+        connection.close()
+
+        busy = self._stack_over(framework_db).in_flight()
+
+        assert "due now" in [row["prompt"] for row in busy]
+
+    def test_an_unscheduled_pending_row_is_busy(self, framework_db):
+        """The ordinary case — a freshly submitted task has no
+        `scheduled_for`, and `NULL <= datetime('now')` is NULL, not true."""
+        busy = self._stack_over(framework_db).in_flight()
+
+        assert [row["prompt"] for row in busy] == ["second"]
+
+    def test_terminal_rows_are_never_busy(self, framework_db):
+        busy = self._stack_over(framework_db).in_flight()
+
+        assert {row["status"] for row in busy} <= {"pending", "locked", "running"}
+
+
+class TestStackReset:
+    """The orchestration, with the two things that need a container faked out.
+
+    What is being pinned is the *order* and the *loop*, both of which are the
+    stage's whole point and neither of which any container-backed run would
+    report clearly when it broke: a stolen turn shows up as an assertion about
+    a merge request opened on behalf of a different task.
+    """
+
+    def _stack(self, monkeypatch, *, busy_sequence, endpoint=None, services=None):
+        endpoint = endpoint or _FakeEndpoint()
+        stack = compose_support.Stack(
+            profile=profiles.BASE,
+            args=["docker", "compose", "--project-name", "p"],
+            services={"model": endpoint, **(services or {})},
+        )
+        order: list = []
+        pending = list(busy_sequence)
+
+        def fake_in_flight(self):
+            order.append("in_flight")
+            return pending.pop(0) if pending else []
+
+        monkeypatch.setattr(compose_support.Stack, "in_flight", fake_in_flight)
+        monkeypatch.setattr(
+            compose_support.Stack,
+            "reset_framework_state",
+            lambda self: order.append("framework") or (0, 0, 0),
+        )
+        monkeypatch.setattr(
+            compose_support.Stack,
+            "clear_container_state",
+            lambda self: order.append("clear_container"),
+        )
+        monkeypatch.setattr(
+            compose_support.Probe, "watermark", lambda self: {"tasks": 7}
+        )
+        monkeypatch.setattr(compose_support, "POLL_INTERVAL", 0.01)
+        endpoint.order = order
+        return stack, order, endpoint
+
+    def test_the_script_is_installed_after_everything_slow(self, monkeypatch):
+        """Order, and it is the whole reason `reset` is not four lines.
+
+        `script` protects the swap with the barrier and nothing protects it
+        afterwards. Installing the turns and *then* spending seconds rebuilding
+        a repository and clearing a container directory leaves this test's turn
+        0 exposed for exactly as long as the rest takes — the defect the
+        barrier exists to close, moved a few lines later.
+        """
+        forge = _FakeService("gitlab", {})
+        stack, order, _ = self._stack(
+            monkeypatch, busy_sequence=[[], []], services={"gitlab": forge}
+        )
+        forge.order = order
+
+        stack.reset([{"text": "answer"}])
+
+        assert order.index("framework") < order.index("gitlab.reset")
+        assert order.index("gitlab.reset") < order.index("clear_container")
+        assert order.index("clear_container") < order.index("rescript")
+
+    def test_the_model_is_not_reset_by_the_service_loop(self, monkeypatch):
+        """`ScriptedEndpoint.reset()` empties the script, so running it after
+        `script` would throw this test's turns away — and running it before
+        would be undone anyway."""
+        stack, order, endpoint = self._stack(monkeypatch, busy_sequence=[[], []])
+
+        stack.reset([{"text": "answer"}])
+
+        assert "model.reset" not in order
+        assert endpoint.turns == [{"text": "answer"}]
+
+    def test_it_returns_the_watermark(self, monkeypatch):
+        stack, _, _ = self._stack(monkeypatch, busy_sequence=[[], []])
+
+        assert stack.reset([{"text": "answer"}]) == {"tasks": 7}
+
+    def test_a_task_appearing_after_the_swap_makes_it_try_again(self, monkeypatch):
+        """The half the barrier structurally cannot see: a poller created the
+        row while the table was being read, and it has not called yet."""
+        appeared = [{"id": 41, "status": "pending"}]
+        stack, order, endpoint = self._stack(
+            # quiesce(clean) -> swap -> re-read(busy) -> quiesce(clean)
+            # -> swap -> re-read(clean)
+            monkeypatch,
+            busy_sequence=[[], appeared, [], []],
+        )
+
+        stack.script([{"text": "answer"}], timeout=5)
+
+        assert order.count("rescript") == 2
+
+    def test_a_refusal_at_the_barrier_makes_it_try_again(self, monkeypatch):
+        """The half the re-read cannot see: the request arrived *during* the
+        swap, so no row was ever visible in between."""
+        endpoint = _FakeEndpoint(refuse_once=True)
+        stack, order, _ = self._stack(
+            monkeypatch, busy_sequence=[[], [], [], []], endpoint=endpoint
+        )
+
+        stack.script([{"text": "answer"}], timeout=5)
+
+        assert order.count("rescript") == 2
+
+    def test_a_turn_served_before_the_scenario_submitted_makes_it_try_again(
+        self, monkeypatch
+    ):
+        """The third hole, which neither of the other two covers.
+
+        A poller's task created, served and finished entirely between the
+        barrier dropping and the table being read — one `docker compose exec`
+        round trip, so hundreds of milliseconds. `rescript` zeroes `served`, so
+        a non-zero reading afterwards is exact: this scenario has not submitted
+        anything, so any turn served is not its own.
+        """
+        endpoint = _FakeEndpoint(serve_once=True)
+        stack, order, _ = self._stack(
+            monkeypatch, busy_sequence=[[], [], [], []], endpoint=endpoint
+        )
+
+        stack.script([{"text": "answer"}], timeout=5)
+
+        assert order.count("rescript") == 2
+
+    def test_it_times_out_naming_the_ids_still_in_flight(self, monkeypatch):
+        """A harness condition, and the message is the whole of its value."""
+        stuck = [{"id": 99, "status": "running"}]
+        stack, _, _ = self._stack(
+            monkeypatch, busy_sequence=[stuck] * 40
+        )
+
+        with pytest.raises(TimeoutError, match="99"):
+            stack.script([{"text": "answer"}], timeout=0.2)
+
+    def test_an_expired_deadline_still_reports_what_it_saw(self, monkeypatch):
+        """`while time.monotonic() < deadline` skips the body entirely on an
+        already-expired deadline and then raises claiming work was in flight
+        with an empty list — the least useful thing it could say."""
+        stuck = [{"id": 99, "status": "running"}]
+        stack, _, _ = self._stack(monkeypatch, busy_sequence=[stuck] * 40)
+
+        with pytest.raises(TimeoutError, match="99"):
+            stack._quiesce(deadline=time.monotonic() - 1)
+
+
+class TestResetFrameworkState:
+    """The one place this harness writes to a live database."""
+
+    def _stack(self, monkeypatch, counts, *, exit_code=0, stdout="1 2 3\n"):
+        stack = compose_support.Stack(
+            profile=profiles.BASE,
+            args=["docker", "compose", "--project-name", "p"],
+            services={},
+        )
+        execs: list = []
+        monkeypatch.setattr(
+            compose_support.Probe, "query", lambda self, sql, params=None: [counts]
+        )
+
+        def fake_exec(self, argv, **kwargs):
+            execs.append(argv)
+            return subprocess.CompletedProcess(argv, exit_code, stdout, "")
+
+        monkeypatch.setattr(compose_support.Stack, "exec", fake_exec)
+        return stack, execs
+
+    def test_a_clean_database_costs_no_exec(self, monkeypatch):
+        """The guard is worth more than it looks: the write is `uv run python
+        -c` importing istota, one to two seconds, against a per-test budget of
+        six-tenths of a second. On a profile with no mail and no failed task
+        the answer is always no."""
+        stack, execs = self._stack(
+            monkeypatch, {"parked": 0, "retries": 0, "trusted": 0}
+        )
+
+        assert stack.reset_framework_state() == (0, 0, 0)
+        assert execs == []
+
+    @pytest.mark.parametrize("dirty", ["parked", "retries", "trusted"])
+    def test_any_one_of_the_three_is_enough_to_run_it(self, monkeypatch, dirty):
+        counts = {"parked": 0, "retries": 0, "trusted": 0}
+        counts[dirty] = 1
+        stack, execs = self._stack(monkeypatch, counts)
+
+        assert stack.reset_framework_state() == (1, 2, 3)
+        assert len(execs) == 1
+
+    def test_a_failed_write_is_raised_rather_than_read_as_zero(self, monkeypatch):
+        """Swallowing it would leave a wedged room or a trusted sender in
+        place and report a clean reset, which is the cross-test dependency
+        this method exists to prevent."""
+        stack, _ = self._stack(
+            monkeypatch, {"parked": 1, "retries": 0, "trusted": 0}, exit_code=1
+        )
+
+        with pytest.raises(compose_support.StackError, match="framework state"):
+            stack.reset_framework_state()
+
+    def test_the_write_goes_through_the_daemons_own_functions(self):
+        """Not hand-written SQL. The harness must not become a second
+        implementation of a status transition."""
+        body = compose_support._RESET_FRAMEWORK_STATE
+
+        assert "db.cancel_task(" in body
+        assert "db.remove_trusted_sender(" in body
+        assert "UPDATE" not in body and "DELETE" not in body
+
+
+class _FakeEndpoint:
+    """Enough of `ScriptedEndpoint` for the reset loop, and no more."""
+
+    name = "model"
+
+    def __init__(self, *, refuse_once: bool = False, serve_once: bool = False) -> None:
+        self.turns: list | None = None
+        self.refused = 0
+        self.served = 0
+        self.order: list = []
+        self._refuse_once = refuse_once
+        self._serve_once = serve_once
+
+    @contextlib.contextmanager
+    def barrier(self):
+        if self._refuse_once:
+            self._refuse_once = False
+            self.refused += 1
+        yield
+
+    def rescript(self, turns) -> None:
+        self.order.append("rescript")
+        self.turns = list(turns)
+        self.served = 0
+        if self._serve_once:
+            self._serve_once = False
+            self.served = 1
+
+    def reset(self) -> None:
+        self.order.append("model.reset")
+
+    def config_env(self) -> dict:
+        return {}
+
+    def close(self) -> None:
+        pass

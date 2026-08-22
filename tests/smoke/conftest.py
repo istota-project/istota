@@ -293,6 +293,12 @@ def stack(request, stacks):
     derived from whichever image the session actually built. The tag is filled
     in here, and `getfixturevalue` rather than a fixture argument so a run with
     no negative control in it never builds the second image.
+
+    The reset's watermark is stashed as `stack.mark`, because the instant it is
+    taken is the one that matters: after this test's reset and before anything
+    it does. A scenario taking its own would take it after `submit`, which is
+    too late for the row it wants to prove was never written. See
+    `Probe.rows_above`.
     """
     marker = request.node.get_closest_marker("profile")
     name = marker.args[0] if marker and marker.args else profiles.BASE.name
@@ -310,7 +316,16 @@ def stack(request, stacks):
         else list(DEFAULT_SCRIPT)
     )
     try:
-        running.reset(turns)
+        try:
+            # `pytrace=False`, because a reset that could not quiesce is a
+            # harness condition rather than a code defect, and a traceback
+            # through three fixture frames buries the one line that says which
+            # task ids were still in flight. `testbed` raises rather than
+            # calling `pytest.fail` itself — it is an installable package two
+            # repos outside this one consume — so the translation happens here.
+            running.mark = running.reset(turns)
+        except (TimeoutError, stack_support.StackError) as exc:
+            pytest.fail(str(exc), pytrace=False)
         yield running
     finally:
         if fresh:

@@ -195,7 +195,18 @@ def build(name: str, *, scratch: Path, host: str) -> Service:
         # not a thing any scenario in this tier can use, and `reset()` rebuilds
         # exactly what `seed_repo` registered — so a stack whose repo was
         # seeded by the test would lose it at the first reset.
-        stub.seed_repo(stub.project)
+        #
+        # Guarded, because `serve` has already bound a socket and started a
+        # thread by the time `seed_repo` shells out to git. Letting that raise
+        # unguarded returns nothing to the caller, so nothing has a handle to
+        # close — a publicly-bound listener and a live thread for the rest of
+        # the session. The pool's own cleanup cannot cover this: it only holds
+        # what `build` returned.
+        try:
+            stub.seed_repo(stub.project)
+        except BaseException:
+            stub.close()
+            raise
         return stub
 
     raise KeyError(  # pragma: no cover - unreachable while the two agree

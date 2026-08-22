@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -549,7 +550,7 @@ class TestTheServiceBuilder:
         finally:
             endpoint.close()
 
-    def test_a_public_bind_carries_the_credential_each_service_publishes(
+    def test_every_service_is_built_with_the_credential_it_publishes(
         self, tmp_path
     ):
         """The pool binds all interfaces, so `build` has to satisfy the rule.
@@ -557,9 +558,17 @@ class TestTheServiceBuilder:
         `HttpStub.start` refuses a non-loopback bind with no credential, and a
         `build` that forgot one would fail at the first `StackPool.get` — after
         an image build, inside a session fixture. Cheaper to find here.
+
+        Asserted on **loopback**, deliberately. `build` passes its credential
+        regardless of host, so binding `0.0.0.0` proves nothing extra and does
+        real harm: it opens an unauthenticated listener — and for the forge,
+        `git http-backend` with `GIT_HTTP_EXPORT_ALL` — on every interface,
+        during an ordinary `uv run pytest`. That is the property `HttpStub`'s
+        own docstring says the default suite must never break. The refusal
+        itself is covered by `TestTheCredentialRuleIsStructural` above.
         """
         for name in REGISTRY:
-            service = services.build(name, scratch=tmp_path / name, host="0.0.0.0")
+            service = services.build(name, scratch=tmp_path / name, host=LOOPBACK)
             try:
                 assert service.credential, name
             finally:
@@ -593,7 +602,7 @@ class TestTheScriptedEndpointsBarrier:
             with endpoint.barrier():
                 with pytest.raises(urllib.error.HTTPError) as raised:
                     _post_completion(endpoint)
-                assert raised.value.code == 409
+                assert raised.value.code == 403
             assert endpoint.refused == 1
             # And nothing was served, so the next request still gets turn 0.
             assert endpoint.served == 0
@@ -675,23 +684,87 @@ class TestTheForgeWaitsForGitBeforeRebuilding:
             forge.close()
 
     def test_a_reset_refuses_rather_than_rebuilding_underneath_a_clone(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ):
         """The failure the wait exists to prevent, made to happen.
 
         Asserted on the refusal rather than on a corrupt repository, because a
         corrupt repository is precisely the outcome that would be diagnosed as
         something else.
+
+        `timeout=` is passed rather than the module global being patched. The
+        patch does not reach a default bound at definition time, so the test
+        waited the real ten seconds, passed, and reported a message quoting the
+        value it thought it had set. This version is bounded by the argument
+        it hands in, which is also what the message has to quote.
         """
         forge = gitlab.serve(tmp_path / "repos")
         try:
             forge.seed_repo("group/project")
-            monkeypatch.setattr(gitlab, "GIT_IDLE_TIMEOUT", 0.1)
             with forge.serving_git():
-                with pytest.raises(RuntimeError, match="in-flight git request"):
-                    forge.reset()
+                with pytest.raises(RuntimeError, match="waited 0.1s"):
+                    forge.reset(timeout=0.1)
             # And once it is idle again, the rebuild happens as usual.
             forge.reset()
             assert forge.branches("group/project") == ["main"]
+        finally:
+            forge.close()
+
+    def test_the_refusal_is_fast_rather_than_waiting_out_the_default(
+        self, tmp_path
+    ):
+        """A default-suite test must not sit for ten seconds.
+
+        The bug this pins is not hypothetical: with `GIT_IDLE_TIMEOUT` bound as
+        a parameter default, the timeout above could not be shortened at all
+        and cost ten seconds on every full run.
+        """
+        forge = gitlab.serve(tmp_path / "repos")
+        try:
+            forge.seed_repo("group/project")
+            with forge.serving_git():
+                started = time.monotonic()
+                with pytest.raises(RuntimeError):
+                    forge.reset(timeout=0.1)
+                elapsed = time.monotonic() - started
+            assert elapsed < 2, f"the refusal took {elapsed:.1f}s, not ~0.1s"
+        finally:
+            forge.close()
+
+    def test_a_request_arriving_mid_rebuild_waits_instead_of_reading_a_deletion(
+        self, tmp_path
+    ):
+        """Waiting for idle is check-then-act on its own.
+
+        `await_git_idle` drops the lock before the rmtree, so a request landing
+        one instruction later has `git http-backend` reading a repository as it
+        is deleted — a truncated packfile, reported by whichever scenario runs
+        next as a corrupt repository. The gate is what closes it: while
+        `reset` is rebuilding, a new `serving_git` blocks.
+        """
+        forge = gitlab.serve(tmp_path / "repos")
+        try:
+            forge.seed_repo("group/project")
+            admitted = threading.Event()
+
+            with forge._rebuild_gate() as idle:
+                assert idle is True
+
+                def enter():
+                    with forge.serving_git(timeout=5):
+                        admitted.set()
+
+                waiter = threading.Thread(target=enter)
+                waiter.start()
+                # Held off for as long as the gate is held. A generous margin,
+                # because asserting "did not happen" needs the scheduler to
+                # have had a real chance to let it happen.
+                assert not admitted.wait(timeout=0.5), (
+                    "a git request was admitted while the repositories were "
+                    "being rebuilt underneath it"
+                )
+
+            assert admitted.wait(timeout=5), "the gate never released the waiter"
+            waiter.join(timeout=5)
         finally:
             forge.close()

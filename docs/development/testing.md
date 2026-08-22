@@ -48,7 +48,7 @@ When to run each:
 | `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
 | `-m image` | you touched `docker/istota/Dockerfile`, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache |
 | `-m image --platform amd64` | before a release | about ten minutes under emulation, and it is the only thing that ever executes the amd64-only devbox image |
-| `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about three minutes |
+| `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about a minute against a warm layer cache: one stack per profile rather than per test, so most of it is the three boots |
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |
 
