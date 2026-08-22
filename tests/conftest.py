@@ -84,6 +84,47 @@ def _no_network_symbol_lookups(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_subscription_usage_lookups(monkeypatch):
+    """The plan-utilization poll reads a real credential and makes a real request.
+
+    ``doctor.run_checks`` runs ``runtime.subscription_usage`` with
+    ``probe=True``, and several tests sweep the whole registry. Left alone, on a
+    developer's macOS laptop that spawns ``security find-generic-password``
+    against the real keychain — which can pop an authorization dialog in the
+    middle of a suite run — and then issues a live GET to api.anthropic.com. In
+    CI no credential resolves and the check SKIPs, so the sweep would also mean
+    two different things on two machines.
+
+    Same shape as ``_no_network_symbol_lookups`` above, and the same escape
+    hatch: ``tests/test_subscription_usage.py`` exercises the module itself and
+    reinstates the functions it captured at import time, and
+    ``TestSubscriptionUsage`` in ``tests/test_doctor.py`` reinstates
+    ``get_snapshot`` behind a wrapper that injects a stub transport.
+
+    Both the entry point *and* the network leaf are neutralized: a test that
+    reinstates one and forgets the other still cannot reach the endpoint.
+    """
+    try:
+        from istota import subscription_usage
+    except Exception:
+        # Broad on purpose: this runs before every test in the suite, so
+        # anything it raises fails thousands of unrelated tests with a
+        # traceback pointing at the wrong place.
+        return
+
+    def _no_credential(config, **kwargs):
+        return subscription_usage.UsageSnapshot(
+            fetched_at=0.0, source="none", error=subscription_usage.NO_CREDENTIAL_ERROR
+        )
+
+    def _refuse(url, headers, timeout):
+        raise AssertionError("a test reached the real usage endpoint; inject a transport")
+
+    monkeypatch.setattr(subscription_usage, "get_snapshot", _no_credential)
+    monkeypatch.setattr(subscription_usage, "_urllib_transport", _refuse)
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """Initialize a real SQLite database using schema.sql and return its path."""

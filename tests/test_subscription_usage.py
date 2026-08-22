@@ -31,6 +31,26 @@ import pytest
 
 from istota import subscription_usage as su
 
+# The root conftest neutralizes both of these for the whole suite, so a doctor
+# sweep on a developer's macOS laptop cannot read the real keychain or reach the
+# real endpoint. This file is the one that tests them, so it captures them
+# before that fixture runs and puts them back for every test here.
+_REAL_GET_SNAPSHOT = su.get_snapshot
+_REAL_URLLIB_TRANSPORT = su._urllib_transport
+
+
+@pytest.fixture(autouse=True)
+def _the_real_module(monkeypatch):
+    """Undo the root network guard: this file is what proves the guarded code works.
+
+    Safe because every test here passes its own ``env``, ``home`` and
+    ``transport``, and the two ``_urllib_transport`` cases substitute the opener
+    rather than opening a socket.
+    """
+    monkeypatch.setattr(su, "get_snapshot", _REAL_GET_SNAPSHOT)
+    monkeypatch.setattr(su, "_urllib_transport", _REAL_URLLIB_TRANSPORT)
+
+
 # ---------------------------------------------------------------------------
 # Fixture payload
 # ---------------------------------------------------------------------------
