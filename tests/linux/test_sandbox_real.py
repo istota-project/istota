@@ -382,3 +382,26 @@ class TestNetworkIsolation:
         # Unix sockets cross a network namespace, which is exactly why the
         # CONNECT proxy is reached over one.
         assert "UNIX_OK" in isolated.stdout, (isolated.stdout, isolated.stderr)
+
+
+class TestSystemBinaries:
+    """Debian ships much of `/usr/bin` as symlinks into `/etc/alternatives`.
+
+    `/usr` is bound whole, so the links are all present — but each one points
+    at an absolute path in a directory the selective `/etc` binds have to name
+    explicitly. Miss it and every alternatives-managed command in the namespace
+    is a dangling link: `awk`, `cc`, `vi`, `editor`, `pager`, `which`, `nc`.
+    The failure reads as `No such file or directory` for a binary that `ls`
+    shows sitting right there, and only inside the sandbox.
+    """
+
+    def test_an_alternatives_managed_binary_runs(self, layout, task, user_temp):
+        link = Path("/usr/bin/awk")
+        if not link.is_symlink() or not str(link.readlink()).startswith("/etc/alternatives/"):
+            _unavailable("awk is not managed through /etc/alternatives on this host")
+
+        result = run_probe(
+            "awk 'BEGIN { print \"AWK_OK\" }' || echo AWK_FAIL",
+            layout, task, user_temp,
+        )
+        assert "AWK_OK" in result.stdout, (result.stdout, result.stderr)

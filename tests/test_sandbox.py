@@ -138,6 +138,28 @@ class TestBuildBwrapCmdNonAdmin:
         result = _run_bwrap(sandbox_config, task, False)
         assert "--ro-bind" in result
 
+    def test_etc_alternatives_bound_at_its_own_path(self, sandbox_config, make_sandbox_task):
+        """The `/etc` binds are selective, and Debian's `/usr/bin` needs this one.
+
+        `awk`, `cc`, `vi`, `editor`, `pager`, `which` and `nc` are all symlinks
+        into `/etc/alternatives`. Binding `/usr` carries the links in; without
+        their target directory every one of them is dangling inside the
+        namespace, and the command fails with `No such file or directory` for a
+        binary `ls` shows sitting right there.
+
+        Skipped where the host has no such directory — a darwin developer box
+        has nothing to assert. `tests/linux/test_sandbox_real.py` runs the
+        binary inside the real namespace.
+        """
+        if not Path("/etc/alternatives").is_dir():
+            pytest.skip("no /etc/alternatives on this host")
+
+        task = make_sandbox_task()
+        result = _run_bwrap(sandbox_config, task, False)
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        assert any(dest == "/etc/alternatives" for _, dest in ro_pairs), \
+            f"/etc/alternatives not in --ro-bind pairs: {ro_pairs}"
+
     def test_has_pid_namespace(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, False)
