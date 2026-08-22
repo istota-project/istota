@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When the server reports memory it cannot account for, the report it writes now names the task holding it. That memory lives in the private scratch space each task gets, which the report had no way of looking into, so the most common cause of the warning was also the one thing it could never name — every occurrence needed someone to log in as root and work it out by hand. Each running task's scratch space is now measured and listed against the task's own number.
+
+- A line in that same report saying it could not read a container's memory now says why it could not. The old wording read as a passing glitch worth retrying, and an investigation was sent after the wrong suspect on the strength of it. The reason is now named exactly, and where a reason has more than one possible cause the line says so rather than picking one.
+
 - When a code reviewer asks to read a file, the extra round is now started only if there is time left to finish it. The check was a flat fifteen seconds against a budget of two to four minutes, so a reviewer that had already used most of its time was sent back out anyway — charged a call, and then timed out with nothing to show for it. It is now measured against the slowest call that reviewer has actually made, which is the only evidence of what a second, larger one will cost. A quick reviewer still gets its round; a slow one is told plainly that it was refused, and the review report says whether a round was refused or was made and failed, since only the second costs anything.
 
 - The Linux test tier builds again on a machine where BuildKit is switched off. It passed a flag only the newer builder accepts, so the build was refused before it started — on exactly the setup that needs the older builder, which is the documented way past a broken build service. The runner now asks the Docker command line which builder it is about to use and only passes the flag when it applies.
