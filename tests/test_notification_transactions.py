@@ -498,7 +498,236 @@ class TestSkillCliGate:
 
 
 # ---------------------------------------------------------------------------
-# 5. the never-a-second-connection property, stated directly
+# 5. the three cron auto-disable sites
+# ---------------------------------------------------------------------------
+
+
+def _scheduled_job(config, *, name="nightly-digest", failures=4, publish=None):
+    """A job one failure short of the auto-disable threshold, plus its task."""
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_jobs "
+            "(user_id, name, cron_expression, prompt, enabled, "
+            " consecutive_failures, publish_shared_kv) "
+            "VALUES (?, ?, ?, ?, 1, ?, ?)",
+            ("alice", name, "0 7 * * *", "summarise the news", failures, publish),
+        )
+        job_id = conn.execute(
+            "SELECT id FROM scheduled_jobs WHERE name = ?", (name,),
+        ).fetchone()[0]
+        task_id = db.create_task(
+            conn, prompt="summarise the news", user_id="alice",
+            source_type="scheduled", scheduled_job_id=job_id,
+        )
+        # No attempts left, so the failure is terminal rather than a retry.
+        conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+    return job_id, task_id
+
+
+class TestCronAutoDisable:
+    """All three sites raise from inside `process_one_task`'s transaction.
+
+    Not one of them told the user anything before this — a `task_logs` warning
+    and a daemon log line, and the job silently stopped running.
+    """
+
+    def test_the_ordinary_failure_branch_writes_inside_the_transaction(
+        self, config, monkeypatch,
+    ):
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config)
+        probe = _WriteProbe(monkeypatch)
+        record: list[str] = []
+        monkeypatch.setattr(
+            "istota.scheduler.deliver_pending",
+            _lock_free_probe(config, record, "delivered"),
+        )
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (False, "boom", None, None),
+        )
+
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            job = db.get_scheduled_job(conn, job_id)
+            assert job.enabled is False
+        assert [c["source"] for c in probe.calls] == ["cron_job"]
+        assert probe.calls[0]["in_transaction"]
+        assert probe.calls[0]["opened_during"] == 0
+        assert probe.calls[0]["dedup_key"] == f"job:{job_id}"
+        assert record == ["delivered"]
+
+    def test_the_row_carries_the_failure_the_disable_was_charged_for(
+        self, config, monkeypatch,
+    ):
+        """Re-read, not the caller's copy of the job.
+
+        `increment_scheduled_job_failures` runs a few statements earlier, so a
+        `ScheduledJob` fetched before it carries the *previous* run's error and
+        one fewer failure.
+        """
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config)
+        _count_sends(monkeypatch, delivered=True)
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (False, "the upstream API refused", None, None),
+        )
+
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT title, body, params, last_delivered_at FROM notifications "
+                "WHERE dedup_key = ?", (f"job:{job_id}",),
+            ).fetchone()
+        assert row is not None
+        assert "after 5 failures" in row["title"]
+        assert "the upstream API refused" in row["body"]
+        assert '"failures": 5' in row["params"]
+        assert row["last_delivered_at"] is not None
+
+    def test_the_policy_refusal_branch_raises_too(self, config, monkeypatch):
+        """A different branch of the same `else`, with its own disable call."""
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config)
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr("istota.scheduler._post_policy_refusal_alert",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (
+                False,
+                "API Error: 400 the request was blocked by our content policy",
+                None, None,
+            ),
+        )
+        probe = _WriteProbe(monkeypatch)
+
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_scheduled_job(conn, job_id).enabled is False
+        assert [c["dedup_key"] for c in probe.calls] == [f"job:{job_id}"]
+        assert probe.calls[0]["in_transaction"]
+        assert probe.calls[0]["opened_during"] == 0
+
+    def test_the_shared_kv_publish_failure_branch_raises_too(
+        self, config, monkeypatch,
+    ):
+        """The third site, reached on a *successful* task with a failed publish.
+
+        `_record_publish_failure` is the one furthest from the `with` block, so
+        it takes the buffer as an argument rather than delivering where it sits.
+        """
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config, publish="digest")
+        # Not a shared-kv writer, so the publish fails loud and charges the job.
+        monkeypatch.setattr(
+            "istota.config.Config.is_shared_kv_writer", lambda self, uid: False,
+        )
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr("istota.scheduler._send_operator_alert",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (True, "# Digest\nbody", None, None),
+        )
+        probe = _WriteProbe(monkeypatch)
+        record: list[str] = []
+        monkeypatch.setattr(
+            "istota.scheduler.deliver_pending",
+            _lock_free_probe(config, record, "delivered"),
+        )
+
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_scheduled_job(conn, job_id).enabled is False
+        assert [c["dedup_key"] for c in probe.calls] == [f"job:{job_id}"]
+        assert probe.calls[0]["in_transaction"]
+        assert probe.calls[0]["opened_during"] == 0
+        assert record == ["delivered"]
+
+    def test_a_second_failure_bumps_the_row_and_pushes_nothing(
+        self, config, monkeypatch,
+    ):
+        """A nightly job failing every night is one row, not a message a night."""
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config)
+        sent = _count_sends(monkeypatch, delivered=True)
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (False, "boom", None, None),
+        )
+
+        process_one_task(config)
+        with db.get_db(config.db_path) as conn:
+            # A second run of the same job, still failing.
+            conn.execute("UPDATE scheduled_jobs SET enabled = 1 WHERE id = ?",
+                         (job_id,))
+            task_id = db.create_task(
+                conn, prompt="summarise the news", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?",
+                         (task_id,))
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            rows = conn.execute(
+                "SELECT occurrences FROM notifications WHERE dedup_key = ?",
+                (f"job:{job_id}",),
+            ).fetchall()
+        assert [r["occurrences"] for r in rows] == [2]
+        assert len(sent) == 1, "the second failure pushed a duplicate"
+
+    def test_a_recovered_job_closes_its_row_on_the_success_path(
+        self, config, monkeypatch,
+    ):
+        from istota.scheduler import process_one_task
+
+        job_id, _task_id = _scheduled_job(config)
+        _count_sends(monkeypatch, delivered=True)
+        monkeypatch.setattr("istota.scheduler.run_coro", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (False, "boom", None, None),
+        )
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE scheduled_jobs SET enabled = 1 WHERE id = ?",
+                         (job_id,))
+            db.create_task(
+                conn, prompt="summarise the news", user_id="alice",
+                source_type="scheduled", scheduled_job_id=job_id,
+            )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (True, "here is the digest", None, None),
+        )
+        process_one_task(config)
+
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT state, resolved_by FROM notifications WHERE dedup_key = ?",
+                (f"job:{job_id}",),
+            ).fetchone()
+        assert (row["state"], row["resolved_by"]) == ("resolved", "system")
+
+
+# ---------------------------------------------------------------------------
+# 6. the never-a-second-connection property, stated directly
 # ---------------------------------------------------------------------------
 
 

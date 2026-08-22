@@ -358,6 +358,43 @@ def _gather_for_day(adapter: gm.GarminAdapter, day: _date) -> dict[str, float]:
     return out
 
 
+def _note_token_expired(
+    ctx: HealthContext,
+    framework_db_path: Path,
+    config: Any | None,
+    reason: str,
+) -> None:
+    """Mark the token dead **and** put a row in the user's notification inbox.
+
+    Both halves at one call site because forgetting the second is the bug this
+    exists to fix: `mark_token_error` wipes the OAuth blob so the settings card
+    stops saying "Connected", and until now that was the entire user-facing
+    signal — nothing was pushed anywhere. Worse, `health/jobs.py` renders this
+    sync job only for a user who has stored tokens, so the scheduler's next sync
+    pass deletes the job row and the failure stops recurring. There is no second
+    chance to tell them.
+
+    `config` is optional and its absence means "write no row": the skill-CLI
+    caller is a short-lived host-side process the skill proxy spawns, and
+    `send_notification`'s Talk and ntfy fan-out does not belong in it — the same
+    rule the email skill CLI follows for outbound drafts.
+    """
+    gm.mark_token_error(framework_db_path, ctx.user_id, reason)
+    if config is None:
+        return
+    try:
+        from istota.notification_resolvers import connected_service
+
+        connected_service.raise_for_service(
+            config, ctx.user_id, gm.SECRET_SERVICE, reason=reason,
+        )
+    except Exception:  # noqa: BLE001 - a sync must not fail over a notification
+        logger.warning(
+            "could not raise the Garmin reconnect notification for user=%s",
+            ctx.user_id, exc_info=True,
+        )
+
+
 def sync_garmin(
     ctx: HealthContext,
     framework_db_path: Path,
@@ -366,6 +403,7 @@ def sync_garmin(
     today: _date | None = None,
     adapter: gm.GarminAdapter | None = None,
     user_tz: str | None = None,
+    config: Any | None = None,
 ) -> SyncResult:
     """Pull Garmin daily summaries and insert into the per-user health DB.
 
@@ -389,6 +427,12 @@ def sync_garmin(
     user_tz:
         IANA timezone name (e.g. ``"Pacific/Auckland"``). Optional —
         falls back to UTC.
+    config:
+        The framework :class:`~istota.config.Config`, passed by the two
+        daemon-side callers (the scheduler's in-process sync and the web
+        ``/garmin/sync`` endpoint) so an auth failure can raise a notification
+        the user will actually see. Omitted by the skill CLI — see
+        :func:`_note_token_expired`.
     """
     result = SyncResult()
     if today is None:
@@ -400,7 +444,7 @@ def sync_garmin(
         except gm.GarminAuthError as exc:
             result.auth_error = True
             result.errors.append(str(exc))
-            gm.mark_token_error(framework_db_path, ctx.user_id, "token_expired")
+            _note_token_expired(ctx, framework_db_path, config, "token_expired")
             return result
         except gm.GarminNotInstalled as exc:
             result.errors.append(str(exc))
@@ -420,7 +464,7 @@ def sync_garmin(
         except gm.GarminAuthError as exc:
             result.auth_error = True
             result.errors.append(f"{day.isoformat()}: {exc}")
-            gm.mark_token_error(framework_db_path, ctx.user_id, "token_expired")
+            _note_token_expired(ctx, framework_db_path, config, "token_expired")
             break
         except gm.GarminRateLimited as exc:
             # Compliant backoff. If Garmin sent a Retry-After, sleep

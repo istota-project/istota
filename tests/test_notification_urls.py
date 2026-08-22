@@ -32,6 +32,9 @@ from istota import (
 )
 from istota.config import Config, UserConfig
 from istota.notification_resolvers import confirmation as confirmation_source
+from istota.notification_resolvers import connected_service as service_source
+from istota.notification_resolvers import cron_job as cron_source
+from istota.notification_resolvers import health_panel as panel_source
 from istota.notification_resolvers import outbound_draft as draft_source
 
 try:
@@ -100,7 +103,10 @@ def _emitted_paths(item) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("source_module", [confirmation_source, draft_source])
+@pytest.mark.parametrize(
+    "source_module",
+    [confirmation_source, draft_source, cron_source, service_source, panel_source],
+)
 @pytest.mark.parametrize("hostile", HOSTILE_IDS)
 def test_a_hostile_object_id_never_reaches_the_client(
     config, conn, source_module, hostile,
@@ -110,6 +116,12 @@ def test_a_hostile_object_id_never_reaches_the_client(
     Either the resolver refuses the id (the row is swept `stale` and vanishes)
     or the view is downgraded to stored text with no actions. Both are fine;
     an emitted `/chat/tasks/1/../../admin/x/confirm` is not.
+
+    Every registered source is fed the same values, including the one whose ids
+    are not integers: `connected_service` keys on a service *name*, so `int()`
+    is not available to it and an explicit allowlist check stands in. A source
+    that validates its ids by not having any interesting ones is exactly the
+    kind this file exists to catch.
     """
     store.write_notification(
         conn, "alice",

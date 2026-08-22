@@ -186,7 +186,7 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
    - Index conversation for memory search
    - Handle heartbeat results / silent scheduled jobs
    - Deliver results
-   - Reset scheduled job failures
+   - Reset scheduled job failures, and close any `cron_job` inbox row the disable had raised
 6. **Failure path**:
    - Check cancellation (`Cancelled by user` → status `cancelled`, no retry)
    - Check policy refusal (`_is_policy_refusal()`: 400 + safety/policy/content/refused/harm/blocked keyword) → mark failed, post alert via `_post_policy_refusal_alert()` (extracts `From:` header for email tasks), no retry
@@ -200,7 +200,7 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
      the classification (`is_permanent_api`) so no "retrying" notice is emitted
    - Retry with backoff if attempts remain (1, 4, 16 min) — skipped for OOM
    - Mark failed permanently
-   - Track scheduled job failures, auto-disable after threshold
+   - Track scheduled job failures, auto-disable after threshold. All three disable sites (this one, the policy-refusal branch, and `_record_publish_failure`) buffer a `cron_job` notification into `notification_results` and let the post-`with` `deliver_pending` send it — the disable used to write a `task_logs` warning and tell nobody. The resolver watches `consecutive_failures`, not `enabled`: `_sync_cron_files` runs every tick and CRON.md is authoritative for `enabled`, so a file-defined job is switched back on within a tick of being auto-disabled while the state columns survive
 7. Deliver results (Talk/email) outside DB context
 
 ## Deferred DB Operations

@@ -26,6 +26,8 @@ from istota import (
 )
 from istota.config import Config, UserConfig
 from istota.notification_resolvers import confirmation as confirmation_source
+from istota.notification_resolvers import connected_service as service_source
+from istota.notification_resolvers import cron_job as cron_source
 from istota.notification_resolvers import outbound_draft as draft_source
 
 
@@ -285,11 +287,246 @@ class TestOutboundDraftResolver:
 
 
 # ---------------------------------------------------------------------------
+# cron_job
+# ---------------------------------------------------------------------------
+
+
+def _disabled_job(conn, *, name="nightly-digest", failures=5, user="alice"):
+    """A job in the state the three auto-disable sites leave behind."""
+    conn.execute(
+        "INSERT INTO scheduled_jobs "
+        "(user_id, name, cron_expression, prompt, enabled, consecutive_failures, "
+        " last_error) VALUES (?, ?, ?, ?, 0, ?, ?)",
+        (user, name, "0 7 * * *", "summarise the news", failures, "boom"),
+    )
+    job_id = conn.execute(
+        "SELECT id FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+        (user, name),
+    ).fetchone()[0]
+    cron_source.write(
+        conn, user, job_id=job_id, job_name=name, fail_count=failures,
+        cron_expression="0 7 * * *", last_error="boom",
+    )
+    return job_id
+
+
+class TestCronJobResolver:
+    def test_the_row_appears_with_the_producers_key(self, conn):
+        job_id = _disabled_job(conn)
+        row = conn.execute(
+            "SELECT user_id, dedup_key, object_type, object_id, actionable, state "
+            "FROM notifications WHERE source = 'cron_job'",
+        ).fetchone()
+        assert tuple(row) == ("alice", f"job:{job_id}", "scheduled_job",
+                              str(job_id), 1, "open")
+        assert cron_source.dedup_key(job_id) == f"job:{job_id}"
+
+    def test_the_open_row_renders_the_job_and_says_how_to_re_enable_it(
+        self, config, conn,
+    ):
+        """No POST endpoint re-enables a job, so the note carries the verb."""
+        _disabled_job(conn)
+        items, total = store.list_open(config, conn, "alice")
+        assert total == 1 and len(items) == 1
+        item = items[0]
+        assert "nightly-digest" in item.title
+        assert "boom" in item.body
+        assert item.actions == ()
+        assert "!cron enable nightly-digest" in item.status_note
+        # No action to take *in the panel*, so it must not be filed under
+        # "Needs action" — the store's own rule, asserted at the source.
+        assert item.actionable is False
+
+    def test_re_enabling_closes_the_row_without_a_panel_read(self, config, conn):
+        job_id = _disabled_job(conn)
+        db.enable_scheduled_job(conn, job_id)
+        cron_source.resolve_for_job(conn, "alice", job_id, by="talk")
+        assert _state(conn, "cron_job") == ("resolved", "talk")
+
+    def test_a_row_left_open_over_a_recovered_job_goes_stale(self, config, conn):
+        """The backstop: the counter went to zero and nobody closed the row."""
+        job_id = _disabled_job(conn)
+        db.reset_scheduled_job_failures(conn, job_id)
+        assert _state(conn, "cron_job") == ("open", None)
+
+        items, total = store.list_open(config, conn, "alice")
+        assert items == [] and total == 0
+        assert _state(conn, "cron_job") == ("stale", "system")
+
+    def test_a_cron_md_job_switched_back_on_but_still_failing_stays_open(
+        self, config, conn,
+    ):
+        """`enabled` is not the predicate, and this is why.
+
+        `sync_cron_jobs_to_db` treats CRON.md as authoritative for `enabled` and
+        runs every scheduler tick, so a file-defined job is switched back on
+        within a tick of being auto-disabled. A resolver watching `enabled`
+        would close the row minutes after raising it, leaving the user a push
+        the panel then denies all knowledge of. The sync leaves the state
+        columns alone, so the failure count is still there.
+        """
+        job_id = _disabled_job(conn)
+        conn.execute("UPDATE scheduled_jobs SET enabled = 1 WHERE id = ?", (job_id,))
+
+        items, total = store.list_open(config, conn, "alice")
+        assert total == 1 and len(items) == 1
+        assert _state(conn, "cron_job")[0] == "open"
+
+    def test_a_row_for_a_job_that_no_longer_exists_goes_stale(self, config, conn):
+        _disabled_job(conn)
+        conn.execute("DELETE FROM scheduled_jobs")
+        items, _total = store.list_open(config, conn, "alice")
+        assert items == []
+        assert _state(conn, "cron_job")[0] == "stale"
+
+    def test_a_row_naming_another_users_job_is_never_rendered(self, config, conn):
+        job_id = _disabled_job(conn, user="bob")
+        conn.execute("DELETE FROM notifications")
+        cron_source.write(
+            conn, "alice", job_id=job_id, job_name="nightly-digest", fail_count=5,
+        )
+        items, _total = store.list_open(config, conn, "alice")
+        assert items == []
+
+    def test_a_module_job_gets_a_different_note(self, config, conn):
+        """`!cron enable` operates on CRON.md, and a module job is not in it.
+
+        The prefix is matched on the raw name. `flatten` maps `_` to a space, so
+        a check against the flattened name would never fire for a name that
+        starts with one.
+        """
+        _disabled_job(conn, name="_module.health.garmin_sync")
+        items, _total = store.list_open(config, conn, "alice")
+        assert "!cron enable" not in items[0].status_note
+        assert "automatically" in items[0].status_note
+
+    def test_a_job_name_carrying_markup_is_not_printed_as_a_command(
+        self, config, conn,
+    ):
+        """A flattened name is not the string `!cron enable` takes.
+
+        Job names come out of CRON.md as free text and the note is delivered
+        into Talk, which renders markdown — so the name is flattened. Printing
+        the flattened form beside the verb would be an instruction that does not
+        work on the job it names, so the generic form is used instead. The title
+        still carries the (flattened, safe) name.
+        """
+        _disabled_job(conn, name="[click](http://evil.invalid) *digest*")
+        items, _total = store.list_open(config, conn, "alice")
+        note = items[0].status_note
+        assert "`!cron enable <name>`" in note
+        assert "http://evil.invalid" not in note
+        for ch in "[]()`*_~<>|":
+            assert ch not in items[0].title
+
+
+# ---------------------------------------------------------------------------
+# connected_service
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _secret_key(monkeypatch):
+    monkeypatch.setenv(
+        "ISTOTA_SECRET_KEY", "test-key-test-key-test-key-test-key-test-key",
+    )
+
+
+def _expired_garmin(conn, user="alice"):
+    from istota.health import garmin as gm
+
+    service_source.write(conn, user, service=gm.SECRET_SERVICE, reason="token_expired")
+
+
+class TestConnectedServiceResolver:
+    def test_the_row_appears_with_the_producers_key(self, conn, _secret_key):
+        _expired_garmin(conn)
+        row = conn.execute(
+            "SELECT user_id, dedup_key, object_type, object_id, state "
+            "FROM notifications WHERE source = 'connected_service'",
+        ).fetchone()
+        assert tuple(row) == ("alice", "service:garmin", "secret", "garmin", "open")
+        assert service_source.dedup_key("garmin") == "service:garmin"
+
+    def test_the_open_row_renders_a_reconnect_link(self, config, conn, _secret_key):
+        _expired_garmin(conn)
+        items, total = store.list_open(config, conn, "alice")
+        assert total == 1 and len(items) == 1
+        (action,) = items[0].actions
+        assert (action.id, action.method, action.href) == (
+            "reconnect", "LINK", "/settings",
+        )
+        assert action.endpoint is None
+        assert items[0].link is None
+
+    def test_reconnecting_closes_the_row_without_a_panel_read(
+        self, config, conn, _secret_key,
+    ):
+        """`store_tokens` is the real producer verb for a successful reconnect."""
+        from istota.health import garmin as gm
+
+        _expired_garmin(conn)
+        conn.commit()
+        gm.store_tokens(config.db_path, "alice", {"oauth1": "x"}, email="a@b.invalid")
+
+        with db.get_db(config.db_path) as c:
+            assert _state(c, "connected_service") == ("resolved", "system")
+
+    def test_disconnecting_closes_the_row(self, config, conn, _secret_key):
+        from istota.health import garmin as gm
+
+        _expired_garmin(conn)
+        conn.commit()
+        gm.clear_tokens(config.db_path, "alice")
+
+        with db.get_db(config.db_path) as c:
+            assert _state(c, "connected_service") == ("resolved", "system")
+
+    def test_a_row_left_open_over_a_working_credential_goes_stale(
+        self, config, conn, _secret_key,
+    ):
+        """The backstop: the blob came back behind the store's back."""
+        from istota import secrets_store
+        from istota.health import garmin as gm
+
+        _expired_garmin(conn)
+        conn.commit()
+        secrets_store.set_secret(
+            config.db_path, "alice", gm.SECRET_SERVICE, gm.SECRET_KEY_BLOB,
+            '{"sdk": {"oauth1": "x"}}',
+        )
+
+        with db.get_db(config.db_path) as c:
+            items, total = store.list_open(config, c, "alice")
+            assert items == [] and total == 0
+            assert _state(c, "connected_service") == ("stale", "system")
+
+    def test_a_row_naming_an_unregistered_service_is_never_rendered(
+        self, config, conn, _secret_key,
+    ):
+        """`object_id` is free text here, so the allowlist stands in for `int()`."""
+        store.write_notification(
+            conn, "alice", source=service_source.SOURCE,
+            dedup_key="service:../../admin", title="reconnect",
+            object_type=service_source.OBJECT_TYPE, object_id="../../admin",
+            actionable=True,
+        )
+        items, _total = store.list_open(config, conn, "alice")
+        assert items == []
+
+
+# ---------------------------------------------------------------------------
 # registration
 # ---------------------------------------------------------------------------
 
 
-def test_both_sources_are_registered_and_neither_auto_resolves():
+_STAGE_SOURCES = {
+    "confirmation", "outbound_draft", "cron_job", "connected_service",
+    "health_panel",
+}
+
+
+def test_every_object_backed_source_is_registered_and_none_auto_resolves():
     resolvers = sources.all_resolvers()
-    assert set(resolvers) >= {"confirmation", "outbound_draft"}
-    assert sources.auto_resolve_sources() & {"confirmation", "outbound_draft"} == set()
+    assert set(resolvers) >= _STAGE_SOURCES
+    assert sources.auto_resolve_sources() & _STAGE_SOURCES == set()

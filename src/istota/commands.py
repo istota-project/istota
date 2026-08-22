@@ -963,11 +963,18 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
+        from .notification_resolvers import cron_job as cron_job_source
+
         if update_job_enabled_in_cron_md(config, user_id, job_name, True):
             db.enable_scheduled_job(conn, job.id)
+            # The counter this resets is the inbox row's close predicate, so the
+            # row would go `stale` on the next panel read either way. Closing it
+            # here makes it `resolved` by the surface that ended the condition.
+            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
             return f"Enabled scheduled job '{job_name}' (failure count reset)."
         # Fallback: no CRON.md file, update DB directly
         db.enable_scheduled_job(conn, job.id)
+        cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
         return f"Enabled scheduled job '{job_name}' (failure count reset). Note: no CRON.md file found — change is DB-only and may not persist."
 
     if subcmd == "disable" and job_name:

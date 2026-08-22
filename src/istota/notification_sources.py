@@ -250,8 +250,7 @@ def _register_all() -> None:
     every later source would render as "source no longer available" — a
     plausible-looking panel with no button that works.
 
-    Later stages add `cron_job`, `connected_service`, `health_panel` and
-    `task_alert` to the list below.
+    A later stage adds `task_alert` to the list below.
     """
     global _REGISTERED
     if _REGISTERED:
@@ -259,7 +258,13 @@ def _register_all() -> None:
     with _REGISTER_LOCK:
         if _REGISTERED:
             return
-        for module_name in ("confirmation", "outbound_draft"):
+        for module_name in (
+            "confirmation",
+            "outbound_draft",
+            "cron_job",
+            "connected_service",
+            "health_panel",
+        ):
             try:
                 module = importlib.import_module(
                     f".notification_resolvers.{module_name}", package=__package__,

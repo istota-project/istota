@@ -4656,11 +4656,12 @@ class TestGarminSyncInProcess:
         task = self._task(["garmin-sync", "--days-back", "3"])
         captured = {}
 
-        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz, config=None):
             captured["ctx_user_id"] = ctx.user_id
             captured["framework_db_path"] = framework_db_path
             captured["days_back"] = days_back
             captured["user_tz"] = user_tz
+            captured["config"] = config
             return self._fake_sync_result()
 
         fake_ctx = MagicMock(user_id="alice")
@@ -4679,6 +4680,8 @@ class TestGarminSyncInProcess:
         assert captured["framework_db_path"] == Path(db_path)
         assert captured["days_back"] == 3
         assert captured["user_tz"] == "Pacific/Auckland"
+        # Daemon-side, so an auth failure can raise the reconnect notification.
+        assert captured["config"] is config
         payload = json.loads(result)
         assert payload["status"] == "ok"
         assert payload["inserted"] == 3
@@ -4688,7 +4691,7 @@ class TestGarminSyncInProcess:
         task = self._task(["garmin-sync"])
         captured = {}
 
-        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz, config=None):
             captured["days_back"] = days_back
             return self._fake_sync_result()
 

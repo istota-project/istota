@@ -97,6 +97,7 @@ from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .modules import MODULE_NAMES
 from .notification_resolvers import confirmation as confirmation_source
+from .notification_resolvers import cron_job as cron_job_source
 from .notification_store import RaiseResult, deliver_pending
 from .notifications import effective_log_destinations, send_notification
 from .process_group import kill_process_group
@@ -1723,6 +1724,11 @@ def _run_garmin_sync_inprocess(
         res = gs.sync_garmin(
             ctx, Path(config.db_path),
             days_back=days_back, user_tz=user_tz,
+            # Daemon-side, so an auth failure can raise (and deliver) the
+            # reconnect notification. This is the caller that most needs it: the
+            # module job removes itself once the tokens are gone, so this run is
+            # the last one that will ever notice.
+            config=config,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("garmin sync (in-process) raised for user=%s", task.user_id)
@@ -2156,6 +2162,37 @@ def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
             "could not resolve the sender of email task %s: %s", task.id, e,
         )
         return False
+
+
+def _note_job_auto_disabled(
+    conn, job_id: int, fail_count: int,
+) -> RaiseResult | None:
+    """The inbox row for a scheduled job the scheduler has just switched off.
+
+    Three sites disable a job — the policy-refusal branch, the ordinary failure
+    branch, and `_record_publish_failure` — and all three previously wrote a
+    `task_logs` warning and told nobody. Each now buffers the result of this and
+    hands it to `deliver_pending` after its `with` block closes; the write rides
+    the caller's already-open transaction, which is the whole point of the split.
+
+    Re-reads the job rather than taking the caller's copy: `last_error` and
+    `consecutive_failures` were both written by the increment a few statements
+    earlier, so a `ScheduledJob` fetched before it carries the previous run's
+    error. `job.user_id` is the owner of the row, not `task.user_id` — they are
+    the same today and only one of them is the authority.
+    """
+    job = db.get_scheduled_job(conn, job_id)
+    if job is None:
+        return None
+    return cron_job_source.write(
+        conn, job.user_id,
+        job_id=job_id,
+        job_name=job.name,
+        fail_count=fail_count,
+        cron_expression=job.cron_expression,
+        last_error=job.last_error,
+        room_token=job.conversation_token,
+    )
 
 
 def process_one_task(
@@ -2764,9 +2801,23 @@ def process_one_task(
                     if job and job.publish_shared_kv:
                         publish_ok = _publish_result_to_shared_kv(
                             conn, config, task, job, result,
+                            notifications=notification_results,
                         )
                     if publish_ok:
                         db.reset_scheduled_job_failures(conn, task.scheduled_job_id)
+                        # The counter is back to zero, which is the resolver's
+                        # close predicate, so the row would go `stale` on the
+                        # next panel read anyway. Closing it here makes it
+                        # `resolved` by the thing that actually ended the
+                        # condition, and does it without waiting for a read.
+                        # `job.user_id`, matching `_note_job_auto_disabled`: the
+                        # row was written under the job's owner, so closing it
+                        # under anyone else matches nothing, silently.
+                        if job is not None:
+                            cron_job_source.resolve_for_job(
+                                conn, job.user_id, task.scheduled_job_id,
+                                by="system",
+                            )
                     # Auto-remove one-time jobs after successful execution
                     if job and job.once:
                         db.delete_scheduled_job(conn, task.scheduled_job_id)
@@ -2823,6 +2874,9 @@ def process_one_task(
                             "Scheduled job %d auto-disabled after %d failures",
                             task.scheduled_job_id, fail_count,
                         )
+                        notification_results.append(_note_job_auto_disabled(
+                            conn, task.scheduled_job_id, fail_count,
+                        ))
             elif is_shutdown_collateral:
                 # Not a task failure — the daemon is going away and took the
                 # subprocess with it. Requeue without charging an attempt or
@@ -2935,6 +2989,9 @@ def process_one_task(
                             "Scheduled job %d auto-disabled after %d failures",
                             task.scheduled_job_id, fail_count,
                         )
+                        notification_results.append(_note_job_auto_disabled(
+                            conn, task.scheduled_job_id, fail_count,
+                        ))
 
     # The transaction above has closed, so the inbox rows raised inside it can
     # be sent. First thing after the `with`, deliberately: everything below it
@@ -3771,7 +3828,10 @@ def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     return SHARED_BLOCK_NAMESPACE, target
 
 
-def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: str) -> bool:
+def _publish_result_to_shared_kv(
+    conn, config: Config, task, job, result_text: str,
+    *, notifications: list[RaiseResult | None] | None = None,
+) -> bool:
     """Publish a completed job's result text into ``shared_kv`` (gated).
 
     A post-success gated write in the ``_process_deferred_*`` genre — NOT an
@@ -3794,7 +3854,10 @@ def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: s
             "publish_shared_kv job=%s has no key in target %r; skipping",
             job.name, job.publish_shared_kv,
         )
-        _record_publish_failure(conn, config, task, job, "publish_shared_kv missing key")
+        _record_publish_failure(
+            conn, config, task, job, "publish_shared_kv missing key",
+            notifications=notifications,
+        )
         return False
 
     if not config.is_shared_kv_writer(task.user_id):
@@ -3805,6 +3868,7 @@ def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: s
         _record_publish_failure(
             conn, config, task, job,
             f"publish_shared_kv unauthorized for user {task.user_id}",
+            notifications=notifications,
         )
         try:
             user = _operator_alert_user(config)
@@ -3841,15 +3905,29 @@ def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: s
         logger.error("publish_shared_kv write failed job=%s key=%s/%s: %s",
                      job.name, ns, key, e)
         try:
-            _record_publish_failure(conn, config, task, job, f"shared_kv write failed: {e}")
+            _record_publish_failure(
+                conn, config, task, job, f"shared_kv write failed: {e}",
+                notifications=notifications,
+            )
         except Exception:  # noqa: BLE001
             pass
         return False
 
 
-def _record_publish_failure(conn, config: Config, task, job, error: str) -> None:
+def _record_publish_failure(
+    conn, config: Config, task, job, error: str,
+    *, notifications: list[RaiseResult | None] | None = None,
+) -> None:
     """Increment a job's failure counter for an unauthorized/failed publish, and
-    auto-disable after the configured threshold (mirrors the normal failure path)."""
+    auto-disable after the configured threshold (mirrors the normal failure path).
+
+    ``notifications`` is `process_one_task`'s buffer. Threaded down rather than
+    delivered here because this runs inside that function's write transaction —
+    the third of the three auto-disable sites, and the one whose distance from
+    the `with` block makes it easiest to forget. A caller that passes nothing
+    still disables the job; it just tells nobody, which is the behaviour this
+    parameter exists to end.
+    """
     fail_count = db.increment_scheduled_job_failures(conn, job.id, error)
     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
     if max_failures > 0 and fail_count >= max_failures:
@@ -3858,6 +3936,10 @@ def _record_publish_failure(conn, config: Config, task, job, error: str) -> None
             "Scheduled job %d auto-disabled after %d consecutive publish failures",
             job.id, fail_count,
         )
+        if notifications is not None:
+            notifications.append(
+                _note_job_auto_disabled(conn, job.id, fail_count),
+            )
 
 
 def check_briefing_triggers(db_path, config: Config) -> list[int]:
