@@ -140,10 +140,93 @@ class TestCommandPassthrough:
         assert result.returncode == EXIT_USAGE
         assert "usage" in result.stderr.lower()
 
-    def test_silent_when_the_slot_is_free(self, lock_dir):
-        """The common case is one run at a time; it must not add noise."""
+    def test_quiet_when_the_slot_is_free(self, lock_dir):
+        """The common case is one run at a time. The verdict is the only thing
+        qtest is allowed to say then -- no queueing notice, no progress."""
         result = run_qtest("true", lock_dir=lock_dir)
-        assert result.stderr == ""
+        lines = result.stderr.splitlines()
+        assert len(lines) == 1, f"qtest added noise: {lines}"
+        assert lines[0].startswith("qtest: PASS exit=0 ")
+
+
+class TestVerdict:
+    """Every run ends with one line naming the outcome.
+
+    The exit code is correct already, and that has not been enough: these runs
+    are invoked as `scripts/qtest uv run pytest | tail -40`, where the shell
+    reports *tail's* status and a failed suite reads as exit 0. The verdict is
+    the answer in a form a filter cannot drop.
+    """
+
+    def last_line(self, stderr):
+        lines = [line for line in stderr.splitlines() if line.strip()]
+        assert lines, "qtest said nothing"
+        return lines[-1]
+
+    def test_a_pass_is_named(self, lock_dir):
+        result = run_qtest("true", lock_dir=lock_dir)
+        assert result.returncode == 0
+        assert self.last_line(result.stderr).startswith("qtest: PASS exit=0 ")
+
+    def test_a_failure_is_named_with_its_own_code(self, lock_dir):
+        result = run_qtest("sh", "-c", "exit 3", lock_dir=lock_dir)
+        assert result.returncode == 3
+        assert self.last_line(result.stderr).startswith("qtest: FAIL exit=3 ")
+
+    def test_the_verdict_names_the_command_it_ran(self, lock_dir):
+        """A scrollback with several runs in it needs to say which one failed."""
+        result = run_qtest("sh", "-c", "exit 1", lock_dir=lock_dir)
+        assert "cmd: sh -c 'exit 1'" in self.last_line(result.stderr)
+
+    def test_a_failure_warns_that_a_pipeline_hides_the_code(self, lock_dir):
+        """The line above the verdict explains why the verdict exists."""
+        failed = run_qtest("false", lock_dir=lock_dir)
+        assert "pipeline" in failed.stderr
+        passed = run_qtest("true", lock_dir=lock_dir)
+        assert "pipeline" not in passed.stderr, "no warning on a run that passed"
+
+    def test_the_verdict_survives_a_pipe_that_swallows_the_exit_code(self, lock_dir):
+        """The motivating case, end to end.
+
+        `qtest ... | tail -n 1` genuinely exits 0 on a failed suite -- that is
+        the shell, not something qtest can fix. What it can do is put the
+        answer somewhere the pipe does not reach.
+        """
+        pipeline = subprocess.run(
+            ["sh", "-c", f'"{sys.executable}" "{QTEST}" sh -c "exit 4" | tail -n 1'],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "QTEST_LOCK_DIR": str(lock_dir)},
+        )
+        assert pipeline.returncode == 0, "the pipe should report tail's status"
+        assert "qtest: FAIL exit=4" in pipeline.stderr
+
+    def test_the_verdict_stays_off_stdout(self, lock_dir):
+        """stdout is the command's, verbatim. Anything qtest adds there would
+        land in a caller's pipeline, log file or parsed output."""
+        result = run_qtest("printf", "%s", "payload", lock_dir=lock_dir)
+        assert result.stdout == "payload"
+        assert "qtest:" not in result.stdout
+
+    def test_a_signal_death_is_named_as_such(self, lock_dir):
+        """143 is not a test failure, and reading it as one sends you to the
+        wrong place. The OOM killer and a hung suite look like this."""
+        result = run_qtest("sh", "-c", "kill -TERM $$", lock_dir=lock_dir)
+        assert result.returncode == 128 + signal.SIGTERM
+        assert self.last_line(result.stderr).startswith(
+            f"qtest: KILLED-SIGTERM exit={128 + signal.SIGTERM} "
+        )
+
+    def test_a_usage_error_is_not_a_failed_command(self, lock_dir):
+        result = run_qtest(lock_dir=lock_dir)
+        assert result.returncode == EXIT_USAGE
+        assert self.last_line(result.stderr) == f"qtest: ERROR exit={EXIT_USAGE}"
+
+    def test_a_missing_command_is_not_a_failed_command(self, lock_dir):
+        result = run_qtest("no-such-binary-xyzzy", lock_dir=lock_dir)
+        assert result.returncode == 127
+        assert self.last_line(result.stderr) == "qtest: ERROR exit=127"
 
 
 class TestMutualExclusion:
@@ -217,6 +300,16 @@ class TestSlotExhaustion:
         result = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "1"})
         assert result.returncode == EXIT_NO_SLOT
         assert "timed out" in result.stderr.lower()
+
+    def test_a_missed_slot_is_not_reported_as_a_failed_run(self, lock_dir, hold_slot):
+        """75 means the command never ran, so a reader who sees FAIL here would
+        go looking for a test that broke. The verdict has to say which it is."""
+        hold_slot()
+        result = run_qtest("true", lock_dir=lock_dir, env={"QTEST_TIMEOUT": "1"})
+        assert result.stderr.strip().splitlines()[-1] == (
+            f"qtest: NO-SLOT exit={EXIT_NO_SLOT} command not run"
+        )
+        assert "FAIL" not in result.stderr
 
     def test_does_not_run_the_command_when_it_cannot_get_a_slot(
         self, lock_dir, hold_slot, tmp_path
