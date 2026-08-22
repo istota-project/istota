@@ -23,12 +23,14 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from testbed import probe as probe_support
 from testbed import stack as stack_support
 from testbed.profiles import BASE, FORGE, NO_FORGE, Profile
 from testbed.services import Service, gitlab
@@ -143,6 +145,39 @@ def _sweep_leftover_stacks():
     if stack_support.docker_available():
         stack_support.sweep_projects(PROJECT_PREFIX)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _measure_probe_exec(request):
+    """Report what the tier spent inside `docker compose exec`.
+
+    Open question 4 in the deployment-testbed spec asks whether a `Probe` query
+    per poll is fast enough once one stack serves a whole session, and answers
+    it with a measurement rather than a long-lived reader process nobody has
+    shown is needed. This is that measurement, and it stays because the answer
+    changes as the tier grows — a number printed on every run is what makes a
+    regression visible before it is a complaint.
+
+    The span is the tier's, not the session's: it opens at the first smoke test
+    and closes at session teardown, so a `-m smoke` run reports a fraction of
+    the thing that was actually running.
+    """
+    probe_support.reset_exec_stats()
+    started = time.monotonic()
+    yield
+    stats = probe_support.exec_stats()
+    elapsed = time.monotonic() - started
+    if not stats.calls or elapsed <= 0:
+        return
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - only under a custom -p
+        return
+    reporter.write_line(
+        f"probe: {stats.calls} `docker compose exec` call(s), "
+        f"{stats.seconds:.1f}s of {elapsed:.1f}s "
+        f"({stats.seconds / elapsed:.0%} of the tier), "
+        f"{stats.seconds / stats.calls * 1000:.0f}ms each"
+    )
 
 
 def _render_config(

@@ -16,8 +16,10 @@ the daemon is written in it.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,59 @@ from pathlib import Path
 DEFAULT_DB_PATH = "/data/db/istota.db"
 QUERY_TIMEOUT = 60
 POLL_INTERVAL = 0.5
+
+#: Tables the watermark covers. Every one is keyed by an integer `id`, which is
+#: what makes `MAX(id)` a usable high-water mark at all.
+#:
+#: Two deliberate absences. `rooms` is keyed by `token TEXT PRIMARY KEY`
+#: (`schema.sql:797`), so it has no `id` to take a maximum of and a scenario
+#: asserting "no room was created" has to scope by token instead.
+#: `trusted_email_senders` is *reset* rather than watermarked: a test that
+#: trusts a sender does not add a row a later test can filter past, it changes
+#: what every later scenario means, and a watermark on it would invite exactly
+#: the assertion shape that hides that.
+WATERMARK_TABLES = (
+    "tasks",
+    "task_logs",
+    "task_events",
+    "processed_emails",
+    "sent_emails",
+    "messages",
+)
+
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass
+class ExecStats:
+    """How much of a session went into `docker compose exec`.
+
+    Open question 4 in the deployment-testbed spec: every remote `query()`
+    shells out, and at session scope one stack serves every test, each polling
+    `wait_for_task`. The answer decides whether a long-lived reader process is
+    worth building — so the counters exist to *measure*, and nothing here
+    optimizes on them.
+    """
+
+    calls: int = 0
+    seconds: float = 0.0
+
+
+_EXEC_STATS = ExecStats()
+_EXEC_LOCK = threading.Lock()
+
+
+def exec_stats() -> ExecStats:
+    """A snapshot of the process-wide `docker compose exec` totals."""
+    with _EXEC_LOCK:
+        return ExecStats(calls=_EXEC_STATS.calls, seconds=_EXEC_STATS.seconds)
+
+
+def reset_exec_stats() -> None:
+    """Zero the totals, for a caller measuring one span."""
+    with _EXEC_LOCK:
+        _EXEC_STATS.calls = 0
+        _EXEC_STATS.seconds = 0.0
 
 # Read-only, and via a URI so SQLite enforces it. The daemon is writing this
 # file concurrently; a probe that took a write lock could stall the thing it is
@@ -61,22 +116,31 @@ class Probe:
             finally:
                 connection.close()
 
-        result = subprocess.run(
-            (self.compose_args or [])
-            + [
-                "exec",
-                "-T",
-                self.service,
-                "python",
-                "-c",
-                _REMOTE_READER % self.db_path,
-                sql,
-                json.dumps(params),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=QUERY_TIMEOUT,
-        )
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                (self.compose_args or [])
+                + [
+                    "exec",
+                    "-T",
+                    self.service,
+                    "python",
+                    "-c",
+                    _REMOTE_READER % self.db_path,
+                    sql,
+                    json.dumps(params),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=QUERY_TIMEOUT,
+            )
+        finally:
+            # In a `finally`, so a query that timed out still counts. It is the
+            # slow ones the measurement is about, and dropping them would bias
+            # the total in the one direction that matters.
+            with _EXEC_LOCK:
+                _EXEC_STATS.calls += 1
+                _EXEC_STATS.seconds += time.monotonic() - started
         if result.returncode != 0:
             raise RuntimeError(
                 f"probe query failed ({result.returncode})\n{sql}\n"
@@ -112,6 +176,76 @@ class Probe:
                 params.append(value)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(f"SELECT * FROM tasks{where} ORDER BY id", params)
+
+    # -- the watermark ----------------------------------------------------
+
+    def watermark(self) -> dict[str, int]:
+        """`MAX(id)` per table, in one round trip.
+
+        The primitive a *negative* assertion needs. Scoping to the id
+        `submit()` returned covers positive assertions and nothing else:
+        "no reply was sent" has no id, because it is the absence of a row
+        nobody handed the test a handle for. Under a session-scoped stack the
+        naive form is worse than useless — `sent_emails` is a framework table
+        that nothing resets, so once one scenario has posted a reply it is
+        permanently non-empty and every later "no reply was sent" is reading
+        the previous test's rows. `processed_emails`, `messages` and
+        `task_events` behave the same way.
+
+        One query rather than one per table, deliberately: on the lean and full
+        shapes every query is a `docker compose exec`, and `Stack.reset` calls
+        this once per test.
+
+        An empty table reads 0 rather than `None`, so `id > mark[...]` is
+        always a valid comparison and no caller has to write the null case.
+        """
+        columns = ", ".join(
+            f"(SELECT MAX(id) FROM {table}) AS {table}" for table in WATERMARK_TABLES
+        )
+        rows = self.query(f"SELECT {columns}")
+        first = rows[0] if rows else {}
+        return {table: (first.get(table) or 0) for table in WATERMARK_TABLES}
+
+    def rows_above(
+        self, table: str, mark: dict[str, int], **filters
+    ) -> list[dict]:
+        """Rows in `table` newer than `mark`, narrowed by a discriminating column.
+
+        **Both halves are required, and that is why `filters` is not optional.**
+        A watermark alone still catches an unrelated poller's row — the daemon
+        runs eleven of them for the whole session, so a table gains rows during
+        every test whether or not the test caused them. A column filter alone
+        still catches the previous test's. Only the pair means "this test
+        caused this". A caller with nothing to filter on is about to write an
+        assertion that will be diagnosed as flake, so it is refused here rather
+        than later.
+
+        `source_type`, `conversation_token` and `to_addr` are the columns that
+        discriminate in practice.
+        """
+        if table not in WATERMARK_TABLES:
+            raise ValueError(
+                f"{table!r} is not watermarked; WATERMARK_TABLES holds "
+                f"{list(WATERMARK_TABLES)}"
+            )
+        if not filters:
+            raise ValueError(
+                f"rows_above({table!r}) needs at least one column filter. A "
+                "watermark alone still matches rows a background poller made "
+                "during this test, so the assertion would fail for reasons "
+                "unrelated to what it is about."
+            )
+        clauses = ["id > ?"]
+        params: list = [mark.get(table, 0)]
+        for column, value in filters.items():
+            if not _IDENTIFIER.match(column):
+                raise ValueError(f"{column!r} is not a column name")
+            clauses.append(f"{column} = ?")
+            params.append(value)
+        return self.query(
+            f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        )
 
     def task_logs(self, task_id: int) -> list[dict]:
         return self.query(
