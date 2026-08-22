@@ -1196,7 +1196,7 @@ def _usage_bar(percent: float) -> str:
 
 
 def _usage_reset(window: "UsageWindow", zone: tzinfo, zone_is_fallback: bool) -> str:
-    """`" (resets Aug 22 17:40)"` in the reader's own clock, or nothing.
+    """`" (resets Aug 22 18:07)"` in the reader's own clock, or nothing.
 
     Absolute, where the admin card's sub-line is relative: a chat reply is read
     once and possibly hours later, while the card re-renders every 60 seconds.

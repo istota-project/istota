@@ -93,7 +93,7 @@ const window_ = (
   key: 'session',
   label: '5-hour',
   percent: 40,
-  resets_at: '2026-08-22T17:40:00Z',
+  resets_at: '2026-08-22T18:07:33Z',
   resets_in_seconds: 3847,
   severity: 'normal',
   is_active: true,

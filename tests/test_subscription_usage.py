@@ -84,13 +84,19 @@ CODENAMES = (
 
 NOW = datetime(2026, 8, 22, 16, 35, 12, tzinfo=timezone.utc).timestamp()
 
-FIVE_HOUR_RESETS = "2026-08-22T17:40:00.224941+00:00"
-WEEKLY_RESETS = "2026-08-28T19:00:00.224961+00:00"
+# Invented, like the percentages above: the endpoint's real reply carried
+# microsecond-precision reset times, and a fractional part that is not round is
+# a fingerprint of one request rather than a shape. What the values have to keep
+# is structural — a non-round fraction (so the fractional-second parse is still
+# exercised), a five-hour window inside five hours of `NOW`, a weekly one
+# several days out, and two microsecond values distinct from each other.
+FIVE_HOUR_RESETS = "2026-08-22T18:07:33.481027+00:00"
+WEEKLY_RESETS = "2026-08-27T09:15:44.732615+00:00"
 
-# 17:40:00.224941 − 16:35:12 = 3888.22s
-FIVE_HOUR_RESETS_IN = 3888
-# 2026-08-28T19:00:00.224961 − 2026-08-22T16:35:12 = 527088.22s
-WEEKLY_RESETS_IN = 527088
+# 18:07:33.481027 − 16:35:12 = 5541.48s
+FIVE_HOUR_RESETS_IN = 5541
+# 2026-08-27T09:15:44.732615 − 2026-08-22T16:35:12 = 405632.73s
+WEEKLY_RESETS_IN = 405632
 
 
 def _dollars_block() -> dict:
@@ -296,8 +302,8 @@ class TestCoercionHelpersAreTotal:
         assert spend.percent == 0.0
 
     def test_a_non_utc_offset_is_converted_not_relabelled(self):
-        canonical, _ = su._normalize_resets_at("2026-08-22T19:40:00+02:00")
-        assert canonical == "2026-08-22T17:40:00Z"
+        canonical, _ = su._normalize_resets_at("2026-08-22T20:07:33+02:00")
+        assert canonical == "2026-08-22T18:07:33Z"
 
 
 # ---------------------------------------------------------------------------
@@ -511,9 +517,9 @@ class TestParseUsageLimitsPath:
         assert [w.key for w in windows] == ["session", "weekly_all", "weekly_scoped:fable"]
         assert [w.label for w in windows] == ["5-hour", "Weekly (all models)", "Weekly (Fable)"]
         assert [w.percent for w in windows] == [37.0, 12.0, 4.0]
-        assert windows[0].resets_at == "2026-08-22T17:40:00Z"
+        assert windows[0].resets_at == "2026-08-22T18:07:33Z"
         assert windows[0].resets_in_seconds == FIVE_HOUR_RESETS_IN
-        assert windows[1].resets_at == "2026-08-28T19:00:00Z"
+        assert windows[1].resets_at == "2026-08-27T09:15:44Z"
         assert windows[1].resets_in_seconds == WEEKLY_RESETS_IN
         assert windows[2].resets_at is None
         assert windows[2].resets_in_seconds is None
@@ -570,9 +576,9 @@ class TestParseUsageLimitsPath:
 
     def test_a_naive_reset_time_is_read_as_utc(self):
         raw = payload()
-        raw["limits"][0]["resets_at"] = "2026-08-22T17:40:00"
+        raw["limits"][0]["resets_at"] = "2026-08-22T18:07:33"
         windows, _ = su.parse_usage(raw, now_ts=NOW)
-        assert windows[0].resets_at == "2026-08-22T17:40:00Z"
+        assert windows[0].resets_at == "2026-08-22T18:07:33Z"
         assert windows[0].resets_in_seconds == FIVE_HOUR_RESETS_IN
 
 
@@ -1076,7 +1082,7 @@ class TestCache:
     def test_the_countdown_is_recomputed_against_the_readers_clock(self, tmp_path):
         """``resets_in_seconds`` is a delta, not data.
 
-        Restoring it verbatim would render "resets in 1h 04m" hours after the
+        Restoring it verbatim would render "resets in 1h 32m" hours after the
         window actually reset — precisely the reading the stale-cache path
         exists to serve.
         """
