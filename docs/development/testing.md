@@ -16,7 +16,7 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
-Five marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
+Six marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
 |---|---|---|
@@ -25,10 +25,15 @@ Five marker sets are deselected by default (also via `addopts`), each with a dif
 | `linux` | a real Linux kernel and a usable bubblewrap | `scripts/test-linux.sh` |
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
 | `smoke` | a Docker daemon | `uv run pytest -m smoke -n0` |
+| `full` | a Docker daemon, and the network — see below | `uv run pytest -m full -n0` |
 
-A sixth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
+A seventh marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
-`image` and `smoke` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it. The conftest fails the session with that reason rather than letting it happen.
+`image`, `smoke` and `full` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. The conftest fails the session with that reason rather than letting it happen.
+
+**Two shapes, one seam.** `smoke` and `full` are the same fixtures over different compose files. The *lean* shape (`docker/docker-compose.test.yml`) is one container with the entrypoint bypassed and the config rendered on the host: seconds to boot, right for a subsystem whose external is an HTTP endpoint. The *full* shape (`docker/docker-compose.yml` plus `testbed/compose/testbed.yml`) is the deployment as shipped — postgres, redis, nextcloud, istota, web, nginx — booted through `entrypoint.sh` with the generator running inside the container. It is the only thing that executes `provision-nc.sh` or reaches the half of `entrypoint.sh` past the config write. Read `testbed/compose/testbed.yml` before adding to it: it is a list of harness concessions, and each one is there with its reason.
+
+**The full tier needs the network, and it is worth knowing which way that fails.** `provision-nc.sh` runs `app:enable spreed`, `calendar` and `files_external`; only the last is bundled in `nextcloud:30-apache`, and the other two are fetched from the app store at first install. Every `occ` call in that script is `|| true`, so an install with no network writes its provisioning flag and reports success having enabled nothing. `tests/full/test_provisioning.py` asserts outcomes by name for exactly that reason.
 
 ## Deployment tiers
 
@@ -38,6 +43,7 @@ Four discretionary tiers, none of them automatic, each answering "does the artif
 scripts/test-linux.sh                        # the suite + the linux tests, on a real kernel
 uv run pytest -m image -n0                   # the built image's contract
 uv run pytest -m smoke -n0                   # end-to-end against the lean compose stack
+uv run pytest -m full -n0                    # end-to-end against the full stack, incl. a real Nextcloud
 scripts/test-upgrade.sh                      # the current image over an older release's state
 ```
 
@@ -49,6 +55,7 @@ When to run each:
 | `-m image` | you touched `docker/istota/Dockerfile`, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache |
 | `-m image --platform amd64` | before a release | about ten minutes under emulation, and it is the only thing that ever executes the amd64-only devbox image |
 | `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about a minute against a warm layer cache: one stack per profile rather than per test, so most of it is the three boots |
+| `-m full` | you touched `entrypoint.sh`, `provision-nc.sh`, `docker-compose.yml`, or anything about first-boot provisioning; and before a release | about a minute and a half against warm image and layer caches, most of it Nextcloud installing itself on a cold volume set |
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |
 
