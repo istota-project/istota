@@ -213,5 +213,11 @@ pytest_args=(-o cache_dir=/tmp/pytest_cache "${pytest_args[@]}")
 
 # ruff first: a lint failure is cheaper to read before a suite's worth of output,
 # and this is the run that sees the tree as Linux sees it.
-run_in_container sh -c 'ruff check --output-format concise src tests && exec pytest "$@"' \
+# The cgroup setup is sourced, not run: it exports ISTOTA_TEST_CGROUP_ROOT into
+# the pytest process, and it has to happen inside the container because what it
+# builds is that container's own cgroup subtree. It never fails the run — a
+# Docker that cannot delegate cgroups is a limitation of the machine, and the
+# tests skip themselves there rather than taking the whole tier down with them.
+run_in_container sh -c '. /src/scripts/dev/linux-tier-cgroup.sh
+ruff check --output-format concise src tests && exec pytest "$@"' \
     -- "${pytest_args[@]}"

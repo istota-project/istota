@@ -47,6 +47,29 @@ def _fresh_log_state():
     task_cgroup._reset_log_state()
 
 
+def _unavailable(reason: str):
+    """Skip — unless something promised us a cgroup, where a skip is the bug.
+
+    Same rule as ``tests/linux/test_sandbox_real.py``, keyed one notch
+    narrower. That file keys on ``ISTOTA_LINUX_TIER=1`` because every container
+    the driver starts can run bwrap. A delegated cgroup is not like that: it
+    needs ``SYS_ADMIN`` and a writable cgroup2 mount, and a Docker setup
+    without them is a limitation of the machine rather than a defect in the
+    tree. Hard-failing there would make the whole Linux tier unusable for
+    something these tests are only one part of.
+
+    So the promise is what is checked. ``ISTOTA_TEST_CGROUP_ROOT`` is set by
+    ``scripts/test-linux.sh`` only after it has actually built the subtree; if
+    it is set and these tests still cannot run, the setup broke and saying so
+    is the point. Unset means nobody claimed anything, and a skip is honest.
+    """
+    if os.environ.get("ISTOTA_TEST_CGROUP_ROOT"):
+        pytest.fail(
+            f"ISTOTA_TEST_CGROUP_ROOT was set, so this must not skip: {reason}"
+        )
+    pytest.skip(reason)
+
+
 @pytest.fixture
 def cgroup(tmp_path: Path) -> Path:
     """A task cgroup as the kernel would present it: the interface file exists.
@@ -408,13 +431,19 @@ class TestForkInheritanceAgainstTheKernel:
     @pytest.fixture
     def live_root(self):
         if not sys.platform.startswith("linux"):
-            pytest.skip("cgroup v2 is Linux-only")
-        root = task_cgroup.resolve_root()
+            _unavailable("cgroup v2 is Linux-only")
+        # `scripts/test-linux.sh` builds a delegated subtree by hand and names
+        # it here. A container's `/proc/self/cgroup` is `0::/` under the default
+        # private namespace, so `resolve_root` finds no `.service` component and
+        # answers None however writable the tree is — the deployed host is the
+        # only place it resolves on its own.
+        env_root = os.environ.get("ISTOTA_TEST_CGROUP_ROOT")
+        root = Path(env_root) if env_root else task_cgroup.resolve_root()
         if root is None:
-            pytest.skip("no delegated unit cgroup (needs Delegate= on the unit)")
+            _unavailable("no delegated unit cgroup (needs Delegate= on the unit)")
         reason = task_cgroup.probe(root)
         if reason is not None:
-            pytest.skip(f"delegation not usable here: {reason}")
+            _unavailable(f"delegation not usable here: {reason}")
         return root
 
     def test_a_grandchild_forked_after_placement_is_a_member(self, live_root):

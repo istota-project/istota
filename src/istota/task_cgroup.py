@@ -366,7 +366,15 @@ def probe(root: Path) -> str | None:
     honest answer comes from :func:`verify_placement` instead, which reads real
     membership after a real spawn.
     """
-    scratch = Path(root) / "task-probe"
+    # Named per process. A fixed `task-probe` is not reentrant: two probes
+    # against the same root interleave `mkdir` / write / `rmdir` on one
+    # directory, and the one that loses gets ENOENT on `memory.max` and reports
+    # the memory controller missing — a false negative that reads exactly like
+    # a deployment with no delegation. One daemon probes once at startup, so
+    # this was not reachable in production, but the tests probe concurrently
+    # under `-n auto` and it is a footgun either way. `sweep_stale` still
+    # collects it: the name stays inside `task-*`.
+    scratch = Path(root) / f"task-probe-{os.getpid()}"
     try:
         scratch.mkdir(exist_ok=True)
     except OSError as exc:
