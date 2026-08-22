@@ -295,38 +295,33 @@ def cmd_run(args):
     reset_async_runtime()
 
 
-# A dollar figure renders only for rows whose cost is real money. A
-# subscription's list-price equivalent and a catalog estimate both read as spend
-# at a glance, and a surface that quietly invents an invoice is worse than one
-# that declines to guess. `--json` is exempt: `cost_basis` travels with the
-# figure there, so a consumer can apply its own rule.
+# A dollar figure renders only for rows whose cost is real money, and it is the
+# whole of what the column says. A subscription's list-price equivalent and a
+# catalog estimate both read as spend at a glance, and a surface that quietly
+# invents an invoice is worse than one that declines to guess — so neither
+# reaches the column, as a figure or as a name. `--json` is exempt: the full
+# `cost_by_basis` map travels there, so a consumer can apply its own rule.
 COST_PLACEHOLDER = "—"
 
 
 def _render_cost(cost_by_basis: dict) -> str:
     """One rule: no currency unless it is money.
 
-    Returns a dollar figure when the group's spend is entirely `api`, and the
-    bare placeholder otherwise. A group spanning bases is never summed into one
-    number — an operator who switched the CLI's auth mid-window has rows of both
+    Returns the group's `api` total as a dollar figure, and the bare
+    placeholder when there is no `api` row at all. Nothing is summed across
+    bases — an operator who switched the CLI's auth mid-window has rows of both
     kinds, and adding a plan-equivalent to real spend is the misread this whole
     design refuses.
 
-    With no `api` rows there is nothing to qualify, so the placeholder stands on
-    its own: naming the bases behind it made a column of dashes noisier without
-    changing what it says, which is that no money was spent here.
+    The other bases are not named. A `+estimated+subscription+unknown` suffix
+    used to follow the figure; it overflowed the dashboard's fixed-width column
+    into the one beside it, and it asked the reader to act on a distinction
+    they have no way to act on. The full breakdown stays available in
+    `cost_by_basis` — `--json` emits it, and `_render_cost` is only the column.
     """
-    # The `+` marker is keyed on which bases are *present*, not on their
-    # magnitude. A catalog estimate is routinely 0.0 — that is the whole reason
-    # `estimated` exists as a basis — and dropping it on magnitude would let a
-    # partial dollar figure read as the whole of a group's spend.
-    bases = cost_by_basis or {}
-    real = bases.get("api")
-    other = sorted(b for b in bases if b != "api")
-    if real is not None and not other:
-        return f"${_fmt_money(real)}"
+    real = (cost_by_basis or {}).get("api")
     if real is not None:
-        return f"${_fmt_money(real)} +{'+'.join(other)}"
+        return f"${_fmt_money(real)}"
     return COST_PLACEHOLDER
 
 
