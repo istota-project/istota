@@ -1130,11 +1130,12 @@ def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
     `api_protocol` for that case (`_plain_http_host_entry`), which makes the
     call work and the plaintext transport real.
 
-    Both forges are checked even though gh cannot address a non-443 host at
-    all: `forge_cli._hostname` strips the port, so gh would reach
-    `https://<host>` instead. The scheme is still what the operator wrote, and
-    reporting on the deployment we wish they had is how a check earns being
-    ignored.
+    Both forges are checked, and for gh the plaintext is the whole of what is
+    wrong: gh refuses a scheme inside `GH_HOST` outright, so a plain-HTTP
+    `github_url` cannot connect however it is spelled. The port half of that
+    used to be broken too and no longer is — `forge_cli._gh_host` keeps a
+    non-default port (ISSUE-279), so a forge on `:8443` is reachable and only
+    its scheme is this check's business.
 
     The detail names the URL and never the token. A URL can carry userinfo, so
     it is redacted rather than printed raw.

@@ -949,9 +949,11 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
     def test_gh_gets_nothing_even_when_its_url_is_plain_http(self, tmp_path):
         """The entry is glab's, and gh must not receive it.
 
-        gh cannot address a non-443 forge at all — `forge_cli._hostname` strips
-        the port by construction — so there is nothing the entry could fix for
-        it. Worse than useless, though: gh *reads* a `hosts:` block, and on
+        The entry exists to reach a forge over plain HTTP, and gh refuses a
+        scheme in `GH_HOST` outright — so there is nothing it could fix for gh.
+        (The *port* half is a separate question and is handled:
+        `forge_cli._gh_host` keeps a non-default one, ISSUE-279.) Worse than
+        useless, though: gh *reads* a `hosts:` block, and on
         seeing one it runs its multi-account migration and writes a `hosts.yml`
         beside the config. `_seed_cli_config_dir` truncates `config.yml` and
         nothing else, and `user_temp_dir` persists across tasks — so that file
