@@ -1,11 +1,11 @@
 """The cost and number render rule for token-usage surfaces.
 
 One rule, stated once: a currency figure appears only where
-`cost_basis = 'api'`, and nothing is summed across bases. Today `istota usage`
-(`cli.py`) is the only Python caller, and the rule sits here rather than in it
-so that the next surface can import the rule instead of copying it — `cli.py`
-is the CLI entry point with a heavy import graph, which a chat handler on the
-Talk polling path cannot import.
+`cost_basis = 'api'`, and nothing is summed across bases. Two Python callers
+import it: `istota usage` (`cli.py`) and `!usage` (`commands.py`). It sits here
+rather than in `cli.py` for the second of those — `cli.py` is the CLI entry
+point with a heavy import graph, which a chat handler on the Talk polling path
+cannot import, so the alternative was a third copy of the rule.
 
 `web/src/lib/usageFormat.ts` states the same rule in TypeScript. Two
 implementations, one per language, is the situation
