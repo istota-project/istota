@@ -67,14 +67,18 @@ COPY pyproject.toml uv.lock ./
 # and now live in the `dev` group, which `--group dev` below installs.
 RUN uv sync --frozen --no-install-project --group dev --extra test
 
-# ruff is not a project dependency: it appears in pyproject.toml only as
-# [tool.ruff] configuration, and [dependency-groups] dev is pytest and its
-# plugins. Installing it as a tool here is narrower than adding it to the dev
-# group, which would change what every developer's `uv sync` pulls.
+# ruff is in [dependency-groups] dev as of ISSUE-301 and so already arrives in
+# /venv above. Keeping the tool install anyway is deliberate: /root/.local/bin
+# is prepended below, so the lint gate in scripts/test-linux.sh resolves this
+# copy whatever a future `uv sync` does with the group, and the runner's
+# behaviour does not change with a flag somewhere else. It used to be the only
+# place ruff was installed at all, which is what left a developer on a fresh
+# clone unable to run the check AGENTS.md mandates.
 #
 # Pinned for the same reason as uv above, and because the lint gate in
 # scripts/test-linux.sh is what the whole suite run hangs on: an unpinned ruff
 # turns a new rule in a new release into "the Linux runner is broken". This is
-# the version the tree is known clean under; bump it deliberately.
+# the version the tree is known clean under; bump it deliberately, here and in
+# the dev group together — tests/test_lean_install.py pins them equal.
 RUN uv tool install ruff==0.16.4
 ENV PATH="/root/.local/bin:${PATH}"
