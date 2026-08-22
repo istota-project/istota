@@ -4122,6 +4122,42 @@ def check_doctor(config: Config, state: dict) -> list:
     return results
 
 
+def check_worktree_reap(config: Config) -> list:
+    """Sweep `developer.repos_dir` for worktrees whose work has landed.
+
+    Here rather than on the developer skill's setup path (ISSUE-288, and the
+    review of it): `dispatch_setup_env_hooks` calls every skill's hook whatever
+    the task selected, so a sweep there ran before every Talk reply, every cron
+    job and every heartbeat tick — and the heartbeat builds a task with `id=0`,
+    so it ran with no notion of whose worktree was whose. A delete path belongs
+    on a cadence somebody chose.
+
+    Nothing is protected by name here, and nothing needs to be: the retention
+    window is the guard, and it is floored well above any task's lifetime.
+
+    Returns the outcomes so a caller can assert on them; the sweep logs its own
+    removals and a count of what it kept.
+    """
+    from .worktree_reaper import reap_and_report
+
+    dev = config.developer
+    # Re-checked here rather than left to the loop's gate. The gate exists to
+    # skip the thread spawn cheaply; this makes the function safe to call on
+    # its own, which is how the tests and any future operator command reach it.
+    # A delete path should not depend on its caller having read the flag.
+    if not (dev.enabled and dev.repos_dir and dev.worktree_reap_enabled):
+        return []
+
+    try:
+        return reap_and_report(
+            Path(dev.repos_dir),
+            retention_hours=dev.worktree_retention_hours,
+        )
+    except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
+        logger.error("worktree_reap_failed err=%s", exc, exc_info=True)
+        return []
+
+
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
@@ -6577,6 +6613,10 @@ def run_daemon(
     last_travel_tz_check = 0.0
     last_heartbeat_check = 0.0
     last_db_health_check = 0.0
+    # Seeded to 0 so a fresh daemon sweeps on its first tick: the accumulation
+    # this clears is the state a restart usually arrives into, and there is no
+    # boot run to double up with.
+    last_worktree_reap = 0.0
     # Seeded to now, not 0: the boot run above already swept, so a 0 here would
     # re-run the whole registry on the first tick seconds later.
     last_doctor_check = time.time()
@@ -6821,6 +6861,23 @@ def run_daemon(
                 "doctor", lambda: check_doctor(config, doctor_state), background_checks,
             )
             last_doctor_check = now
+
+        # Reap developer worktrees whose work has landed (ISSUE-288). Nothing
+        # removed a task's worktree, so `repos_dir` grew gigabyte checkouts with
+        # no owner. Backgrounded like the sweeps above and for the same reason:
+        # it fetches each bare clone and walks each candidate checkout, so on
+        # the loop thread a slow forge or a cold cache would starve dispatch.
+        if (
+            config.developer.enabled
+            and config.developer.repos_dir
+            and config.developer.worktree_reap_enabled
+            and config.scheduler.worktree_reap_interval
+            and now - last_worktree_reap >= config.scheduler.worktree_reap_interval
+        ):
+            _spawn_background_check(
+                "worktree-reap", lambda: check_worktree_reap(config), background_checks,
+            )
+            last_worktree_reap = now
 
         # Snapshot local DBs to the mount for off-host durability (they left the
         # Nextcloud-synced workspaces when they moved to local disk). Also off
