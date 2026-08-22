@@ -1140,11 +1140,22 @@
   # — its own docs tell you to — and an interactive prompt here hangs the play.
   environment:
     GIT_TERMINAL_PROMPT: "0"
+  # Every long-running service that imports from the checkout has to be listed
+  # here, including the two per-user proxies: their handlers are otherwise
+  # notified only by the tmpfiles-snippet and unit-file template tasks, which
+  # change when the *deployment* changes and not when the source does. A pure
+  # source sync then left both proxies holding the old module in memory for as
+  # long as the unit file stayed put — which is how the ISSUE-294 keep-alive
+  # bypass survived its own fix on a host that had already been deployed. The
+  # handlers carry their own devbox/web-only guards, so no condition is needed
+  # at the notify site.
   notify:
     - "restart istota-scheduler"
     - "restart istota-browser"
     - "restart istota-web"
     - "restart istota-webhooks"
+    - "restart istota-devbox-proxy"
+    - "restart istota-docker-proxy"
 
 - name: Read back the repository remote URL
   command: "git -C {{ istota_repo_dir }} config --get remote.origin.url"
@@ -1203,11 +1214,14 @@
       register: tag_checkout_result
       changed_when: tag_checkout_result.rc == 0
       when: _istota_resolved_tag | length > 0
+      # Same list as the branch-checkout task above; see the comment there.
       notify:
         - "restart istota-scheduler"
         - "restart istota-browser"
         - "restart istota-web"
         - "restart istota-webhooks"
+        - "restart istota-devbox-proxy"
+        - "restart istota-docker-proxy"
 
     - name: Warn if no tags found
       debug:
