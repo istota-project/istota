@@ -2432,6 +2432,26 @@
   notify:
     - "restart istota-devbox"
 
+# The escape hatch for what the two triggers above cannot see: a container
+# modified by hand, an image left half-built, a build that failed after the
+# marker was already written. `changed_when: true` is the whole mechanism — a
+# handler only runs for a task that reports changed, so an unconditional task
+# reporting changed is how you notify one on demand. Reporting changed for a
+# deliberate no-op is the honest answer here: something is about to be rebuilt
+# and recreated, and a run that says "ok" while doing that is the misleading
+# one.
+- name: Force a devbox rebuild and recreate when asked
+  ansible.builtin.debug:
+    msg: >-
+      istota_devbox_force_recreate is set: rebuilding the devbox image and
+      recreating every devbox container at the end of this play.
+  changed_when: true
+  when:
+    - istota_devbox_force_recreate | default(false) | bool
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  notify:
+    - "restart istota-devbox"
+
 # --- Devbox credential proxy ----------------------------------------------
 # Per-user host-side daemon that holds GitLab/GitHub tokens and answers
 # JSON requests over a Unix socket bind-mounted into each container. The
