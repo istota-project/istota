@@ -2307,7 +2307,11 @@ def _outbound_gate(
             draft_source.write(
                 conn, user_id, draft_id=draft_id,
                 title=draft_source.title_for(to[0] if to else ""),
-                body=draft_source.delivery_body_for(subject, draft_id),
+                body=draft_source.delivery_body_for(
+                    subject, draft_id,
+                    draft_source.visible_recipients(to, cc, bcc),
+                ),
+                room_token=room_token,
             )
     except _GateRefusal as e:
         return _gate_error(str(e)), []

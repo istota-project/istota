@@ -87,6 +87,30 @@ class _ConnectionDepth:
         monkeypatch.setattr(db, "get_db", _tracked)
 
 
+def _count_sends(monkeypatch, *, delivered: bool = False) -> list[tuple]:
+    """Record every `send_notification` the inbox delivery makes.
+
+    Patched where `deliver_pending` imports it from, so the real buffering and
+    the real `last_delivered_at` stamp still run — a patch on `deliver_pending`
+    itself would prove only that something was called.
+    """
+    calls: list[tuple] = []
+
+    def _send(cfg, user_id, text, **kwargs):
+        calls.append((user_id, text, kwargs.get("purpose")))
+        return delivered
+
+    monkeypatch.setattr("istota.notifications.send_notification", _send)
+    return calls
+
+
+def _stored(config, source: str):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM notifications WHERE source = ?", (source,),
+        ).fetchone()
+
+
 def _lock_free_probe(config, record: list[str], label: str):
     """A `deliver_pending` stand-in that proves the producer's lock is gone."""
 
@@ -113,6 +137,24 @@ def _email_config():
         bot_email=BOT,
         outbound_approval_floor="untrusted",
     )
+
+
+@pytest.fixture(autouse=True)
+def _clean_prompt_budget():
+    """The gate's prompt throttle is a module dict that outlives one test.
+
+    `_prompt_counts` is keyed `(user, sender)` and never cleared between tests
+    in a reused process, so a second gated mail from the same sender reaches
+    `_prompt_budget_spent` and has its prompt collapsed — the case one of the
+    tests below covers deliberately, and silent pollution everywhere else.
+    """
+    from istota.transport.email import inbound
+
+    inbound._prompt_counts.clear()
+    inbound._throttle_alerted.clear()
+    yield
+    inbound._prompt_counts.clear()
+    inbound._throttle_alerted.clear()
 
 
 @pytest.fixture
@@ -190,14 +232,89 @@ class TestEmailGate:
             _lock_free_probe(config, record, "delivered"),
         )
         envelope, email = _gated_mail(uid="42")
+        # The prompt fails, which is the arm that actually delivers the row —
+        # stubbing a *successful* prompt would leave the buffer empty and the
+        # probe would pass on a call that sent nothing.
         with patch(
-            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+            "istota.notifications.send_confirmation_prompt", return_value=(False, None),
         ):
             _poll(config, envelope, email)
 
         assert record == ["delivered"], (
             "deliver_pending never ran, or ran while the write lock was held"
         )
+
+    def test_a_delivered_prompt_is_the_rows_delivery_and_the_row_sends_nothing(
+        self, config, monkeypatch,
+    ):
+        """One question, one message.
+
+        The prompt already carries this question to whatever the user's routing
+        table resolves; sending the row as well puts two messages in the same
+        alerts channel for one gated email.
+        """
+        sent = _count_sends(monkeypatch)
+        envelope, email = _gated_mail(uid="43")
+        with patch(
+            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+        ):
+            _poll(config, envelope, email)
+
+        assert sent == [], "the row pushed a second copy of the question"
+        assert _stored(config, "confirmation")["last_delivered_at"] is None
+
+    def test_a_prompt_that_reached_nobody_falls_back_to_the_row(
+        self, config, monkeypatch,
+    ):
+        """The one arm where the row is the only voice left.
+
+        `send_confirmation_prompt` returning False used to mean a WARNING and a
+        task that died unanswered two hours later. The row is durable either
+        way; this is the second attempt on top of it.
+        """
+        sent = _count_sends(monkeypatch, delivered=True)
+        envelope, email = _gated_mail(uid="44")
+        with patch(
+            "istota.notifications.send_confirmation_prompt", return_value=(False, None),
+        ):
+            _poll(config, envelope, email)
+
+        assert len(sent) == 1
+        assert _stored(config, "confirmation")["last_delivered_at"] is not None
+
+    def test_a_throttled_prompt_writes_a_row_and_pushes_nothing(
+        self, config, monkeypatch,
+    ):
+        """The arm that would undo ISSUE-250 if the row delivered.
+
+        Past the per-sender budget the prompt is suppressed and the sender's
+        held mail is collapsed into one summary notice. A row that delivered
+        here would fan fifty collapsed prompts straight back out as fifty
+        notification pushes.
+        """
+        from istota.transport.email import inbound
+
+        sent = _count_sends(monkeypatch)
+        with patch(
+            "istota.notifications.send_confirmation_prompt", return_value=(True, None),
+        ):
+            for n in range(inbound._MAX_PROMPTS_PER_SENDER_WINDOW + 1):
+                envelope, email = _gated_mail(uid=str(50 + n))
+                _poll(config, envelope, email)
+
+        with db.get_db(config.db_path) as conn:
+            rows = conn.execute(
+                "SELECT last_delivered_at FROM notifications "
+                "WHERE source = 'confirmation'",
+            ).fetchall()
+        assert len(rows) == inbound._MAX_PROMPTS_PER_SENDER_WINDOW + 1, (
+            "every held task must get a row, throttled or not"
+        )
+        assert all(r["last_delivered_at"] is None for r in rows)
+        # Exactly one push for the whole burst, and it is the collapse's own
+        # summary — not one per row, which is what the collapse exists to stop.
+        assert len(sent) == 1, [text for _, text, _ in sent]
+        assert "held waiting for your confirmation" in sent[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +362,58 @@ class TestSchedulerConfirmation:
         assert probe.calls[0]["opened_during"] == 0
         assert probe.calls[0]["dedup_key"] == f"task:{task_id}"
         assert record == ["delivered"]
+
+    def test_a_talk_carried_question_writes_a_row_and_pushes_nothing(
+        self, config, monkeypatch,
+    ):
+        """`post_talk_message` posts the question into the room itself.
+
+        Delivering the row as well puts the same question in that room twice.
+        The row is still written — it is what makes the question answerable
+        from the bell after the message has scrolled away.
+        """
+        from istota.scheduler import process_one_task
+
+        config.users["alice"] = UserConfig(
+            display_name="Alice", email_addresses=[OWN], alerts_channel="alerts",
+        )
+        with db.get_db(config.db_path) as conn:
+            db.create_task(
+                conn, prompt="Delete the file", user_id="alice",
+                source_type="talk", conversation_token="talk-room-1",
+            )
+
+        sent = _count_sends(monkeypatch)
+        posted: list = []
+        monkeypatch.setattr(
+            "istota.scheduler.run_coro", lambda *a, **k: posted.append(a) or 1,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *a, **k: (
+                True,
+                "I need your confirmation before deleting the file. Reply yes or no.",
+                None, None,
+            ),
+        )
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, _ = result
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            row = conn.execute(
+                "SELECT last_delivered_at FROM notifications WHERE dedup_key = ?",
+                (f"task:{task_id}",),
+            ).fetchone()
+        assert row is not None, "the park wrote no row"
+        assert row["last_delivered_at"] is None
+        assert sent == [], "the row pushed a second copy of the question"
+        # Without this the test passes for the wrong reason: a plan with no
+        # Talk leg at all also sends nothing, and would prove nothing about
+        # the branch being asserted.
+        assert posted, "the Talk leg never carried the question"
 
 
 # ---------------------------------------------------------------------------

@@ -81,9 +81,17 @@ def describe_email(sender: str | None, subject: str | None) -> str:
     the identical string. The stored title and the resolver's title have to
     agree; two spellings of the same label is how one of them goes stale.
     """
+    # Both halves are truncated. The subject always was; the sender is newly
+    # load-bearing because this string is now stored as `notifications.title`
+    # and handed to `send_notification(title=…)`, which reaches ntfy as an HTTP
+    # header — an oversized one is refused by the server, and the push is then
+    # lost with `last_delivered_at` correctly left null and nothing saying why.
     flat_subject = _flatten(subject or "") or "(no subject)"
     flat_sender = _flatten(sender or "") or "unknown sender"
-    return f"email from {flat_sender} — {flat_subject[:_PREVIEW_CHARS]}"
+    return (
+        f"email from {flat_sender[:_PREVIEW_CHARS]} — "
+        f"{flat_subject[:_PREVIEW_CHARS]}"
+    )
 
 
 def describe_prompt(prompt: str | None) -> str:
@@ -148,6 +156,37 @@ def _close_notification(conn, task: db.Task, by: str) -> None:
     from .notification_resolvers import confirmation as confirmation_source
 
     confirmation_source.resolve_for_task(conn, task.user_id, task.id, by=by)
+
+
+def cancel_for_conversation(
+    conn, conversation_token: str, user_id: str, *, by: str = "system",
+) -> int:
+    """Discard this room's held questions because the user moved on.
+
+    The fifth close path, and the one that is easiest to miss: a new message in
+    a room cancels the questions already open there, and it does so with a bare
+    UPDATE rather than through :func:`decline`. Left alone, those rows stayed
+    open — and unlike an ordinary miss they were not merely slow to clear. The
+    resolver backstop runs inside ``list_open``, i.e. only on a panel *open*,
+    while the bell polls ``counts``, which is plain SQL; a user who never opened
+    the panel would have carried the count for those rows indefinitely.
+
+    The ids are read before the cancel, on the caller's own connection, because
+    ``db.cancel_pending_confirmations`` reports a count rather than the rows it
+    touched. Both callers hold a write transaction — the Talk poller wraps its
+    whole batch in one — so opening a connection here would deadlock against it.
+    """
+    from .notification_resolvers import confirmation as confirmation_source
+
+    held = conn.execute(
+        "SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ? "
+        "AND status = 'pending_confirmation'",
+        (conversation_token, user_id),
+    ).fetchall()
+    cancelled = db.cancel_pending_confirmations(conn, conversation_token, user_id)
+    for row in held:
+        confirmation_source.resolve_for_task(conn, user_id, row[0], by=by)
+    return cancelled
 
 
 def approve(

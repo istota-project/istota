@@ -162,6 +162,55 @@ class TestConfirmationResolver:
         assert items == []
         assert _state(conn, "confirmation")[0] == "stale"
 
+    def test_a_scheduler_parked_email_task_shows_its_own_question(
+        self, config, conn,
+    ):
+        """The two producers are indistinguishable from the row.
+
+        An email-origin task whose *answer* asks a question parks exactly like
+        any other, so `source_type == "email"` does not mean "held by the
+        inbound gate". A resolver branching on it renders the gate's wording —
+        "nothing has been run, and the message body is not shown" — over a task
+        that ran to completion and asked something of its own.
+        """
+        task_id = db.create_task(
+            conn, prompt="<email_metadata>…</email_metadata> do the thing",
+            user_id="alice", source_type="email", conversation_token="thread-abc",
+        )
+        question = "I need your confirmation before deleting three files."
+        db.set_task_confirmation(conn, task_id, question)
+        confirmation_source.write(
+            conn, "alice", task_id=task_id,
+            title=confirmations.describe_prompt(question),
+            body=confirmation_source.body_for(question),
+        )
+
+        items, _total = store.list_open(config, conn, "alice")
+        assert len(items) == 1
+        assert "deleting three files" in items[0].body
+        assert "not shown" not in items[0].body
+        assert "do the thing" not in items[0].body
+
+    def test_the_gates_stored_body_is_what_the_resolver_recomputes(
+        self, config, conn,
+    ):
+        """Stored and rendered come from one function, so they cannot drift."""
+        task_id = db.create_task(
+            conn, prompt="untrusted", user_id="alice", source_type="email",
+        )
+        gate_message = "Email from unknown sender x@example.invalid\nSubject: Hi"
+        db.set_task_confirmation(conn, task_id, gate_message)
+        confirmation_source.write(
+            conn, "alice", task_id=task_id, title="email from x — Hi",
+            body=confirmation_source.body_for(gate_message),
+        )
+        stored = conn.execute(
+            "SELECT body FROM notifications WHERE dedup_key = ?",
+            (f"task:{task_id}",),
+        ).fetchone()["body"]
+        items, _total = store.list_open(config, conn, "alice")
+        assert items[0].body == stored
+
     def test_a_row_naming_another_users_task_is_never_rendered(self, config, conn):
         """`object_id` is a value on the row, so the resolver re-checks the owner."""
         task_id = db.create_task(

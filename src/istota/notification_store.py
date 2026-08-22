@@ -817,11 +817,19 @@ def _fallback(row: NotificationRow, note: str) -> ResolvedNotification:
 
 def _rendered(row: NotificationRow, view: NotificationView) -> ResolvedNotification:
     severity = view.severity if view.severity in sources.SEVERITIES else row.severity
+    # `actionable` is the *rendered* answer, not the stored one, exactly as in
+    # `_fallback` and for the same reason: a view with no actions filed under
+    # "Needs action" is a row the user is told to act on with no way to act. A
+    # resolver returns an empty tuple for a real state — a draft mid-send is the
+    # live case, and a `sending` row is terminal if the process died between the
+    # claim and the finalize, so without this it would sit in that filter
+    # forever. The stored column keeps the write-time answer.
+    actionable = row.actionable and bool(view.actions)
     return ResolvedNotification(
         id=row.id,
         source=row.source,
         severity=severity,
-        actionable=row.actionable,
+        actionable=actionable,
         title=view.title or row.title,
         body=view.body if view.body is not None else row.body,
         link=view.link,

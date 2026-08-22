@@ -4785,7 +4785,7 @@ def _chat_create_web_task(
     it must be a message in *this* room, and its body — never a client-supplied
     quote — is what gets snapshotted onto the task.
     """
-    from . import db
+    from . import confirmations, db
     from .transport import record_inbound
     chat = _config.web.chat
     with db.get_db(_config.db_path) as conn:
@@ -4850,7 +4850,9 @@ def _chat_create_web_task(
         # Ordered before `record_inbound` for the same reason Talk orders it
         # that way — the new task must not be a candidate for its own cancel.
         if not replaying:
-            cancelled = db.cancel_pending_confirmations(conn, token, username)
+            cancelled = confirmations.cancel_for_conversation(
+                conn, token, username, by="web",
+            )
             if cancelled:
                 logger.info(
                     "Cancelled %d pending confirmation(s) in %s for %s (new message)",

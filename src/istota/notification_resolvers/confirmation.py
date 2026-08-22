@@ -36,14 +36,15 @@ OBJECT_TYPE = "task"
 # actionable and warns rather than informs.
 SEVERITY = "warning"
 
+# The task status this source watches. Spelled once: `resolve` returning None
+# means "the object is gone", and `list_open` feeds those ids straight to
+# `mark_stale` — so a literal that drifted from what the tasks table actually
+# stores would close every open row of this source with nothing logged anywhere.
+HELD_STATUS = "pending_confirmation"
+
 # How much of a bot-composed question survives into the notification body. The
 # title already carries the one-line label; this is the rest of what was asked.
 _BODY_CHARS = 400
-
-_EMAIL_BODY = (
-    "This message is held until you approve it. Nothing has been run, and the "
-    "message body is not shown until you do."
-)
 
 
 def dedup_key(task_id: int | str) -> str:
@@ -54,6 +55,30 @@ def dedup_key(task_id: int | str) -> str:
     held item shows twice, permanently, with only one of the two closable.
     """
     return f"{OBJECT_TYPE}:{task_id}"
+
+
+def body_for(confirmation_prompt: str | None) -> str:
+    """The notification body for a held task: its own question, flattened.
+
+    One rule for **both** producers, and that is the point. This source has two
+    — the inbound email gate and the scheduler's mid-run park — and the row they
+    write is indistinguishable afterwards: same `source`, same `object_type`,
+    same `object_id`, and `source_type` is `email` on both, because an
+    email-origin task whose answer asks a question parks exactly like any other
+    (`.claude/rules/transport.md` records that as a deliberate decision). A
+    resolver branching on `source_type` therefore renders the *gate's* wording
+    over the *scheduler's* question — "nothing has been run, and the message
+    body is not shown", on a task that ran to completion.
+
+    `tasks.confirmation_prompt` is the one thing that is right in both cases: it
+    is the gate's own composed message for a hold, and the model's question for
+    a park. Neither is the withheld body — the gate's message carries the sender
+    and subject only, which is exactly what `describe` is allowed to show — and
+    flattening covers the fact that both spellings embed attacker-supplied text.
+    """
+    from ..confirmations import flatten
+
+    return flatten(confirmation_prompt or "")[:_BODY_CHARS]
 
 
 def write(
@@ -146,20 +171,12 @@ class ConfirmationResolver:
                 row.id, row.user_id, task.user_id, task_id,
             )
             return None
-        if task.status != "pending_confirmation":
+        if task.status != HELD_STATUS:
             return None
-
-        if task.source_type == "email":
-            # Fixed text, not the stored prompt. The gate's prompt embeds the
-            # raw subject, and the task's own prompt is the withheld body; the
-            # title already carries the flattened sender and subject.
-            body = _EMAIL_BODY
-        else:
-            body = confirmations.flatten(task.confirmation_prompt or "")[:_BODY_CHARS]
 
         return NotificationView(
             title=confirmations.describe(conn, task),
-            body=body,
+            body=body_for(task.confirmation_prompt),
             severity=row.severity,
             actions=(
                 NotificationAction(

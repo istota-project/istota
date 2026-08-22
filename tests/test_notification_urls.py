@@ -123,14 +123,48 @@ def test_a_hostile_object_id_never_reaches_the_client(
 
     items, _total = store.list_open(config, conn, "alice")
 
-    for item in items:
+    # Stated rather than left implicit: every one of these ids is refused by the
+    # resolver's own `int()` coercion, so the row is swept `stale` and the loop
+    # below has nothing to iterate. Asserting only inside the loop would make
+    # the whole parametrization pass by never executing — which is exactly the
+    # vacuity this file's docstring says a URL test must not have.
+    assert items == [], (
+        f"{source_module.SOURCE} rendered a row for object_id {hostile!r}"
+    )
+    for item in items:  # pragma: no cover - defence if the refusal ever changes
         for path in _emitted_paths(item):
             assert sources.is_safe_path(path), (
                 f"{source_module.SOURCE} emitted {path!r} for object_id {hostile!r}"
             )
-        assert item.actions == (), (
-            "a row whose object cannot be named must offer no actions"
-        )
+
+
+def test_a_coercible_id_is_interpolated_as_the_int_not_as_the_stored_text(
+    config, conn,
+):
+    """The coercion is what builds the path, not `row.object_id`.
+
+    ` 1 ` and `+1` are the case the refusals above cannot reach: both name a
+    real task, so the resolver renders — and a path built by interpolating the
+    *stored* text rather than the parsed int would emit `/chat/tasks/ 1 /confirm`,
+    which the allowlist then has to catch. It should never get that far.
+    """
+    task_id = db.create_task(
+        conn, prompt="do it", user_id="alice", source_type="web",
+    )
+    db.set_task_confirmation(conn, task_id, "Shall I proceed?")
+    store.write_notification(
+        conn, "alice", source=confirmation_source.SOURCE,
+        dedup_key="task:padded", title="waiting",
+        object_type=confirmation_source.OBJECT_TYPE,
+        object_id=f" {task_id} ", actionable=True,
+    )
+
+    items, _total = store.list_open(config, conn, "alice")
+    assert len(items) == 1
+    endpoints = {a.id: a.endpoint for a in items[0].actions}
+    assert endpoints["confirm"] == f"/chat/tasks/{task_id}/confirm"
+    for path in _emitted_paths(items[0]):
+        assert sources.is_safe_path(path)
 
 
 # ---------------------------------------------------------------------------

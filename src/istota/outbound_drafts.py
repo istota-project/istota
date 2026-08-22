@@ -450,9 +450,14 @@ def discard(conn: sqlite3.Connection, draft_id: int, *, by: str = "system") -> N
         raise DraftNotFound(f"no draft {draft_id}")
     user_id, status = current
     if status == STATUS_DISCARDED:
-        # Idempotent, and the close is repeated deliberately: a first discard
-        # whose notification write lost its transaction would otherwise leave
-        # the row open with no second chance to close it.
+        # Idempotent, and the close is repeated deliberately — though not for
+        # the reason it first looks like. The first discard's close runs on the
+        # same connection and in the same transaction as the status write, so
+        # the two commit or roll back together and a row reading `discarded`
+        # already had its notification closed. What this covers is a row that
+        # arrives *after* the object was closed: stage 4's backfill inserts one
+        # per held draft, and a draft discarded before the inbox existed would
+        # otherwise keep an open row until somebody opened the panel.
         _close_notification(conn, user_id, draft_id, by)
         return
     if status != STATUS_PENDING:
@@ -569,6 +574,10 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                     f"draft {draft_id} is marked sent but records no "
                     "Message-ID; refusing to guess whether it went out"
                 )
+            # Same reasoning as `discard`'s idempotent branch: the send that
+            # marked this row closed its own notification, so this only ever
+            # matters for a row that arrived later than the object it names.
+            _close_notification(conn, draft.user_id, draft_id, by)
             return draft.sent_message_id
 
         # The claim. rowcount, not the read above, is what decides.
@@ -587,6 +596,8 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                 raise DraftError(
                     f"draft {draft_id} is marked sent but records no Message-ID"
                 )
+            with db.get_db(config.db_path) as conn:
+                _close_notification(conn, current.user_id, draft_id, by)
             return current.sent_message_id
         state = current.status if current else "gone"
         raise DraftNotPending(f"draft {draft_id} is {state}, not pending")

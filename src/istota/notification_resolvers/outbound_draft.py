@@ -31,9 +31,6 @@ OBJECT_TYPE = "draft"
 
 SEVERITY = "warning"
 
-STATUS_PENDING = "pending"
-STATUS_SENDING = "sending"
-
 _SENDING_NOTE = "This message is being sent right now and can no longer be changed."
 
 _UNREADABLE_NOTE = (
@@ -62,16 +59,40 @@ def title_for(to_addr: str) -> str:
     return f"Email reply to {who} is waiting for your approval"
 
 
-def body_for(subject: str | None) -> str:
+def body_for(subject: str | None, recipients: str = "") -> str:
+    """Subject and, where the caller can supply it, the whole recipient set.
+
+    Recipients rather than the one address in the title, because the panel's
+    Send button posts straight at `/chat/drafts/{id}/approve` — the user has to
+    be able to see what they are approving, and a draft can be held *because of*
+    a Cc address that the title never mentions. Same reasoning, and the same
+    shape, as `commands._visible_recipients`: To and Cc by address, Bcc by count
+    only, since a `!drafts` listing can be read by everyone in a Talk room and
+    printing the blind list there would defeat the one property Bcc has.
+    """
     from ..confirmations import flatten
 
     flat = flatten(subject or "")[:_SUBJECT_CHARS]
-    if not flat:
-        return "Nothing was sent. Approve it to send, or discard it."
-    return f"Subject: {flat}. Nothing was sent."
+    parts = []
+    if recipients:
+        parts.append(f"To: {recipients}.")
+    parts.append(f"Subject: {flat}." if flat else "No subject.")
+    parts.append("Nothing was sent.")
+    return " ".join(parts)
 
 
-def delivery_body_for(subject: str | None, draft_id: int) -> str:
+def visible_recipients(to_addrs, cc_addrs=(), bcc_addrs=()) -> str:
+    """To + Cc by address, Bcc by count. See :func:`body_for`."""
+    from ..confirmations import flatten
+
+    shown = [flatten(a) for a in [*(to_addrs or []), *(cc_addrs or [])]]
+    text = ", ".join(a for a in shown if a) or "(no recipients)"
+    if bcc_addrs:
+        text += f" (+{len(bcc_addrs)} bcc)"
+    return text
+
+
+def delivery_body_for(subject: str | None, draft_id: int, recipients: str = "") -> str:
     """The stored body, which is also what the push says.
 
     Carries the `!drafts` verbs because a push lands on a surface with no
@@ -81,7 +102,7 @@ def delivery_body_for(subject: str | None, draft_id: int) -> str:
     a row whose object can no longer be read.
     """
     return (
-        f"{body_for(subject)} Review it with `!drafts`, then "
+        f"{body_for(subject, recipients)} Review it with `!drafts`, then "
         f"`!drafts send {draft_id}` or `!drafts discard {draft_id}`."
     )
 
@@ -145,6 +166,13 @@ class OutboundDraftResolver:
         from .. import outbound_drafts as drafts
         from ..notification_sources import NotificationAction, NotificationView
 
+        # The statuses come from the store that writes them, never re-spelled
+        # here. `resolve` returning None means "the object is gone" and
+        # `list_open` feeds those ids straight to `mark_stale`, so a local
+        # literal that drifted from `outbound_drafts` would close every open row
+        # of this source with nothing logged anywhere.
+        pending, sending = drafts.STATUS_PENDING, drafts.STATUS_SENDING
+
         draft_id = _draft_id(row)
         if draft_id is None:
             return None
@@ -159,7 +187,7 @@ class OutboundDraftResolver:
                 row.id, row.user_id, owner, draft_id,
             )
             return None
-        if status not in (STATUS_PENDING, STATUS_SENDING):
+        if status not in (pending, sending):
             # sent or discarded: the decision was made somewhere else.
             return None
 
@@ -179,9 +207,11 @@ class OutboundDraftResolver:
             draft = None
         if draft is not None:
             title = title_for(draft.to_addrs[0] if draft.to_addrs else "")
-            body = body_for(draft.subject)
+            body = body_for(draft.subject, visible_recipients(
+                draft.to_addrs, draft.cc_addrs, draft.bcc_addrs,
+            ))
 
-        if status == STATUS_SENDING:
+        if status == sending:
             return NotificationView(
                 title=title, body=body, severity=row.severity,
                 status_note=_SENDING_NOTE,

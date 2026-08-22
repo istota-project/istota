@@ -212,10 +212,6 @@ CONFIRMATION_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# How much of a parked task's own question the notification body carries. The
-# title already holds its first line; this is the rest, flattened.
-_CONFIRMATION_BODY_CHARS = 400
-
 _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")
 
 _FROM_HEADER_PATTERN = re.compile(r"(?:^|\n)From:\s*(.+?)(?:\n|$)")
@@ -2582,7 +2578,7 @@ def process_one_task(
                 held_notification = confirmation_source.write(
                     conn, task.user_id, task_id=task_id,
                     title=confirmations.describe_prompt(result),
-                    body=confirmations.flatten(result)[:_CONFIRMATION_BODY_CHARS],
+                    body=confirmation_source.body_for(result),
                     room_token=transcript_token,
                 )
                 if post_talk_message is None:

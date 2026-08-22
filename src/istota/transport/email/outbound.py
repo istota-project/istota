@@ -308,7 +308,10 @@ def _hold_if_unapproved(
                 held_notification = draft_source.write(
                     conn, task.user_id, draft_id=draft_id,
                     title=draft_source.title_for(to_addr),
-                    body=draft_source.delivery_body_for(subject, draft_id),
+                    body=draft_source.delivery_body_for(
+                        subject, draft_id,
+                        draft_source.visible_recipients([to_addr]),
+                    ),
                     room_token=room,
                 )
             except drafts.DraftError as e:
@@ -379,14 +382,16 @@ def _announce_hold(
         deliver_pending(config, [notification])
         return
 
-    line = f"Email reply to {to_addr} is waiting for your approval"
-    if subject:
-        line += f" (subject: {subject})"
+    # Built from the same helpers as the row above, not hand-rolled: the
+    # subject on this leg comes from an inbound header, delivery renders
+    # markdown, and two branches of one function disagreeing about whether to
+    # flatten is how the unflattened one survives.
     try:
         send_notification(
             config, task.user_id,
-            f"{line}. Nothing was sent. Review it with `!drafts`, then "
-            f"`!drafts send {draft_id}` or `!drafts discard {draft_id}`.",
+            draft_source.title_for(to_addr) + ". " + draft_source.delivery_body_for(
+                subject, draft_id, draft_source.visible_recipients([to_addr]),
+            ),
             purpose="alert",
         )
     except Exception as e:  # noqa: BLE001 — the draft is already safely stored
