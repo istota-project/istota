@@ -6,8 +6,22 @@ from pathlib import Path
 import pytest
 
 
+from .support.env_isolation import (
+    NO_PROXY_NAMES,
+    NO_PROXY_VALUE,
+    NO_SCRUB_FLAG,
+    SUITE_ENV_DEFAULTS,
+    scrubbed_env_names,
+)
+
+
 def _load_dotenv():
-    """Load .env file from project root into os.environ (simple key=value parser)."""
+    """Load .env file from project root into os.environ (simple key=value parser).
+
+    Runs at import, i.e. before collection, and is therefore *not* undone by
+    the `_scrub_ambient_env` fixture below — see that fixture for which of the
+    two wins where they overlap.
+    """
     env_file = Path(__file__).parent.parent / ".env"
     if not env_file.exists():
         return
@@ -26,20 +40,71 @@ def _load_dotenv():
 
 _load_dotenv()
 
-# Default-off in tests: most feeds tests expect an empty DB. The seed
-# tests in test_feeds_migrate.py monkeypatch this var off explicitly.
-os.environ.setdefault("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", "1")
-# Same pattern for the money default-ledger seed: most money tests
-# expect a clean ledgers/ dir. The seed tests in test_migrate.py
-# monkeypatch this var off explicitly.
-os.environ.setdefault("ISTOTA_MONEY_SKIP_DEFAULT_SEED", "1")
-# web_app's session middleware fails closed without a signing secret
-# (ISSUE-124). Tests don't configure one, so opt into the random per-process
-# dev secret. Tests that assert the fail-closed behaviour clear this explicitly.
-os.environ.setdefault("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
+# Set at import as well as by `_scrub_ambient_env`, because module-scope code
+# in a test file runs during collection, before any fixture. Each is documented
+# in `tests/support/env_isolation.py`.
+for _name, _value in SUITE_ENV_DEFAULTS.items():
+    os.environ.setdefault(_name, _value)
 
 from istota import db
 from istota.config import Config, UserConfig
+
+
+@pytest.fixture(autouse=True)
+def _scrub_ambient_env(monkeypatch):
+    """Take the ambient shell's istota config out of every test (ISSUE-301).
+
+    The suite reset every process global it knew about and no part of the
+    environment, so a shell carrying real config changed its answers: thirty of
+    the thirty-two failures on the deployment host were this, and none of them
+    was about the code. The list of what goes, what is forced to a fixed value,
+    and the reasoning behind each rule, is in `tests/support/env_isolation.py`.
+
+    **Where this and `_load_dotenv` disagree, this wins, and that is a decision
+    rather than an accident of ordering.** `_load_dotenv` runs at import and
+    copies the repo-root `.env` into `os.environ`; this fixture runs per test
+    and deletes the scrubbed names, so for anything on the scrub list the
+    dotenv load has no effect on a test body. That is the right way round: a
+    developer's `.env` is their *deployment* config, and a suite whose result
+    depends on it is the bug being fixed here — `.env` on this machine sets
+    `BROWSER_HOST`, and it is exactly the kind of value a test asserting on a
+    default must not see.
+
+    `_load_dotenv` is not thereby pointless, and is deliberately left alone.
+    It still feeds every name off the scrub list, and it still feeds the
+    scrubbed ones to module-scope code, which runs at collection before any
+    fixture: `tests/test_browse_integration.py` reads `BROWSER_HOST` at import
+    to decide whether to skip, and that is the intended way to consume one of
+    these. What changes is that a *test body* can no longer be reached by one.
+
+    Uses `monkeypatch` rather than mutating `os.environ` so the shell is put
+    back between tests. That matters for the higher-scoped fixtures created
+    lazily part-way through a session — `tests/image/test_upgrade.py` reaches
+    one through `request.getfixturevalue`, and the compose boot in `stack`
+    snapshots `os.environ` for its child processes.
+
+    One hole worth knowing about: `monkeypatch` is a single per-test object
+    shared with the test body, so a test calling `monkeypatch.undo()` reverses
+    this fixture's work along with its own. Use `monkeypatch.context()` or a
+    local `pytest.MonkeyPatch()` instead of `undo()`.
+    """
+    if os.environ.get(NO_SCRUB_FLAG) == "1":
+        # The one caller is the negative control in `tests/test_env_isolation.py`,
+        # which has to watch the reported tests actually go red — a test that
+        # asserts against the behaviour of a separately-configured process
+        # tells you nothing about whether it can fail. Nothing else should set
+        # this: it restores the state ISSUE-301 was filed about.
+        return
+    for name in sorted(scrubbed_env_names(os.environ)):
+        monkeypatch.delenv(name, raising=False)
+    # After the scrub, not before: these match the `ISTOTA_` prefix and are
+    # meant to. The suite's own value beats the shell's.
+    for name, value in SUITE_ENV_DEFAULTS.items():
+        monkeypatch.setenv(name, value)
+    # Forced, not scrubbed — see `env_isolation.NO_PROXY_VALUE` for why the
+    # proxy variables themselves are left alone.
+    for name in NO_PROXY_NAMES:
+        monkeypatch.setenv(name, NO_PROXY_VALUE)
 
 
 @pytest.fixture(autouse=True)
