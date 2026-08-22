@@ -1013,6 +1013,55 @@ class TestForgeTransport:
         )
         assert run_checks(config, only=("developer.forge_transport",))[0].status == WARN
 
+    def test_a_url_carrying_a_credential_is_warned_about(self, make_config, tmp_path):
+        """A forge URL is not where a credential belongs.
+
+        The token goes in `gitlab_token`, and `git_remote_scrub` exists to
+        strip exactly this out of URLs. It matters more since the plain-HTTP
+        entry landed: `_plain_http_host_entry` refuses to write an entry for
+        such a URL — writing one would mean putting the password in a file the
+        sandbox can read — so the call fails, and without this check nothing
+        says why.
+        """
+        config = _dev_config(
+            make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal"
+        )
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+
+        assert r.status == WARN
+        assert "gitlab.internal" in r.detail
+        assert "sekritvalue" not in (r.detail + (r.remedy or "")), r.detail
+
+    def test_the_redacted_url_still_shows_a_credential_was_there(
+        self, make_config, tmp_path
+    ):
+        """Removing the userinfo silently is its own failure.
+
+        An operator reading `https://gitlab.internal` cannot tell the
+        configured value carried a credential at all, which is the single most
+        useful thing this check could tell them.
+        """
+        config = _dev_config(
+            make_config, tmp_path, gitlab_url="https://bot:sekritvalue@gitlab.internal"
+        )
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+
+        assert "@gitlab.internal" in r.detail, r.detail
+
+    def test_a_malformed_url_does_not_turn_a_warning_into_a_failure(
+        self, make_config, tmp_path
+    ):
+        """`urlsplit` raises on some inputs — `http://[::1` is `Invalid IPv6 URL`.
+
+        Unguarded, `run_checks` catches it and reports FAIL with the remedy
+        "this is a defect in the check": a WARN-only check emitting a FAIL, and
+        blaming itself for the operator's typo.
+        """
+        config = _dev_config(make_config, tmp_path, gitlab_url="http://[::1")
+        r = run_checks(config, only=("developer.forge_transport",))[0]
+
+        assert r.status != FAIL, r.detail
+
     def test_never_fails(self, make_config, tmp_path):
         config = _dev_config(make_config, tmp_path, gitlab_url="http://gitlab.internal")
         assert run_checks(config, only=("developer.forge_transport",))[0].status != FAIL

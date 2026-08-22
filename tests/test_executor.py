@@ -938,11 +938,44 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
     sits next to is the thing most likely to be broken by a later edit here.
     """
 
-    def _seed(self, tmp_path, url):
+    def _seed(self, tmp_path, url, forge="gitlab"):
         from istota.skills.developer import _seed_cli_config_dir
 
-        target = _seed_cli_config_dir(tmp_path, "gitlab-config", forge_url=url)
+        target = _seed_cli_config_dir(
+            tmp_path, f"{forge}-config", forge=forge, forge_url=url
+        )
         return (target / "config.yml").read_text()
+
+    def test_gh_gets_nothing_even_when_its_url_is_plain_http(self, tmp_path):
+        """The entry is glab's, and gh must not receive it.
+
+        gh cannot address a non-443 forge at all — `forge_cli._hostname` strips
+        the port by construction — so there is nothing the entry could fix for
+        it. Worse than useless, though: gh *reads* a `hosts:` block, and on
+        seeing one it runs its multi-account migration and writes a `hosts.yml`
+        beside the config. `_seed_cli_config_dir` truncates `config.yml` and
+        nothing else, and `user_temp_dir` persists across tasks — so that file
+        would survive every later run in a directory whose whole design is that
+        nothing does.
+        """
+        assert self._seed(tmp_path, "http://ghe.internal:8080", forge="github") == ""
+
+    def test_the_forge_decides_rather_than_the_directory_name(self, tmp_path):
+        """The rule lives in the function, not in what the caller passed.
+
+        `_section` builds the directory name from the forge already, so a
+        caller-blanked URL would work — and would put a security-relevant rule
+        in the one place a later refactor is free to change without reading
+        this docstring.
+        """
+        from istota.skills.developer import _seed_cli_config_dir
+
+        target = _seed_cli_config_dir(
+            tmp_path, "confusingly-named", forge="github",
+            forge_url="http://ghe.internal:8080",
+        )
+
+        assert (target / "config.yml").read_text() == ""
 
     def test_https_still_seeds_an_empty_file(self, tmp_path):
         """The overwhelmingly common case must not grow a config surface.
@@ -998,18 +1031,79 @@ class TestPlainHttpGitlabReachesTheConfiguredHost:
         from istota.skills.developer import _seed_cli_config_dir
 
         url = "http://127.0.0.1:18080"
-        target = _seed_cli_config_dir(tmp_path, "gitlab-config", forge_url=url)
+        target = _seed_cli_config_dir(
+            tmp_path, "gitlab-config", forge="gitlab", forge_url=url
+        )
         (target / "config.yml").write_text("aliases:\n    pwn: repo delete\n")
 
-        _seed_cli_config_dir(tmp_path, "gitlab-config", forge_url=url)
+        _seed_cli_config_dir(tmp_path, "gitlab-config", forge="gitlab", forge_url=url)
 
         assert "pwn" not in (target / "config.yml").read_text()
+
+    def test_an_uppercase_host_is_lowercased(self, tmp_path):
+        """glab looks the entry up by a lowercased key. Measured on 1.114.0:
+        `GITLAB_HOST=http://LOCALHOST:8080` with the key written verbatim finds
+        nothing and forces https; the same entry filed lowercase works."""
+        yaml = pytest.importorskip("yaml")
+        parsed = yaml.safe_load(self._seed(tmp_path, "http://GitLab.Internal:8080"))
+
+        assert set(parsed["hosts"]) == {"gitlab.internal:8080"}, parsed
+
+    def test_a_subpath_install_keeps_its_path_in_the_key(self, tmp_path):
+        """`build_invocation` puts the *whole* URL in GITLAB_HOST — a subpath
+        install is a documented supported shape (`tests/test_forge_cli.py::
+        test_gitlab_host_keeps_port_and_subpath`). Measured: glab's lookup key
+        carries the path, so an entry filed under the bare netloc is never
+        consulted and the call still forces https."""
+        yaml = pytest.importorskip("yaml")
+        parsed = yaml.safe_load(self._seed(tmp_path, "http://forge.internal/gitlab"))
+
+        assert set(parsed["hosts"]) == {"forge.internal/gitlab"}, parsed
+
+    def test_a_trailing_slash_does_not_become_part_of_the_key(self, tmp_path):
+        yaml = pytest.importorskip("yaml")
+        parsed = yaml.safe_load(self._seed(tmp_path, "http://forge.internal/"))
+
+        assert set(parsed["hosts"]) == {"forge.internal"}, parsed
+
+    def test_a_url_carrying_a_password_gets_no_entry_at_all(self, tmp_path):
+        """The one case where making it work would be worse than leaving it broken.
+
+        Measured on glab 1.114.0: its lookup key includes the userinfo, so an
+        entry that actually matched `http://user:token@host` would have to carry
+        the password — into `config.yml`, which lives under `.developer` and is
+        bound *readable* into the sandbox. That hands the model a credential to
+        support a shape that should not exist: the token belongs in
+        `gitlab_token`, and `git_remote_scrub` exists to strip exactly this out
+        of URLs.
+
+        So: no entry, the call fails the way it did before, and
+        `developer.forge_transport` is what says why.
+        """
+        body = self._seed(tmp_path, "http://user:s3cr3t-value@gitlab.internal:8080")
+
+        assert body == "", body
+
+    def test_no_password_survives_into_the_file_by_any_route(self, tmp_path):
+        """Stated over the whole output rather than over the branch.
+
+        A later change that starts emitting the netloc again would satisfy the
+        assertion above only if it also returned early — this one fails
+        whatever route the value took.
+        """
+        for url in (
+            "http://user:s3cr3t-value@gitlab.internal:8080",
+            "https://user:s3cr3t-value@gitlab.internal",
+            "http://s3cr3t-value@gitlab.internal:8080",
+        ):
+            assert "s3cr3t-value" not in self._seed(tmp_path, url), url
 
     def test_the_seeded_file_keeps_the_mode_glab_demands(self, tmp_path):
         from istota.skills.developer import _seed_cli_config_dir
 
         target = _seed_cli_config_dir(
-            tmp_path, "gitlab-config", forge_url="http://127.0.0.1:18080"
+            tmp_path, "gitlab-config", forge="gitlab",
+            forge_url="http://127.0.0.1:18080",
         )
 
         assert (target / "config.yml").stat().st_mode & 0o777 == 0o600

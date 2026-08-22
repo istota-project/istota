@@ -63,12 +63,12 @@ class TestTheSandboxRunsInsideTheContainer:
         task_id = lean_stack.submit("run a command for me")
         lean_stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
 
-        followups = [
-            body
-            for body in lean_stack.endpoint.requests
-            if any("SANDBOX_RAN_THIS" in str(m.get("content")) for m in body["messages"])
-        ]
-        assert followups, (
+        # `transcript()` rather than iterating `requests`: it takes the
+        # endpoint's lock, and the daemon's own tasks keep running after
+        # `wait_for_task` returns, so handler threads may still be appending.
+        # It also tolerates a body with no `messages` key, which indexing does
+        # not.
+        assert "SANDBOX_RAN_THIS" in lean_stack.endpoint.transcript(), (
             "no request carried the command's output back; the Bash tool did "
             "not run, or its result never reached the model\n"
             f"--- daemon logs ---\n{lean_stack.logs(120)}"

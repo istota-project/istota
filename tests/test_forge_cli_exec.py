@@ -782,7 +782,9 @@ class TestAgainstRealBinary:
         glab_wrapper = deployed[0].parent / "glab"
         shutil.copy(_MODULE, glab_wrapper)
         glab_wrapper.chmod(0o700)
-        cfg = _seed_cli_config_dir(tmp_path, "gitlab-config", forge_url=url)
+        cfg = _seed_cli_config_dir(
+            tmp_path, "gitlab-config", forge="gitlab", forge_url=url
+        )
         _write_policy(glab_wrapper.parent, glab, cfg, forge="gitlab", url=url)
 
         proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})

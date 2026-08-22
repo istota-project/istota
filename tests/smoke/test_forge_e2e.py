@@ -81,15 +81,17 @@ def _script(*commands: str) -> list[dict]:
 class TestTheHappyPath:
     """Clone, branch, commit, push, open a merge request.
 
-    The script is installed with `rescript` rather than through the fixture's
-    `param`, because the clone URL carries the stub's port and that is not
-    known until something is listening. The alternative — a second endpoint —
-    would mean re-rendering the config that names the first one's `base_url`,
-    which is a stack restart per test.
+    The script is installed with `ForgeStack.script` rather than through the
+    fixture's `param`, because the clone URL carries the stub's port and that
+    is not known until something is listening. The alternative — a second
+    endpoint — would mean re-rendering the config that names the first one's
+    `base_url`, which is a stack restart per test. `script` waits for the
+    daemon's own startup work to drain before rewinding, since the endpoint
+    routes by call order and cannot tell whose request it is answering.
     """
 
     def test_a_merge_request_is_opened_against_the_forge(self, forge_stack):
-        forge_stack.endpoint.rescript(
+        forge_stack.script(
             _script(
                 _CLONE_AND_PUSH.format(clone_url=forge_stack.clone_url),
                 _OPEN_MR,
@@ -116,7 +118,7 @@ class TestTheHappyPath:
         assertion that the credential helper, the proxy and `git http-backend`
         all did their part.
         """
-        forge_stack.endpoint.rescript(
+        forge_stack.script(
             _script(_CLONE_AND_PUSH.format(clone_url=forge_stack.clone_url))
         )
         task_id = forge_stack.submit("branch and push")
@@ -140,7 +142,7 @@ class TestTheDenyPolicy:
         talking to the forge rather than after, which is the difference between
         a guard and a log line.
         """
-        forge_stack.endpoint.rescript(
+        forge_stack.script(
             _script(
                 "glab api --form title=x /projects/1/issues; "
                 'echo "EXIT=$?"'
@@ -167,7 +169,7 @@ class TestTheDenyPolicy:
         reason survived the sandbox, the tool result and the transcript, so the
         model could act on it.
         """
-        forge_stack.endpoint.rescript(
+        forge_stack.script(
             _script("glab api --form title=x /projects/1/issues || true")
         )
         task_id = forge_stack.submit("try something the policy blocks")
@@ -192,7 +194,7 @@ class TestTokenIsolation:
         the first by one where the forge call simply fails, the second by one
         that hands the model the credential and lets it through.
         """
-        forge_stack.endpoint.rescript(
+        forge_stack.script(
             _script(
                 # By variable *name*, never by value. Grepping for the literal
                 # would put the token into the command — and the command is
@@ -240,7 +242,7 @@ class TestTokenIsolation:
         out to `credential-fetch`, which asks the same proxy. Two paths, and
         only the stub's challenge makes the second observable at all.
         """
-        forge_stack.endpoint.rescript(
+        forge_stack.script(
             _script(_CLONE_AND_PUSH.format(clone_url=forge_stack.clone_url))
         )
         task_id = forge_stack.submit("branch and push")
@@ -324,7 +326,7 @@ class TestTheNegativeControl:
         report survives the sandbox and reaches the model, which is the
         difference between a diagnosable failure and a mystery.
         """
-        broken_forge_stack.endpoint.rescript(
+        broken_forge_stack.script(
             _script("glab repo view " + FORGE_PROJECT + "; echo \"EXIT=$?\"")
         )
         task_id = broken_forge_stack.submit("look at the repository")

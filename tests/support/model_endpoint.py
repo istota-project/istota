@@ -271,6 +271,15 @@ def serve_script(
             length = int(self.headers.get("content-length") or 0)
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    # A body of `[]` or `"x"` parses fine and then raises
+                    # `AttributeError` on `.get` below — in a handler thread
+                    # whose `handle_error` is deliberately silent, so the client
+                    # sees a dropped connection. `transcript()` would raise the
+                    # same way later. `fake_gitlab._read_body` guards this; the
+                    # asymmetry between two files added together is what bites
+                    # when someone points a different client at one of them.
+                    raise ValueError("body was not a JSON object")
             except (ValueError, OSError):
                 # A 400 the caller can see beats a traceback in someone else's
                 # test output.

@@ -99,17 +99,48 @@ def _plain_http_host_entry(forge_url: str) -> str:
     """
     if not forge_url:
         return ""
-    parts = urlsplit(forge_url if "://" in forge_url else f"https://{forge_url}")
+    try:
+        parts = urlsplit(forge_url if "://" in forge_url else f"https://{forge_url}")
+    except ValueError:
+        # An unparseable URL is the operator's problem and doctor's to report.
+        # This is a setup path; raising here would take the whole hook's return
+        # value with it (`dispatch_setup_env_hooks` keeps only what it returned),
+        # leaving a task that looks fine and cannot authenticate.
+        return ""
     if parts.scheme != "http":
         return ""
-    # `netloc`, not `hostname`: glab looks the entry up by the host:port it
-    # derived from GITLAB_HOST, so an entry filed under the bare hostname is
-    # never consulted and the call still forces https.
-    host = parts.netloc
+
+    # A URL carrying userinfo gets nothing, deliberately. Measured on glab
+    # 1.114.0: its lookup key *includes* the userinfo, so an entry that actually
+    # matched `http://user:token@host` would have to carry the password — and
+    # this file lives under `.developer`, which is bound readable into the
+    # sandbox. That would hand the model a credential in order to support a
+    # shape that should not exist: the token belongs in `gitlab_token`, and
+    # `git_remote_scrub` exists to strip exactly this out of URLs. Better to
+    # leave the call failing the way it already did and let
+    # `doctor.check_forge_transport` say why.
+    if "@" in (parts.netloc or ""):
+        return ""
+
+    # `hostname`, not `netloc`: `hostname` is already lowercased and free of
+    # userinfo, and glab's lookup key is lowercased too — measured, an entry
+    # filed under `LOCALHOST:8080` is never found and the call forces https.
+    host = parts.hostname or ""
     if not host:
         return ""
-    # Quoted, because a netloc carrying a port is a YAML mapping key containing
-    # a colon — unquoted, that is not the key it looks like.
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    # The path belongs in the key. `build_invocation` puts the whole URL in
+    # GITLAB_HOST because a subpath install is a supported shape, and glab
+    # derives its key from that — so an entry under the bare netloc is never
+    # consulted for `http://forge.internal/gitlab`.
+    path = (parts.path or "").rstrip("/")
+    if path:
+        host = f"{host}{path}"
+
+    # Quoted, because a key carrying a port or a path is a YAML mapping key
+    # containing a colon or a slash — unquoted, that is not the key it looks
+    # like.
     return (
         "hosts:\n"
         f'  "{host}":\n'
@@ -118,7 +149,9 @@ def _plain_http_host_entry(forge_url: str) -> str:
     )
 
 
-def _seed_cli_config_dir(dev_bin: Path, name: str, *, forge_url: str = "") -> Path:
+def _seed_cli_config_dir(
+    dev_bin: Path, name: str, *, forge: str = "", forge_url: str = ""
+) -> Path:
     """A pre-seeded CLI config directory, at the modes each CLI will accept.
 
     ``config.yml`` is mode 0600, not 0400, because glab refuses to start on
@@ -131,11 +164,16 @@ def _seed_cli_config_dir(dev_bin: Path, name: str, *, forge_url: str = "") -> Pa
     deliberate. gh expands ``aliases`` from ``config.yml`` *before* command
     dispatch, so an absent file is one the model could otherwise supply.
 
-    ``forge_url`` is consulted only to reach a plain-HTTP forge — see
-    :func:`_plain_http_host_entry`. It is passed for both CLIs and matters for
-    neither gh nor an https GitLab; gh cannot address a non-443 forge at all
-    (``forge_cli._hostname`` strips the port by construction), so there is
-    nothing an entry here could fix for it.
+    ``forge`` and ``forge_url`` together decide whether anything is written at
+    all — see :func:`_plain_http_host_entry`. **Only glab gets an entry**, and
+    the rule lives here rather than at the call site because it is not merely
+    useless for gh, it is harmful: gh cannot address a non-443 forge at all
+    (``forge_cli._hostname`` strips the port by construction), and on finding a
+    ``hosts:`` block it runs its multi-account migration and writes a
+    ``hosts.yml`` beside the config. This function truncates ``config.yml`` and
+    nothing else, and ``user_temp_dir`` persists across tasks — so that file
+    would survive every later run, in a directory whose whole design is that
+    nothing does.
     """
     cfg = dev_bin / name
     cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -148,7 +186,8 @@ def _seed_cli_config_dir(dev_bin: Path, name: str, *, forge_url: str = "") -> Pa
     # policy are both rewritten unconditionally; this is the file that most
     # needs to be. Everything written here is derived from config, so a
     # non-empty body is as reproducible as the empty one it replaced.
-    _atomic_write(config_yml, _plain_http_host_entry(forge_url), 0o600)
+    entry = _plain_http_host_entry(forge_url) if forge == FORGE_GITLAB else ""
+    _atomic_write(config_yml, entry, 0o600)
     return cfg
 
 
@@ -278,7 +317,9 @@ def setup_env(ctx) -> dict[str, str]:
             section["url"] = url
             section["real_bin"] = real_bin
             section["config_dir"] = str(
-                _seed_cli_config_dir(dev_bin, f"{forge}-config", forge_url=url)
+                _seed_cli_config_dir(
+                    dev_bin, f"{forge}-config", forge=forge, forge_url=url
+                )
             )
             section["data_dir"] = str(_pinned_data_dir(dev_bin, f"{forge}-data"))
             section["state_dir"] = str(state_dir)

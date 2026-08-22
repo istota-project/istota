@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -53,6 +54,14 @@ _XDIST_MESSAGE = (
 # Every project this tier creates starts with it, which is what makes the
 # session-start sweep able to find leftovers without touching anything else.
 PROJECT_PREFIX = "istota-smoke-"
+
+# The non-terminal task statuses, from AGENTS.md's "Task Status" ladder
+# (pending -> locked -> running -> completed / failed / pending_confirmation /
+# cancelled). A task in one of these may still call the model.
+# `pending_confirmation` is deliberately absent: it is suspended waiting for a
+# human and will not move on its own, so treating it as in-flight would make
+# `script` wait out its whole timeout.
+_IN_FLIGHT = frozenset({"pending", "locked", "running"})
 
 
 def lean_image_tag() -> str:
@@ -280,14 +289,24 @@ def no_forge_image(pytestconfig) -> str:
     _require_no_xdist(pytestconfig)
     require_docker()
     platform = resolve_platform(pytestconfig)
-    base = image_support.build_image(
-        image_support.ISTOTA_DOCKERFILE, REPO, platform=platform, prefix="istota"
-    )
-    tag = f"istota-test/no-forge:{base.tag.rsplit(':', 1)[1]}"
+
+    # `ISTOTA_IMAGE_TAG` first, exactly as `image_support.istota_image` does.
+    # Without it the control is built from the local checkout while the
+    # correct-image half of the pair is whatever tag the environment named — so
+    # the two differ by more than the forge binaries, and the control measures
+    # the difference between two builds rather than the thing it exists for.
+    preexisting = os.environ.get("ISTOTA_IMAGE_TAG")
+    if preexisting:
+        base_tag = preexisting
+    else:
+        base_tag = image_support.build_image(
+            image_support.ISTOTA_DOCKERFILE, REPO, platform=platform, prefix="istota"
+        ).tag
+    tag = f"istota-test/no-forge:{base_tag.rsplit(':', 1)[-1]}"
     argv = [
         "docker", "build",
         "-f", str(NO_FORGE_DOCKERFILE),
-        "--build-arg", f"BASE={base.tag}",
+        "--build-arg", f"BASE={base_tag}",
         "-t", tag,
     ]
     if platform:
@@ -298,10 +317,13 @@ def no_forge_image(pytestconfig) -> str:
         argv, capture_output=True, text=True, timeout=image_support.BUILD_TIMEOUT
     )
     if result.returncode != 0:
-        pytest.exit(
+        # `fail`, not `exit`. A Docker hiccup building the control must not
+        # terminate the whole session and take any other tier queued behind it
+        # with it; every other failure path in this file uses `fail` too.
+        pytest.fail(
             "could not build the no-forge control image:\n"
             + "\n".join((result.stderr or result.stdout or "").splitlines()[-40:]),
-            returncode=1,
+            pytrace=False,
         )
     return tag
 
@@ -360,8 +382,14 @@ def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
-    endpoint = serve_script(turns, host="0.0.0.0")
-    stub = fake_gitlab.serve(tmp_path / "forge", host="0.0.0.0")
+    # Both listeners are started inside the `try`, not before it. `lean_stack`
+    # carries the same rule and the reason it gives applies twice over here:
+    # `fake_gitlab.serve` does a `mkdir` and a bind, either of which can raise,
+    # and the endpoint started on the line above would then never be closed —
+    # leaking a bound port and a live thread for the rest of the session. Both
+    # bind all interfaces, so the leak is a publicly-bound socket.
+    endpoint = None
+    stub = None
     project = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:8]}"
 
     env_file = tmp_path / "compose.env"
@@ -383,6 +411,15 @@ def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
     )
 
     try:
+        endpoint = serve_script(turns, host="0.0.0.0")
+        # The expected git credential, which is what makes
+        # `authenticated_git_calls()` mean "the helper produced the right
+        # token". It is also the access control: this listener is bound to all
+        # interfaces so the container can reach it, and it serves a real
+        # `git http-backend`.
+        stub = fake_gitlab.serve(
+            tmp_path / "forge", host="0.0.0.0", expect_git_password=FORGE_TOKEN
+        )
         clone_url = stub.seed_repo(FORGE_PROJECT)
         _render_config(
             config_dir,
@@ -410,8 +447,11 @@ def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
         )
     finally:
         compose_support.down(args, volumes=True)
-        stub.close()
-        endpoint.close()
+        # Guarded, because either may be None if the other's construction raised.
+        if stub is not None:
+            stub.close()
+        if endpoint is not None:
+            endpoint.close()
 
 
 class LeanStack:
@@ -488,6 +528,42 @@ class ForgeStack(LeanStack):
         super().__init__(**kwargs)
         self.stub = stub
         self.clone_url = clone_url
+
+    def script(self, turns: list[dict], *, timeout: float = 60) -> None:
+        """Install a script, once the daemon is not going to consume it.
+
+        `rescript` rewinds the endpoint, and the endpoint routes by call order
+        alone — it has no notion of which task a request belongs to. The daemon
+        queues work of its own at startup (`LeanStack.submit` says as much), so
+        a task still in flight when a scenario rewinds would take turn 0, and
+        the submitted task would get turn 1. The symptom is either an assertion
+        about a merge request opened on behalf of a different task, or the
+        exhausted-script error frame that rewinding exists to prevent — and
+        both read as forge problems.
+
+        So: wait for the task table to hold nothing non-terminal, then rewind.
+        `wait_for_task` cannot express this — it waits for *a* task to reach a
+        status, and what is wanted here is the absence of any that have not.
+        """
+        deadline = time.monotonic() + timeout
+        busy: list = []
+        while time.monotonic() < deadline:
+            busy = [
+                task
+                for task in self.probe.tasks()
+                if task.get("status") in _IN_FLIGHT
+            ]
+            if not busy:
+                self.endpoint.rescript(turns)
+                return
+            time.sleep(0.5)
+
+        pytest.fail(
+            "the daemon still had work in flight after "
+            f"{timeout}s, so a scripted turn would have gone to it rather than "
+            f"to this scenario: {[(t.get('id'), t.get('status')) for t in busy]}",
+            pytrace=False,
+        )
 
     def doctor(self, *, scope: str = "") -> list[dict]:
         """`istota doctor --json` inside the running container.

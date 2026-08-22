@@ -1052,7 +1052,7 @@ def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
             "developer.forge_transport", SKIP, token_reason, scope=DEPLOYMENT
         )
 
-    plaintext = []
+    plaintext, embedded = [], []
     for label, url, token in (
         ("gitlab_url", dev.gitlab_url, dev.gitlab_token),
         ("github_url", dev.github_url, dev.github_token),
@@ -1061,26 +1061,57 @@ def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
         # forge sends no credential, so its scheme is not this check's business.
         if not token or not url:
             continue
-        if urlsplit(url).scheme == "http":
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            # `http://[::1` raises Invalid IPv6 URL. Unguarded, `run_checks`
+            # turns that into a FAIL whose remedy says "this is a defect in the
+            # check" — a WARN-only check emitting a FAIL, and blaming itself
+            # for the operator's typo.
+            embedded.append(f"{label} is not a parseable URL")
+            continue
+        if "@" in (parts.netloc or ""):
+            # Any scheme. A credential in the URL is a disclosure on https too,
+            # and since `_plain_http_host_entry` refuses to write glab's
+            # protocol entry for such a URL — the entry would have to carry the
+            # password, into a file the sandbox can read — a plain-HTTP one
+            # also silently fails to connect. This is the only thing that says
+            # why.
+            embedded.append(f"{label} = {_redact_userinfo(url)}")
+        elif parts.scheme == "http":
             plaintext.append(f"{label} = {_redact_userinfo(url)}")
 
-    if not plaintext:
+    if not plaintext and not embedded:
         return CheckResult(
             "developer.forge_transport",
             OK,
             "every configured forge with a token is reached over https",
             scope=DEPLOYMENT,
         )
-    return CheckResult(
-        "developer.forge_transport",
-        WARN,
-        f"a forge token is sent over plain HTTP: {', '.join(plaintext)}",
-        remedy=(
+
+    details, remedies = [], []
+    if embedded:
+        details.append(f"a forge URL carries a credential: {', '.join(embedded)}")
+        remedies.append(
+            "Move the credential to [developer] gitlab_token / github_token and "
+            "rotate it — a URL reaches logs, remotes and process arguments. A "
+            "plain-HTTP forge configured this way also cannot connect at all, "
+            "because the protocol entry that would fix it is not written for a "
+            "URL that would put the password in a sandbox-readable file."
+        )
+    if plaintext:
+        details.append(f"a forge token is sent over plain HTTP: {', '.join(plaintext)}")
+        remedies.append(
             "Point the URL at https, or accept that the token — and everything "
             "the CLI sends with it — crosses the network in the clear. A "
             "loopback URL is usually a tunnel, and what is on its far side is "
             "not visible from here."
-        ),
+        )
+    return CheckResult(
+        "developer.forge_transport",
+        WARN,
+        "; ".join(details),
+        remedy=" ".join(remedies),
         scope=DEPLOYMENT,
     )
 
@@ -1091,6 +1122,12 @@ def _redact_userinfo(url: str) -> str:
     A forge URL is operator-written config and is not supposed to carry
     credentials, but `https://user:token@host` parses fine and this string goes
     straight into a report that reaches the admin dashboard and the log.
+
+    **Replaced, not removed.** Deleting the userinfo renders
+    `https://bot:token@host` as `https://host`, and an operator reading that
+    cannot tell the configured value carried a credential at all — which is the
+    most useful thing the report could have told them, and the thing they need
+    in order to know something wants rotating.
     """
     try:
         parts = urlsplit(url)
@@ -1100,7 +1137,7 @@ def _redact_userinfo(url: str) -> str:
         return url
     _, _, hostport = parts.netloc.rpartition("@")
     return urlunsplit(
-        (parts.scheme, hostport, parts.path, parts.query, parts.fragment)
+        (parts.scheme, f"{_REDACTED}@{hostport}", parts.path, parts.query, parts.fragment)
     )
 
 

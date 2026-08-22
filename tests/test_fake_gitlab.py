@@ -20,7 +20,7 @@ import subprocess
 
 import pytest
 
-from .smoke.fake_gitlab import _auth_shape, serve
+from .smoke.fake_gitlab import LOOPBACK, _auth_shape, serve
 
 REQUIRES_GLAB = pytest.mark.skipif(
     shutil.which("glab") is None, reason="glab not installed"
@@ -42,7 +42,9 @@ def _glab_env(tmp_path, stub, *, token="forge-token-stand-in-value"):
     """
     from istota.skills.developer import _seed_cli_config_dir
 
-    config_dir = _seed_cli_config_dir(tmp_path, "gitlab-config", forge_url=stub.url)
+    config_dir = _seed_cli_config_dir(
+        tmp_path, "gitlab-config", forge="gitlab", forge_url=stub.url
+    )
     return {
         "PATH": os.environ["PATH"],
         "HOME": str(tmp_path),
@@ -87,6 +89,55 @@ class TestAuthShape:
         branch. A failing smoke assertion renders `ForgeCall` into the pytest
         report and the terminal, and under `--live` these carry a real token."""
         assert "averyrealsecretvalue" not in _auth_shape(headers)
+
+
+class TestForgeCallRendering:
+    """What reaches a failing test's output.
+
+    `auth` is lossy by construction; `query` and `body` are not, because
+    assertions need them. So the guarantee has to be about rendering, and the
+    rendering pytest actually uses is `repr` — assertion rewriting prints the
+    repr of whatever a failing comparison touched, and a dataclass's generated
+    one carries every field.
+    """
+
+    def _call(self, **overrides):
+        from .smoke.fake_gitlab import ForgeCall
+
+        fields = {
+            "method": "POST",
+            "path": "/api/v4/projects/1/merge_requests",
+            "query": {"private_token": "a-secret-in-the-query"},
+            "body": {"description": "a-secret-in-the-body"},
+            "auth": "private-token:20",
+        }
+        fields.update(overrides)
+        return ForgeCall(**fields)
+
+    def test_repr_carries_neither_the_query_nor_the_body(self):
+        rendered = repr(self._call())
+
+        assert "a-secret-in-the-query" not in rendered, rendered
+        assert "a-secret-in-the-body" not in rendered, rendered
+
+    def test_repr_still_says_enough_to_debug_with(self):
+        """Redaction that removes the diagnostic value is its own failure."""
+        rendered = repr(self._call())
+
+        assert "POST" in rendered
+        assert "/merge_requests" in rendered
+        assert "private-token:20" in rendered
+
+    def test_a_list_of_calls_renders_safely_too(self):
+        """The shape the assertions actually use.
+
+        `assert not stub.rest_calls(...)` fails on a *list*, and a list's repr
+        calls `repr` on each element — so a `__str__`-only override would be
+        bypassed by every real failure this is meant to protect.
+        """
+        rendered = repr([self._call()])
+
+        assert "a-secret-in-the-body" not in rendered, rendered
 
 
 class TestRestSurface:
@@ -166,6 +217,52 @@ class TestGitOverHttp:
 
         assert result.returncode != 0
         assert stub.git_calls and not stub.authenticated_git_calls()
+
+    def test_a_challenged_post_leaves_the_connection_usable(self, stub):
+        """The 401 must consume the request body before answering.
+
+        `protocol_version` is HTTP/1.1, so the socket is reused. A body left
+        unread stays in the buffer and is parsed as the next request line —
+        measured before the fix: an unauthenticated POST followed by a valid
+        `GET /api/v4/user` on the same connection answered the second request
+        out of the first one's bytes, as an HTML error page.
+
+        The live shape is `git push`. Whenever libcurl does not pre-emptively
+        re-send Basic auth on `POST /git-receive-pack`, the push fails looking
+        corrupt, which reads as a defect in the forge chain rather than in the
+        harness — and intermittently, since it depends on connection reuse.
+        """
+        import http.client
+
+        stub.seed_repo("group/project")
+        connection = http.client.HTTPConnection(
+            LOOPBACK, stub.port, timeout=15
+        )
+        try:
+            connection.request(
+                "POST",
+                "/group/project.git/git-receive-pack",
+                body=b"x" * 512,
+                headers={"content-type": "application/x-git-receive-pack-request"},
+            )
+            first = connection.getresponse()
+            first.read()
+            assert first.status == 401, first.status
+            assert not first.will_close, (
+                "the stub closed the connection, so this test cannot observe "
+                "the desync it exists for"
+            )
+
+            # The same socket, a well-formed request. Before the fix this came
+            # back as an HTML error page parsed out of the packfile bytes.
+            connection.request("GET", "/api/v4/user")
+            second = connection.getresponse()
+            body = second.read()
+        finally:
+            connection.close()
+
+        assert second.status == 200, (second.status, body[:200])
+        assert b"istota-test" in body, body[:200]
 
     def test_a_seeded_repo_clones(self, stub, tmp_path):
         stub.seed_repo("group/project")

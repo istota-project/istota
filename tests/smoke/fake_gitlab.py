@@ -21,18 +21,27 @@ per-host `api_protocol` in glab's own config — which the developer skill write
 entry works: if it stops being written, nothing here is reachable and every
 scenario fails on a TLS handshake.
 
-**No credential is ever stored.** `ForgeCall.auth` records the *shape* of the
-`Authorization` / `PRIVATE-TOKEN` header — scheme and length — never its value.
-Under `--live` those headers carry a real token, and a failing assertion renders
-the dataclass into the pytest report and the terminal, which is where pasted
-credentials end up in a repo's history. Everything this tier needs to assert
-("a token was injected", "it was not the ambient one") is satisfiable from the
-shape.
+**No credential reaches the report.** `ForgeCall.auth` records the *shape* of
+the `Authorization` / `PRIVATE-TOKEN` header — scheme and length — never its
+value, and everything this tier needs to assert ("a token was injected", "it was
+not the ambient one") is satisfiable from that.
+
+The query and the body *are* kept whole, because assertions need them, so the
+guarantee is about rendering rather than about storage: `ForgeCall` overrides
+`__repr__`, since pytest's assertion rewriting prints the repr of whatever a
+failing comparison touched and a dataclass's generated one would carry both
+fields. GitLab REST accepts `?private_token=` and a live write verb can put a
+secret in a body; under `--live` that is a real token going to the terminal, in
+a repo whose pre-commit hook exists because pasted terminal output is where
+credentials land.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import secrets
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -57,7 +66,13 @@ STUB_USER = {"id": 1, "username": "istota-test", "name": "Istota Test"}
 
 @dataclass
 class ForgeCall:
-    """One REST request, with the credential reduced to its shape."""
+    """One REST request, with the credential reduced to its shape.
+
+    `auth` is the only field deliberately lossy, but it is not the only field
+    that can carry a secret: GitLab REST accepts `?private_token=`, and a live
+    write verb can put one in the body. Both are kept, because assertions need
+    them — so the *rendering* is what has to be safe.
+    """
 
     method: str
     path: str
@@ -67,6 +82,14 @@ class ForgeCall:
 
     def __str__(self) -> str:  # pragma: no cover - diagnostic
         return f"{self.method} {self.path} auth={self.auth}"
+
+    # `repr`, not just `str`. pytest's assertion rewriting renders the *repr* of
+    # whatever a failing comparison touched, so a dataclass's generated one is
+    # what reaches the report and the terminal — and it prints `query` and
+    # `body` in full. Under `--live` that is a real token in a repo whose
+    # pre-commit hook exists because pasted terminal output is where credentials
+    # land. The path is query-stripped for the same reason.
+    __repr__ = __str__
 
 
 def _auth_shape(headers) -> str:
@@ -90,6 +113,32 @@ def _auth_shape(headers) -> str:
     return ""
 
 
+def _password_accepted(headers, expected: str | None) -> bool:
+    """Whether a git request's Basic password is the one we are waiting for.
+
+    `None` accepts anything that carried a credential at all — the shape the
+    loopback-bound default-suite tests use, since they have no token to expect.
+
+    Never returns *why* it failed and never logs the value. A mismatch is a
+    401, which is indistinguishable to the caller from having sent nothing, and
+    that is the correct amount to say.
+    """
+    if expected is None:
+        return True
+    authorization = headers.get("Authorization") or ""
+    scheme, _, encoded = authorization.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8", "replace")
+    except (ValueError, binascii.Error):
+        return False
+    # `partition`, not `split`: a password may legitimately contain a colon,
+    # and only the first one separates it from the username.
+    _, _, password = decoded.partition(":")
+    return secrets.compare_digest(password, expected)
+
+
 @dataclass
 class FakeGitLab:
     """A running stub and the record of what it was asked."""
@@ -103,6 +152,21 @@ class FakeGitLab:
     # ref-advertisement requests a clone makes.
     git_calls: list[ForgeCall] = field(default_factory=list)
     require_git_auth: bool = True
+    # When set, a git request must carry *this* password or it is challenged
+    # again. Two things turn on it.
+    #
+    # It is what makes `authenticated_git_calls()` mean "the credential helper
+    # produced the right token" rather than "something sent a header" — the
+    # helper shells out to `credential-fetch`, which asks the skill proxy, and
+    # only comparing the value proves that round trip happened.
+    #
+    # It is also the access control. The smoke fixture binds this listener to
+    # all interfaces so a container can reach it, and it serves a real
+    # `git http-backend` with GIT_HTTP_EXPORT_ALL — accepting any header at all
+    # would let anyone on the same network clone from and push to the seeded
+    # repos for the length of a run. `None` keeps the permissive behaviour for
+    # the loopback-bound default-suite tests, which have no token to expect.
+    expect_git_password: str | None = None
     repo_root: Path | None = None
     _server: ThreadingHTTPServer | None = None
     _thread: threading.Thread | None = None
@@ -312,18 +376,31 @@ class _Handler(BaseHTTPRequestHandler):
         is a `receive-pack` negotiation, not a series of file reads, and the
         happy path pushes.
         """
-        root = self.stub.repo_root
-        if root is None:
-            self._json(500, {"error": "no repo root"})
-            return
-
         # Challenge first, like a private repo does. This is what makes the git
         # half of the chain assert anything: git sends no credential until it
         # is asked for one, so a stub that never challenges would let a push
         # succeed with the credential helper broken or absent — and the helper
         # is precisely the piece that fetches the token from the skill proxy.
         shape = _auth_shape(self.headers)
-        if self.stub.require_git_auth and not shape:
+        accepted = bool(shape) and _password_accepted(
+            self.headers, self.stub.expect_git_password
+        )
+
+        # Read the body *before* branching, always. On the 401 path this looks
+        # like waste and is not: `protocol_version` is HTTP/1.1, so the socket
+        # is reused, and a body left unread stays in the buffer to be parsed as
+        # the next request line. Measured — an unauthenticated POST followed by
+        # a perfectly valid `GET /api/v4/user` on the same connection answered
+        # the second request out of the first one's packfile bytes, as an HTML
+        # error page. The live shape is `git push`: whenever libcurl does not
+        # pre-emptively re-send Basic auth on `POST /git-receive-pack`, the
+        # push fails looking corrupt, which reads as a defect in the forge
+        # chain. Intermittent by construction, and the tier exists to find that
+        # class of thing rather than to produce it.
+        length = int(self.headers.get("content-length") or 0)
+        payload = self.rfile.read(length) if length else b""
+
+        if self.stub.require_git_auth and not accepted:
             self.send_response(401)
             self.send_header("WWW-Authenticate", 'Basic realm="fake-gitlab"')
             self.send_header("content-length", "0")
@@ -339,8 +416,11 @@ class _Handler(BaseHTTPRequestHandler):
                 ForgeCall(method=method, path=path, query={}, body={}, auth=shape)
             )
 
-        length = int(self.headers.get("content-length") or 0)
-        payload = self.rfile.read(length) if length else b""
+        # After the body read, for the same keep-alive reason as the 401 above.
+        root = self.stub.repo_root
+        if root is None:
+            self._json(500, {"error": "no repo root"})
+            return
 
         environment = {
             "GIT_PROJECT_ROOT": str(root),
@@ -379,6 +459,21 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": f"git http-backend failed: {exc}"})
             return
 
+        # A backend that produced no header block wrote nothing usable, and
+        # relaying that verbatim answers 200 with an empty body — git then
+        # reports a corrupt response and the real reason, which is on stderr,
+        # is gone. `diagnostics()` cannot recover it either.
+        if result.returncode != 0 and not result.stdout:
+            self._json(
+                500,
+                {
+                    "error": "git http-backend exited "
+                    f"{result.returncode}",
+                    "stderr": (result.stderr or b"").decode("utf-8", "replace")[-2000:],
+                },
+            )
+            return
+
         self._write_cgi(result.stdout)
 
     def _write_cgi(self, raw: bytes) -> None:
@@ -400,7 +495,15 @@ class _Handler(BaseHTTPRequestHandler):
             name, _, value = line.decode("latin-1").partition(":")
             value = value.strip()
             if name.lower() == "status":
-                status = int(value.split()[0] or 200)
+                # `"".split()` is `[]`, so an unguarded `[0]` raises on a bare
+                # `Status:` — inside a handler thread whose `handle_error` is
+                # deliberately silent, so the client sees a dropped connection
+                # and no diagnostic. A non-numeric token does the same.
+                tokens = value.split()
+                try:
+                    status = int(tokens[0]) if tokens else 200
+                except ValueError:
+                    status = 200
             else:
                 headers.append((name, value))
 
@@ -536,6 +639,7 @@ def serve(
     host: str = LOOPBACK,
     port: int = 0,
     require_git_auth: bool = True,
+    expect_git_password: str | None = None,
 ) -> FakeGitLab:
     """Start the stub. Port 0 lets the OS choose, which is what keeps
     concurrent sessions from colliding.
@@ -546,14 +650,21 @@ def serve(
     """
     repo_root.mkdir(parents=True, exist_ok=True)
     stub = FakeGitLab(
-        host_bound=host, repo_root=repo_root, require_git_auth=require_git_auth
+        host_bound=host,
+        repo_root=repo_root,
+        require_git_auth=require_git_auth,
+        expect_git_password=expect_git_password,
     )
 
     handler = type("_BoundHandler", (_Handler,), {"stub": stub})
     server = ThreadingHTTPServer((host, port), handler)
-    # `block_on_close` is `not daemon_threads`, so leaving this True means
-    # `server_close` does not join handler threads — an in-flight handler could
-    # append to `calls` after `close()` returned.
+    # Set explicitly, and it is `daemon_threads` that matters here rather than
+    # `block_on_close`: in `socketserver.ThreadingMixIn` the two are
+    # independent class attributes, not derived from each other. What joins
+    # handler threads on `server_close` is `block_on_close`, left at its
+    # default True — and that default only takes effect while `daemon_threads`
+    # is False. Leave this True and an in-flight handler could append to
+    # `calls` after `close()` returned.
     server.daemon_threads = False
     # Read the bound address back off the socket rather than trusting what we
     # asked for: `host_bound` is asserted against, and an assertion on the
