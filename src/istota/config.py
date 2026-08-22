@@ -1102,7 +1102,9 @@ class ClaudeCodeBrainConfig:
     Every field is defaulted, so an absent ``[brain.claude_code]`` block is the
     shipping behaviour. The poll is read-only: the credential is never written
     and never refreshed. ``subscription_usage = false`` makes the doctor check
-    ``SKIP`` and hides the admin card.
+    ``SKIP`` and the admin card report ``disabled by config`` in place of its
+    tiles — the card is not hidden, because ``available: false`` always carries
+    a reason and an operator expecting the reading has to learn why it is gone.
 
     ``_validate_claude_code_brain`` (config load) corrects a configuration that
     would make the feature misbehave — see its docstring for the three rules.

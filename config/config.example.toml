@@ -195,7 +195,8 @@ features = []
 # [brain.claude_code]
 # Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
 # on /admin and in `istota doctor`. Read-only: the credential is never written or
-# refreshed. Off = the doctor check SKIPs and the admin card is hidden.
+# refreshed. Off = the doctor check SKIPs and the admin card says so in place of
+# its tiles, rather than disappearing.
 # subscription_usage = true
 # subscription_usage_cache_ttl_seconds = 300     # one deployment-wide fetch per this window;
 #                                                #   floored at 1 (0 would fetch on every read)

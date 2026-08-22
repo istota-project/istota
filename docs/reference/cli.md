@@ -39,7 +39,7 @@ istota usage --json                          # Machine-readable
 
 Operator-facing: it runs from the operator's shell, so `--user` is a convenience filter rather than a boundary. Filters combine with any grouping.
 
-A cost column shows a dollar figure only when every row in the group reports a real charged cost. A plan-equivalent or a catalog estimate renders as `—` with the basis named, and is never summed into a real figure — see [token usage and cost](../features/usage.md) for what each basis means and for `--origin`'s values.
+A cost column shows the group's real charged cost and nothing else. A group whose rows are all plan-equivalents or catalog estimates renders as a bare `—`, and a mixed group shows the real figure alone — the other bases are never summed into it and never named beside it. `--json` still carries the whole `cost_by_basis` map. See [token usage and cost](../features/usage.md) for what each basis means and for `--origin`'s values.
 
 ### User management
 
