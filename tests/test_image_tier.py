@@ -31,6 +31,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TESTS = REPO_ROOT / "tests" / "image"
 
+# Every module in the image tier, enumerated at import so the checks below
+# cover files added after they were written. Guarded by
+# `test_the_enumeration_below_found_the_tier`, because an empty list would make
+# a parametrized check collapse into one green skip.
+_IMAGE_TIER_MODULES = sorted(
+    p.name for p in IMAGE_TESTS.glob("*.py") if p.name != "__init__.py"
+)
+
 
 def _ini() -> dict:
     return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["pytest"][
@@ -198,9 +206,23 @@ class TestCollectionNeverRequiresDocker:
 
         assert callable(image_conftest.build_image)
 
-    @pytest.mark.parametrize(
-        "module", ["conftest.py", "test_istota_image.py", "test_devbox_image.py"]
-    )
+    def test_the_enumeration_below_found_the_tier(self):
+        """An empty parametrize list is a *skipped placeholder*, not a failure.
+
+        The check below enumerates `tests/image/*.py` rather than listing them,
+        because a hardcoded list silently stops covering the next file added —
+        `test_upgrade.py` arrived after the original list was written and was
+        not in it. But a glob that matches nothing (a moved directory, a renamed
+        tier) turns the whole check into one green skip, which is the same
+        silent non-coverage by another route. So the enumeration is asserted.
+        """
+        assert _IMAGE_TIER_MODULES, (
+            f"no modules found under {IMAGE_TESTS}; the check below is "
+            f"enumerating an empty directory and asserting nothing"
+        )
+        assert "conftest.py" in _IMAGE_TIER_MODULES
+
+    @pytest.mark.parametrize("module", _IMAGE_TIER_MODULES)
     def test_no_module_level_subprocess_call(self, module):
         """Nothing in the image tier shells out at import time.
 
