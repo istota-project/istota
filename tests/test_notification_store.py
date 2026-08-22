@@ -74,10 +74,15 @@ def _backdate(conn, notification_id, stamp="2020-01-01T00:00:00.000Z"):
 class _BoomConn:
     """A connection whose every call raises, for the never-raises contract."""
 
+    in_transaction = False
+
     def execute(self, *args, **kwargs):
         raise sqlite3.OperationalError("boom")
 
     def executemany(self, *args, **kwargs):
+        raise sqlite3.OperationalError("boom")
+
+    def cursor(self, *args, **kwargs):
         raise sqlite3.OperationalError("boom")
 
     def commit(self):
@@ -494,13 +499,39 @@ class TestListOpen:
         assert total == 2
 
     def test_action_filter_selects_actionable_rows(self, conn, config):
-        _write(conn, dedup_key="task:1", actionable=True)
+        actionable = _write(conn, dedup_key="task:1", actionable=True)
         _write(conn, dedup_key="task:2", actionable=False)
+        sources.register(
+            _Resolver(
+                "confirmation",
+                view=sources.NotificationView(
+                    title="rendered", body="", severity="info",
+                    actions=(
+                        sources.NotificationAction(
+                            id="confirm", label="Confirm", kind="primary",
+                            method="POST", endpoint="/chat/tasks/1/confirm",
+                        ),
+                    ),
+                    link=None, status_note=None,
+                ),
+            )
+        )
 
         items, total = store.list_open(config, conn, "alice", filter="action")
-        assert [i.actionable for i in items] == [True]
+        assert [i.id for i in items] == [actionable.notification_id]
         # `total_open` is the honest open count, not the filtered one.
         assert total == 2
+
+    def test_a_fallback_row_is_never_filed_under_needs_action(self, conn, config):
+        """No resolver means no actions can be offered, whatever the row says."""
+        _write(conn, dedup_key="task:1", actionable=True)
+
+        all_items, _ = store.list_open(config, conn, "alice")
+        action_items, _ = store.list_open(config, conn, "alice", filter="action")
+
+        assert len(all_items) == 1
+        assert all_items[0].actionable is False
+        assert action_items == []
 
     def test_newest_updated_at_sorts_first_and_limit_applies(self, conn, config):
         old = _write(conn, dedup_key="task:1")
@@ -636,6 +667,190 @@ class TestListOpen:
         assert total == 2
 
 
+class TestRawConnection:
+    """A connection opened without `row_factory = sqlite3.Row`.
+
+    `db.get_db` sets it; a producer opening its own connection is under no
+    obligation to. Every read here indexes by name, so on a tuple-returning
+    connection the whole module used to fail silently — and the *insert* branch
+    reads nothing, so the first write to a key worked and every later one
+    vanished, which is the shape that hides it.
+    """
+
+    @pytest.fixture
+    def raw(self, config):
+        db.init_db(config.db_path)
+        conn = sqlite3.connect(config.db_path)
+        assert conn.row_factory is None
+        yield conn
+        conn.close()
+
+    def test_the_full_lifecycle_works_on_a_tuple_connection(self, raw, config):
+        first = _write(raw)
+        assert first is not None
+
+        second = _write(raw)
+        assert second is not None
+        assert second.notification_id == first.notification_id
+        assert second.deliver is False
+
+        assert store.counts(raw, "alice") == {"open": 1, "actionable": 1}
+        items, total = store.list_open(config, raw, "alice")
+        assert total == 1
+        assert items[0].title == "Held email from a stranger"
+
+        assert store.dismiss(raw, first.notification_id, "alice") is True
+        assert store.counts(raw, "alice") == {"open": 0, "actionable": 0}
+
+    def test_mark_seen_works_on_a_tuple_connection(self, raw):
+        sources.register(_Resolver("task_alert", auto=True))
+        written = store.write_notification(
+            raw, "alice", source="task_alert", dedup_key="a:1", title="Alert"
+        )
+        stamp = raw.execute(
+            "SELECT updated_at FROM notifications WHERE id = ?",
+            (written.notification_id,),
+        ).fetchone()[0]
+
+        store.mark_seen(raw, "alice", [(written.notification_id, stamp)])
+
+        state, seen_at = raw.execute(
+            "SELECT state, seen_at FROM notifications WHERE id = ?",
+            (written.notification_id,),
+        ).fetchone()
+        assert state == "resolved"
+        assert seen_at is not None
+
+
+class TestConcurrentWrite:
+    def test_an_insert_that_loses_the_race_bumps_instead_of_vanishing(
+        self, conn, config
+    ):
+        """Two producers, no shared lock, same key.
+
+        The module's contract says producers hold a write transaction and SQLite
+        therefore serialises them — but nothing enforces that, and
+        `raise_notification` opens its own connection and holds no lock at the
+        SELECT. A losing insert used to raise `IntegrityError` into the
+        never-raises handler: no row bump, no delivery, and a `None` the producer
+        is told to ignore.
+        """
+        db.init_db(config.db_path)
+        other = sqlite3.connect(config.db_path)
+        other.row_factory = sqlite3.Row
+        try:
+            # A writes and commits between B's SELECT and B's INSERT.
+            real_read = store._read
+            state = {"fired": False}
+
+            def racing_read(c, sql, params=()):
+                cursor = real_read(c, sql, params)
+                if not state["fired"] and "SELECT id, state" in sql:
+                    state["fired"] = True
+                    other.execute(
+                        "INSERT INTO notifications "
+                        "(user_id, source, dedup_key, title) "
+                        "VALUES ('alice', 'confirmation', 'task:7', 'A')"
+                    )
+                    other.commit()
+                return cursor
+
+            store._read = racing_read
+            try:
+                with db.get_db(config.db_path) as b:
+                    result = store.write_notification(
+                        b, "alice", source="confirmation", dedup_key="task:7",
+                        title="B", actionable=True,
+                    )
+            finally:
+                store._read = real_read
+
+            assert result is not None
+            assert result.deliver is False       # A's insert was the delivery
+            row = other.execute(
+                "SELECT occurrences, title, state FROM notifications"
+            ).fetchall()
+            assert len(row) == 1
+            assert row[0]["occurrences"] == 2    # B's write was not lost
+            assert row[0]["title"] == "B"
+        finally:
+            other.close()
+
+
+class TestPurpose:
+    def test_the_purpose_list_matches_the_delivery_layer(self):
+        """`DELIVERY_PURPOSES` is a copy; this is what stops it drifting."""
+        from istota import notifications
+
+        assert sources.DELIVERY_PURPOSES == notifications.PURPOSES
+
+    def test_an_unknown_purpose_falls_back(self, conn, config, monkeypatch):
+        from istota import notifications
+
+        result = _write(conn, purpose="urgent-ish")
+        assert result.purpose == "alert"
+        conn.commit()
+
+        seen = []
+        monkeypatch.setattr(
+            notifications,
+            "send_notification",
+            lambda *a, **k: seen.append(k.get("purpose")) or True,
+        )
+        store.deliver_pending(config, [result])
+        assert seen == ["alert"]
+
+
+class TestDeliveryVerifiesTheRow:
+    def test_a_rolled_back_write_is_not_delivered(self, config, monkeypatch):
+        """The result is handed back on the caller's *open* transaction."""
+        from istota import notifications
+
+        db.init_db(config.db_path)
+        calls = []
+        monkeypatch.setattr(
+            notifications,
+            "send_notification",
+            lambda *a, **k: calls.append(a) or True,
+        )
+
+        conn = sqlite3.connect(config.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            result = store.write_notification(
+                conn, "alice", source="confirmation", dedup_key="task:7", title="t"
+            )
+            conn.rollback()
+        finally:
+            conn.close()
+
+        store.deliver_pending(config, [result])
+        assert calls == []
+
+    def test_a_row_closed_before_delivery_is_not_delivered(self, config, monkeypatch):
+        from istota import notifications
+
+        db.init_db(config.db_path)
+        calls = []
+        monkeypatch.setattr(
+            notifications,
+            "send_notification",
+            lambda *a, **k: calls.append(a) or True,
+        )
+
+        with db.get_db(config.db_path) as conn:
+            result = store.write_notification(
+                conn, "alice", source="confirmation", dedup_key="task:7", title="t"
+            )
+        with db.get_db(config.db_path) as conn:
+            store.resolve_notification(
+                conn, "alice", "confirmation", "task:7", by="talk"
+            )
+
+        store.deliver_pending(config, [result])
+        assert calls == []
+
+
 # --- the never-raises contract -------------------------------------------
 
 
@@ -649,10 +864,8 @@ class TestNeverRaises:
         assert store.write_notification(
             bad, "alice", source="s", dedup_key="k", title="t"
         ) is None
-        assert store.resolve_notification(bad, "alice", "s", "k", by="web") is None
-        assert store.resolve_by_object(
-            bad, "alice", "s", "task", "1", by="web"
-        ) is None
+        assert store.resolve_notification(bad, "alice", "s", "k", by="web") == 0
+        assert store.resolve_by_object(bad, "alice", "s", "task", "1", by="web") == 0
         assert store.dismiss(bad, 1, "alice") is False
         assert store.mark_stale(bad, [1]) is None
         assert store.mark_seen(bad, "alice", [(1, "2026-01-01T00:00:00.000Z")]) is None

@@ -77,6 +77,8 @@ LIVENESS_SCAN_MAX = 500
 _STALE_SWEEP_BUSY_TIMEOUT_MS = 2000
 # SQLite's default parameter limit is 999; stay well under it per statement.
 _ID_CHUNK = 400
+# Rows per DELETE in the retention sweep — see `sweep_retention`.
+_RETENTION_DELETE_CHUNK = 500
 
 _UNREGISTERED_NOTE = "This notification's source is no longer available."
 _UNRENDERABLE_NOTE = "This notification could not be rendered."
@@ -141,6 +143,27 @@ class ResolvedNotification:
 
 
 # --- helpers -------------------------------------------------------------
+
+
+def _read(conn: sqlite3.Connection, sql: str, params: Any = ()) -> sqlite3.Cursor:
+    """Execute a SELECT on a cursor that yields `sqlite3.Row` regardless.
+
+    Every read below indexes rows by name, which on a connection opened without
+    `row_factory = sqlite3.Row` raises `TypeError` — swallowed by the
+    never-raises contract into a store that looks like it is working. The insert
+    branch needs no read at all, so the *first* write to a key would succeed and
+    every subsequent one silently vanish; `counts` would report an empty bell
+    over a table full of open rows, and `dismiss` would 404 the user their own
+    notification.
+
+    `db.get_db` sets the factory, but a producer opening its own connection is
+    under no obligation to, and this module cannot mutate a caller's connection
+    to find out. A per-cursor factory overrides the connection's without
+    touching it.
+    """
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    return cursor.execute(sql, params)
 
 
 def _row_to_notification(row: sqlite3.Row) -> NotificationRow:
@@ -241,6 +264,12 @@ def write_notification(
             )
             severity = DEFAULT_SEVERITY
 
+        if purpose not in sources.DELIVERY_PURPOSES:
+            logger.warning(
+                "notification source %r used unknown purpose %r", source, purpose
+            )
+            purpose = sources.DEFAULT_PURPOSE
+
         try:
             params_json = json.dumps(params or {}, sort_keys=True, default=str)
         except (TypeError, ValueError):
@@ -248,35 +277,59 @@ def write_notification(
             params_json = "{}"
 
         now = db.iso_utc_now()
-        existing = conn.execute(
+        existing = _read(
+            conn,
             "SELECT id, state FROM notifications "
             "WHERE user_id = ? AND source = ? AND dedup_key = ?",
             (user_id, source, dedup_key),
         ).fetchone()
 
         if existing is None:
-            cursor = conn.execute(
-                """
-                INSERT INTO notifications (
-                    user_id, source, dedup_key, object_type, object_id,
-                    severity, actionable, title, body, params, link, room_token,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id, source, dedup_key, object_type, object_id,
-                    severity, 1 if actionable else 0, title, body or "",
-                    params_json, link, room_token, now, now,
-                ),
-            )
-            return RaiseResult(
-                notification_id=int(cursor.lastrowid),
-                user_id=user_id,
-                deliver=True,
-                text=_delivery_text(title, body or ""),
-                title=title,
-                purpose=purpose,
-            )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO notifications (
+                        user_id, source, dedup_key, object_type, object_id,
+                        severity, actionable, title, body, params, link,
+                        room_token, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id, source, dedup_key, object_type, object_id,
+                        severity, 1 if actionable else 0, title, body or "",
+                        params_json, link, room_token, now, now,
+                    ),
+                )
+                return RaiseResult(
+                    notification_id=int(cursor.lastrowid),
+                    user_id=user_id,
+                    deliver=True,
+                    text=_delivery_text(title, body or ""),
+                    title=title,
+                    purpose=purpose,
+                )
+            except sqlite3.IntegrityError:
+                # Somebody inserted this key between the SELECT and the INSERT.
+                # The module docstring says both callers hold a write lock and
+                # SQLite therefore serialises them, and that is true of the
+                # producers this store was designed around — but it is a
+                # precondition nothing enforces, and a caller in autocommit (or
+                # `raise_notification`, which opens its own connection and holds
+                # no lock at the SELECT) can legitimately land here. Falling
+                # through to the update branch turns a lost notification and a
+                # swallowed error into the bump it should have been.
+                logger.debug(
+                    "notification insert raced on (%r, %r, %r), bumping instead",
+                    user_id, source, dedup_key,
+                )
+                existing = _read(
+                    conn,
+                    "SELECT id, state FROM notifications "
+                    "WHERE user_id = ? AND source = ? AND dedup_key = ?",
+                    (user_id, source, dedup_key),
+                ).fetchone()
+                if existing is None:
+                    raise
 
         notification_id = int(existing["id"])
         reopening = existing["state"] != STATE_OPEN
@@ -327,36 +380,65 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
 
     Takes an iterable that may contain `None`, so a producer can hand over its
     buffer without filtering the refused writes out of it first.
+
+    **Each row is re-read before its send.** The result was handed back on the
+    caller's still-open transaction, so a producer that went on to roll back —
+    or whose row was closed on another surface in the meantime — would otherwise
+    have this push a notice about something that never happened, with no inbox
+    row left to explain or dismiss it. The re-read is one query for the whole
+    buffer, on the connection the stamp needs anyway.
     """
     try:
         from .notifications import send_notification
 
-        delivered: list[int] = []
-        for result in results or []:
-            if result is None or not result.deliver:
-                continue
-            try:
-                ok = send_notification(
-                    config,
-                    result.user_id,
-                    result.text,
-                    purpose=result.purpose,
-                    title=result.title,
-                )
-            except Exception:
-                logger.warning(
-                    "notification delivery raised (id=%s user=%r)",
-                    result.notification_id, result.user_id, exc_info=True,
-                )
-                continue
-            if ok:
-                delivered.append(result.notification_id)
-
-        if not delivered:
+        pending = [r for r in (results or []) if r is not None and r.deliver]
+        if not pending:
             return
 
-        now = db.iso_utc_now()
         with db.get_db(config.db_path) as conn:
+            live: set[int] = set()
+            for chunk in _chunks([r.notification_id for r in pending]):
+                placeholders = ",".join("?" for _ in chunk)
+                live.update(
+                    row[0]
+                    for row in conn.execute(
+                        f"SELECT id FROM notifications WHERE id IN ({placeholders}) "
+                        "AND state = 'open'",
+                        chunk,
+                    ).fetchall()
+                )
+
+            delivered: list[int] = []
+            for result in pending:
+                if result.notification_id not in live:
+                    logger.warning(
+                        "skipping delivery for notification %s: no open row "
+                        "(the producer's transaction rolled back, or it was "
+                        "closed elsewhere)",
+                        result.notification_id,
+                    )
+                    continue
+                try:
+                    ok = send_notification(
+                        config,
+                        result.user_id,
+                        result.text,
+                        purpose=result.purpose,
+                        title=result.title,
+                    )
+                except Exception:
+                    logger.warning(
+                        "notification delivery raised (id=%s user=%r)",
+                        result.notification_id, result.user_id, exc_info=True,
+                    )
+                    continue
+                if ok:
+                    delivered.append(result.notification_id)
+
+            if not delivered:
+                return
+
+            now = db.iso_utc_now()
             for chunk in _chunks(delivered):
                 placeholders = ",".join("?" for _ in chunk)
                 conn.execute(
@@ -396,26 +478,34 @@ def raise_notification(config: "Config", user_id: str, **kwargs) -> int | None:
 
 def resolve_notification(
     conn: sqlite3.Connection, user_id: str, source: str, dedup_key: str, *, by: str
-) -> None:
+) -> int:
     """Close the open row for `(user_id, source, dedup_key)`, if there is one.
 
     Idempotent: an already-closed row keeps the `resolved_at` / `resolved_by` of
     the surface that actually closed it.
+
+    Returns how many rows it closed, so a producer that knows a row should have
+    been there can say so. A close that matches nothing is otherwise invisible —
+    the liveness pass eventually marks the row stale, and a broken close path
+    then presents as "it went away on its own after a while" rather than as a
+    defect. 0 is a normal answer for a repeat call.
     """
     try:
-        conn.execute(
+        now = db.iso_utc_now()
+        cursor = conn.execute(
             "UPDATE notifications "
             "   SET state = 'resolved', resolved_at = ?, resolved_by = ?, "
             "       updated_at = ? "
             " WHERE user_id = ? AND source = ? AND dedup_key = ? AND state = 'open'",
-            (db.iso_utc_now(), by, db.iso_utc_now(), user_id, source, dedup_key),
+            (now, by, now, user_id, source, dedup_key),
         )
+        return cursor.rowcount or 0
     except Exception:
         logger.warning(
             "resolve_notification failed (user=%r source=%r key=%r)",
             user_id, source, dedup_key, exc_info=True,
         )
-    return None
+        return 0
 
 
 def resolve_by_object(
@@ -426,32 +516,37 @@ def resolve_by_object(
     object_id: str,
     *,
     by: str,
-) -> None:
+) -> int:
     """Close the open row a producer just closed the object of.
 
     `user_id` is first-class and required, and that is the whole point: panel
     ids come from the per-user health module DB, where every user has a panel
     `12`. Scoped by session user, never by a value from the request — inside the
     store as well as at the endpoint.
+
+    Returns the number of rows closed, for the reason given on
+    :func:`resolve_notification`. It matters more here: `object_id` is opaque
+    `TEXT` written by the producer and matched with `str(object_id)`, so a
+    producer that stored one rendering and closes with another matches nothing
+    at all, silently and every time.
     """
     try:
-        conn.execute(
+        now = db.iso_utc_now()
+        cursor = conn.execute(
             "UPDATE notifications "
             "   SET state = 'resolved', resolved_at = ?, resolved_by = ?, "
             "       updated_at = ? "
             " WHERE user_id = ? AND source = ? AND object_type = ? "
             "   AND object_id = ? AND state = 'open'",
-            (
-                db.iso_utc_now(), by, db.iso_utc_now(),
-                user_id, source, object_type, str(object_id),
-            ),
+            (now, by, now, user_id, source, object_type, str(object_id)),
         )
+        return cursor.rowcount or 0
     except Exception:
         logger.warning(
             "resolve_by_object failed (user=%r source=%r %s=%r)",
             user_id, source, object_type, object_id, exc_info=True,
         )
-    return None
+        return 0
 
 
 def dismiss(conn: sqlite3.Connection, notification_id: int, user_id: str,
@@ -464,7 +559,8 @@ def dismiss(conn: sqlite3.Connection, notification_id: int, user_id: str,
     already-dismissed row is still a 200.
     """
     try:
-        row = conn.execute(
+        row = _read(
+            conn,
             "SELECT id, state FROM notifications WHERE id = ? AND user_id = ?",
             (notification_id, user_id),
         ).fetchone()
@@ -555,7 +651,8 @@ def mark_seen(
 
         for chunk in _chunks(list(wanted)):
             placeholders = ",".join("?" for _ in chunk)
-            rows = conn.execute(
+            rows = _read(
+                conn,
                 "SELECT id, source, state, updated_at FROM notifications "
                 f"WHERE user_id = ? AND id IN ({placeholders})",
                 [user_id, *chunk],
@@ -635,12 +732,25 @@ def sweep_retention(conn: sqlite3.Connection) -> int:
     try:
         cutoff = db.iso_utc_days_ago(NOTIFICATION_RETENTION_DAYS)
         placeholders = ",".join("?" for _ in CLOSED_STATES)
-        cursor = conn.execute(
-            f"DELETE FROM notifications WHERE state IN ({placeholders}) "
-            "AND COALESCE(resolved_at, updated_at) < ?",
-            [*CLOSED_STATES, cutoff],
-        )
-        deleted = cursor.rowcount or 0
+        deleted = 0
+        # Chunked, because the first run after a long accumulation deletes the
+        # whole backlog and this runs in the scheduler's cleanup pass, where one
+        # large statement holds the write lock while every reader waits out its
+        # busy timeout. `.claude/rules/scheduler.md` records the same hazard for
+        # `prune_old_usage`. A `LIMIT` subselect rather than `DELETE … LIMIT`,
+        # which needs a compile-time option SQLite does not always carry.
+        while True:
+            cursor = conn.execute(
+                "DELETE FROM notifications WHERE id IN ("
+                f"  SELECT id FROM notifications WHERE state IN ({placeholders}) "
+                "    AND COALESCE(resolved_at, updated_at) < ? LIMIT ?"
+                ")",
+                [*CLOSED_STATES, cutoff, _RETENTION_DELETE_CHUNK],
+            )
+            removed = cursor.rowcount or 0
+            deleted += removed
+            if removed < _RETENTION_DELETE_CHUNK:
+                break
         if deleted:
             logger.info("notification retention sweep deleted %d row(s)", deleted)
         return deleted
@@ -661,7 +771,8 @@ def counts(conn: sqlite3.Connection, user_id: str) -> dict[str, int]:
     between one panel open and the next if a producer missed a close.
     """
     try:
-        row = conn.execute(
+        row = _read(
+            conn,
             "SELECT COUNT(*) AS open_count, "
             "       COALESCE(SUM(actionable), 0) AS actionable_count "
             "  FROM notifications WHERE user_id = ? AND state = 'open'",
@@ -678,12 +789,18 @@ def counts(conn: sqlite3.Connection, user_id: str) -> dict[str, int]:
 
 def _fallback(row: NotificationRow, note: str) -> ResolvedNotification:
     """Stored text, no actions, and a note saying why. Never hidden — a row
-    nobody can explain is still one the user should be able to clear."""
+    nobody can explain is still one the user should be able to clear.
+
+    Rendered `actionable` is False whatever the stored column says: there are no
+    actions here and there is no way to produce any, so leaving the flag set
+    would file the row under "Needs action" with nothing to act on. The stored
+    column keeps the write-time answer — this is only how it renders today.
+    """
     return ResolvedNotification(
         id=row.id,
         source=row.source,
         severity=row.severity,
-        actionable=row.actionable,
+        actionable=False,
         title=row.title,
         body=row.body,
         link=None,
@@ -749,8 +866,17 @@ def list_open(
     the client derives both tab labels from it and the returned rows.
     """
     try:
-        limit = max(1, min(int(limit), LIVENESS_SCAN_MAX))
-        rows = conn.execute(
+        # Coerced before the clamp rather than inside it: a `?limit=` arriving
+        # unparsed from a query string would otherwise raise into the handler
+        # below and return an empty list, which reads to the user as "nothing is
+        # waiting on you" rather than as a bad request.
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, LIVENESS_SCAN_MAX))
+        rows = _read(
+            conn,
             "SELECT * FROM notifications WHERE user_id = ? AND state = 'open' "
             "ORDER BY updated_at DESC, id DESC LIMIT ?",
             (user_id, LIVENESS_SCAN_MAX),
@@ -793,7 +919,7 @@ def list_open(
                 survivors.append((row, _fallback(row, _UNRENDERABLE_NOTE)))
 
         if dead:
-            _sweep_stale(config, dead)
+            _sweep_stale(config, conn, dead)
 
         # Counted from what the pass actually observed, not re-queried. The
         # sweep runs on its own connection and commits, so a re-query would
@@ -816,18 +942,30 @@ def list_open(
         return [], 0
 
 
-def _sweep_stale(config: "Config", notification_ids: list[int]) -> None:
-    """Close dead rows on a connection of our own, with a short lock budget.
+def _sweep_stale(
+    config: "Config", conn: sqlite3.Connection, notification_ids: list[int]
+) -> None:
+    """Close dead rows, on whichever connection can actually write them.
 
-    A panel-open GET must not wait the default thirty seconds on the scheduler's
-    write lock. Dropping the sweep on contention is fine — it runs again next
-    time — so the failure is swallowed rather than surfaced.
+    The ordinary case is the panel-open GET: the reader holds no write lock, so
+    the sweep goes on a second connection with a short lock budget rather than
+    waiting the default thirty seconds on the scheduler's. Dropping it on
+    contention is fine — it runs again next time — so that failure is swallowed.
+
+    **Unless the caller is already in a transaction**, in which case a second
+    connection is the one thing that cannot work: it would wait out the full
+    2s budget on the caller's own write lock, fail, and leave the rows open
+    while the panel reports them gone. The caller holds the lock, so the write
+    is free on their connection; it commits when their transaction does.
     """
+    if conn.in_transaction:
+        mark_stale(conn, notification_ids)
+        return
     try:
         with db.get_db(
             config.db_path, busy_timeout_ms=_STALE_SWEEP_BUSY_TIMEOUT_MS
-        ) as conn:
-            mark_stale(conn, notification_ids)
+        ) as own:
+            mark_stale(own, notification_ids)
     except Exception:
         logger.warning(
             "notification stale sweep skipped (%d row(s))",

@@ -50,12 +50,29 @@ logger = logging.getLogger(__name__)
 # validates its id before interpolating (`int(row.object_id)` for the
 # integer-keyed sources); this is the backstop behind that, enforced at runtime
 # on every view rather than only in a test.
-SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9/_-]*$")
+#
+# Anchored `\A`/`\Z`, not `^`/`$`: outside MULTILINE, `$` still matches *before*
+# a terminal newline, so `"/chat\n"` passes a `$`-anchored version of this
+# pattern. A control character reaching a fetch target is exactly what an
+# allowlist is for, and one that admits a trailing newline is not one.
+SAFE_PATH_RE = re.compile(r"\A/[A-Za-z0-9][A-Za-z0-9/_-]*\Z")
 
 ACTION_KINDS = ("primary", "default", "danger")
 ACTION_METHODS = ("POST", "LINK")
 
 SEVERITIES = ("info", "success", "warning", "danger")
+
+# Mirrors `notifications.PURPOSES`. Duplicated rather than imported because the
+# store validates a purpose on the write path, where pulling in the delivery
+# module (and the transport package behind it) buys nothing — delivery happens
+# later, on another call. `test_notification_store.py` asserts the two agree, so
+# the copy cannot drift.
+#
+# Validated at all because an unrecognised purpose is not refused downstream: it
+# falls through the user's routing table and lands on the default ladder, so a
+# typo silently mis-routes rather than failing.
+DELIVERY_PURPOSES = ("reply", "alert", "log", "briefing", "notification")
+DEFAULT_PURPOSE = "alert"
 
 
 def is_safe_path(value: object) -> bool:

@@ -208,6 +208,9 @@ def test_malformed_pairs_are_skipped(conn, registered):
 
     row = _row(conn, alert.notification_id)
     assert row["state"] == "open"
+    # Not just "still open" — a skipped pair leaves it open either way. The
+    # stamp is what says the malformed entries were dropped rather than coerced.
+    assert row["seen_at"] is None
 
 
 def test_empty_batch_is_a_no_op(conn, registered):
