@@ -2388,6 +2388,67 @@ export async function deleteChatRoom(id: number): Promise<{ status: string }> {
   return resp.json();
 }
 
+/** A room's `CHANNEL.md` — the standing instructions every task in the room
+ * is given. `revision` is opaque and must be handed back on save. */
+export interface ChatRoomMemory {
+  room_id: number;
+  token: string;
+  content: string;
+  /** False when the file is absent or whitespace-only; both are the empty state. */
+  exists: boolean;
+  /** A Talk-origin room shares one file across all its members. */
+  shared: boolean;
+  /** Server-supplied starting text for the empty state. */
+  template: string;
+  revision: string;
+}
+
+export function getRoomMemory(id: number): Promise<ChatRoomMemory> {
+  return apiFetch<ChatRoomMemory>(`/chat/rooms/${id}/memory`);
+}
+
+/** The file moved under the editor — an agent write landed between load and
+ * save. Reload before overwriting. */
+export class ChatMemoryConflictError extends Error {
+  constructor() {
+    super('channel memory changed since it was loaded');
+    this.name = 'ChatMemoryConflictError';
+  }
+}
+
+/** Save refused because a task is in flight in the room, or because another
+ * writer held the file lock. Both clear on their own; retry is the answer. */
+export class ChatMemoryBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChatMemoryBusyError';
+  }
+}
+
+export async function saveRoomMemory(
+  id: number,
+  content: string,
+  revision: string,
+): Promise<{ status: string; revision: string }> {
+  const resp = await fetch(`${base}/api/chat/rooms/${id}/memory`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, revision }),
+  });
+  if (resp.status === 409) {
+    const body = await resp.json().catch(() => ({}));
+    if (body.code === 'conflict') throw new ChatMemoryConflictError();
+    throw new ChatMemoryBusyError(body.error || 'room is busy');
+  }
+  if (resp.status === 413) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(`Too long — the limit is ${Math.floor((body.max_bytes ?? 0) / 1024)} KB.`);
+  }
+  if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+  return resp.json();
+}
+
 export function getRoomMessages(
   id: number,
   opts: { limit?: number; before?: { ts: string; id: number } | null; timeoutMs?: number } = {},

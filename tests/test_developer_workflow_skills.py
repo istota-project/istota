@@ -600,9 +600,23 @@ class TestLoadBudget:
     was inert in exactly the checkouts the agent commits from. Five net lines,
     the smallest of these raises, and the one where a recipe kept short would
     have left a security control silently absent rather than merely unstated.
+
+    735 -> 760 for ISSUE-288, same procedure, and the largest of these raises --
+    the only one adding a policy rather than a recipe line. Nothing reaped a
+    task's worktree, so `repos_dir` accumulated gigabyte checkouts and "when
+    does this go away" was a judgement call each time. The body now states the
+    retention rule `worktree_reaper.py` applies, says never to clean up after
+    another task (the task that made it may still be running, which the model
+    cannot see and the reaper can), names `git worktree lock` as the hatch, and
+    corrects the cleanup recipe from `branch -d` -- which consults HEAD, and this
+    clone's HEAD deliberately points at a deleted ref (ISSUE-125), so it failed
+    on every branch including the merged ones. Twenty-five net lines. Cutting it
+    further means dropping either the criteria, and then uncommitted work in a
+    worktree looks safe when it is not, or the `--main` warning, which is the
+    recurrence guard for the stray checkout that prompted the entry.
     """
 
-    BUDGET_LINES = 735
+    BUDGET_LINES = 760
 
     def test_three_bodies_fit_the_budget(self):
         total = 0

@@ -317,6 +317,7 @@ tasks_file_poll_interval = {{ istota_scheduler_tasks_file_poll_interval }}
 shared_file_check_interval = {{ istota_scheduler_shared_file_check_interval }}
 heartbeat_check_interval = {{ istota_scheduler_heartbeat_check_interval }}
 db_health_check_interval = {{ istota_scheduler_db_health_check_interval }}
+worktree_reap_interval = {{ istota_scheduler_worktree_reap_interval }}
 main_loop_read_timeout_ms = {{ istota_scheduler_main_loop_read_timeout_ms }}
 db_backup_enabled = {{ istota_scheduler_db_backup_enabled | lower }}
 db_backup_interval = {{ istota_scheduler_db_backup_interval }}
@@ -576,6 +577,8 @@ glab_bin_path = "{{ istota_developer_glab_bin_path }}"
 devbox_proxy_enabled = {{ istota_devbox_proxy_enabled | ternary('true', 'false') }}
 devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
 devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
+worktree_reap_enabled = {{ istota_developer_worktree_reap_enabled | ternary('true', 'false') }}
+worktree_retention_hours = {{ istota_developer_worktree_retention_hours }}
 
 # Subsection, so it has to stay last in the [developer] block: every key after
 # this header belongs to it.
