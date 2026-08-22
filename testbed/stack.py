@@ -1050,9 +1050,19 @@ def conflicting_process_env(environment: dict[str, str]) -> dict[str, str]:
 
     So the boot refuses rather than guessing. Only a *differing* value counts: a
     developer who happens to export `USER_NAME=testuser` is not fought with.
-    Note that `tests/conftest.py::_load_dotenv` injects a repo-root `.env` into
+    `tests/conftest.py::_load_dotenv` injects a repo-root `.env` into
     `os.environ` before any of this runs, so a key landing there is
     indistinguishable from an exported one — and is caught the same way.
+
+    Since ISSUE-301 the suite also *scrubs* `os.environ` before every test, and
+    the boot happens inside the function-scoped `stack` fixture, i.e. after the
+    scrub. So every `ISTOTA_*` key and everything credential-shaped —
+    `ISTOTA_BRAIN_KIND` and `ADMIN_PASSWORD` among them — is already gone by the
+    time this runs, and the exported value genuinely no longer reaches compose.
+    What is left for this guard is the rest, `USER_NAME` and the port variables
+    included, which is still worth refusing over. Read a failure here as "your
+    shell exports this and the scrub does not cover it", not as a `.env` to go
+    and clean up.
     """
     return {
         key: value

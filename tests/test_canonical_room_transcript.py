@@ -275,9 +275,13 @@ class TestNonconversationalCleanupMigration:
                 raise ImportError("simulated broken import")
             return real_import(name, *args, **kwargs)
 
-        monkeypatch.setattr(builtins, "__import__", boom)
-        db._migrate_nonconversational_transcript_cleanup(conn)
-        monkeypatch.undo()
+        # A scoped context, not `monkeypatch.undo()`: `monkeypatch` is one
+        # object shared with the autouse fixtures, so `undo()` reverses their
+        # work too — since ISSUE-301 that includes the environment scrub, which
+        # would come back mid-test.
+        with monkeypatch.context() as patched:
+            patched.setattr(builtins, "__import__", boom)
+            db._migrate_nonconversational_transcript_cleanup(conn)
 
         # No mutation: the synthetic subtask/briefing user rows still present.
         user_rows = conn.execute(

@@ -43,10 +43,28 @@ from istota.git_remote_scrub import (
     url_credential,
 )
 
+# A fixed identity, not the operator's (ISSUE-301). `GIT_CONFIG_NOSYSTEM` and
+# `GIT_CONFIG_GLOBAL=/dev/null` correctly refuse to read the host's git config
+# and then supply no `user.email` of their own, which leaves the identity to
+# git's fallback: it synthesises one from the passwd GECOS field and
+# `user@hostname`. So every fixture commit here carried the operator's real
+# name and machine name, and on a host where the fallback cannot fire — a
+# container with no GECOS entry, or an `EMAIL`-less shell with an unqualified
+# hostname — `git commit` refuses outright with "Author identity unknown" and
+# four tests fail for a reason that says nothing about the code. Isolation was
+# attempted and left half-done; this finishes it in both directions.
+TEST_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Istota Test",
+    "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Istota Test",
+    "GIT_COMMITTER_EMAIL": "test@example.invalid",
+}
+
 GIT_ISOLATION = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
+    **TEST_IDENTITY,
 }
 
 # A shape, not a value. `xxxx` is what `scripts/check-private-data.sh` treats as
@@ -90,6 +108,46 @@ def _with_upstream(tmp_path: Path, name: str = "project.git") -> tuple[Path, Pat
 
 def _text(path: Path) -> str:
     return path.read_text()
+
+
+class TestTheFixturesCommitAsThemselves:
+    """ISSUE-301 regression: `_git` must not borrow the host's identity.
+
+    Two failure modes, opposite ends of the same omission. Where git's fallback
+    works, the fixture commits under the operator's real name and hostname —
+    quiet, and the wrong thing to be writing into a public repository's test
+    tree. Where it does not, `git commit` refuses and four tests in this file
+    fail with `Author identity unknown`.
+    """
+
+    def test_a_fixture_commit_carries_the_test_identity(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main", ".")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+
+        author = _git(repo, "log", "-1", "--format=%an|%ae|%cn|%ce").strip()
+        assert author == "|".join((
+            TEST_IDENTITY["GIT_AUTHOR_NAME"],
+            TEST_IDENTITY["GIT_AUTHOR_EMAIL"],
+            TEST_IDENTITY["GIT_COMMITTER_NAME"],
+            TEST_IDENTITY["GIT_COMMITTER_EMAIL"],
+        ))
+
+    def test_it_holds_with_no_identity_in_the_ambient_shell(self, tmp_path, monkeypatch):
+        # The clean-host case: nothing to fall back to and no global config to
+        # read. Before the fix this raised `Author identity unknown` out of
+        # `_git`, which is how it failed on the deployment host.
+        for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"):
+            monkeypatch.delenv(name, raising=False)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main", ".")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+        assert _git(repo, "log", "-1", "--format=%ae").strip() == (
+            TEST_IDENTITY["GIT_AUTHOR_EMAIL"]
+        )
 
 
 class TestUrlCredential:

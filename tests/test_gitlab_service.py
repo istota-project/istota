@@ -15,8 +15,10 @@ first, naming the protocol rather than the symptom.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -25,6 +27,96 @@ from testbed.services.gitlab import _auth_shape, serve
 
 REQUIRES_GLAB = pytest.mark.skipif(
     shutil.which("glab") is None, reason="glab not installed"
+)
+
+# What the other five git-driving test files set. Repeated rather than imported
+# because those five each own a copy too; the shared thing is the rule, not the
+# dict. `GIT_TERMINAL_PROMPT=0` so a credential prompt fails instead of hanging.
+GIT_ISOLATION = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+# The version the assertions below were written and verified against. Not a
+# bisected boundary: what is known is that 1.114.0 passes and that 1.53.0
+# cannot (ISSUE-301). Older glab compares `GITLAB_HOST` against the configured
+# git remote *without* the port, so a stub on an ephemeral loopback port is
+# never recognised as the same host and `mr create` refuses with "none of the
+# git remotes configured for this repository correspond to the GITLAB_HOST
+# environment variable". No environment fixes that, and `shutil.which` alone
+# reported the failure as if it were about the stub.
+GLAB_MR_CREATE_FLOOR = (1, 114, 0)
+
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def parse_glab_version(output: str) -> tuple[int, int, int] | None:
+    """The first dotted triple in `glab --version` output, or None.
+
+    Tolerant on purpose: `glab 1.114.0 (4d7c6cda7)` and
+    `glab version 1.53.0 (2024-01-01)` are both real shapes, and a build with
+    no recognisable version must skip rather than be assumed new enough.
+    """
+    match = _VERSION_RE.search(output)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+
+
+def installed_glab_version() -> tuple[int, int, int] | None:
+    """`glab --version`, run at collection and therefore given an env of its own.
+
+    Every other glab call in this file goes through `_glab_env`, which hands the
+    binary a scratch HOME and turns off its update check and telemetry. This one
+    ran before any fixture and so inherited the operator's shell — reading their
+    real glab config, and reaching the network for an update check during the
+    collection of a suite that should make no requests. The timeout is short for
+    the same reason: it is paid once per xdist worker, and a glab that hangs here
+    stalls collection rather than failing a test.
+    """
+    binary = shutil.which("glab")
+    if binary is None:
+        return None
+    try:
+        # A throwaway config dir, not an unwritable one: glab creates its config
+        # before doing anything at all, so an unwritable HOME makes even
+        # `--version` exit 2 and the probe reports "absent" on a host that has
+        # it. Measured, not assumed — it skipped the test it exists to guard.
+        with tempfile.TemporaryDirectory(prefix="glab-probe-") as scratch:
+            result = subprocess.run(
+                [binary, "--version"],
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": scratch,
+                    "GLAB_CONFIG_DIR": scratch,
+                    "GLAB_CHECK_UPDATE": "false",
+                    "GLAB_SEND_TELEMETRY": "0",
+                    "GLAB_NO_PROMPT": "1",
+                    "NO_COLOR": "1",
+                    "PAGER": "cat",
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_glab_version(result.stdout)
+
+
+_GLAB_VERSION = installed_glab_version()
+
+REQUIRES_GLAB_MR_CREATE = pytest.mark.skipif(
+    _GLAB_VERSION is None or _GLAB_VERSION < GLAB_MR_CREATE_FLOOR,
+    reason=(
+        f"glab {_GLAB_VERSION or 'absent'} is below the "
+        f"{'.'.join(str(n) for n in GLAB_MR_CREATE_FLOOR)} floor this assertion "
+        "was verified against; older glab drops the port when matching "
+        "GITLAB_HOST against a git remote"
+    ),
 )
 
 
@@ -58,6 +150,51 @@ def _glab_env(tmp_path, stub, *, token="forge-token-stand-in-value"):
         "NO_COLOR": "1",
         "PAGER": "cat",
     }
+
+
+class TestTheGlabVersionFloor:
+    """ISSUE-301: `shutil.which` is not a capability check.
+
+    `mr create` cannot pass on glab 1.53.0 whatever the environment, so before
+    the floor its failure carried no information about the stub — and this file
+    sits in the *default* suite, where a red test nobody can act on is how a
+    suite stops being read.
+    """
+
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            ("glab 1.114.0 (4d7c6cda7)\n", (1, 114, 0)),
+            ("glab version 1.53.0 (2024-01-01)\n", (1, 53, 0)),
+            ("glab 1.114.0-rc.1 (abc)\n", (1, 114, 0)),
+            ("aglab v2.0.10\nbuilt with go1.22\n", (2, 0, 10)),
+        ],
+    )
+    def test_it_reads_a_real_version_line(self, output, expected):
+        assert parse_glab_version(output) == expected
+
+    @pytest.mark.parametrize("output", ["", "glab\n", "glab: command not found\n"])
+    def test_an_unreadable_version_is_none_rather_than_a_guess(self, output):
+        # None sorts as "skip". A build whose version cannot be read must not
+        # be assumed new enough — that is the failure the floor exists to stop.
+        assert parse_glab_version(output) is None
+
+    def test_the_floor_admits_the_version_the_test_was_written_against(self):
+        assert parse_glab_version("glab 1.114.0 (4d7c6cda7)") >= GLAB_MR_CREATE_FLOOR
+
+    def test_the_floor_excludes_the_version_that_cannot_pass(self):
+        assert parse_glab_version("glab 1.53.0 (x)") < GLAB_MR_CREATE_FLOOR
+
+    @REQUIRES_GLAB
+    def test_the_probe_reads_the_version_of_the_installed_glab(self):
+        # The guard on the guard. A floor whose probe cannot answer skips
+        # silently and forever, which is worse than the red test it replaced —
+        # and the first draft of `installed_glab_version` did exactly that, by
+        # handing glab an unwritable HOME.
+        assert installed_glab_version() is not None, (
+            "glab is on PATH but the probe could not read its version, so every "
+            "assertion behind the floor is skipping rather than running"
+        )
 
 
 class TestAuthShape:
@@ -215,7 +352,10 @@ class TestGitOverHttp:
             ["git", "-c", "credential.helper=", "clone",
              f"{stub.url}/group/project.git", str(tmp_path / "x")],
             capture_output=True, text=True, timeout=60,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            # The same isolation the five other git-driving test files use
+            # (ISSUE-301). Without it an operator's global `commit.gpgsign`,
+            # `core.fsmonitor` or `core.hooksPath` reaches this fixture repo.
+            env={**os.environ, **GIT_ISOLATION},
         )
 
         assert result.returncode != 0
@@ -353,8 +493,14 @@ class TestAgainstRealGlab:
         # *particular* token arrived without recording one.
         assert calls[0].auth.endswith(f":{len(token)}"), calls[0].auth
 
+    @REQUIRES_GLAB_MR_CREATE
     def test_mr_create_reaches_the_post_with_both_branches(self, stub, tmp_path):
         """The happy path's central verb, proven cheap.
+
+        The only test in this class that resolves a repo from the git remotes,
+        which is why it alone carries a version floor — see
+        `GLAB_MR_CREATE_FLOOR`. The others drive `glab` outside a checkout and
+        pass on 1.53.0.
 
         `glab mr create` is what the smoke tier's happy path drives, and it
         costs a compose stack there. It is also the verb most sensitive to the
