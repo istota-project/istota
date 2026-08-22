@@ -152,12 +152,23 @@ const money = (value: number, currency: string, digits: number): string =>
     maximumFractionDigits: digits,
   }).format(value);
 
-const tileValue = (el: HTMLElement, label: string): HTMLElement => {
-  const tile = Array.from(el.querySelectorAll('.stat-tile')).find(
+const findTile = (el: HTMLElement, label: string): Element | undefined =>
+  Array.from(el.querySelectorAll('.stat-tile')).find(
     (t) => t.querySelector('.micro-label')?.textContent?.trim() === label,
   );
+
+const tileValue = (el: HTMLElement, label: string): HTMLElement => {
+  const tile = findTile(el, label);
   expect(tile, `a tile labelled ${label}`).toBeTruthy();
   return tile!.querySelector('.stat-value') as HTMLElement;
+};
+
+/** A tile's whole text — label, value and sub-line. Extra usage splits its
+ *  figures across the value and the sub, so most of its assertions want both. */
+const tileText = (el: HTMLElement, label: string): string => {
+  const tile = findTile(el, label);
+  expect(tile, `a tile labelled ${label}`).toBeTruthy();
+  return tile!.textContent ?? '';
 };
 
 beforeEach(() => {
@@ -360,10 +371,45 @@ describe('the subscription card — extra usage', () => {
       ),
     );
 
-    expect(el.textContent).toContain('Extra usage:');
-    expect(el.textContent).toContain(money(4.65, 'USD', 2));
-    expect(el.textContent).toContain(money(20, 'USD', 2));
-    expect(el.textContent).toContain('23.3%');
+    // A tile in the grid, not a footer line under it: the card reads as one
+    // row of meters, and the spent figure is the tile's value because it is
+    // the one number here that is money rather than a share of a quota.
+    expect(tileValue(el, 'Extra usage').textContent?.trim()).toBe(money(4.65, 'USD', 2));
+    expect(tileText(el, 'Extra usage')).toContain(money(20, 'USD', 2));
+    expect(tileText(el, 'Extra usage')).toContain('23.3%');
+  });
+
+  it('sits alongside the windows in one grid rather than below it', async () => {
+    // The layout the card is asked for: four tiles across, matching the system
+    // banner. A regression here is the tile drifting back out of the grid into
+    // a note, which the text-content assertions above would not notice.
+    const el = card(
+      await show(
+        populated({
+          windows: [
+            window_({ key: 'session', label: '5-hour' }),
+            window_({ key: 'weekly_all', label: 'Weekly (all models)' }),
+            window_({ key: 'weekly_scoped:fable', label: 'Weekly (Fable)' }),
+          ],
+          spend: {
+            enabled: true,
+            used_minor: 465,
+            limit_minor: 2000,
+            currency: 'USD',
+            exponent: 2,
+            percent: 23.25,
+          },
+        }),
+      ),
+    );
+
+    const grid = el.querySelector('.kpi-grid');
+    expect(grid, 'the card has a tile grid').toBeTruthy();
+    const labels = Array.from(grid!.querySelectorAll('.stat-tile .micro-label')).map((n) =>
+      n.textContent?.trim(),
+    );
+    // Extra usage last, after every window, in one grid.
+    expect(labels).toEqual(['5-hour', 'Weekly (all models)', 'Weekly (Fable)', 'Extra usage']);
   });
 
   it('takes the divisor from the exponent rather than assuming cents', async () => {

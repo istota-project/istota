@@ -112,7 +112,7 @@
   }
 
   /**
-   * Pay-as-you-go credits, as `$0.00 / $20.00 (0%)`.
+   * One pay-as-you-go money figure, from minor units.
    *
    * This is a real dollar figure on a subscription dashboard, and it does not
    * break the rule that keeps one off the Token usage card: that rule refuses
@@ -124,6 +124,45 @@
    * `!usage` command divided by 100 and was wrong for any currency that is not
    * two-decimal. `Intl` is asked for exactly that many digits rather than the
    * currency's own default, so the figure shown is the figure reported.
+   */
+  function spendMoney(spend: AdminSubscriptionSpend, minor: number): string {
+    const digits =
+      Number.isFinite(spend.exponent) && spend.exponent >= 0 && spend.exponent <= 6
+        ? Math.floor(spend.exponent)
+        : 2;
+    const scale = Math.pow(10, digits);
+    const value = (Number.isFinite(minor) ? minor : 0) / scale;
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency: spend.currency || 'USD',
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      }).format(value);
+    } catch {
+      // A *malformed* code makes `Intl` throw — one that is not three
+      // letters. An unknown but well-formed one does not: `XYZ` formats as
+      // `XYZ 4.65`, which is the right outcome and needs no branch. The
+      // number is still worth showing either way, and the code beside it
+      // still says what it is.
+      return `${value.toFixed(digits)} ${spend.currency}`;
+    }
+  }
+
+  /**
+   * The credits spent, which is the Extra usage tile's value.
+   *
+   * The money is the value rather than the percentage, unlike every plan
+   * window beside it, because this tile is the one figure on the card that is
+   * money rather than a share of a quota. The percentage rides the sub-line
+   * with the cap it is a percentage *of*, where the two read together.
+   */
+  function formatSpendUsed(spend: AdminSubscriptionSpend): string {
+    return spendMoney(spend, spend.used_minor);
+  }
+
+  /**
+   * The cap and the share of it, as `of $20.00 (23.3%)`.
    *
    * The percentage is rendered **unclamped**, unlike a plan window's. Above 100
    * here is real money already committed, and
@@ -131,32 +170,9 @@
    * it; clamping it back would hide an overage while the two money figures
    * beside it still showed one.
    */
-  function formatSpend(spend: AdminSubscriptionSpend): string {
-    const digits =
-      Number.isFinite(spend.exponent) && spend.exponent >= 0 && spend.exponent <= 6
-        ? Math.floor(spend.exponent)
-        : 2;
-    const scale = Math.pow(10, digits);
-    const money = (minor: number): string => {
-      const value = (Number.isFinite(minor) ? minor : 0) / scale;
-      try {
-        return new Intl.NumberFormat(undefined, {
-          style: 'currency',
-          currency: spend.currency || 'USD',
-          minimumFractionDigits: digits,
-          maximumFractionDigits: digits,
-        }).format(value);
-      } catch {
-        // A *malformed* code makes `Intl` throw — one that is not three
-        // letters. An unknown but well-formed one does not: `XYZ` formats as
-        // `XYZ 4.65`, which is the right outcome and needs no branch. The
-        // number is still worth showing either way, and the code beside it
-        // still says what it is.
-        return `${value.toFixed(digits)} ${spend.currency}`;
-      }
-    };
+  function formatSpendCap(spend: AdminSubscriptionSpend): string {
     const percent = formatUtilization(spend.percent, { clamp: false });
-    return `${money(spend.used_minor)} / ${money(spend.limit_minor)} (${percent})`;
+    return `of ${spendMoney(spend, spend.limit_minor)} (${percent})`;
   }
 
   function moduleErrorCount(mod: Record<string, unknown>): number {
@@ -609,6 +625,11 @@
           <h2>Claude Code subscription</h2>
         </header>
         {#if sub.available && (sub.windows ?? []).length > 0}
+          <!-- Extra usage is a tile in this grid rather than a footer line
+               under it, so the card reads as one row of meters the way the
+               system banner above does. It is last because it is the one
+               figure here that is money rather than a share of a plan
+               window. -->
           <div class="kpi-grid card-grid">
             {#each sub.windows ?? [] as w (w.key)}
               <StatTile
@@ -619,10 +640,16 @@
                 {formatUtilization(w.percent)}
               </StatTile>
             {/each}
+            {#if sub.spend?.enabled}
+              <StatTile
+                label="Extra usage"
+                sub={formatSpendCap(sub.spend)}
+                valueColor={utilizationColor(sub.spend.percent, sub.warn_percent, sub.high_percent)}
+              >
+                {formatSpendUsed(sub.spend)}
+              </StatTile>
+            {/if}
           </div>
-          {#if sub.spend?.enabled}
-            <p class="usage-note">Extra usage: {formatSpend(sub.spend)}</p>
-          {/if}
           <p class="usage-note">
             Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
               — reading is stale{#if sub.error}: {sub.error}{/if}
