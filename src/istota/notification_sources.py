@@ -23,6 +23,7 @@ imports it, and so does every resolver module. Registration is explicit — see
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 import threading
@@ -243,8 +244,14 @@ def _register_all() -> None:
     downgraded to "source no longer available" — a bug that appears only under
     load, only on the first request after a restart, and never in a test.
 
-    The resolver modules themselves arrive with the stages that add producers;
-    this is the seam they plug into.
+    **Each import is guarded separately.** One broken resolver module must cost
+    its own source and nothing else: an unguarded loop would leave the registry
+    holding whatever had been imported before the failure, and every row of
+    every later source would render as "source no longer available" — a
+    plausible-looking panel with no button that works.
+
+    Later stages add `cron_job`, `connected_service`, `health_panel` and
+    `task_alert` to the list below.
     """
     global _REGISTERED
     if _REGISTERED:
@@ -252,10 +259,17 @@ def _register_all() -> None:
     with _REGISTER_LOCK:
         if _REGISTERED:
             return
-        # Stage 2+ imports and registers `confirmation`, `outbound_draft`,
-        # `cron_job`, `connected_service`, `health_panel` and `task_alert`
-        # here, each import guarded so one broken module cannot empty the
-        # whole registry.
+        for module_name in ("confirmation", "outbound_draft"):
+            try:
+                module = importlib.import_module(
+                    f".notification_resolvers.{module_name}", package=__package__,
+                )
+                register(module.RESOLVER)
+            except Exception:
+                logger.error(
+                    "notification resolver %r could not be registered",
+                    module_name, exc_info=True,
+                )
         _REGISTERED = True
 
 

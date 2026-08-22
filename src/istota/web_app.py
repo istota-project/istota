@@ -3535,7 +3535,7 @@ def _chat_answer_confirmation(
         if res.task is None:
             return None
 
-        ack = confirmations.apply_answer(conn, res.task, answer, _config)
+        ack = confirmations.apply_answer(conn, res.task, answer, _config, by="web")
         user_msg_id, system_msg_id = confirmations.record_exchange(
             conn, token, answer_text=text, ack=ack, origin_surface="web",
             client_msg_id=client_msg_id, answered_by=username,
@@ -5988,7 +5988,7 @@ def _chat_confirm_task(task_id: int) -> None:
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
-        confirmations.approve(conn, task, config=_config)
+        confirmations.approve(conn, task, config=_config, by="web")
 
 
 def _chat_pending_confirmations(username: str) -> list[dict]:
@@ -6257,7 +6257,7 @@ async def chat_approve_draft(
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
         message_id = await asyncio.to_thread(
-            outbound_drafts.release, _config, draft_id,
+            outbound_drafts.release, _config, draft_id, by="web",
         )
     except outbound_drafts.DraftSentButUnrecorded as e:
         # Checked ahead of DraftError, which it subclasses. The mail is gone;
@@ -6412,7 +6412,7 @@ async def chat_discard_draft(
 
     def _discard() -> None:
         with db.get_db(_config.db_path) as conn:
-            outbound_drafts.discard(conn, draft_id)
+            outbound_drafts.discard(conn, draft_id, by="web")
 
     try:
         await asyncio.to_thread(_discard)
@@ -6452,7 +6452,7 @@ def _chat_cancel_task(task_id: int) -> None:
             # Talk poller and `!confirm` do.
             task = db.get_task(conn, task_id)
             if task is not None:
-                confirmations.decline(conn, task)
+                confirmations.decline(conn, task, by="web")
             return
         conn.execute(
             "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)

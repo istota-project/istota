@@ -497,13 +497,14 @@ async def cmd_confirm(ctx: CommandContext):
     # was answered is the whole point of having typed it.
     label = confirmations.describe(conn, task)
     if verb == "decline":
-        confirmations.decline(conn, task)
+        confirmations.decline(conn, task, by=ctx.surface)
         return _record_confirm_exchange(
             ctx, f"Declined #{task.id} — {label}. Nothing was run.",
         )
 
     trusted = confirmations.approve(
         conn, task, trust_sender=(verb == "trust"), config=ctx.config,
+        by=ctx.surface,
     )
     if trusted:
         return _record_confirm_exchange(
@@ -2321,7 +2322,7 @@ async def cmd_drafts(ctx: CommandContext):
     recipients = _visible_recipients(draft)
     if verb == "discard":
         try:
-            drafts.discard(conn, draft.id)
+            drafts.discard(conn, draft.id, by=ctx.surface)
         except drafts.DraftError as e:
             return f"Couldn't discard #{draft.id}: {e}"
         # Commit before we say it happened. The Talk poller wraps its whole
@@ -2359,7 +2360,9 @@ async def cmd_drafts(ctx: CommandContext):
     # thread rather than stalling Talk for an SMTP conversation plus the IMAP
     # append to Sent.
     try:
-        message_id = await asyncio.to_thread(drafts.release, ctx.config, draft.id)
+        message_id = await asyncio.to_thread(
+            drafts.release, ctx.config, draft.id, by=ctx.surface,
+        )
     except drafts.DraftSentButUnrecorded as e:
         # Checked before the DraftError branch it belongs to. The mail is gone;
         # calling this "failed, try again" would be the one wrong thing to say.

@@ -61,6 +61,38 @@ def _flatten(text: str) -> str:
     return " ".join(text.translate(_MARKUP_CHARS).split())
 
 
+def flatten(text: str) -> str:
+    """Public name for :func:`_flatten`.
+
+    Exported because the notification inbox stores a label that is *delivered*
+    into Talk and rendered in the web panel, and it has to flatten the same
+    characters this module already decided on. A second definition elsewhere
+    would be a second answer to "what is safe to put in a label".
+    """
+    return _flatten(text)
+
+
+def describe_email(sender: str | None, subject: str | None) -> str:
+    """The label for a gated email, from its sender and subject alone.
+
+    Split out so a producer that has the envelope in hand — the inbound gate
+    writes its notification row *before* ``mark_email_processed``, so
+    :func:`describe` would have no ``processed_emails`` row to read yet — builds
+    the identical string. The stored title and the resolver's title have to
+    agree; two spellings of the same label is how one of them goes stale.
+    """
+    flat_subject = _flatten(subject or "") or "(no subject)"
+    flat_sender = _flatten(sender or "") or "unknown sender"
+    return f"email from {flat_sender} — {flat_subject[:_PREVIEW_CHARS]}"
+
+
+def describe_prompt(prompt: str | None) -> str:
+    """The label for a non-email held task: the first line of its own question."""
+    text = (prompt or "").strip()
+    first_line = _flatten(text.splitlines()[0]) if text else ""
+    return first_line[:_PREVIEW_CHARS] or "(no description)"
+
+
 def describe(conn, task: db.Task) -> str:
     """A one-line label for a held task, safe to show before it is approved.
 
@@ -79,12 +111,8 @@ def describe(conn, task: db.Task) -> str:
         record = db.get_email_for_task(conn, task.id)
         if record is None:
             return "an inbound email"
-        subject = _flatten(record.subject or "") or "(no subject)"
-        sender = _flatten(record.sender_email or "") or "unknown sender"
-        return f"email from {sender} — {subject[:_PREVIEW_CHARS]}"
-    prompt = (task.confirmation_prompt or "").strip()
-    first_line = _flatten(prompt.splitlines()[0]) if prompt else ""
-    return first_line[:_PREVIEW_CHARS] or "(no description)"
+        return describe_email(record.sender_email, record.subject)
+    return describe_prompt(task.confirmation_prompt)
 
 
 def format_listing(conn, tasks: list[db.Task]) -> str:
@@ -108,8 +136,23 @@ def ambiguity_listing(conn, tasks) -> str:
     )
 
 
+def _close_notification(conn, task: db.Task, by: str) -> None:
+    """Close the inbox row for a held task, on the caller's own connection.
+
+    Here rather than at the five call sites for the same reason every other verb
+    in this module is: a close that lives on the surfaces would exist on some of
+    them. The store never raises, so this needs no guard of its own, and the
+    resolver is the backstop if it ever misses — the panel then flips the row to
+    `stale` on the next read rather than showing an answered question.
+    """
+    from .notification_resolvers import confirmation as confirmation_source
+
+    confirmation_source.resolve_for_task(conn, task.user_id, task.id, by=by)
+
+
 def approve(
     conn, task: db.Task, *, trust_sender: bool = False, config=None,
+    by: str = "system",
 ) -> bool:
     """Release a held task for execution.
 
@@ -133,6 +176,11 @@ def approve(
     user mailed themselves" from "a stranger wrote in". Pass it whenever one is
     in scope — the DB-only fallback cannot see addresses configured in TOML
     alone, and would label such a self-mail as an external speaker.
+
+    ``by`` names the surface the answer came from, and is recorded on the closed
+    notification row. It defaults to ``"system"`` rather than to any one surface
+    so a caller that forgets is visibly unattributed instead of quietly filed
+    under somebody else's.
     """
     db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
@@ -175,13 +223,15 @@ def approve(
             trusted = True
 
     _restore_transcript_mirror(conn, task, config)
+    _close_notification(conn, task, by)
     return trusted
 
 
-def decline(conn, task: db.Task) -> None:
+def decline(conn, task: db.Task, *, by: str = "system") -> None:
     """Discard a held task. The withheld transcript mirror stays withheld."""
     db.cancel_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User cancelled task")
+    _close_notification(conn, task, by)
 
 
 # The words a bare answer may be spelled with. Fixed lists rather than a
@@ -272,7 +322,9 @@ def resolve(
     return Resolution(task=task)
 
 
-def apply_answer(conn, task: db.Task, answer: Answer, config=None) -> str:
+def apply_answer(
+    conn, task: db.Task, answer: Answer, config=None, *, by: str = "system",
+) -> str:
     """Act on ``answer`` and return the ack every surface posts.
 
     The ack text is shared deliberately. Talk used to stay silent on a plain
@@ -284,11 +336,11 @@ def apply_answer(conn, task: db.Task, answer: Answer, config=None) -> str:
     ``config`` is passed straight through to ``approve`` for attribution only.
     """
     if not answer.approve:
-        decline(conn, task)
+        decline(conn, task, by=by)
         return "Task cancelled."
 
     trusted = approve(
-        conn, task, trust_sender=answer.trust_sender, config=config,
+        conn, task, trust_sender=answer.trust_sender, config=config, by=by,
     )
     if trusted:
         record = db.get_email_for_task(conn, task.id)

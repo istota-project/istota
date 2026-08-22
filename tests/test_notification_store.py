@@ -38,9 +38,17 @@ def conn(config):
         yield c
 
 
+# A source id no real resolver claims. These are *store* tests: registering a
+# fake under a live source id would not hold, because `get_resolver` calls
+# `_register_all` lazily and the real module would replace the fake on the first
+# read — so every `list_open` assertion here would silently be testing
+# `notification_resolvers.confirmation` instead of the store.
+_SOURCE = "held_thing"
+
+
 def _write(conn, **overrides):
     kwargs = {
-        "source": "confirmation",
+        "source": _SOURCE,
         "dedup_key": "task:7",
         "title": "Held email from a stranger",
         "body": "Subject: Invite",
@@ -119,7 +127,7 @@ class TestInsertBranch:
 
         row = _row(conn, result.notification_id)
         assert row["user_id"] == "alice"
-        assert row["source"] == "confirmation"
+        assert row["source"] == "held_thing"
         assert row["dedup_key"] == "task:7"
         assert row["state"] == "open"
         assert row["occurrences"] == 1
@@ -207,7 +215,7 @@ class TestOpenBranch:
     def test_same_key_for_a_different_user_is_a_different_row(self, conn):
         first = _write(conn)
         other = store.write_notification(
-            conn, "bob", source="confirmation", dedup_key="task:7", title="Bob's"
+            conn, "bob", source="held_thing", dedup_key="task:7", title="Bob's"
         )
         assert other.notification_id != first.notification_id
         assert other.deliver is True
@@ -351,7 +359,7 @@ class TestRaiseNotification:
 class TestLifecycle:
     def test_resolve_notification_closes_an_open_row(self, conn):
         result = _write(conn)
-        store.resolve_notification(conn, "alice", "confirmation", "task:7", by="talk")
+        store.resolve_notification(conn, "alice", "held_thing", "task:7", by="talk")
         row = _row(conn, result.notification_id)
         assert row["state"] == "resolved"
         assert row["resolved_by"] == "talk"
@@ -359,9 +367,9 @@ class TestLifecycle:
 
     def test_resolve_notification_is_idempotent(self, conn):
         result = _write(conn)
-        store.resolve_notification(conn, "alice", "confirmation", "task:7", by="talk")
+        store.resolve_notification(conn, "alice", "held_thing", "task:7", by="talk")
         first_at = _row(conn, result.notification_id)["resolved_at"]
-        store.resolve_notification(conn, "alice", "confirmation", "task:7", by="web")
+        store.resolve_notification(conn, "alice", "held_thing", "task:7", by="web")
         row = _row(conn, result.notification_id)
         assert row["resolved_by"] == "talk"
         assert row["resolved_at"] == first_at
@@ -370,7 +378,7 @@ class TestLifecycle:
         result = _write(conn, object_type="task", object_id="7")
         _write(conn, dedup_key="task:8", object_id="8")
 
-        store.resolve_by_object(conn, "alice", "confirmation", "task", "7", by="web")
+        store.resolve_by_object(conn, "alice", "held_thing", "task", "7", by="web")
 
         assert _row(conn, result.notification_id)["state"] == "resolved"
         assert conn.execute(
@@ -443,7 +451,7 @@ class TestListOpen:
             link=None,
             status_note=None,
         )
-        sources.register(_Resolver("confirmation", view=view))
+        sources.register(_Resolver("held_thing", view=view))
         _write(conn, title="stored title")
 
         items, _ = store.list_open(config, conn, "alice")
@@ -453,7 +461,7 @@ class TestListOpen:
 
     def test_resolver_returning_none_marks_the_row_stale(self, conn, config):
         result = _write(conn)
-        sources.register(_Resolver("confirmation", view=None))
+        sources.register(_Resolver("held_thing", view=None))
         conn.commit()
 
         items, total = store.list_open(config, conn, "alice")
@@ -468,10 +476,10 @@ class TestListOpen:
     ):
         """The sweep commits on its own connection, so a re-query already
         excludes the dead rows — subtracting them again would under-count."""
-        _write(conn, source="confirmation", dedup_key="task:1")
-        _write(conn, source="confirmation", dedup_key="task:2")
+        _write(conn, source="held_thing", dedup_key="task:1")
+        _write(conn, source="held_thing", dedup_key="task:2")
         _write(conn, source="task_alert", dedup_key="a:1")
-        sources.register(_Resolver("confirmation", view=None))  # both objects gone
+        sources.register(_Resolver("held_thing", view=None))  # both objects gone
         conn.commit()
 
         items, total = store.list_open(config, conn, "alice")
@@ -480,9 +488,9 @@ class TestListOpen:
         assert len(items) == 1
 
     def test_a_raising_resolver_degrades_one_row_only(self, conn, config):
-        _write(conn, source="confirmation", dedup_key="task:1", title="fallback text")
+        _write(conn, source="held_thing", dedup_key="task:1", title="fallback text")
         _write(conn, source="task_alert", dedup_key="a:1", title="alert text")
-        sources.register(_Resolver("confirmation", raises=True))
+        sources.register(_Resolver("held_thing", raises=True))
         sources.register(
             _Resolver(
                 "task_alert",
@@ -503,7 +511,7 @@ class TestListOpen:
         _write(conn, dedup_key="task:2", actionable=False)
         sources.register(
             _Resolver(
-                "confirmation",
+                "held_thing",
                 view=sources.NotificationView(
                     title="rendered", body="", severity="info",
                     actions=(
@@ -567,7 +575,7 @@ class TestListOpen:
             ),
             link=None, status_note=None,
         )
-        sources.register(_Resolver("confirmation", view=view))
+        sources.register(_Resolver("held_thing", view=view))
         _write(conn, title="stored title")
 
         items, _ = store.list_open(config, conn, "alice")
@@ -606,7 +614,7 @@ class TestListOpen:
     ):
         sources.register(
             _Resolver(
-                "confirmation",
+                "held_thing",
                 view=sources.NotificationView(
                     title="rendered", body="", severity="info",
                     actions=(action,), link=None, status_note=None,
@@ -622,7 +630,7 @@ class TestListOpen:
     def test_an_offsite_link_is_downgraded(self, conn, config):
         sources.register(
             _Resolver(
-                "confirmation",
+                "held_thing",
                 view=sources.NotificationView(
                     title="rendered", body="", severity="info",
                     actions=(), link="https://evil.example/x", status_note=None,
@@ -648,9 +656,9 @@ class TestListOpen:
         object.__setattr__(broken, "link", None)
         object.__setattr__(broken, "status_note", None)
 
-        _write(conn, source="confirmation", dedup_key="task:1", title="fallback text")
+        _write(conn, source="held_thing", dedup_key="task:1", title="fallback text")
         _write(conn, source="task_alert", dedup_key="a:1", title="alert text")
-        sources.register(_Resolver("confirmation", view=broken))
+        sources.register(_Resolver("held_thing", view=broken))
         sources.register(
             _Resolver(
                 "task_alert",
@@ -750,7 +758,7 @@ class TestConcurrentWrite:
                     other.execute(
                         "INSERT INTO notifications "
                         "(user_id, source, dedup_key, title) "
-                        "VALUES ('alice', 'confirmation', 'task:7', 'A')"
+                        "VALUES ('alice', 'held_thing', 'task:7', 'A')"
                     )
                     other.commit()
                 return cursor
@@ -759,7 +767,7 @@ class TestConcurrentWrite:
             try:
                 with db.get_db(config.db_path) as b:
                     result = store.write_notification(
-                        b, "alice", source="confirmation", dedup_key="task:7",
+                        b, "alice", source="held_thing", dedup_key="task:7",
                         title="B", actionable=True,
                     )
             finally:
@@ -818,7 +826,7 @@ class TestDeliveryVerifiesTheRow:
         conn.row_factory = sqlite3.Row
         try:
             result = store.write_notification(
-                conn, "alice", source="confirmation", dedup_key="task:7", title="t"
+                conn, "alice", source="held_thing", dedup_key="task:7", title="t"
             )
             conn.rollback()
         finally:
@@ -840,11 +848,11 @@ class TestDeliveryVerifiesTheRow:
 
         with db.get_db(config.db_path) as conn:
             result = store.write_notification(
-                conn, "alice", source="confirmation", dedup_key="task:7", title="t"
+                conn, "alice", source="held_thing", dedup_key="task:7", title="t"
             )
         with db.get_db(config.db_path) as conn:
             store.resolve_notification(
-                conn, "alice", "confirmation", "task:7", by="talk"
+                conn, "alice", "held_thing", "task:7", by="talk"
             )
 
         store.deliver_pending(config, [result])
