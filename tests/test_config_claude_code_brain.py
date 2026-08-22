@@ -15,12 +15,20 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import sys
 import textwrap
 
+import pytest
+
 from istota import subscription_usage as su
-from istota.config import ClaudeCodeBrainConfig, load_config
+from istota.config import (
+    ClaudeCodeBrainConfig,
+    Config,
+    _validate_claude_code_brain,
+    load_config,
+)
 
 
 def _load(tmp_path, body: str):
@@ -94,19 +102,154 @@ class TestParse:
         config = _load(tmp_path, '[brain]\nclaude_code = "yes"\n')
         assert config.brain.claude_code == ClaudeCodeBrainConfig()
 
+    @pytest.mark.parametrize("literal,expected", [
+        ("true", True), ("false", False),
+        ('"true"', True), ('"false"', False),
+        ('"yes"', True), ('"no"', False),
+        ('"on"', True), ('"off"', False),
+        ('"TRUE"', True), ('" False "', False),
+    ])
+    def test_the_switch_accepts_a_string_boolean(self, tmp_path, literal, expected):
+        """`bool("false")` is True, and a rendered config can quote a boolean.
+
+        This is the field that decides whether the deployment makes an
+        unsolicited outbound request, so "operator wrote false, poll stayed on"
+        is the one failure this parse must not have.
+        """
+        config = _load(tmp_path, f"""
+            [brain.claude_code]
+            subscription_usage = {literal}
+        """)
+        assert config.brain.claude_code.subscription_usage is expected
+
+    def test_an_uninterpretable_switch_falls_back_and_warns(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            config = _load(tmp_path, """
+                [brain.claude_code]
+                subscription_usage = "maybe"
+            """)
+        assert config.brain.claude_code.subscription_usage is True
+        assert any(
+            "subscription_usage=" in r.getMessage() and "not a boolean" in r.getMessage()
+            for r in caplog.records if r.name == "istota.config"
+        )
+
+
+class TestABadValueNeverStopsTheDaemon:
+    """`load_config` runs in the scheduler, the web app, the webhook receiver
+    and every host-side skill CLI the proxy spawns per call. A typo on a knob
+    that only draws a dashboard tile must not stop any of them from starting.
+
+    `int(float("inf"))` raises OverflowError and `int(float("nan"))` raises
+    ValueError, and TOML spells both — so this is reachable from a config file,
+    not just from a hand-built dataclass.
+    """
+
+    @pytest.mark.parametrize("key", [
+        "subscription_usage_cache_ttl_seconds",
+        "subscription_usage_timeout_seconds",
+        "subscription_usage_warn_percent",
+        "subscription_usage_high_percent",
+        "subscription_usage_stale_after_seconds",
+    ])
+    @pytest.mark.parametrize("literal", ["inf", "-inf", "nan", '"5m"', "[1, 2]", "true"])
+    def test_a_bad_numeric_value_loads_as_the_default(self, tmp_path, key, literal):
+        config = _load(tmp_path, f"""
+            [brain.claude_code]
+            {key} = {literal}
+        """)
+        assert getattr(config.brain.claude_code, key) == getattr(ClaudeCodeBrainConfig(), key)
+
+    @pytest.mark.parametrize("literal", ["inf", "nan", '"5m"', "true"])
+    def test_a_bad_numeric_value_is_logged(self, tmp_path, caplog, literal):
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            _load(tmp_path, f"""
+                [brain.claude_code]
+                subscription_usage_cache_ttl_seconds = {literal}
+            """)
+        assert any(
+            "subscription_usage_cache_ttl_seconds" in r.getMessage()
+            for r in caplog.records if r.name == "istota.config"
+        )
+
+    def test_a_table_where_a_number_belongs(self, tmp_path):
+        config = _load(tmp_path, """
+            [brain.claude_code.subscription_usage_warn_percent]
+            oops = 1
+        """)
+        assert config.brain.claude_code.subscription_usage_warn_percent == 80.0
+
+    def test_a_non_finite_timeout_never_reaches_the_dataclass(self, tmp_path):
+        """`inf` here is an unbounded socket read on a diagnostic path, and a
+        value the admin config pane cannot serialize — starlette renders JSON
+        with `allow_nan=False`, so one of these 500s `GET /api/admin/config`
+        for the whole instance."""
+        config = _load(tmp_path, """
+            [brain.claude_code]
+            subscription_usage_timeout_seconds = inf
+        """)
+        timeout = config.brain.claude_code.subscription_usage_timeout_seconds
+        assert math.isfinite(timeout)
+        assert timeout == ClaudeCodeBrainConfig().subscription_usage_timeout_seconds
+
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+    def test_a_hand_built_config_is_corrected_too(self, value):
+        """The parse guards the file; this guards a Config assembled some other
+        way, which is the population the validator's own docstring claims."""
+        config = Config()
+        config.brain.claude_code = ClaudeCodeBrainConfig(
+            subscription_usage_timeout_seconds=value,
+            subscription_usage_warn_percent=value,
+            subscription_usage_high_percent=value,
+        )
+        _validate_claude_code_brain(config)
+        cc = config.brain.claude_code
+        assert math.isfinite(cc.subscription_usage_timeout_seconds)
+        assert math.isfinite(cc.subscription_usage_warn_percent)
+        assert math.isfinite(cc.subscription_usage_high_percent)
+        assert 0.0 <= cc.subscription_usage_warn_percent <= 100.0
+        assert 0.0 <= cc.subscription_usage_high_percent <= 100.0
+
+    def test_a_nan_percentage_does_not_become_a_permanent_warning(self):
+        """Clamping NaN would land it at 0.0 — WARN at every utilization, for
+        ever, on a check whose whole point is that it does not cry wolf."""
+        config = Config()
+        config.brain.claude_code = ClaudeCodeBrainConfig(
+            subscription_usage_warn_percent=float("nan"),
+        )
+        _validate_claude_code_brain(config)
+        warn = config.brain.claude_code.subscription_usage_warn_percent
+        assert warn == ClaudeCodeBrainConfig().subscription_usage_warn_percent
+        assert warn > 0.0
+
+    def test_a_nan_ttl_does_not_sail_past_the_floor(self):
+        """`nan < 1` is False. A floor written the obvious way lets it through."""
+        config = Config()
+        config.brain.claude_code = ClaudeCodeBrainConfig(
+            subscription_usage_cache_ttl_seconds=float("nan"),
+        )
+        _validate_claude_code_brain(config)
+        assert config.brain.claude_code.subscription_usage_cache_ttl_seconds == 1
+
 
 class TestValidation:
     """The loader corrects, warns and carries on. It never refuses to load."""
 
-    def test_percentages_clamp_to_the_top(self, tmp_path):
-        config = _load(tmp_path, """
-            [brain.claude_code]
-            subscription_usage_warn_percent = 400
-            subscription_usage_high_percent = 900
-        """)
+    def test_percentages_clamp_to_the_top(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            config = _load(tmp_path, """
+                [brain.claude_code]
+                subscription_usage_warn_percent = 400
+                subscription_usage_high_percent = 900
+            """)
         cc = config.brain.claude_code
         assert cc.subscription_usage_warn_percent == 100.0
         assert cc.subscription_usage_high_percent == 100.0
+        # A silent correction is the failure here: an operator who set 400 and
+        # got 100 must be able to find out why from the log.
+        messages = [r.getMessage() for r in caplog.records if r.name == "istota.config"]
+        assert any("subscription_usage_warn_percent" in m for m in messages), messages
+        assert any("subscription_usage_high_percent" in m for m in messages), messages
 
     def test_percentages_clamp_to_the_bottom(self, tmp_path):
         config = _load(tmp_path, """
@@ -173,24 +316,48 @@ class TestValidation:
         assert cc.subscription_usage_warn_percent == 95.0
         assert cc.subscription_usage_high_percent == 95.0
 
-    def test_non_finite_percentages_land_in_range(self, tmp_path):
-        """TOML really does spell `inf` and `nan`, and both must land somewhere."""
+    def test_non_finite_percentages_take_the_default_not_a_bound(self, tmp_path):
+        """TOML spells `inf` and `nan`, and neither is "out of range".
+
+        Clamping would put `nan` at 0.0, which means amber at every utilization
+        for ever. A value that is not a number carries no intent to preserve,
+        so it takes the shipping default instead.
+        """
         config = _load(tmp_path, """
             [brain.claude_code]
             subscription_usage_warn_percent = nan
             subscription_usage_high_percent = inf
         """)
         cc = config.brain.claude_code
-        assert cc.subscription_usage_warn_percent == 0.0
-        assert cc.subscription_usage_high_percent == 100.0
+        assert cc.subscription_usage_warn_percent == 80.0
+        assert cc.subscription_usage_high_percent == 95.0
 
-    def test_a_zero_ttl_is_floored(self, tmp_path):
+    def test_a_zero_ttl_is_floored_and_logged(self, tmp_path, caplog):
         """A zero TTL would fetch on every dashboard poll."""
-        config = _load(tmp_path, """
-            [brain.claude_code]
-            subscription_usage_cache_ttl_seconds = 0
-        """)
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            config = _load(tmp_path, """
+                [brain.claude_code]
+                subscription_usage_cache_ttl_seconds = 0
+            """)
         assert config.brain.claude_code.subscription_usage_cache_ttl_seconds == 1
+        assert any(
+            "subscription_usage_cache_ttl_seconds" in r.getMessage()
+            for r in caplog.records if r.name == "istota.config"
+        )
+
+    @pytest.mark.parametrize("value", [0, -1, -3600])
+    def test_stale_after_seconds_is_deliberately_not_floored(self, tmp_path, value):
+        """Documented as a decision in `_validate_claude_code_brain`, so pinned.
+
+        Zero there coherently means "treat any stale reading as too old". A
+        later change that floors it "for consistency" with the other two
+        integers would otherwise leave the whole suite green.
+        """
+        config = _load(tmp_path, f"""
+            [brain.claude_code]
+            subscription_usage_stale_after_seconds = {value}
+        """)
+        assert config.brain.claude_code.subscription_usage_stale_after_seconds == value
 
     def test_a_negative_ttl_is_floored(self, tmp_path):
         config = _load(tmp_path, """
@@ -258,20 +425,27 @@ class TestOneSourceOfTruthForTheDefaults:
         """)
         assert su._settings(config) == (False, 60.0, 3.0)
 
-    def test_an_infinite_timeout_never_reaches_the_fetch(self, tmp_path):
-        """The loader floors at 1 but has no ceiling; the module's own guard has.
+    def test_the_module_guard_substitutes_where_the_loader_floors(self):
+        """The two guards refuse the same values and substitute different ones.
 
-        `timeout = inf` is spellable in TOML and would otherwise become an
-        unbounded socket timeout on the doctor path — the one thing this feature
-        promises never to do.
+        Deliberate, and documented on `_settings`: the loader floors a below-1
+        value at 1 because an operator asked for something small, while the
+        module substitutes the shipping default, because a value arriving past
+        the loader carries no intent worth preserving. Pinned so the difference
+        stays a decision rather than becoming a surprise.
         """
-        config = _load(tmp_path, """
-            [brain.claude_code]
-            subscription_usage_timeout_seconds = inf
-        """)
-        assert config.brain.claude_code.subscription_usage_timeout_seconds == float("inf")
-        _enabled, _ttl, timeout = su._settings(config)
+        config = Config()
+        config.brain.claude_code = ClaudeCodeBrainConfig(
+            subscription_usage_cache_ttl_seconds=0,
+            subscription_usage_timeout_seconds=0.0,
+        )
+        _enabled, ttl, timeout = su._settings(config)
+        assert ttl == su.DEFAULT_CACHE_TTL_SECONDS
         assert timeout == su.DEFAULT_TIMEOUT_SECONDS
+
+        _validate_claude_code_brain(config)
+        assert config.brain.claude_code.subscription_usage_cache_ttl_seconds == 1
+        assert config.brain.claude_code.subscription_usage_timeout_seconds == 1.0
 
     def test_config_does_not_import_the_leaf(self):
         """Keeping the copy is what keeps this true.

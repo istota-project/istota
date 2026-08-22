@@ -986,9 +986,16 @@ def _settings(config: object) -> tuple[bool, float, float]:
     Read defensively: this module must not import ``Config`` (leaf), and a
     deployment whose config predates ``[brain.claude_code]`` gets the shipping
     defaults rather than an ``AttributeError`` on the daemon's boot path. The
-    loader clamps these fields; the floors here are a second guard so a value
+    loader corrects these fields; the guard here is a second line so a value
     that reached the dataclass some other way cannot turn the TTL into a fetch
-    on every dashboard poll.
+    on every dashboard poll or the timeout into an unbounded socket read.
+
+    The two do not agree on *what* to substitute, deliberately: the loader
+    floors a below-1 value at 1 because the operator asked for something small
+    and 1 is the smallest honest answer, while ``_positive`` here substitutes
+    the shipping default, because a value arriving past the loader has no
+    intent behind it worth preserving. Both refuse the bad value; only the
+    loader is in a position to log about it.
     """
     block = getattr(getattr(config, "brain", None), "claude_code", None)
     enabled = getattr(block, "subscription_usage", DEFAULT_SUBSCRIPTION_USAGE)

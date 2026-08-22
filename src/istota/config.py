@@ -1,6 +1,7 @@
 """Configuration loading for istota."""
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
@@ -2573,39 +2574,79 @@ def load_config(config_path: Path | None = None) -> Config:
         if not isinstance(cc_raw, dict):
             cc_raw = {}
         _cc_defaults = ClaudeCodeBrainConfig()
+        _cc_logger = logging.getLogger("istota.config")
+
+        # Unlike the [brain.tmux] and [brain.native] parses above, this one does
+        # not hand a raw TOML value to int()/float()/bool(). It cannot afford
+        # to: `int(float("inf"))` raises OverflowError, `int(float("nan"))`
+        # raises ValueError, and TOML really does spell `inf` and `nan`. That
+        # exception escapes load_config, which runs in the scheduler, the web
+        # app, the webhook receiver and every host-side skill CLI the proxy
+        # spawns per call — so a typo on a knob that only draws a dashboard tile
+        # would stop the daemon from starting. `_validate_claude_code_brain`
+        # promises the block corrects rather than refuses; that promise has to
+        # start here, at the point the value enters.
+        def _cc_number(key: str, cast):
+            default = getattr(_cc_defaults, key)
+            if key not in cc_raw:
+                return default
+            raw = cc_raw[key]
+            # bool is a subclass of int, so `= true` would otherwise become 1 —
+            # a one-second TTL, i.e. a fetch per read, arriving past the floor
+            # that exists to prevent exactly that.
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                _cc_logger.warning(
+                    "[brain.claude_code] %s=%r is not a number; using %r",
+                    key, raw, default,
+                )
+                return default
+            if not math.isfinite(raw):
+                _cc_logger.warning(
+                    "[brain.claude_code] %s=%r is not a finite number; using %r",
+                    key, raw, default,
+                )
+                return default
+            return cast(raw)
+
+        # The one field whose whole job is to stop an unsolicited outbound
+        # request, so a value that is not plainly a boolean must not resolve to
+        # "on". `bool("false")` is True, and a YAML boolean reaching a quoted
+        # slot in a rendered config is a failure mode this repo has already had.
+        def _cc_enabled():
+            default = _cc_defaults.subscription_usage
+            if "subscription_usage" not in cc_raw:
+                return default
+            raw = cc_raw["subscription_usage"]
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                text = raw.strip().lower()
+                if text in ("true", "yes", "on", "1"):
+                    return True
+                if text in ("false", "no", "off", "0"):
+                    return False
+            _cc_logger.warning(
+                "[brain.claude_code] subscription_usage=%r is not a boolean; using %r",
+                raw, default,
+            )
+            return default
+
         claude_code_cfg = ClaudeCodeBrainConfig(
-            subscription_usage=bool(
-                cc_raw.get("subscription_usage", _cc_defaults.subscription_usage)
+            subscription_usage=_cc_enabled(),
+            subscription_usage_cache_ttl_seconds=_cc_number(
+                "subscription_usage_cache_ttl_seconds", int
             ),
-            subscription_usage_cache_ttl_seconds=int(
-                cc_raw.get(
-                    "subscription_usage_cache_ttl_seconds",
-                    _cc_defaults.subscription_usage_cache_ttl_seconds,
-                )
+            subscription_usage_timeout_seconds=_cc_number(
+                "subscription_usage_timeout_seconds", float
             ),
-            subscription_usage_timeout_seconds=float(
-                cc_raw.get(
-                    "subscription_usage_timeout_seconds",
-                    _cc_defaults.subscription_usage_timeout_seconds,
-                )
+            subscription_usage_warn_percent=_cc_number(
+                "subscription_usage_warn_percent", float
             ),
-            subscription_usage_warn_percent=float(
-                cc_raw.get(
-                    "subscription_usage_warn_percent",
-                    _cc_defaults.subscription_usage_warn_percent,
-                )
+            subscription_usage_high_percent=_cc_number(
+                "subscription_usage_high_percent", float
             ),
-            subscription_usage_high_percent=float(
-                cc_raw.get(
-                    "subscription_usage_high_percent",
-                    _cc_defaults.subscription_usage_high_percent,
-                )
-            ),
-            subscription_usage_stale_after_seconds=int(
-                cc_raw.get(
-                    "subscription_usage_stale_after_seconds",
-                    _cc_defaults.subscription_usage_stale_after_seconds,
-                )
+            subscription_usage_stale_after_seconds=_cc_number(
+                "subscription_usage_stale_after_seconds", int
             ),
         )
         config.brain = BrainConfig(
@@ -3358,16 +3399,33 @@ def _validate_claude_code_brain(config: "Config") -> None:
        would fetch on every dashboard poll — the cache exists precisely so the
        whole deployment pays for one fetch per window.
 
+    A non-finite value is substituted with the shipping default rather than
+    clamped or floored, on both the percentage and the timeout paths. Clamping
+    a NaN percentage would land it at 0.0, i.e. WARN at every utilization for
+    ever, on a check whose whole point is that it does not cry wolf; and an
+    ``inf`` timeout is both an unbounded socket read and a value the admin
+    config pane cannot serialize. The loader's own parse already rejects these
+    at the point they enter, so this is the guard for a ``Config`` assembled
+    some other way.
+
     ``stale_after_seconds`` is deliberately not floored: zero there means "treat
     any stale reading as too old", which is a coherent thing to ask for.
     """
     cc = config.brain.claude_code
     _logger = logging.getLogger("istota.config")
 
-    def _clamp_percent(name: str, raw: float) -> float:
-        # A NaN (TOML spells it `nan`) compares False against everything, so
-        # max() keeps the 0.0 and min() keeps it — it lands at 0.0 and is
-        # reported as out of range, which is the only deterministic answer.
+    def _clamp_percent(name: str, raw: float, default: float) -> float:
+        # A non-finite value is not "out of range", it is "not a number", and
+        # clamping it would land it at 0.0 — which means WARN at every
+        # utilization, forever, on a check whose whole point is that it is not
+        # alarming. Substitute the shipping default instead. (NaN compares
+        # False against everything, so min/max would silently keep the 0.0.)
+        if not math.isfinite(raw):
+            _logger.warning(
+                "[brain.claude_code] %s=%r is not a finite number; using %r",
+                name, raw, default,
+            )
+            return default
         clamped = min(100.0, max(0.0, float(raw)))
         if clamped != raw:
             _logger.warning(
@@ -3376,11 +3434,16 @@ def _validate_claude_code_brain(config: "Config") -> None:
             )
         return clamped
 
+    _defaults = ClaudeCodeBrainConfig()
     cc.subscription_usage_warn_percent = _clamp_percent(
-        "subscription_usage_warn_percent", cc.subscription_usage_warn_percent
+        "subscription_usage_warn_percent",
+        cc.subscription_usage_warn_percent,
+        _defaults.subscription_usage_warn_percent,
     )
     cc.subscription_usage_high_percent = _clamp_percent(
-        "subscription_usage_high_percent", cc.subscription_usage_high_percent
+        "subscription_usage_high_percent",
+        cc.subscription_usage_high_percent,
+        _defaults.subscription_usage_high_percent,
     )
 
     if cc.subscription_usage_warn_percent > cc.subscription_usage_high_percent:
@@ -3394,7 +3457,11 @@ def _validate_claude_code_brain(config: "Config") -> None:
         )
         cc.subscription_usage_warn_percent = cc.subscription_usage_high_percent
 
-    if cc.subscription_usage_cache_ttl_seconds < 1:
+    # `not (x >= 1)` rather than `x < 1`, so a NaN that reached the dataclass
+    # some way other than the loader's own parse is corrected instead of
+    # sailing through — every comparison against NaN is False, which is exactly
+    # how a floor written the obvious way lets one past.
+    if not (cc.subscription_usage_cache_ttl_seconds >= 1):
         _logger.warning(
             "[brain.claude_code] subscription_usage_cache_ttl_seconds=%r would "
             "fetch on every read; using 1",
@@ -3402,13 +3469,25 @@ def _validate_claude_code_brain(config: "Config") -> None:
         )
         cc.subscription_usage_cache_ttl_seconds = 1
 
-    if cc.subscription_usage_timeout_seconds < 1:
+    if not (cc.subscription_usage_timeout_seconds >= 1):
         _logger.warning(
             "[brain.claude_code] subscription_usage_timeout_seconds=%r is below "
             "one second; using 1",
             cc.subscription_usage_timeout_seconds,
         )
         cc.subscription_usage_timeout_seconds = 1.0
+    elif not math.isfinite(cc.subscription_usage_timeout_seconds):
+        # An unbounded socket timeout on a diagnostic path, and a value the
+        # admin config pane cannot serialize — starlette renders JSON with
+        # allow_nan=False, so one `inf` here 500s GET /api/admin/config for the
+        # whole instance.
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_timeout_seconds=%r is not "
+            "finite; using %r",
+            cc.subscription_usage_timeout_seconds,
+            _defaults.subscription_usage_timeout_seconds,
+        )
+        cc.subscription_usage_timeout_seconds = _defaults.subscription_usage_timeout_seconds
 
 
 def _apply_user_profiles(config: "Config") -> None:

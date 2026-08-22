@@ -271,6 +271,13 @@ dialog / error / usage-limit marker lists (`ready_markers`, `trust_markers`,
 checked before `error_markers`). All defaulted to the prototype's hardcoded
 values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
 
+`BrainConfig` selects which `Brain` implementation handles model invocation. `source_type_overrides`
+maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
+(gradual rollout: cron/heartbeat on native, interactive on claude_code). The
+executor routes per task via `brain.resolve_brain_kind(task.source_type, config.brain)`;
+unknown target kinds are logged and ignored. See `.claude/rules/brain.md` for the
+protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
+
 `ClaudeCodeBrainConfig` (`[brain.claude_code]`) — today this block is the
 **subscription usage poll only**; the headless brain's model selection still
 comes from `[brain]` and `[models]`, and its subprocess behaviour is not
@@ -288,23 +295,43 @@ written and never refreshed.
 - `subscription_usage_warn_percent: float = 80.0` / `subscription_usage_high_percent: float = 95.0` — our own thresholds, applied identically by doctor and the admin tile (the server's own `severity` is carried on the wire but does not drive either). Doctor WARNs and the tile turns amber at or above `warn`, red at or above `high`. **Never a `FAIL` at any utilization** — a busy plan is a fact about the plan, not a defect in the host, and a `FAIL` would exit `istota doctor` non-zero and alert every admin.
 - `subscription_usage_stale_after_seconds: int = 3600` — a stale-cache reading older than this WARNs rather than being reported as current.
 
+**A bad value in this block never stops the daemon.** `load_config` runs in the
+scheduler, the web app, the webhook receiver and every host-side skill CLI the
+proxy spawns per call, so a typo on a knob that only draws a dashboard tile must
+not stop any of them from starting. Unlike the `[brain.tmux]` / `[brain.native]`
+parses above it, this one does not hand a raw TOML value to `int()` / `float()`
+— `int(float("inf"))` raises `OverflowError`, `int(float("nan"))` raises
+`ValueError`, and TOML spells both. A non-number, a non-finite number or a bool
+in a numeric slot logs one WARNING and takes the dataclass default.
+`subscription_usage` is stricter still: it accepts a real boolean or a quoted
+one (`"false"`, `"no"`, `"off"`, `"0"`, case-insensitive) and warns on anything
+else, because `bool("false")` is `True` and this is the field that decides
+whether the deployment makes an unsolicited outbound request — "operator wrote
+false, poll stayed on" is the one failure it must not have.
+
 `_validate_claude_code_brain` (config load, beside `_validate_brain_fallback`)
-corrects rather than refuses, one WARNING per correction: both percentages clamp
-to `[0, 100]`; `warn > high` after clamping is lowered to `high` (an inverted
-pair leaves no amber band and is more likely a typo than an intent); the TTL and
-the timeout floor at 1. `stale_after_seconds` is deliberately not floored — zero
-there coherently means "treat any stale reading as too old". No I/O: the poll is
-reached only from a diagnostic path, never from `load_config`.
+then corrects rather than refuses, one WARNING per correction: both percentages
+clamp to `[0, 100]`; `warn > high` after clamping is lowered to `high` (an
+inverted pair leaves no amber band and is more likely a typo than an intent);
+the TTL and the timeout floor at 1. A **non-finite** value takes the default
+instead of a bound — clamping a NaN percentage would land it at 0.0, i.e. amber
+at every utilization for ever on a check whose whole point is that it does not
+cry wolf, and an `inf` timeout is both an unbounded socket read and a value the
+admin config pane cannot serialize (starlette renders JSON with
+`allow_nan=False`, so one would 500 `GET /api/admin/config` instance-wide).
+`stale_after_seconds` is deliberately not floored — zero there coherently means
+"treat any stale reading as too old". No I/O: the poll is reached only from a
+diagnostic path, never from `load_config`.
+
 `subscription_usage.py` is a stdlib-only leaf and carries its own copy of the
 three defaults it reads, pinned against this dataclass by
 `tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`.
-
-Selects which `Brain` implementation handles model invocation. `source_type_overrides`
-maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
-(gradual rollout: cron/heartbeat on native, interactive on claude_code). The
-executor routes per task via `brain.resolve_brain_kind(task.source_type, config.brain)`;
-unknown target kinds are logged and ignored. See `.claude/rules/brain.md` for the
-protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
+Its `_positive` guard refuses the same values the loader does but substitutes
+the *default* where the loader *floors*: an operator asking for a small TTL gets
+1, while a value that reached the dataclass past the loader has no intent worth
+preserving. `deploy/ansible/files/validate_config.py` allowlists `claude_code`
+under `[brain]`; the role's template renders no block (every field is
+defaulted), but an unlisted sub-table would fail the play.
 
 `NativeBrainConfig` (`[brain.native]`) — model-agnosticism knobs (see `.claude/rules/brain.md` "NativeBrain"):
 - `model_overrides: dict = {}` (`[brain.native.model_overrides."<model-id>"]`) — per-model partial `ModelInfo` (any of `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, prices). Applied globally at config load via `llm.catalog.set_model_overrides`, merged over the live-fetched entry (or the conservative default) in `get_model_info`. Lets a non-Anthropic reasoning/vision or small-window model declare real capabilities instead of being degraded to no-thinking / no-vision / 200k, and corrects a single wrong field on a fetched model (NB-4). Unknown keys are dropped.
