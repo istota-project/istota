@@ -28,6 +28,7 @@ _WIZ_BOT_NAME=""
 _WIZ_EMAIL_ENABLED=false
 _WIZ_BROWSER_ENABLED=false
 _WIZ_BROWSER_VNC_PASSWORD=""
+_WIZ_BROWSER_VNC_BIND_ADDRESS="127.0.0.1"
 _WIZ_MEMORY_SEARCH_ENABLED=true
 _WIZ_SLEEP_CYCLE_ENABLED=true
 _WIZ_CHANNEL_SLEEP_ENABLED=true
@@ -427,7 +428,21 @@ wiz_features() {
             warn "Docker not found. It will be installed during deployment."
         fi
         echo
+        echo "  The browser viewer is an interactive view of the browser holding"
+        echo "  your logged-in profile. It listens on 127.0.0.1 by default; give"
+        echo "  it a VPN or management address only if you need to reach it from"
+        echo "  another machine, and set a password when you do."
+        prompt_value _WIZ_BROWSER_VNC_BIND_ADDRESS \
+            "Address to publish the browser viewer on" "127.0.0.1"
         prompt_secret _WIZ_BROWSER_VNC_PASSWORD "VNC password for browser viewer"
+        case "$_WIZ_BROWSER_VNC_BIND_ADDRESS" in
+            127.*|::1|'[::1]'|localhost) ;;
+            *)
+                if [ -z "$_WIZ_BROWSER_VNC_PASSWORD" ]; then
+                    warn "A reachable viewer address needs a password; the deploy will refuse without one."
+                fi
+                ;;
+        esac
     fi
 }
 
@@ -720,6 +735,7 @@ bot_email = "$_WIZ_EMAIL_BOT_ADDRESS"
 
 [browser]
 enabled = $_WIZ_BROWSER_ENABLED
+vnc_bind_address = "$_WIZ_BROWSER_VNC_BIND_ADDRESS"
 vnc_password = "$_WIZ_BROWSER_VNC_PASSWORD"
 
 [memory_search]

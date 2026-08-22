@@ -2145,6 +2145,66 @@
     - reload systemd
     - "restart istota-scheduler"
 
+- name: Refuse an unauthenticated or unreachable noVNC console
+  ansible.builtin.assert:
+    that:
+      # Plain string tests rather than an ipaddr filter: `ansible.utils` is used
+      # nowhere else in this role and nothing declares it as a dependency, so
+      # the filter would raise at deploy time and fail the run this guard exists
+      # to protect. It also drags in the netaddr package.
+      #
+      # `| default('', true) | string` because `match` is `re.match` with no
+      # coercion: a key written with no value parses to None and the test would
+      # raise TypeError instead of producing the message below. The whole point
+      # of a guard is that it fails *legibly*.
+      #
+      # Anchored at both ends. `^127\.` alone accepts "127.0.0.1:6080", which
+      # the template would then render into a four-part port spec.
+      - >-
+        (_vnc_bind is match('^127[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$'))
+        or (_vnc_bind in ['::1', '[::1]', 'localhost'])
+        or (_vnc_pass | length > 0)
+      # An empty bind address is not loopback — compose reads a missing host
+      # address as every interface — so it must never pass on the strength of a
+      # password alone being set.
+      - _vnc_bind | length > 0
+      # Reaching the console from off-host is what `istota_browser_vnc_external_url`
+      # means, and after this default flip that is no longer implied by anything.
+      # Without this arm the operator whose access actually breaks gets a green
+      # deploy and a dead link at the moment they need the console
+      # (`src/istota/skills/browse/skill.md` hands the user that URL).
+      - not (_vnc_external | length > 0 and _vnc_bind is match('^127[.]'))
+    fail_msg: |
+      The noVNC console configuration will not work as written.
+
+      istota_browser_vnc_bind_address = {{ istota_browser_vnc_bind_address | default('') }}
+      istota_browser_vnc_password     = {{ 'set' if istota_browser_vnc_password | default('') | length > 0 else 'empty' }}
+      istota_browser_vnc_external_url = {{ istota_browser_vnc_external_url | default('') }}
+
+      noVNC serves an interactive view of the browser holding your logged-in
+      profile, and docker/browser/entrypoint.sh passes -passwd only when the
+      password is non-empty. So one of these is true:
+
+        * the bind address is reachable from off the host and no password is
+          set — set istota_browser_vnc_password in your vault, or bind to
+          127.0.0.1 and reach the console over an SSH tunnel;
+
+        * the bind address is empty, which Docker reads as every interface —
+          set it to 127.0.0.1 or to the address you reach the console on;
+
+        * istota_browser_vnc_external_url is set while the console is bound to
+          loopback, so that URL cannot resolve to anything — set the bind
+          address to the interface that URL points at, or clear the URL.
+    success_msg: >-
+      noVNC on {{ istota_browser_vnc_bind_address }}
+      ({{ 'password set' if istota_browser_vnc_password | default('') | length > 0
+          else 'loopback only' }})
+  vars:
+    _vnc_bind: "{{ istota_browser_vnc_bind_address | default('', true) | string }}"
+    _vnc_pass: "{{ istota_browser_vnc_password | default('', true) | string }}"
+    _vnc_external: "{{ istota_browser_vnc_external_url | default('', true) | string }}"
+  when: istota_browser_enabled and not istota_web_only
+
 - name: Deploy browser container docker-compose
   template:
     src: docker-compose.browser.yml.j2
@@ -2597,14 +2657,58 @@
 # persistence is handled by the istota-devbox-iptables.service oneshot
 # below — it re-applies the same rules After=docker.service so we never
 # race with dockerd's own iptables programming.
-- name: Block cloud metadata endpoint from the devbox subnet
+#
+# `action: insert` on both, matching the boot script's `-I DOCKER-USER 1`.
+# The module defaults to append, and an appended rule lands after whatever
+# is already in the chain — which on a stock dockerd before v28 is
+# `-j RETURN`, making all four rules inert while `iptables -S` shows them
+# present (ISSUE-295). The teardown tasks below stay at the default: `-D`
+# matches on the rule spec, not on position.
+#
+# Deploying this to a host on Docker 27 or earlier makes rules effective
+# that were not before, and two things change there rather than one.
+#
+# DNS: on those versions the embedded resolver forwards from the
+# *container* namespace, so a resolver on an RFC1918 address (a LAN or VPN
+# resolver, or AWS's 172.31.0.2) is now blocked and devbox DNS stops
+# working. On 28+ the `host(...)` forwarding makes this a non-issue.
+#
+# Reachability: the devbox subnet itself sits inside 172.16.0.0/12, as does
+# most of Docker's default address pool. While the rules were inert the
+# devbox could reach sibling containers on other Docker networks; now it
+# cannot. That is the isolation working as designed, but it presents as
+# "the devbox suddenly cannot reach anything" rather than as a DNS error,
+# so check what the container actually talks to before deploying.
+- name: Remove superseded devbox rules from earlier versions of this role
   ansible.builtin.iptables:
     chain: DOCKER-USER
     source: "{{ istota_devbox_network_subnet }}"
     destination: "169.254.169.254/32"
     jump: DROP
     comment: "istota-devbox: block cloud metadata"
+    state: absent
+  when: istota_devbox_enabled and not istota_web_only
+  # Matching the two teardown tasks below, which carry the same guard. This is
+  # cleanup of a rule an older version installed; a host where it cannot run —
+  # no DOCKER-USER chain yet, a transient lock — should still get its current
+  # rules applied by the tasks that follow. Failing the deploy over a leftover
+  # that blocks a strict subset of what replaced it would be the wrong trade.
+  failed_when: false
+
+- name: Block link-local and cloud metadata from the devbox subnet
+  ansible.builtin.iptables:
+    chain: DOCKER-USER
+    source: "{{ istota_devbox_network_subnet }}"
+    destination: "{{ item.dest }}"
+    jump: DROP
+    comment: "{{ item.comment }}"
+    action: insert
     state: present
+  loop:
+    - dest: "169.254.0.0/16"
+      comment: "istota-devbox: block link-local (incl. cloud metadata)"
+    - dest: "168.63.129.16/32"
+      comment: "istota-devbox: block Azure host agent"
   when: istota_devbox_enabled and istota_devbox_block_metadata and not istota_web_only
 
 - name: Block RFC1918 destinations from the devbox subnet
@@ -2614,17 +2718,19 @@
     destination: "{{ item }}"
     jump: DROP
     comment: "istota-devbox: block {{ item }}"
+    action: insert
     state: present
   loop:
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16
+    - 100.64.0.0/10
   when: istota_devbox_enabled and istota_devbox_block_rfc1918 and not istota_web_only
 
 # Reboot persistence: a small oneshot unit re-applies the DROP rules
 # after dockerd has come up and re-installed its own POSTROUTING /
-# DOCKER-FORWARD rules. Idempotent (`iptables -C || -A`) so it's safe
-# to retrigger.
+# DOCKER-FORWARD rules. Convergent (delete-then-insert) so it's safe to
+# retrigger, and so it repairs a chain whose rules are in the wrong place.
 - name: Deploy devbox iptables reapply script
   template:
     src: istota-devbox-iptables.sh.j2
@@ -2633,6 +2739,27 @@
     group: root
     mode: '0755'
   when: istota_devbox_enabled and not istota_web_only
+
+# The two module tasks above cannot repair an existing host, and this is
+# the task that does. `ansible.builtin.iptables` with `state: present`
+# runs its own `-C` probe, which matches on the rule spec and is blind to
+# position — so on a host provisioned by an older version of this role,
+# with the four rules appended behind dockerd's `-j RETURN`, it finds each
+# rule already present and reports ok/changed=false while moving nothing.
+# That is exactly the broken state ISSUE-295 describes, and a deploy would
+# otherwise leave it in place and call itself green.
+#
+# Running the script is the repair: it deletes each rule wherever it sits
+# and re-inserts it at the head. `changed_when: false` because it is
+# convergent rather than idempotent-by-guard — it rewrites the same four
+# rules every run, and reporting that as a change every time would train
+# everyone to ignore it.
+- name: Re-apply devbox rules at the head of the chain now
+  ansible.builtin.command: /usr/local/sbin/istota-devbox-iptables
+  changed_when: false
+  when:
+    - istota_devbox_enabled and not istota_web_only
+    - istota_devbox_block_metadata or istota_devbox_block_rfc1918
 
 - name: Deploy devbox iptables systemd unit
   template:
@@ -2687,14 +2814,25 @@
 # filtering a subnet the role no longer owns and which is inside Docker's
 # default address pool. Each delete must therefore carry the same comment its
 # matching apply task set, verbatim (ISSUE-283).
-- name: Drop devbox cloud-metadata iptables rule when disabled
+- name: Drop devbox link-local and metadata iptables rules when disabled
   ansible.builtin.iptables:
     chain: DOCKER-USER
     source: "{{ istota_devbox_network_subnet }}"
-    destination: "169.254.169.254/32"
+    destination: "{{ item.dest }}"
     jump: DROP
-    comment: "istota-devbox: block cloud metadata"
+    comment: "{{ item.comment }}"
     state: absent
+  loop:
+    - dest: "169.254.0.0/16"
+      comment: "istota-devbox: block link-local (incl. cloud metadata)"
+    - dest: "168.63.129.16/32"
+      comment: "istota-devbox: block Azure host agent"
+    # The pre-ISSUE-298 spec. A host disabled after being upgraded has only the
+    # two above; one disabled while still carrying the narrow rule needs this,
+    # and `-D` matches destination *and* comment, so the old spelling has to be
+    # named in full or the delete matches nothing.
+    - dest: "169.254.169.254/32"
+      comment: "istota-devbox: block cloud metadata"
   when: not istota_devbox_enabled and not istota_web_only
   failed_when: false
 
@@ -2710,6 +2848,7 @@
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16
+    - 100.64.0.0/10
   when: not istota_devbox_enabled and not istota_web_only
   failed_when: false
 

@@ -481,7 +481,7 @@ services:
       - browser
     ports:
       - "${BROWSER_API_BIND:-127.0.0.1}:${BROWSER_API_PORT:-9223}:9223"
-      - "0.0.0.0:${BROWSER_VNC_PORT:-6080}:6080"
+      - "${BROWSER_VNC_BIND:-127.0.0.1}:${BROWSER_VNC_PORT:-6080}:6080"
     shm_size: ${BROWSER_SHM_SIZE:-2gb}
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:-}
