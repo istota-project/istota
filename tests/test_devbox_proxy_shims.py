@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -392,16 +393,44 @@ class TestImageStaticContent:
         assert "dpkg-deb --fsys-tarfile" in dockerfile
         assert "dpkg -i" not in dockerfile
 
-    def test_dockerfile_pins_and_verifies_the_forge_cli_downloads(self):
+    def test_dockerfile_pins_and_verifies_every_download(self):
         """A pinned version with no checksum is a version pin, not a supply
-        chain control — the vendor can re-cut a tag."""
+        chain control — the vendor can re-cut a tag.
+
+        Stated as "every download into /tmp is verified" rather than as a count
+        of `sha256sum` calls. The count was 2, and it failed the moment the Go
+        toolchain gained the verification it had always lacked (ISSUE-280) —
+        a passing test going red on a strict improvement, and a number nobody
+        would think to raise if a *fourth* download arrived unverified.
+        """
         dockerfile = DOCKERFILE.read_text()
         assert "ARG GH_VERSION=" in dockerfile
         assert "ARG GLAB_VERSION=" in dockerfile
-        assert dockerfile.count("sha256sum -c -") == 2
-        for name in ("GH_DEB_SHA256", "GLAB_DEB_SHA256"):
-            line = next(ln for ln in dockerfile.splitlines() if f"ARG {name}=" in ln)
-            digest = line.split("=", 1)[1].strip()
+
+        # Fold shell line continuations first: the Go layer puts its `-o` on the
+        # next line, so a line-scoped regex sees two downloads where there are
+        # three — and would have reported "all verified" while missing one.
+        folded = re.sub(r"\\\n\s*", " ", dockerfile)
+        # `[^\s;"]+` rather than `\S+`: a shell `;` or a closing quote directly
+        # after the path is punctuation, not part of the filename.
+        downloads = re.findall(r"curl [^\n]*?-o \"?(/tmp/[^\s;\"]+)", folded)
+        assert len(downloads) >= 3, (
+            f"expected the go, gh and glab downloads, found {downloads}"
+        )
+        for target in downloads:
+            assert f'{target}" | sha256sum -c -' in folded, (
+                f"{target} is downloaded and never checksum-verified"
+            )
+
+        # Every pinned digest is a real sha256, whatever it is called. The names
+        # carry an architecture suffix now, so matching them exactly is what
+        # went stale last time.
+        digests = re.findall(r"^ARG\s+(\w*SHA256\w*)=(\S+)", dockerfile, re.M)
+        assert len(digests) >= 6, (
+            f"expected two digests per artifact for three artifacts, found "
+            f"{[name for name, _ in digests]}"
+        )
+        for name, digest in digests:
             assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest), (
                 f"{name} is not a sha256 hex digest: {digest!r}"
             )
