@@ -511,6 +511,20 @@ class TestListOpen:
         assert [i.id for i in items] == [new.notification_id]
         assert total == 2
 
+    def test_a_truncated_scan_falls_back_to_the_db_count(
+        self, conn, config, monkeypatch
+    ):
+        """Past `LIVENESS_SCAN_MAX` the badge may over-count, and says the
+        honest open total rather than the size of the pass."""
+        monkeypatch.setattr(store, "LIVENESS_SCAN_MAX", 3)
+        for n in range(5):
+            _write(conn, dedup_key=f"task:{n}")
+
+        items, total = store.list_open(config, conn, "alice", limit=50)
+
+        assert len(items) == 3          # only the scan's survivors render
+        assert total == 5               # but the count is the real open set
+
     def test_a_view_with_an_unsafe_path_is_downgraded(self, conn, config):
         view = sources.NotificationView(
             title="rendered", body="", severity="info",
@@ -530,12 +544,107 @@ class TestListOpen:
         assert items[0].actions == ()
         assert items[0].status_note
 
+    @pytest.mark.parametrize(
+        "action",
+        [
+            # The field the method does not name is serialized anyway, so it
+            # cannot be left unchecked.
+            sources.NotificationAction(
+                id="confirm", label="Confirm", kind="primary", method="POST",
+                endpoint="/chat/tasks/1/confirm",
+                href="javascript:fetch('//evil.example')",
+            ),
+            sources.NotificationAction(
+                id="open", label="Open", kind="default", method="LINK",
+                href="/chat", endpoint="https://evil.example/x",
+            ),
+            # The field it does name has to be there at all.
+            sources.NotificationAction(
+                id="confirm", label="Confirm", kind="primary", method="POST",
+                endpoint=None,
+            ),
+            # And an unknown method is not a shape the client can act on.
+            sources.NotificationAction(
+                id="confirm", label="Confirm", kind="primary", method="GET",
+                endpoint="/chat/tasks/1/confirm",
+            ),
+        ],
+    )
+    def test_every_url_field_is_checked_whatever_the_method_says(
+        self, conn, config, action
+    ):
+        sources.register(
+            _Resolver(
+                "confirmation",
+                view=sources.NotificationView(
+                    title="rendered", body="", severity="info",
+                    actions=(action,), link=None, status_note=None,
+                ),
+            )
+        )
+        _write(conn, title="stored title")
+
+        items, _ = store.list_open(config, conn, "alice")
+        assert items[0].title == "stored title"
+        assert items[0].actions == ()
+
+    def test_an_offsite_link_is_downgraded(self, conn, config):
+        sources.register(
+            _Resolver(
+                "confirmation",
+                view=sources.NotificationView(
+                    title="rendered", body="", severity="info",
+                    actions=(), link="https://evil.example/x", status_note=None,
+                ),
+            )
+        )
+        _write(conn, title="stored title")
+
+        items, _ = store.list_open(config, conn, "alice")
+        assert items[0].title == "stored title"
+        assert items[0].link is None
+
+    def test_a_structurally_invalid_view_degrades_one_row_only(self, conn, config):
+        """A view is a resolver-supplied object, so validating and rendering it
+        can raise just as `resolve` can — and that must not blank the panel."""
+        broken = sources.NotificationView.__new__(sources.NotificationView)
+        object.__setattr__(broken, "title", "x")
+        object.__setattr__(broken, "body", "")
+        object.__setattr__(broken, "severity", "info")
+        # Truthy and not iterable, so the validation pass raises rather than
+        # treating it as an empty action tuple.
+        object.__setattr__(broken, "actions", object())
+        object.__setattr__(broken, "link", None)
+        object.__setattr__(broken, "status_note", None)
+
+        _write(conn, source="confirmation", dedup_key="task:1", title="fallback text")
+        _write(conn, source="task_alert", dedup_key="a:1", title="alert text")
+        sources.register(_Resolver("confirmation", view=broken))
+        sources.register(
+            _Resolver(
+                "task_alert",
+                view=sources.NotificationView(
+                    title="rendered", body="", severity="info",
+                    actions=(), link=None, status_note=None,
+                ),
+            )
+        )
+
+        items, total = store.list_open(config, conn, "alice")
+
+        assert {i.title for i in items} == {"fallback text", "rendered"}
+        assert total == 2
+
 
 # --- the never-raises contract -------------------------------------------
 
 
 class TestNeverRaises:
     def test_every_public_function_survives_a_broken_connection(self, config):
+        # Both sweeps and `mark_seen` short-circuit on an empty registry before
+        # they ever touch the connection, so without a registration the
+        # assertions below would pass without exercising anything.
+        sources.register(_Resolver("task_alert", auto=True))
         bad = _BoomConn()
         assert store.write_notification(
             bad, "alice", source="s", dedup_key="k", title="t"

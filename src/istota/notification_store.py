@@ -527,8 +527,12 @@ def mark_seen(
     worth failing a panel open over. Both updates run on the caller's
     connection, so they land in one transaction.
 
-    `updated_at` is never touched here: it is the sort key and the client's
-    version token, and moving it on a read would invalidate every other tab.
+    **Stamping never moves `updated_at`**, which is the sort key and the token
+    the client hands back: moving it on a plain read would re-sort the panel
+    under every other tab and invalidate the version they hold. The auto-resolve
+    write does move it, along with every other close path — by then the row has
+    left the open set, so there is no ordering left to disturb and no open-row
+    version for another tab to match against.
     """
     try:
         wanted: dict[int, str] = {}
@@ -761,27 +765,32 @@ def list_open(
             if resolver is None:
                 survivors.append((row, _fallback(row, _UNREGISTERED_NOTE)))
                 continue
+            # The whole per-row pass is guarded, not just the `resolve` call:
+            # a view is a resolver-supplied object, so validating and rendering
+            # it are equally capable of raising on a malformed one (a `None`
+            # action tuple is enough). Outside this block that lands in the
+            # function-level handler and returns an empty panel for the user —
+            # one broken source blanking the bell for everything else.
             try:
                 view = resolver.resolve(config, conn, row)
+                if view is None:
+                    dead.append(row.id)
+                    continue
+                bad = sources.invalid_paths(view)
+                if bad:
+                    logger.error(
+                        "notification resolver %r emitted an unsafe path on row %s: %s",
+                        row.source, row.id, "; ".join(bad),
+                    )
+                    survivors.append((row, _fallback(row, _UNRENDERABLE_NOTE)))
+                    continue
+                survivors.append((row, _rendered(row, view)))
             except Exception:
                 logger.warning(
-                    "notification resolver %r raised on row %s",
+                    "notification resolver %r failed on row %s",
                     row.source, row.id, exc_info=True,
                 )
                 survivors.append((row, _fallback(row, _UNRENDERABLE_NOTE)))
-                continue
-            if view is None:
-                dead.append(row.id)
-                continue
-            bad = sources.invalid_paths(view)
-            if bad:
-                logger.error(
-                    "notification resolver %r emitted an unsafe path on row %s: %s",
-                    row.source, row.id, "; ".join(bad),
-                )
-                survivors.append((row, _fallback(row, _UNRENDERABLE_NOTE)))
-                continue
-            survivors.append((row, _rendered(row, view)))
 
         if dead:
             _sweep_stale(config, dead)

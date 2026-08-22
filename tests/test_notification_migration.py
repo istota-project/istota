@@ -32,6 +32,24 @@ def _index_names(conn):
     }
 
 
+def _columns(conn):
+    """`{name: (type, notnull, default)}` for the notifications table."""
+    return {
+        r[1]: (r[2], r[3], r[4])
+        for r in conn.execute("PRAGMA table_info(notifications)").fetchall()
+    }
+
+
+def _indexed_columns(conn):
+    indexes = {}
+    for index in conn.execute("PRAGMA index_list(notifications)").fetchall():
+        name = index[1]
+        indexes[name] = [
+            r[2] for r in conn.execute(f"PRAGMA index_info({name})").fetchall()
+        ]
+    return indexes
+
+
 @pytest.fixture
 def upgraded_db(tmp_path):
     """A DB with history, then stripped of `notifications` as an old deploy is."""
@@ -103,12 +121,21 @@ class TestFreshInstall:
 
 class TestUpgradedInstall:
     def test_migration_creates_the_table_on_a_db_with_history(self, upgraded_db):
-        with db.get_db(upgraded_db) as conn:
+        """Driven through the migration alone.
+
+        `init_db` runs the migrations and *then* executes schema.sql, which
+        carries the same CREATE IF NOT EXISTS statements — so an `init_db`-driven
+        assertion here passes with `_migrate_notifications` deleted outright and
+        proves nothing about it.
+        """
+        conn = sqlite3.connect(upgraded_db)
+        conn.row_factory = sqlite3.Row
+        try:
             assert "notifications" not in _table_names(conn)
 
-        db.init_db(upgraded_db)
+            db._migrate_notifications(conn)
+            conn.commit()
 
-        with db.get_db(upgraded_db) as conn:
             assert "notifications" in _table_names(conn)
             assert "idx_notifications_user_state" in _index_names(conn)
             assert "idx_notifications_object" in _index_names(conn)
@@ -117,6 +144,28 @@ class TestUpgradedInstall:
             assert conn.execute(
                 "SELECT COUNT(*) FROM outbound_drafts"
             ).fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_the_migrated_table_matches_the_schema_file(self, upgraded_db, tmp_path):
+        """The two copies of the DDL must not drift apart.
+
+        `_migrate_notifications` is what an upgraded deploy gets and schema.sql
+        is what a fresh install gets; a column present in one and not the other
+        is a defect that surfaces only on whichever half nobody tested.
+        """
+        migrated = sqlite3.connect(upgraded_db)
+        migrated.row_factory = sqlite3.Row
+        fresh_path = tmp_path / "fresh.db"
+        db.init_db(fresh_path)
+        try:
+            db._migrate_notifications(migrated)
+            migrated.commit()
+            with db.get_db(fresh_path) as fresh:
+                assert _columns(migrated) == _columns(fresh)
+                assert _indexed_columns(migrated) == _indexed_columns(fresh)
+        finally:
+            migrated.close()
 
     def test_migration_runs_standalone_on_an_inherited_transaction(self, upgraded_db):
         """The shape `_run_migrations` actually calls it in: DML already open."""
@@ -132,18 +181,31 @@ class TestUpgradedInstall:
             conn.close()
 
     def test_migration_is_idempotent(self, upgraded_db):
-        db.init_db(upgraded_db)
-        with db.get_db(upgraded_db) as conn:
+        """Re-run directly, not through `init_db` — see the note above."""
+        conn = sqlite3.connect(upgraded_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            db._migrate_notifications(conn)
             conn.execute(
                 "INSERT INTO notifications (user_id, source, dedup_key, title) "
                 "VALUES ('alice', 'confirmation', 'task:7', 't')"
             )
+            conn.commit()
 
-        db.init_db(upgraded_db)
-        db.init_db(upgraded_db)
+            db._migrate_notifications(conn)
+            db._migrate_notifications(conn)
+            conn.commit()
 
-        with db.get_db(upgraded_db) as conn:
             assert conn.execute(
+                "SELECT COUNT(*) FROM notifications"
+            ).fetchone()[0] == 1
+        finally:
+            conn.close()
+
+        # And the whole init path stays clean over an already-migrated DB.
+        db.init_db(upgraded_db)
+        with db.get_db(upgraded_db) as check:
+            assert check.execute(
                 "SELECT COUNT(*) FROM notifications"
             ).fetchone()[0] == 1
 

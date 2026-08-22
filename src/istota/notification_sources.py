@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -165,6 +166,9 @@ class NotificationResolver(Protocol):
 
 _REGISTRY: dict[str, NotificationResolver] = {}
 _REGISTERED = False
+# Guards the one-time import pass, not every read: a dict lookup needs no lock,
+# and taking one on the panel's hot path would serialize the read for nothing.
+_REGISTER_LOCK = threading.Lock()
 
 
 def register(resolver: NotificationResolver) -> None:
@@ -215,23 +219,35 @@ def _register_all() -> None:
     Called lazily by the readers above so no caller has to remember to prime it,
     but the work happens exactly once per process.
 
+    **Under the lock, and the flag is set last.** This runs in the web process,
+    which serves concurrent requests on a thread pool. Setting the flag first
+    would let a second thread arriving mid-import see "registered" over an
+    empty registry, and every row that request rendered would be silently
+    downgraded to "source no longer available" — a bug that appears only under
+    load, only on the first request after a restart, and never in a test.
+
     The resolver modules themselves arrive with the stages that add producers;
     this is the seam they plug into.
     """
     global _REGISTERED
     if _REGISTERED:
         return
-    _REGISTERED = True
-    # Stage 2+ registers `confirmation`, `outbound_draft`, `cron_job`,
-    # `connected_service`, `health_panel` and `task_alert` here, each import
-    # guarded so one broken module cannot empty the whole registry.
+    with _REGISTER_LOCK:
+        if _REGISTERED:
+            return
+        # Stage 2+ imports and registers `confirmation`, `outbound_draft`,
+        # `cron_job`, `connected_service`, `health_panel` and `task_alert`
+        # here, each import guarded so one broken module cannot empty the
+        # whole registry.
+        _REGISTERED = True
 
 
 def reset_registry() -> None:
     """Drop every registration. For tests, which run in a reused process."""
     global _REGISTERED
-    _REGISTRY.clear()
-    _REGISTERED = False
+    with _REGISTER_LOCK:
+        _REGISTRY.clear()
+        _REGISTERED = False
 
 
 def invalid_paths(view: NotificationView) -> list[str]:
@@ -241,22 +257,34 @@ def invalid_paths(view: NotificationView) -> list[str]:
     got wrong. An empty list means the view is safe to emit. A non-empty one
     means the whole view is downgraded to stored text — not just the bad field —
     because a resolver that built one path wrongly has no claim on the rest.
+
+    **Both URL fields of an action are checked, not just the one its `method`
+    names.** `NotificationAction.to_dict` serializes `endpoint` and `href`
+    unconditionally, so a `method='POST'` action carrying a `javascript:` href —
+    or a `LINK` carrying an off-origin endpoint — would otherwise ship an
+    unvalidated server-supplied URL to the client through the field the branch
+    did not look at. The spec's rule is that all three URL-carrying fields are
+    treated the same way; a branch on `method` is not that.
     """
     bad: list[str] = []
 
     if view.link is not None and not is_safe_path(view.link):
         bad.append(f"link={view.link!r}")
 
-    for action in view.actions:
+    for action in view.actions or ():
         if action.method not in ACTION_METHODS:
             bad.append(f"{action.id}.method={action.method!r}")
-            continue
-        if action.kind not in ACTION_KINDS:
+        elif action.kind not in ACTION_KINDS:
             bad.append(f"{action.id}.kind={action.kind!r}")
-        if action.method == "POST":
-            if not is_safe_path(action.endpoint):
-                bad.append(f"{action.id}.endpoint={action.endpoint!r}")
-        elif not is_safe_path(action.href):
+
+        if action.endpoint is not None and not is_safe_path(action.endpoint):
+            bad.append(f"{action.id}.endpoint={action.endpoint!r}")
+        elif action.endpoint is None and action.method == "POST":
+            bad.append(f"{action.id}.endpoint is missing")
+
+        if action.href is not None and not is_safe_path(action.href):
             bad.append(f"{action.id}.href={action.href!r}")
+        elif action.href is None and action.method == "LINK":
+            bad.append(f"{action.id}.href is missing")
 
     return bad

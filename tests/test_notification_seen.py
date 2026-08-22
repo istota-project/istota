@@ -163,14 +163,37 @@ def test_another_users_id_is_skipped_silently(conn, registered):
     assert bob_row["state"] == "open"
 
 
-def test_seen_does_not_move_updated_at(conn, registered):
-    """`updated_at` is the sort key and the client's version token."""
+def test_stamping_does_not_move_updated_at(conn, registered):
+    """`updated_at` is the sort key and the client's version token, so a plain
+    read must not re-sort the panel under another tab."""
     confirmation = _write(conn, source="confirmation", dedup_key="task:7")
     before = _row(conn, confirmation.notification_id)["updated_at"]
 
     store.mark_seen(conn, "alice", [(confirmation.notification_id, before)])
 
     assert _row(conn, confirmation.notification_id)["updated_at"] == before
+
+
+def test_the_auto_resolve_write_does_move_updated_at(conn, registered):
+    """The other row class, which the stamping rule above does not cover.
+
+    Closing bumps it, as every other close path does. By then the row has left
+    the open set, so there is no ordering to disturb and no open-row version
+    for another tab to match against.
+    """
+    alert = _write(conn)
+    conn.execute(
+        "UPDATE notifications SET updated_at = ? WHERE id = ?",
+        ("2020-01-01T00:00:00.000Z", alert.notification_id),
+    )
+
+    store.mark_seen(
+        conn, "alice", [(alert.notification_id, "2020-01-01T00:00:00.000Z")]
+    )
+
+    row = _row(conn, alert.notification_id)
+    assert row["state"] == "resolved"
+    assert row["updated_at"] > "2020-01-01T00:00:00.000Z"
 
 
 def test_malformed_pairs_are_skipped(conn, registered):
