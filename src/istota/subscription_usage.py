@@ -73,6 +73,14 @@ _FAILURE_FILENAME = "subscription_usage.failure.json"
 # unbounded string off disk would push the rest of a report off the screen.
 MAX_ERROR_CHARS = 300
 
+# Ceiling on a server-stated ``Retry-After``. Six hours comfortably clears the
+# ~39 minutes the endpoint actually asks for while bounding a buggy or hostile
+# value: past this we retry earlier than asked, which is impolite but keeps a
+# single bad header from silencing the reading indefinitely. The doctor keeps
+# WARNing throughout, so a deployment stuck at the ceiling is visible rather
+# than quiet.
+MAX_RETRY_AFTER_SECONDS = 6 * 60 * 60
+
 # Ceiling on either file's size. Both are a few kB when this module writes them;
 # past this they are corrupt, and reading them whole is a memory cost chosen by
 # whatever is in a shared data dir rather than by this module.
@@ -111,7 +119,7 @@ _ERROR_BODY_CHARS = 200
 # ``TestOneSourceOfTruthForTheDefaults`` in tests/test_config_claude_code_brain.py
 # pins these against the dataclass, so the two sets cannot drift apart.
 DEFAULT_SUBSCRIPTION_USAGE = True
-DEFAULT_CACHE_TTL_SECONDS = 300
+DEFAULT_CACHE_TTL_SECONDS = 1800
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
 # Every value ``resolve_token`` can report, and the only ones a caller may
@@ -150,9 +158,18 @@ LIMIT_KINDS: dict[str, str] = {
 
 _SCOPED_KIND = "weekly_scoped"
 
-# ``(url, headers, timeout) -> (status, body)``. Injectable so no test touches
-# the network; the default is a small urllib wrapper.
-Transport = Callable[[str, dict[str, str], float], "tuple[int, bytes]"]
+# ``(url, headers, timeout) -> (status, body, response_headers)``. Injectable so
+# no test touches the network; the default is a small urllib wrapper.
+#
+# The response headers are in the contract because of ``Retry-After``. A 429 is
+# the endpoint's normal answer to a deployment that polls it, and it says in
+# that header when to come back — observed at 2327 seconds against a cache TTL
+# that was retrying every 300. Dropping the headers, as this seam used to, made
+# the one number that could have prevented seven pointless retries per window
+# unreachable by construction.
+Transport = Callable[
+    [str, dict[str, str], float], "tuple[int, bytes, Mapping[str, str]]"
+]
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +249,10 @@ class UsageSnapshot:
     source: str = "fetch"
     token_source: str = ""
     error: str = ""
+    # Seconds the endpoint asked us to wait, off a failure's ``Retry-After``.
+    # Never rendered — it exists to reach ``write_failure``, so the backoff is
+    # the interval the server named rather than the one we guessed.
+    retry_after: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -713,24 +734,112 @@ def _build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
-def _urllib_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+def parse_retry_after(value: Any, *, now_ts: float) -> float | None:
+    """``Retry-After`` as seconds from ``now_ts``, or ``None`` if unusable.
+
+    RFC 9110 gives the header two spellings and the endpoint is free to use
+    either, so both are read: ``delta-seconds`` (``Retry-After: 2327``) and an
+    HTTP-date (``Retry-After: Sat, 22 Aug 2026 23:42:17 GMT``). A date already
+    in the past floors at 0 rather than going negative — clock skew between a
+    host and Anthropic is ordinary, and a negative backoff would read as "retry
+    before now" to arithmetic that never expects one.
+
+    ``None`` for anything else: absent, blank, a float (``delta-seconds`` is an
+    integer, and a server sending ``1.5`` is not one this should guess for), a
+    negative integer, a non-finite value, or a date that will not parse. The
+    caller then falls back to its own interval, which is the pre-existing
+    behaviour — an unreadable hint costs nothing.
+
+    Never raises. This runs on the failure path of a diagnostic fetch, where an
+    exception would turn a rate-limit response into a crash.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        text = str(value).strip()
+    except Exception:  # noqa: BLE001 — a __str__ that raises is still just unusable
+        return None
+    if not text:
+        return None
+
+    # delta-seconds first: it is the common spelling and the cheap parse.
+    if re.fullmatch(r"\d+", text):
+        try:
+            seconds = float(int(text))
+        except (ValueError, OverflowError):
+            # A digit string long enough to overflow a float is not a delay.
+            return None
+        return seconds if math.isfinite(seconds) else None
+
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(text)
+    except Exception:  # noqa: BLE001 — a malformed date is a missing hint
+        return None
+    if when is None:
+        return None
+    try:
+        if when.tzinfo is None:
+            # RFC 9110 dates are GMT; a naive one means the sender omitted the
+            # zone, not that it meant local time on *this* host.
+            when = when.replace(tzinfo=timezone.utc)
+        delta = when.timestamp() - now_ts
+    except (ValueError, OverflowError, OSError):
+        return None
+    if not math.isfinite(delta):
+        return None
+    return max(0.0, delta)
+
+
+def _retry_after_from(headers: Mapping[str, str] | None, *, now_ts: float) -> float | None:
+    """``Retry-After`` out of a response's headers, case-insensitively.
+
+    Header names are case-insensitive per RFC 9110 and a stub transport in a
+    test is under no obligation to match urllib's capitalization, so the lookup
+    folds case rather than trusting either.
+    """
+    if not headers:
+        return None
+    try:
+        for name, value in headers.items():
+            if str(name).strip().lower() == "retry-after":
+                return parse_retry_after(value, now_ts=now_ts)
+    except Exception:  # noqa: BLE001 — a mapping that will not iterate has no hint in it
+        return None
+    return None
+
+
+def _urllib_transport(
+    url: str, headers: dict[str, str], timeout: float
+) -> tuple[int, bytes, Mapping[str, str]]:
     """The default ``Transport``: one GET, stdlib only.
 
     An ``HTTPError`` is a response, not a transport failure, so it is turned back
-    into ``(status, body)`` — that is what routes a 401 or a 403 into the status
-    branch instead of the exception branch, and what turns a refused redirect
-    into a reported 30x.
+    into ``(status, body, headers)`` — that is what routes a 401 or a 403 into
+    the status branch instead of the exception branch, what turns a refused
+    redirect into a reported 30x, and what carries a 429's ``Retry-After`` back
+    to the caller. The headers matter most on exactly the branch that used to
+    look like an error and nothing else.
     """
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with _build_opener().open(request, timeout=timeout) as response:
-            return int(response.status), response.read(_MAX_BODY_BYTES)
+            return (
+                int(response.status),
+                response.read(_MAX_BODY_BYTES),
+                dict(response.headers),
+            )
     except urllib.error.HTTPError as exc:
         try:
             body = exc.read(_MAX_BODY_BYTES)
         except Exception:  # noqa: BLE001 — the status is what we needed
             body = b""
-        return int(exc.code), body
+        try:
+            response_headers = dict(exc.headers or {})
+        except Exception:  # noqa: BLE001 — same: the status is the load-bearing part
+            response_headers = {}
+        return int(exc.code), body, response_headers
 
 
 def fetch_snapshot(
@@ -762,7 +871,7 @@ def fetch_snapshot(
     send = transport or _urllib_transport
 
     try:
-        status, body = send(url, headers, timeout)
+        status, body, response_headers = send(url, headers, timeout)
     except Exception as exc:  # noqa: BLE001 — a diagnostic fetch never propagates
         logger.debug("subscription usage fetch failed", exc_info=True)
         return _failed(
@@ -770,12 +879,16 @@ def fetch_snapshot(
         )
 
     if status != 200:
+        retry_after = _retry_after_from(response_headers, now_ts=now_ts)
         logger.debug(
-            "subscription usage endpoint returned HTTP %s: %s",
+            "subscription usage endpoint returned HTTP %s (retry-after %s): %s",
             status,
+            retry_after,
             _snippet(body),
         )
-        return _failed(f"the usage endpoint returned HTTP {status}", token_source)
+        return _failed(
+            f"the usage endpoint returned HTTP {status}", token_source, retry_after
+        )
 
     try:
         payload = json.loads(body.decode("utf-8", "replace"))
@@ -817,10 +930,16 @@ def _reason(exc: BaseException, token: str) -> str:
     return _redact(type(exc).__name__, token)
 
 
-def _failed(message: str, token_source: str = "") -> UsageSnapshot:
+def _failed(
+    message: str, token_source: str = "", retry_after: float | None = None
+) -> UsageSnapshot:
     """A snapshot with no data. ``fetched_at`` is 0.0 on every such branch."""
     return UsageSnapshot(
-        fetched_at=0.0, source="none", token_source=token_source, error=message
+        fetched_at=0.0,
+        source="none",
+        token_source=token_source,
+        error=message,
+        retry_after=retry_after,
     )
 
 
@@ -1184,6 +1303,34 @@ def _clean_message(value: Any) -> str:
     return re.sub(r"\s+", " ", flattened).strip()[:MAX_ERROR_CHARS]
 
 
+def _backoff_seconds(raw: Mapping[str, Any], ttl_seconds: float) -> float:
+    """How long a recorded failure suppresses retries.
+
+    The TTL is the floor, not the answer. When the endpoint stated a
+    ``Retry-After`` the longer of the two wins: retrying inside a window the
+    server named is what kept a deployment permanently rate-limited, because it
+    asked for ~39 minutes while the TTL came back every 5 and each early knock
+    was another request against the limit.
+
+    The stated value is capped at :data:`MAX_RETRY_AFTER_SECONDS`, and a value
+    that is absent, unusable or *shorter* than the TTL leaves the TTL in place —
+    a server asking us to come back sooner than we intended to is not a reason
+    to poll harder.
+    """
+    floor = ttl_seconds if _is_finite(ttl_seconds) else 0.0
+    stated = _number(raw.get("retry_after_seconds"))
+    if stated is None or stated <= 0:
+        return floor
+    return max(floor, min(stated, float(MAX_RETRY_AFTER_SECONDS)))
+
+
+def _is_finite(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnapshot | None:
     """The recorded failure if it is still inside the backoff, else ``None``.
 
@@ -1202,7 +1349,7 @@ def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnaps
         failed_at = _number(raw.get("failed_at"))
         if failed_at is None:
             return None
-        if not _within(now_ts - failed_at, ttl_seconds):
+        if not _within(now_ts - failed_at, _backoff_seconds(raw, ttl_seconds)):
             return None
         error = _clean_message(raw.get("error"))
         if not error:
@@ -1217,7 +1364,14 @@ def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnaps
         return None
 
 
-def write_failure(path: Path, *, now_ts: float, error: str, token_source: str = "") -> None:
+def write_failure(
+    path: Path,
+    *,
+    now_ts: float,
+    error: str,
+    token_source: str = "",
+    retry_after: float | None = None,
+) -> None:
     """Record a failed reading so the next TTL's worth of callers reuse it.
 
     ``error`` is the reason to hand the suppressed callers; a blank one — or one
@@ -1234,15 +1388,20 @@ def write_failure(path: Path, *, now_ts: float, error: str, token_source: str = 
     message = _clean_message(error)
     if not message:
         return
-    _write_json(
-        path,
-        {
-            "version": 1,
-            "failed_at": now_ts,
-            "error": message,
-            "token_source": _token_source(token_source),
-        },
-    )
+    record: dict[str, Any] = {
+        "version": 1,
+        "failed_at": now_ts,
+        "error": message,
+        "token_source": _token_source(token_source),
+    }
+    # Recorded only when the endpoint actually stated one. An absent key reads
+    # back as "no hint" through `_backoff_seconds`, which is also what a file
+    # written before this field existed looks like — so an in-place upgrade
+    # needs no version bump and no migration.
+    stated = _number(retry_after)
+    if stated is not None and stated > 0:
+        record["retry_after_seconds"] = min(stated, float(MAX_RETRY_AFTER_SECONDS))
+    _write_json(path, record)
 
 
 def clear_failure(path: Path) -> None:
@@ -1420,7 +1579,11 @@ def _get_snapshot(
 
     if timer is not None:
         write_failure(
-            timer, now_ts=now_ts, error=snapshot.error, token_source=token_source
+            timer,
+            now_ts=now_ts,
+            error=snapshot.error,
+            token_source=token_source,
+            retry_after=snapshot.retry_after,
         )
     return _with_stale_fallback(snapshot, path, now_ts)
 

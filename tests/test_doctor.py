@@ -605,14 +605,15 @@ class _UsageTransport:
     swallowed and the test would pass whatever the check did.
     """
 
-    def __init__(self, status=200, body=b"{}"):
+    def __init__(self, status=200, body=b"{}", response_headers=None):
         self.status = status
         self.body = body
+        self.response_headers = dict(response_headers or {})
         self.calls = []
 
     def __call__(self, url, headers, timeout):
         self.calls.append((url, headers, timeout))
-        return self.status, self.body
+        return self.status, self.body, dict(self.response_headers)
 
 
 # A reset far enough from a minute boundary that the rendered countdown cannot
@@ -999,7 +1000,14 @@ class TestSubscriptionUsage:
         against the current clock while the percentage is not, and that pair is
         the most misleading line this check could print.
         """
-        config = _usage_config(make_config, subscription_usage_stale_after_seconds=3600)
+        # TTL pinned below the seeded age for the same reason as the test below:
+        # at the shipping 1800s default a 900s reading is fresh, no fetch fires,
+        # and the stale branch this test exists for is never reached.
+        config = _usage_config(
+            make_config,
+            subscription_usage_stale_after_seconds=3600,
+            subscription_usage_cache_ttl_seconds=300,
+        )
         self._seed_cache(config, age_seconds=900)
         _drive_usage(
             monkeypatch,
@@ -1016,7 +1024,14 @@ class TestSubscriptionUsage:
         self, make_config, monkeypatch
     ):
         """The same 900s reading, against a 60s window instead of the default."""
-        config = _usage_config(make_config, subscription_usage_stale_after_seconds=60)
+        # The cache TTL is pinned below the seeded age: at the shipping default
+        # of 1800 a 900s reading is still *fresh*, so nothing would fetch and
+        # there would be no stale branch under test at all.
+        config = _usage_config(
+            make_config,
+            subscription_usage_stale_after_seconds=60,
+            subscription_usage_cache_ttl_seconds=300,
+        )
         self._seed_cache(config, age_seconds=900)
         _drive_usage(
             monkeypatch,

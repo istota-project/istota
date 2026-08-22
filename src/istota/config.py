@@ -1134,7 +1134,7 @@ class ClaudeCodeBrainConfig:
     subscription_usage: bool = True
     # One deployment-wide fetch per this window; every surface reads the same
     # disk cache, so the dashboard's 60s auto-refresh costs nothing.
-    subscription_usage_cache_ttl_seconds: int = 300
+    subscription_usage_cache_ttl_seconds: int = 1800
     # Matches doctor.PROBE_TIMEOUT.
     subscription_usage_timeout_seconds: float = 10.0
     # Doctor WARNs and the tile turns amber at or above warn; the tile turns red

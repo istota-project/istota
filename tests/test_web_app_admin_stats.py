@@ -138,17 +138,18 @@ class _UsageTransport:
     single place the credential can re-enter a string the module builds.
     """
 
-    def __init__(self, status=200, body=b"{}", raises=None):
+    def __init__(self, status=200, body=b"{}", raises=None, response_headers=None):
         self.status = status
         self.body = body
         self.raises = raises
+        self.response_headers = dict(response_headers or {})
         self.calls = []
 
     def __call__(self, url, headers, timeout):
         self.calls.append((url, headers, timeout))
         if self.raises is not None:
             raise self.raises
-        return self.status, self.body
+        return self.status, self.body, dict(self.response_headers)
 
 
 def _usage_body(percent=40):

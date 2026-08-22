@@ -198,8 +198,12 @@ features = []
 # refreshed. Off = the doctor check SKIPs and the admin card says so in place of
 # its tiles, rather than disappearing.
 # subscription_usage = true
-# subscription_usage_cache_ttl_seconds = 300     # one deployment-wide fetch per this window;
-#                                                #   floored at 1 (0 would fetch on every read)
+# subscription_usage_cache_ttl_seconds = 1800    # one deployment-wide fetch per this window,
+#                                                #   and the floor on the retry after a failure.
+#                                                #   The shortest window reported is five hours,
+#                                                #   so polling faster buys no accuracy and the
+#                                                #   endpoint rate-limits a deployment that does.
+#                                                #   Floored at 1 (0 would fetch on every read).
 # subscription_usage_timeout_seconds = 10        # matches doctor.PROBE_TIMEOUT; floored at 1
 # subscription_usage_warn_percent = 80.0         # doctor WARNs, the tile turns amber
 # subscription_usage_high_percent = 95.0         # the tile turns red; still a WARN, never a FAIL

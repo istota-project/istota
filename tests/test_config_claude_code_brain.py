@@ -44,7 +44,7 @@ class TestDefaults:
         config = _load(tmp_path, '[brain]\nkind = "claude_code"\n')
         cc = config.brain.claude_code
         assert cc.subscription_usage is True
-        assert cc.subscription_usage_cache_ttl_seconds == 300
+        assert cc.subscription_usage_cache_ttl_seconds == 1800
         assert cc.subscription_usage_timeout_seconds == 10.0
         assert cc.subscription_usage_warn_percent == 80.0
         assert cc.subscription_usage_high_percent == 95.0

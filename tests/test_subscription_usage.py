@@ -23,7 +23,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,16 +169,27 @@ def payload() -> dict:
     }
 
 
-def _stub_transport(status: int = 200, body: object = None, *, calls: list | None = None):
-    """A ``Transport`` returning a canned ``(status, body)`` and recording calls."""
+def _stub_transport(
+    status: int = 200,
+    body: object = None,
+    *,
+    calls: list | None = None,
+    response_headers: dict | None = None,
+):
+    """A ``Transport`` returning a canned response and recording calls.
+
+    ``response_headers`` is how a test spells a ``Retry-After``; it defaults to
+    none at all, which is the shape of a server that states nothing.
+    """
     if body is None:
         body = payload()
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+    hdrs = dict(response_headers or {})
 
-    def transport(url: str, headers: dict, timeout: float) -> tuple[int, bytes]:
+    def transport(url: str, headers: dict, timeout: float) -> tuple[int, bytes, dict]:
         if calls is not None:
             calls.append((url, headers, timeout))
-        return status, raw
+        return status, raw, dict(hdrs)
 
     return transport
 
@@ -948,21 +959,21 @@ class TestDefaultTransport:
 
     def test_a_200_is_returned(self, monkeypatch):
         monkeypatch.setattr(su, "_build_opener", lambda: _FakeOpener(200, b'{"ok":1}'))
-        assert su._urllib_transport("https://x/y", {}, 1.0) == (200, b'{"ok":1}')
+        assert su._urllib_transport("https://x/y", {}, 1.0) == (200, b'{"ok":1}', {})
 
     def test_an_http_error_becomes_a_status_not_an_exception(self, monkeypatch):
         monkeypatch.setattr(su, "_build_opener", lambda: _FakeOpener(403, b"denied", raise_it=True))
-        assert su._urllib_transport("https://x/y", {}, 1.0) == (403, b"denied")
+        assert su._urllib_transport("https://x/y", {}, 1.0) == (403, b"denied", {})
 
     def test_an_unreadable_error_body_still_yields_the_status(self, monkeypatch):
         monkeypatch.setattr(
             su, "_build_opener", lambda: _FakeOpener(500, b"", raise_it=True, unreadable=True)
         )
-        assert su._urllib_transport("https://x/y", {}, 1.0) == (500, b"")
+        assert su._urllib_transport("https://x/y", {}, 1.0) == (500, b"", {})
 
     def test_the_body_is_capped(self, monkeypatch):
         monkeypatch.setattr(su, "_build_opener", lambda: _FakeOpener(200, b"x" * (su._MAX_BODY_BYTES + 5000)))
-        status, body = su._urllib_transport("https://x/y", {}, 1.0)
+        status, body, _headers = su._urllib_transport("https://x/y", {}, 1.0)
         assert status == 200
         assert len(body) == su._MAX_BODY_BYTES
 
@@ -1011,17 +1022,20 @@ class TestDefaultTransport:
 class _FakeOpener:
     """Stands in for the private opener ``_urllib_transport`` builds."""
 
-    def __init__(self, status, body, *, raise_it=False, unreadable=False):
+    def __init__(self, status, body, *, raise_it=False, unreadable=False, headers=None):
         self.status = status
         self.body = body
         self.raise_it = raise_it
         self.unreadable = unreadable
+        self.headers = dict(headers or {})
 
     def open(self, request, timeout=None):
         if self.raise_it:
             fp = _Unreadable() if self.unreadable else io.BytesIO(self.body)
-            raise urllib.error.HTTPError("https://x/y", self.status, "nope", {}, fp)
-        return _FakeResponse(self.status, self.body)
+            raise urllib.error.HTTPError(
+                "https://x/y", self.status, "nope", self.headers, fp
+            )
+        return _FakeResponse(self.status, self.body, self.headers)
 
 
 class _Unreadable:
@@ -1035,9 +1049,10 @@ class _Unreadable:
 
 
 class _FakeResponse:
-    def __init__(self, status, body):
+    def __init__(self, status, body, headers=None):
         self.status = status
         self._body = body
+        self.headers = dict(headers or {})
 
     def read(self, n=None):
         return self._body[:n] if n is not None else self._body
@@ -1439,19 +1454,26 @@ class TestGetSnapshot:
 
     @pytest.mark.parametrize("ttl", [0, -5, "nope", None, True, float("nan")])
     def test_a_nonsense_ttl_falls_back_to_the_default(self, tmp_path, ttl):
-        """Specifically the *documented 300s* default, not "never expires".
+        """Specifically the *documented* default, not "never expires".
 
-        The 40s call alone would pass against a `_positive` that returned 0,
-        because a 0 TTL used to be read as "no expiry". The 400s call is what
-        distinguishes the two readings.
+        The inside-the-window call alone would pass against a `_positive` that
+        returned 0, because a 0 TTL used to be read as "no expiry". The call
+        past the window is what distinguishes the two readings.
+
+        Both offsets are derived from ``DEFAULT_CACHE_TTL_SECONDS`` rather than
+        written out: they were literals against the old 300s default, and both
+        silently stopped testing anything when it rose to 1800 — the "expired"
+        probe at 400s was still inside the new window, so it asserted a cache
+        hit was a fetch and failed for the right reason only by luck.
         """
+        ttl_default = su.DEFAULT_CACHE_TTL_SECONDS
         su.write_cache(su.cache_path(tmp_path), _good_snapshot())
         config = _config(tmp_path, subscription_usage_cache_ttl_seconds=ttl)
 
         calls: list = []
         fresh = su.get_snapshot(
             config,
-            now_ts=NOW + 40,
+            now_ts=NOW + ttl_default / 2,
             transport=_stub_transport(calls=calls),
             env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
             home=tmp_path,
@@ -1461,7 +1483,7 @@ class TestGetSnapshot:
 
         expired = su.get_snapshot(
             config,
-            now_ts=NOW + 400,
+            now_ts=NOW + ttl_default + 100,
             transport=_stub_transport(calls=calls),
             env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
             home=tmp_path,
@@ -2302,13 +2324,16 @@ class TestFailureBackoff:
         transport = _stub_transport(403, b"denied", calls=calls)
         config = _config(tmp_path, subscription_usage_cache_ttl_seconds="nope")
         env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        # Derived, not written out: as literals these were 299/300 against the
+        # old default, and both fell inside the window when it rose to 1800.
+        ttl = su.DEFAULT_CACHE_TTL_SECONDS
         su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
         su.get_snapshot(
-            config, now_ts=NOW + 299, transport=transport, env=env, home=tmp_path
+            config, now_ts=NOW + ttl - 1, transport=transport, env=env, home=tmp_path
         )
         assert len(calls) == 1
         su.get_snapshot(
-            config, now_ts=NOW + 300, transport=transport, env=env, home=tmp_path
+            config, now_ts=NOW + ttl, transport=transport, env=env, home=tmp_path
         )
         assert len(calls) == 2
 
@@ -2340,3 +2365,255 @@ class TestFailureBackoff:
             )
             assert "could not reach api.anthropic.com" in snap.error
         assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Retry-After
+# ---------------------------------------------------------------------------
+
+
+class TestParseRetryAfter:
+    """RFC 9110 gives the header two spellings; the endpoint may use either.
+
+    Observed in production: `HTTP 429` with `Retry-After: 2327` against a cache
+    TTL that was retrying every 300 seconds, which is seven knocks inside the
+    window the server asked us to wait out. That deployment never obtained a
+    single successful reading.
+    """
+
+    def test_delta_seconds(self):
+        assert su.parse_retry_after("2327", now_ts=NOW) == 2327.0
+
+    def test_delta_seconds_with_surrounding_space(self):
+        assert su.parse_retry_after("  2327  ", now_ts=NOW) == 2327.0
+
+    def test_zero_is_a_real_answer_not_an_absent_one(self):
+        # Distinct from None: the server said "immediately", which the caller
+        # then floors at its own TTL rather than treating as no hint at all.
+        assert su.parse_retry_after("0", now_ts=NOW) == 0.0
+
+    def test_an_http_date_becomes_seconds_from_now(self):
+        when = datetime.fromtimestamp(NOW, tz=timezone.utc) + timedelta(seconds=600)
+        stamp = when.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        assert su.parse_retry_after(stamp, now_ts=NOW) == pytest.approx(600, abs=1)
+
+    def test_an_http_date_in_the_past_floors_at_zero(self):
+        # Clock skew between this host and Anthropic is ordinary, and a negative
+        # backoff would read as "retry before now" to arithmetic never expecting
+        # one.
+        when = datetime.fromtimestamp(NOW, tz=timezone.utc) - timedelta(hours=3)
+        stamp = when.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        assert su.parse_retry_after(stamp, now_ts=NOW) == 0.0
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            "   ",
+            "soon",
+            "-5",  # delta-seconds is unsigned
+            "1.5",  # delta-seconds is an integer; do not guess for a server
+            "NaN",
+            "Infinity",
+            True,  # a bool is not a delay, and bool is an int subclass
+            False,
+            [],
+            {},
+            "Sat, 99 Zzz 2026 99:99:99 GMT",
+            "9" * 400,  # long enough that float() would overflow
+        ],
+    )
+    def test_unusable_values_are_no_hint_rather_than_an_error(self, value):
+        assert su.parse_retry_after(value, now_ts=NOW) is None
+
+    def test_it_never_raises_on_a_hostile_object(self):
+        class Hostile:
+            def __str__(self):
+                raise RuntimeError("no")
+
+        assert su.parse_retry_after(Hostile(), now_ts=NOW) is None
+
+
+class TestRetryAfterIsHonoured:
+    def _rate_limited(self, calls, retry_after="2327"):
+        return _stub_transport(
+            429,
+            b'{"error":{"type":"rate_limit_error"}}',
+            calls=calls,
+            response_headers={"Retry-After": retry_after},
+        )
+
+    def test_a_stated_retry_after_overrides_a_shorter_ttl(self, tmp_path):
+        """The production case, and the whole point of the change."""
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=300)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        transport = self._rate_limited(calls)
+
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        assert len(calls) == 1
+
+        # Well past the 300s TTL, still inside the 2327s the server asked for.
+        for offset in (301, 1000, 2326):
+            su.get_snapshot(
+                config, now_ts=NOW + offset, transport=transport, env=env, home=tmp_path
+            )
+        assert len(calls) == 1, "retried inside the window the server named"
+
+        su.get_snapshot(
+            config, now_ts=NOW + 2327, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 2
+
+    def test_the_header_is_matched_case_insensitively(self, tmp_path):
+        # Header names are case-insensitive per RFC 9110, and a stub is under no
+        # obligation to match urllib's capitalization.
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=300)
+        transport = _stub_transport(
+            429, b"limited", calls=calls, response_headers={"retry-after": "2327"}
+        )
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        su.get_snapshot(
+            config, now_ts=NOW + 1000, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+
+    def test_a_retry_after_shorter_than_the_ttl_does_not_shorten_it(self, tmp_path):
+        """A server asking us back sooner is not a reason to poll harder."""
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=1800)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        transport = self._rate_limited(calls, retry_after="5")
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        su.get_snapshot(
+            config, now_ts=NOW + 600, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+        su.get_snapshot(
+            config, now_ts=NOW + 1800, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 2
+
+    def test_an_absurd_retry_after_is_capped(self, tmp_path):
+        """A buggy or hostile header must not silence the reading for a year."""
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=300)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        transport = self._rate_limited(calls, retry_after=str(365 * 24 * 3600))
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        su.get_snapshot(
+            config,
+            now_ts=NOW + su.MAX_RETRY_AFTER_SECONDS - 1,
+            transport=transport,
+            env=env,
+            home=tmp_path,
+        )
+        assert len(calls) == 1
+        su.get_snapshot(
+            config,
+            now_ts=NOW + su.MAX_RETRY_AFTER_SECONDS,
+            transport=transport,
+            env=env,
+            home=tmp_path,
+        )
+        assert len(calls) == 2
+
+    def test_no_header_leaves_the_ttl_in_charge(self, tmp_path):
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=300)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        transport = _stub_transport(403, b"denied", calls=calls)
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        su.get_snapshot(
+            config, now_ts=NOW + 299, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+        su.get_snapshot(
+            config, now_ts=NOW + 300, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 2
+
+    def test_a_success_clears_a_retry_after_backoff(self, tmp_path):
+        """Recovery is never delayed, however long the server asked for."""
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=300)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        su.get_snapshot(
+            config,
+            now_ts=NOW,
+            transport=self._rate_limited(calls),
+            env=env,
+            home=tmp_path,
+        )
+        snap = su.get_snapshot(
+            config,
+            now_ts=NOW + 2400,
+            transport=_stub_transport(calls=calls),
+            env=env,
+            home=tmp_path,
+        )
+        assert snap.ok
+        assert not su.failure_path(tmp_path).exists()
+
+    def test_the_hint_is_recorded_on_disk_and_capped_there_too(self, tmp_path):
+        p = su.failure_path(tmp_path)
+        su.write_failure(
+            p, now_ts=NOW, error="limited", retry_after=365 * 24 * 3600.0
+        )
+        raw = json.loads(p.read_text())
+        assert raw["retry_after_seconds"] == float(su.MAX_RETRY_AFTER_SECONDS)
+
+    def test_a_timer_written_before_this_field_existed_still_reads(self, tmp_path):
+        """No version bump and no migration: an absent key means "no hint"."""
+        p = su.failure_path(tmp_path)
+        p.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "failed_at": NOW,
+                    "error": "denied",
+                    "token_source": "env",
+                }
+            )
+        )
+        assert su.read_failure(p, 300, now_ts=NOW + 299) is not None
+        assert su.read_failure(p, 300, now_ts=NOW + 300) is None
+
+    @pytest.mark.parametrize("stored", ["nope", -1, 0, None, True, float("inf")])
+    def test_an_unusable_stored_hint_falls_back_to_the_ttl(self, tmp_path, stored):
+        p = su.failure_path(tmp_path)
+        p.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "failed_at": NOW,
+                    "error": "denied",
+                    "token_source": "env",
+                    "retry_after_seconds": stored,
+                },
+                default=str,
+            )
+        )
+        assert su.read_failure(p, 300, now_ts=NOW + 299) is not None
+        assert su.read_failure(p, 300, now_ts=NOW + 300) is None
+
+    def test_a_stale_reading_is_still_served_during_a_retry_after_backoff(self, tmp_path):
+        """An old real reading outranks a fresh failure, backoff or not."""
+        su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        calls: list = []
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=300)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        transport = self._rate_limited(calls)
+        su.get_snapshot(
+            config, now_ts=NOW + 400, transport=transport, env=env, home=tmp_path
+        )
+        snap = su.get_snapshot(
+            config, now_ts=NOW + 1000, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+        assert snap.source == "stale-cache"
+        assert snap.windows
+        assert "429" in snap.error
