@@ -1,13 +1,17 @@
 """The cost and number render rule for token-usage surfaces.
 
 One rule, stated once: a currency figure appears only where
-`cost_basis = 'api'`, and nothing is summed across bases. It lives here rather
-than inside a surface because more than one renders it — `istota usage`
-(`cli.py`), the `!usage` chat command (`commands.py`), and in TypeScript
-`web/src/lib/usageFormat.ts`. Two implementations of one rule, one per
-language, is the situation `tests/test_cli_render_cost.py` and
-`web/src/lib/usageFormat.parity.test.ts` exist to hold in place; a third Python
-copy inside a surface would make that job strictly harder.
+`cost_basis = 'api'`, and nothing is summed across bases. Today `istota usage`
+(`cli.py`) is the only Python caller, and the rule sits here rather than in it
+so that the next surface can import the rule instead of copying it — `cli.py`
+is the CLI entry point with a heavy import graph, which a chat handler on the
+Talk polling path cannot import.
+
+`web/src/lib/usageFormat.ts` states the same rule in TypeScript. Two
+implementations, one per language, is the situation
+`tests/test_cli_render_cost.py` and `web/src/lib/usageFormat.parity.test.ts`
+exist to hold in place; a third Python copy inside a surface would make that
+job strictly harder.
 """
 
 # A dollar figure renders only for rows whose cost is real money, and it is the
