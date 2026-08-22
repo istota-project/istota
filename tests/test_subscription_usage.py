@@ -15,10 +15,14 @@ nothing.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
 import subprocess
+import urllib.error
+import urllib.request
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -160,6 +164,110 @@ def _config(tmp_path: Path, **claude_code) -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
+# Coercion helpers
+# ---------------------------------------------------------------------------
+
+# Values that must never make a coercion helper raise. `json.loads` really does
+# produce every one of these: NaN and Infinity are accepted as bare tokens by
+# default, and a long integer literal becomes an arbitrary-precision int, on
+# which `float()` raises OverflowError.
+HOSTILE_VALUES = [
+    None,
+    True,
+    False,
+    "40",
+    "",
+    [],
+    {},
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    10**400,
+    -(10**400),
+    10**308 * 10,
+]
+
+
+class TestCoercionHelpersAreTotal:
+    """Assert at the helper, not through a caller.
+
+    Every hostile-input test that goes through ``parse_usage``'s ``limits[]``
+    path is wrapped in that path's blanket ``except``, so it passes just as well
+    against a helper that raises as against one that returns ``None``. These
+    assertions cannot be satisfied that way — which is what makes them the ones
+    that pin the module's headline invariant.
+    """
+
+    @pytest.mark.parametrize("value", HOSTILE_VALUES)
+    def test_number_returns(self, value):
+        assert su._number(value) is None
+
+    @pytest.mark.parametrize("value", HOSTILE_VALUES)
+    def test_percent_returns(self, value):
+        assert su._percent(value) is None
+
+    @pytest.mark.parametrize("value", HOSTILE_VALUES)
+    def test_int_returns(self, value):
+        assert su._int(value, default=-1) == -1
+
+    @pytest.mark.parametrize("value", HOSTILE_VALUES)
+    def test_unclamped_percent_returns(self, value):
+        assert su._unclamped_percent(value, default=-1.0) == -1.0
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            True,
+            7,
+            [],
+            {},
+            "",
+            "not a date",
+            # Valid ISO-8601 that overflows on the shift to UTC. One keystroke
+            # from the sentinel expiry this codebase writes into credentials.
+            "9999-12-31T23:59:59-14:00",
+            "0001-01-01T00:00:00+14:00",
+            "9999-12-31T23:59:59.999999+23:59",
+        ],
+    )
+    def test_normalize_resets_at_returns(self, value):
+        canonical, ts = su._normalize_resets_at(value)
+        assert ts is None or isinstance(ts, float)
+        assert canonical is None or isinstance(canonical, str)
+
+    def test_a_huge_number_does_not_raise_on_the_top_level_path(self):
+        """The top-level path has no blanket ``except`` around it, by design."""
+        raw = payload()
+        raw.pop("limits")
+        raw["five_hour"] = {"utilization": 10**400, "resets_at": FIVE_HOUR_RESETS}
+        windows, _ = su.parse_usage(raw, now_ts=NOW)
+        assert [w.key for w in windows] == ["seven_day", "seven_day_sonnet"]
+
+    def test_an_overflowing_reset_time_costs_the_timestamp_not_the_window(self):
+        raw = payload()
+        raw.pop("limits")
+        raw["five_hour"] = {"utilization": 37.0, "resets_at": "9999-12-31T23:59:59-14:00"}
+        windows, _ = su.parse_usage(raw, now_ts=NOW)
+        assert windows[0].key == "five_hour"
+        assert windows[0].percent == 37.0
+        assert windows[0].resets_in_seconds is None
+
+    def test_a_huge_spend_figure_does_not_raise(self):
+        raw = payload()
+        raw["spend"]["used"] = {"amount_minor": 10**400}
+        raw["spend"]["percent"] = 10**400
+        _, spend = su.parse_usage(raw, now_ts=NOW)
+        assert spend is not None
+        assert spend.used_minor == 0
+        assert spend.percent == 0.0
+
+    def test_a_non_utc_offset_is_converted_not_relabelled(self):
+        canonical, _ = su._normalize_resets_at("2026-08-22T19:40:00+02:00")
+        assert canonical == "2026-08-22T17:40:00Z"
+
+
+# ---------------------------------------------------------------------------
 # resolve_token
 # ---------------------------------------------------------------------------
 
@@ -265,7 +373,7 @@ class TestResolveToken:
         assert seen["argv"][:2] == ["security", "find-generic-password"]
         assert "Claude Code-credentials" in seen["argv"]
         assert "someone" in seen["argv"]
-        assert seen["kwargs"].get("timeout") == su.PROBE_TIMEOUT
+        assert seen["kwargs"].get("timeout") == su.KEYCHAIN_PROBE_TIMEOUT
 
     @pytest.mark.parametrize(
         "result",
@@ -290,6 +398,50 @@ class TestResolveToken:
 
         monkeypatch.setattr(su.subprocess, "run", boom)
         assert su.resolve_token({"USER": "someone"}, tmp_path) is None
+
+    @pytest.mark.parametrize(
+        "token",
+        ["tok\nX-Evil: y", "tok\rX: y", "tok\x00", "tok\x7f", "\n\n"],
+        ids=["lf", "cr", "nul", "del", "only-newlines"],
+    )
+    def test_a_token_with_a_control_character_is_refused(self, tmp_path, monkeypatch, token):
+        """Such a value cannot authenticate and can only leak.
+
+        ``http.client`` rejects a header value containing CR/LF by raising a
+        ``ValueError`` that embeds the value **as a repr** — which a substring
+        redaction would not match, putting the credential into an error string
+        and a log line. Refusing it at the source removes the class.
+        """
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        assert su.resolve_token({"CLAUDE_CODE_OAUTH_TOKEN": token}, tmp_path) is None
+
+    def test_a_control_character_in_the_credential_file_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        _write_credentials(tmp_path, {"claudeAiOauth": {"accessToken": "tok\nX: y"}})
+        assert su.resolve_token({}, tmp_path) is None
+
+    def test_a_none_home_skips_the_file_branch(self, tmp_path, monkeypatch):
+        """A process with no resolvable home has no credential file, not a crash."""
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        assert su.resolve_token({}, None) is None
+        assert su.resolve_token({"CLAUDE_CODE_OAUTH_TOKEN": "t"}, None) == ("t", "env")
+
+    def test_a_non_ascii_credential_file_is_read(self, tmp_path, monkeypatch):
+        """The file is UTF-8, not the locale default.
+
+        Under a systemd unit with no ``LANG`` the preferred encoding is ASCII,
+        and a locale-default read would report "no credential" for a file that
+        has a perfectly good one.
+        """
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        path = tmp_path / ".claude" / ".credentials.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            json.dumps(
+                {"claudeAiOauth": {"accessToken": "tok", "note": "café ünïcode"}}
+            ).encode("utf-8")
+        )
+        assert su.resolve_token({}, tmp_path) == ("tok", "file")
 
     def test_resolve_never_writes(self, tmp_path, monkeypatch):
         """The credential file is read-only to this module, on every branch.
@@ -343,8 +495,14 @@ class TestParseUsageLimitsPath:
         (``cobalt_lantern``) is a live window rather than a null, so this
         assertion is not satisfied by the payload being empty.
         """
+        raw = payload()
         for name in CODENAMES:
-            assert isinstance(payload()[name], (dict, type(None)))
+            assert name in raw
+        # Not merely present: one is a live window with a real utilization, so
+        # a fixture edit that nulled them all would fail here rather than
+        # quietly turning the assertion below into a tautology.
+        assert isinstance(raw["cobalt_lantern"], dict)
+        assert su._percent(raw["cobalt_lantern"]["utilization"]) is not None
 
         for source in (payload(), {k: v for k, v in payload().items() if k != "limits"}):
             windows, _ = su.parse_usage(source, now_ts=NOW)
@@ -687,8 +845,6 @@ class TestFetchSnapshot:
         assert snap.windows == ()
 
     def test_a_transport_raising_urlerror(self):
-        import urllib.error
-
         def boom(url, headers, timeout):
             raise urllib.error.URLError("connection refused")
 
@@ -718,15 +874,140 @@ class TestFetchSnapshot:
         snap = su.fetch_snapshot(token, timeout=10.0, now_ts=NOW, transport=transport)
         assert token not in repr(snap)
 
-    def test_a_token_inside_an_exception_is_redacted(self):
+    def test_a_token_inside_an_exception_never_reaches_the_error(self):
+        """The error is built from the exception's *class*, not its message.
+
+        An exception message is stdlib- and network-influenced text. The
+        strongest version of this test is a token that a substring redaction
+        would miss — ``http.client`` embeds a rejected header value as a repr,
+        so the escaped form is what would actually appear.
+        """
         token = "sk-ant-oat-SENTINEL-TOKEN"
 
         def boom(url, headers, timeout):
-            raise RuntimeError(f"failed talking to {url} as {token}")
+            raise RuntimeError(f"failed talking to {url} as {token} / {token!r}")
 
         snap = su.fetch_snapshot(token, timeout=10.0, now_ts=NOW, transport=boom)
         assert token not in snap.error
         assert token not in repr(snap)
+        assert "failed talking to" not in snap.error
+        assert "RuntimeError" in snap.error
+
+    def test_a_failed_fetch_carries_no_fetched_at(self):
+        """Every data-less snapshot reads 0.0, so an age means one thing."""
+        for transport in (_stub_transport(500, b"x"), _stub_transport(200, b"nope")):
+            assert su.fetch_snapshot("t", timeout=1.0, now_ts=NOW, transport=transport).fetched_at == 0.0
+
+
+class TestDefaultTransport:
+    """The one piece of the module that touches the real world.
+
+    Every other test injects a stub, so without these the ``HTTPError`` →
+    ``(status, body)`` conversion — the thing that routes a 401 or a 403 into
+    the status branch rather than the exception branch — is only a comment.
+    """
+
+    def test_a_200_is_returned(self, monkeypatch):
+        monkeypatch.setattr(su, "_build_opener", lambda: _FakeOpener(200, b'{"ok":1}'))
+        assert su._urllib_transport("https://x/y", {}, 1.0) == (200, b'{"ok":1}')
+
+    def test_an_http_error_becomes_a_status_not_an_exception(self, monkeypatch):
+        monkeypatch.setattr(su, "_build_opener", lambda: _FakeOpener(403, b"denied", raise_it=True))
+        assert su._urllib_transport("https://x/y", {}, 1.0) == (403, b"denied")
+
+    def test_an_unreadable_error_body_still_yields_the_status(self, monkeypatch):
+        monkeypatch.setattr(
+            su, "_build_opener", lambda: _FakeOpener(500, b"", raise_it=True, unreadable=True)
+        )
+        assert su._urllib_transport("https://x/y", {}, 1.0) == (500, b"")
+
+    def test_the_body_is_capped(self, monkeypatch):
+        monkeypatch.setattr(su, "_build_opener", lambda: _FakeOpener(200, b"x" * (su._MAX_BODY_BYTES + 5000)))
+        status, body = su._urllib_transport("https://x/y", {}, 1.0)
+        assert status == 200
+        assert len(body) == su._MAX_BODY_BYTES
+
+    def test_a_redirect_is_refused_rather_than_followed(self):
+        """Following one would re-send the bearer token to the new host.
+
+        ``urllib``'s default ``HTTPRedirectHandler.redirect_request`` copies
+        every header except content-length/content-type onto the new request,
+        and does not strip ``Authorization`` the way httpx and requests do.
+        Returning ``None`` is what makes the 30x surface as an ``HTTPError``.
+        """
+        handler = su._NoRedirect()
+        assert (
+            handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example.com/")
+            is None
+        )
+
+    def test_the_opener_consults_no_proxy_environment(self, monkeypatch):
+        """A credentialed request must not be routed through an ambient proxy.
+
+        Asserted as a contrast against the stdlib default, because that is the
+        behaviour being overridden: with ``HTTPS_PROXY`` set, ``build_opener()``
+        installs a live proxy handler and ``_build_opener()`` must not.
+        """
+        monkeypatch.setenv("HTTPS_PROXY", "http://192.0.2.9:3128")
+        monkeypatch.setenv("HTTP_PROXY", "http://192.0.2.9:3128")
+
+        def live_proxies(opener):
+            return [
+                h
+                for h in opener.handlers
+                if isinstance(h, urllib.request.ProxyHandler) and h.proxies
+            ]
+
+        assert live_proxies(urllib.request.build_opener()), "the default really would proxy"
+        assert live_proxies(su._build_opener()) == []
+
+    def test_the_opener_installs_the_refusing_redirect_handler(self):
+        opener = su._build_opener()
+        assert any(isinstance(h, su._NoRedirect) for h in opener.handlers)
+        assert not any(
+            type(h) is urllib.request.HTTPRedirectHandler for h in opener.handlers
+        ), "the stdlib handler would re-send Authorization across hosts"
+
+
+class _FakeOpener:
+    """Stands in for the private opener ``_urllib_transport`` builds."""
+
+    def __init__(self, status, body, *, raise_it=False, unreadable=False):
+        self.status = status
+        self.body = body
+        self.raise_it = raise_it
+        self.unreadable = unreadable
+
+    def open(self, request, timeout=None):
+        if self.raise_it:
+            fp = _Unreadable() if self.unreadable else io.BytesIO(self.body)
+            raise urllib.error.HTTPError("https://x/y", self.status, "nope", {}, fp)
+        return _FakeResponse(self.status, self.body)
+
+
+class _Unreadable:
+    """An error body whose socket has already gone away."""
+
+    def read(self, *a):
+        raise OSError("socket closed")
+
+    def close(self):
+        pass
+
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self, n=None):
+        return self._body[:n] if n is not None else self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -750,9 +1031,46 @@ class TestCache:
         assert got is not None
         assert got.source == "cache"
         assert got.fetched_at == NOW
-        assert got.windows == _good_snapshot().windows
+        assert got.ok
+        assert got.has_data
+        assert [w.key for w in got.windows] == [w.key for w in _good_snapshot().windows]
+        assert [w.percent for w in got.windows] == [37.0, 12.0, 4.0]
+        assert [w.severity for w in got.windows] == ["normal", "normal", "normal"]
+        assert [w.is_active for w in got.windows] == [True, False, False]
         assert got.spend == _good_snapshot().spend
         assert got.error == ""
+
+    def test_the_countdown_is_recomputed_against_the_readers_clock(self, tmp_path):
+        """``resets_in_seconds`` is a delta, not data.
+
+        Restoring it verbatim would render "resets in 1h 04m" hours after the
+        window actually reset — precisely the reading the stale-cache path
+        exists to serve.
+        """
+        p = su.cache_path(tmp_path)
+        su.write_cache(p, _good_snapshot())
+
+        fresh = su.read_cache(p, 3600, now_ts=NOW + 600)
+        assert fresh is not None
+        assert fresh.windows[0].resets_in_seconds == FIVE_HOUR_RESETS_IN - 600
+
+        stale = su.read_cache_any_age(p, now_ts=NOW + 999_999)
+        assert stale is not None
+        assert stale.windows[0].resets_in_seconds == 0
+        assert stale.windows[1].resets_in_seconds == 0
+
+        # With no clock, the stored value is carried through unchanged.
+        clockless = su.read_cache_any_age(p)
+        assert clockless is not None
+        assert clockless.windows[0].resets_in_seconds == FIVE_HOUR_RESETS_IN
+
+    def test_a_window_with_no_reset_time_stays_none(self, tmp_path):
+        p = su.cache_path(tmp_path)
+        su.write_cache(p, _good_snapshot())
+        got = su.read_cache_any_age(p, now_ts=NOW + 10)
+        assert got is not None
+        assert got.windows[2].resets_at is None
+        assert got.windows[2].resets_in_seconds is None
 
     def test_outside_ttl_returns_none_but_any_age_returns_it(self, tmp_path):
         p = su.cache_path(tmp_path)
@@ -783,6 +1101,15 @@ class TestCache:
             '{"fetched_at": 1.0, "windows": "nope"}',
             '{"fetched_at": 1.0, "windows": []}',
             '{"fetched_at": 1.0, "windows": [{"key": 7}]}',
+            '{"fetched_at": true, "windows": []}',
+            # An oversized number: `float()` on an arbitrary-precision int
+            # raises OverflowError, and this file is on-disk state two
+            # processes write, so "corrupt" is not hypothetical.
+            '{"fetched_at": ' + "9" * 400 + ', "windows": []}',
+            '{"fetched_at": 1.0, "windows": [{"key": "a", "label": "b", "percent": '
+            + "9" * 400
+            + "}]}",
+            '{"fetched_at": NaN, "windows": []}',
         ],
         ids=[
             "truncated",
@@ -793,6 +1120,10 @@ class TestCache:
             "windows-not-a-list",
             "no-windows",
             "unusable-window",
+            "bool-fetched-at",
+            "oversized-fetched-at",
+            "oversized-percent",
+            "nan-fetched-at",
         ],
     )
     def test_a_corrupt_cache_returns_none_from_both_readers(self, tmp_path, content):
@@ -800,13 +1131,73 @@ class TestCache:
         p.write_text(content)
         assert su.read_cache(p, 300, now_ts=1.0) is None
         assert su.read_cache_any_age(p) is None
+        assert su.read_cache_any_age(p, now_ts=1.0) is None
+
+    def test_a_ttl_of_zero_expires_everything(self, tmp_path):
+        """The direction an operator setting it to zero means.
+
+        The loader floors the configured value at 1, so nobody reaches this by
+        accident — but ``read_cache`` is public, and "0 means never expire"
+        would be the opposite of what it reads like.
+        """
+        p = su.cache_path(tmp_path)
+        su.write_cache(p, _good_snapshot())
+        assert su.read_cache(p, 0, now_ts=NOW + 1) is None
+        assert su.read_cache(p, -5, now_ts=NOW + 1) is None
+        assert su.read_cache(p, 0, now_ts=NOW) is not None
+
+    def test_a_bool_countdown_in_the_cache_is_not_read_as_zero(self, tmp_path):
+        """``True`` is an ``int`` subclass; read as 0 it renders "resetting now"."""
+        p = su.cache_path(tmp_path)
+        p.write_text(
+            json.dumps(
+                {
+                    "fetched_at": NOW,
+                    "windows": [
+                        {
+                            "key": "session",
+                            "label": "5-hour",
+                            "percent": 37.0,
+                            "resets_at": None,
+                            "resets_in_seconds": True,
+                        }
+                    ],
+                }
+            )
+        )
+        got = su.read_cache_any_age(p, now_ts=NOW)
+        assert got is not None
+        assert got.windows[0].resets_in_seconds is None
 
     def test_the_file_is_written_0600_with_no_tmp_left_behind(self, tmp_path):
         p = su.cache_path(tmp_path)
         su.write_cache(p, _good_snapshot())
         assert stat.S_IMODE(p.stat().st_mode) == 0o600
         assert list(tmp_path.glob("*.tmp")) == []
+        assert list(tmp_path.glob(".*.tmp")) == []
         assert sorted(x.name for x in tmp_path.iterdir()) == ["subscription_usage.json"]
+
+    def test_the_temp_file_is_scoped_to_this_process(self, tmp_path, monkeypatch):
+        """Two writers must not share one temp inode.
+
+        ``os.replace`` is atomic with respect to the rename, not with respect to
+        two processes opening one fixed temp name ``O_TRUNC`` and writing at
+        independent offsets. The scheduler and the web unit are separate
+        processes writing this file with no lock, so the pid is what makes the
+        docstring's "an old file or a new one, never a truncated one" true.
+        """
+        names = []
+        real_open = su.os.open
+
+        def spy(path, *a, **k):
+            names.append(Path(path).name)
+            return real_open(path, *a, **k)
+
+        monkeypatch.setattr(su.os, "open", spy)
+        su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        assert names
+        assert str(os.getpid()) in names[0]
+        assert names[0] != "subscription_usage.json.tmp"
 
     def test_a_failed_snapshot_is_never_cached(self, tmp_path):
         p = su.cache_path(tmp_path)
@@ -820,12 +1211,15 @@ class TestCache:
         su.write_cache(p, _good_snapshot())
         assert su.read_cache_any_age(p) is not None
 
+    @pytest.mark.requires_dac
     def test_an_unwritable_directory_does_not_raise(self, tmp_path):
         target = tmp_path / "ro"
         target.mkdir()
         os.chmod(target, 0o500)
         try:
             su.write_cache(su.cache_path(target), _good_snapshot())
+            assert su.read_cache_any_age(su.cache_path(target)) is None
+            assert list(target.iterdir()) == []
         finally:
             os.chmod(target, 0o700)
 
@@ -840,6 +1234,13 @@ class TestSnapshotHelpers:
     def test_ok_is_false_whenever_error_is_set(self):
         assert not su.UsageSnapshot(fetched_at=NOW, error="boom").ok
         assert _good_snapshot().ok
+
+    def test_has_data_tracks_windows_not_error(self):
+        assert not su.UsageSnapshot(fetched_at=0.0, error="boom").has_data
+        assert _good_snapshot().has_data
+        stale = replace(_good_snapshot(), source="stale-cache", error="HTTP 403")
+        assert stale.has_data
+        assert not stale.ok
 
     def test_age_seconds(self):
         assert _good_snapshot().age_seconds(NOW + 90) == 90
@@ -944,6 +1345,13 @@ class TestGetSnapshot:
         assert [w.key for w in snap.windows] == ["session", "weekly_all", "weekly_scoped:fable"]
         assert snap.fetched_at == NOW
         assert snap.age_seconds(NOW + 3600) == 3600
+        # The two predicates say different things here, and this is the branch
+        # that makes the distinction load-bearing: a caller keying on `ok` would
+        # throw away exactly the reading the stale fallback exists to deliver.
+        assert not snap.ok
+        assert snap.has_data
+        # And the countdown is against the reader's clock, not the fetch's.
+        assert snap.windows[0].resets_in_seconds == max(0, FIVE_HOUR_RESETS_IN - 3600)
         # The failure must not have overwritten the good reading.
         assert su.cache_path(tmp_path).read_bytes() == before
 
@@ -990,19 +1398,70 @@ class TestGetSnapshot:
         assert snap.ok
         assert snap.source == "fetch"
 
-    @pytest.mark.parametrize("ttl", [0, -5, "nope", None])
+    @pytest.mark.parametrize("ttl", [0, -5, "nope", None, True, float("nan")])
     def test_a_nonsense_ttl_falls_back_to_the_default(self, tmp_path, ttl):
+        """Specifically the *documented 300s* default, not "never expires".
+
+        The 40s call alone would pass against a `_positive` that returned 0,
+        because a 0 TTL used to be read as "no expiry". The 400s call is what
+        distinguishes the two readings.
+        """
         su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds=ttl)
+
         calls: list = []
-        snap = su.get_snapshot(
-            _config(tmp_path, subscription_usage_cache_ttl_seconds=ttl),
+        fresh = su.get_snapshot(
+            config,
             now_ts=NOW + 40,
             transport=_stub_transport(calls=calls),
             env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
             home=tmp_path,
         )
-        assert snap.source == "cache"
+        assert fresh.source == "cache"
         assert calls == []
+
+        expired = su.get_snapshot(
+            config,
+            now_ts=NOW + 400,
+            transport=_stub_transport(calls=calls),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert expired.source == "fetch"
+        assert len(calls) == 1
+
+    def test_the_defaults_are_used_when_no_env_or_home_is_passed(self, tmp_path, monkeypatch):
+        """The production call site passes neither, and nothing else covers it.
+
+        ``Path.home()`` raises ``RuntimeError`` when ``HOME`` is unset and the
+        uid has no passwd entry — the ``docker run --user`` shape. That is a
+        deployment with no credential file, not a reason to fail a boot.
+        """
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+        def no_home():
+            raise RuntimeError("Could not determine home directory")
+
+        monkeypatch.setattr(su.Path, "home", staticmethod(no_home))
+        snap = su.get_snapshot(_config(tmp_path), now_ts=NOW, transport=_stub_transport())
+        assert snap.error == su.NO_CREDENTIAL_ERROR
+        assert snap.source == "none"
+
+    def test_an_unexpected_failure_inside_the_policy_is_absorbed(self, tmp_path, monkeypatch):
+        """The outer guard, asserted directly.
+
+        The helpers are total in their own right — ``TestCoercionHelpersAreTotal``
+        is what pins that — so this covers the backstop rather than the
+        mechanism.
+        """
+        monkeypatch.setattr(
+            su, "_settings", lambda config: (_ for _ in ()).throw(ZeroDivisionError("boom"))
+        )
+        snap = su.get_snapshot(_config(tmp_path), now_ts=NOW, transport=_stub_transport())
+        assert not snap.ok
+        assert "ZeroDivisionError" in snap.error
+        assert snap.source == "none"
 
     def test_the_timeout_reaches_the_transport(self, tmp_path):
         calls: list = []

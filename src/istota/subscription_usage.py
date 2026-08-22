@@ -58,8 +58,16 @@ USER_AGENT = f"istota/{__version__}"
 _CACHE_FILENAME = "subscription_usage.json"
 
 # Bound on the macOS Keychain probe. Short: it is a local lookup, and a hung
-# `security` call would stall a doctor run or a dashboard refresh.
-PROBE_TIMEOUT = 5.0
+# `security` call would stall a doctor run or a dashboard refresh. Named for what
+# it bounds rather than `PROBE_TIMEOUT`, which is a *different* value (10) in
+# doctor.py — and doctor imports this module at Stage 3.
+KEYCHAIN_PROBE_TIMEOUT = 5.0
+
+# Magnitude ceiling for any number taken off the wire or out of the cache.
+# `json.loads` builds an arbitrary-precision int for a long integer literal, and
+# `float()` on one raises OverflowError. Percentages, epoch seconds and minor
+# currency units are all many orders of magnitude below this.
+_MAX_MAGNITUDE = 10**15
 
 # Response bodies are small (a few kB). The cap is a guard against a proxy or a
 # captive portal handing us something enormous, not a real size expectation.
@@ -153,11 +161,18 @@ class UsageSnapshot:
     """A reading, or the reason there isn't one.
 
     ``fetched_at`` is when the data was *obtained*, not when it was read, so a
-    cache hit carries the original fetch time. ``source`` names where the data
-    came from: ``"fetch"``, ``"cache"``, ``"stale-cache"``, or ``"none"`` when
-    there is no data at all (disabled, no credential, or a failed fetch with no
-    cache to fall back on). A non-empty ``error`` means there is nothing usable
-    here, and such a snapshot is never written to the cache.
+    cache hit carries the original fetch time; a snapshot with no data at all
+    carries ``0.0``, uniformly, so a caller cannot read an age off one branch and
+    a different meaning off the next. ``source`` names where the data came from:
+    ``"fetch"``, ``"cache"``, ``"stale-cache"``, or ``"none"`` when there is no
+    data (disabled, no credential, or a failed fetch with no cache behind it).
+
+    ``error`` and ``windows`` are independent, and the ``stale-cache`` branch is
+    why: it carries real windows *and* the fetch error that made them stale, so a
+    caller can render an old reading and say why it is old. Read ``ok`` to mean
+    "this is a current, trustworthy reading" and ``has_data`` to mean "there is
+    something here to render". A snapshot carrying an ``error`` is never written
+    to the cache.
     """
 
     fetched_at: float
@@ -168,12 +183,17 @@ class UsageSnapshot:
 
     @property
     def ok(self) -> bool:
-        """True when this snapshot carries usable data.
+        """True when this is a current reading with nothing wrong with it.
 
-        A successful fetch that yielded no recognizable window sets
-        ``NO_WINDOWS_ERROR``, so ``ok`` also implies at least one window.
+        False on a stale-cache snapshot even though that one has windows — use
+        ``has_data`` to decide whether there is anything to render.
         """
         return not self.error
+
+    @property
+    def has_data(self) -> bool:
+        """True when there are windows to render, current or stale."""
+        return bool(self.windows)
 
     def age_seconds(self, now_ts: float) -> float:
         return now_ts - self.fetched_at
@@ -184,32 +204,68 @@ class UsageSnapshot:
 # ---------------------------------------------------------------------------
 
 
-def _percent(value: Any) -> float | None:
-    """A utilization figure clamped to ``[0, 100]``, or ``None`` if unusable.
+def _number(value: Any) -> float | None:
+    """A JSON number as a finite float, or ``None`` for anything else.
 
     ``bool`` is excluded because it is an ``int`` subclass and ``True`` would
-    otherwise read as 1%. Non-finite floats are rejected: ``json.loads`` accepts
-    the bare tokens ``NaN`` and ``Infinity``, so they really do arrive. A string
-    is rejected too — a window with an unusable percent is dropped rather than
-    rendered as zero, because a fabricated 0% on a full quota is the worst
-    possible error here.
+    otherwise read as the number 1. Non-finite floats are rejected: ``json.loads``
+    accepts the bare tokens ``NaN`` and ``Infinity`` by default, so they really do
+    arrive. Strings are rejected — this endpoint reports numbers as numbers, and
+    coercing ``"40"`` would be guessing.
+
+    The magnitude bound is the part that is easy to miss. ``json.loads`` builds an
+    arbitrary-precision ``int`` for a long integer literal, and ``float()`` on one
+    raises ``OverflowError`` — an exception out of a coercion helper, from remote
+    input, in a module whose whole contract is that it does not raise. The bound
+    is far above any figure this endpoint reports.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    as_float = float(value)
-    if not math.isfinite(as_float):
+    if isinstance(value, int) and not -_MAX_MAGNITUDE < value < _MAX_MAGNITUDE:
+        return None
+    try:
+        as_float = float(value)
+    except (OverflowError, ValueError):  # a float subclass with a hostile __float__
+        return None
+    return as_float if math.isfinite(as_float) else None
+
+
+def _percent(value: Any) -> float | None:
+    """A utilization figure clamped to ``[0, 100]``, or ``None`` if unusable.
+
+    A window with an unusable percent is dropped by its caller rather than
+    rendered as zero: a fabricated 0% against a full quota is the worst error
+    this could make. Over-quota is a real state, so anything above 100 clamps to
+    100 rather than being dropped.
+    """
+    as_float = _number(value)
+    if as_float is None:
         return None
     return max(0.0, min(100.0, as_float))
 
 
-def _int(value: Any, default: int = 0) -> int:
-    if isinstance(value, bool):
+def _unclamped_percent(value: Any, default: float = 0.0) -> float:
+    """A percentage that may legitimately exceed 100.
+
+    Used for ``Spend.percent`` only. Clamping is right for a plan window, whose
+    ceiling is the plan, and wrong for pay-as-you-go credits: 150% of a spend cap
+    is real money already committed, and rendering it as 100% would hide an
+    overage on the one figure here that is not a token count.
+    """
+    as_float = _number(value)
+    if as_float is None:
         return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if math.isfinite(value) else default
-    return default
+    return max(0.0, as_float)
+
+
+def _int(value: Any, default: int = 0) -> int:
+    as_float = _number(value)
+    if as_float is None:
+        return default
+    try:
+        return int(as_float)
+    except (OverflowError, ValueError):
+        return default
 
 
 def _str(value: Any, default: str = "") -> str:
@@ -237,29 +293,39 @@ def _redact(text: str, token: str) -> str:
     return text
 
 
-def _normalize_resets_at(value: Any) -> tuple[str | None, int | None]:
-    """``(canonical ISO-8601 UTC, seconds until reset)``.
+def _normalize_resets_at(value: Any) -> tuple[str | None, float | None]:
+    """``(canonical ISO-8601 UTC, the reset's epoch seconds)``.
 
     An unparseable *string* is carried through verbatim (it is what the endpoint
-    said) with ``None`` seconds; anything that is not a non-empty string yields
-    ``(None, None)``. ``resets_in_seconds`` floors at 0 — clock skew between this
-    host and Anthropic is normal and must not produce a negative duration.
+    said) with ``None`` for the timestamp; anything that is not a non-empty
+    string yields ``(None, None)``. An offset other than UTC is converted, not
+    just relabelled.
+
+    The whole conversion is inside the ``try``, not just the parse. A value at
+    the edge of the datetime range parses cleanly and then overflows on the
+    shift to UTC — ``"9999-12-31T23:59:59-14:00"`` does, and that is one
+    keystroke from the sentinel expiry this codebase writes into credential
+    files, so it is not an exotic input.
     """
     if not isinstance(value, str) or not value:
         return None, None
     text = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
         parsed = datetime.fromisoformat(text)
-    except (ValueError, TypeError):
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ"), parsed.timestamp()
+    except Exception:  # noqa: BLE001 — an unusable date costs the timestamp, not the window
         return value, None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    parsed = parsed.astimezone(timezone.utc)
-    canonical = parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return canonical, parsed.timestamp()
 
 
 def _window_times(value: Any, now_ts: float) -> tuple[str | None, int | None]:
+    """``(canonical resets_at, resets_in_seconds)`` for one window.
+
+    ``resets_in_seconds`` floors at 0: clock skew between this host and
+    Anthropic is normal, and a negative duration would render as nonsense.
+    """
     canonical, ts = _normalize_resets_at(value)
     if ts is None:
         return canonical, None
@@ -271,7 +337,7 @@ def _window_times(value: Any, now_ts: float) -> tuple[str | None, int | None]:
 # ---------------------------------------------------------------------------
 
 
-def resolve_token(env: Mapping[str, str], home: Path) -> tuple[str, str] | None:
+def resolve_token(env: Mapping[str, str], home: Path | None) -> tuple[str, str] | None:
     """``(token, source)`` from the first source that has one, else ``None``.
 
     Ordered: ``CLAUDE_CODE_OAUTH_TOKEN`` (``"env"``, what both server shapes
@@ -288,15 +354,18 @@ def resolve_token(env: Mapping[str, str], home: Path) -> tuple[str, str] | None:
     it spawns for that same file. An expired token is reported as an error, not
     repaired.
 
-    ``env`` and ``home`` are parameters so no test reads the real ones.
+    ``env`` and ``home`` are parameters so no test reads the real ones. ``home``
+    may be ``None`` when this process has no resolvable home directory, in which
+    case the file branch is skipped rather than raising.
     """
-    token = _str(env.get("CLAUDE_CODE_OAUTH_TOKEN")).strip()
+    token = _clean_token(env.get("CLAUDE_CODE_OAUTH_TOKEN"))
     if token:
         return token, "env"
 
-    token = _token_from_file(Path(home) / ".claude" / ".credentials.json")
-    if token:
-        return token, "file"
+    if home is not None:
+        token = _token_from_file(Path(home) / ".claude" / ".credentials.json")
+        if token:
+            return token, "file"
 
     token = _token_from_keychain(env)
     if token:
@@ -305,18 +374,36 @@ def resolve_token(env: Mapping[str, str], home: Path) -> tuple[str, str] | None:
     return None
 
 
+def _clean_token(value: Any) -> str:
+    """A resolved credential, or ``""`` if it is not usable as a header value.
+
+    Surrounding whitespace is stripped (an env var set from a file usually ends
+    in a newline). A token containing a control character — CR, LF, NUL — is
+    rejected outright rather than passed on. Two reasons: ``http.client`` refuses
+    such a header value anyway, so it could never authenticate; and it refuses it
+    by raising a ``ValueError`` that embeds the value as a *repr*, which a
+    substring redaction would not match, putting the credential into an error
+    string and a log line. Rejecting it at the source removes that class rather
+    than trying to scrub it downstream.
+    """
+    token = _str(value).strip()
+    if not token or any(ch in token for ch in "\r\n\x00") or not token.isprintable():
+        return ""
+    return token
+
+
 def _token_from_blob(text: str) -> str:
     """``claudeAiOauth.accessToken`` out of a credentials JSON blob, or ``""``."""
     try:
         blob = json.loads(text)
     except Exception:  # noqa: BLE001 — malformed credential file is "no token"
         return ""
-    return _str(_dict(_dict(blob).get("claudeAiOauth")).get("accessToken")).strip()
+    return _clean_token(_dict(_dict(blob).get("claudeAiOauth")).get("accessToken"))
 
 
 def _token_from_file(path: Path) -> str:
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
     except Exception:  # noqa: BLE001 — unreadable / a directory / permissions
@@ -345,7 +432,7 @@ def _token_from_keychain(env: Mapping[str, str]) -> str:
             ],
             capture_output=True,
             text=True,
-            timeout=PROBE_TIMEOUT,
+            timeout=KEYCHAIN_PROBE_TIMEOUT,
         )
         if proc.returncode != 0:
             return ""
@@ -387,15 +474,29 @@ def parse_usage(raw: object, *, now_ts: float) -> tuple[tuple[UsageWindow, ...],
 
 
 def _parse_limits(entries: list, now_ts: float) -> list[UsageWindow]:
+    """Every usable entry, first occurrence of each key winning.
+
+    The de-duplication is what makes ``_scoped_key_and_label``'s promise true.
+    Slugging is lossy — ``"Fable 4"`` and ``"Fable-4"`` both slug to ``fable-4``
+    — so dropping the unnamed scoped entry is not on its own enough to stop two
+    windows sharing a key. Two tiles with the same key and different numbers is
+    the outcome being avoided, whichever way the collision arises.
+    """
     out: list[UsageWindow] = []
+    seen: set[str] = set()
     for entry in entries:
         try:
             window = _parse_one_limit(entry, now_ts)
         except Exception:  # noqa: BLE001 — one bad entry must not kill the rest
             logger.debug("rate-limit entry parse raised; skipping", exc_info=True)
             continue
-        if window is not None:
-            out.append(window)
+        if window is None:
+            continue
+        if window.key in seen:
+            logger.debug("duplicate rate-limit window key; keeping the first: %s", window.key)
+            continue
+        seen.add(window.key)
+        out.append(window)
     return out
 
 
@@ -488,7 +589,7 @@ def _parse_spend(payload: dict) -> Spend | None:
             limit_minor=_int(limit.get("amount_minor")),
             currency=currency,
             exponent=exponent,
-            percent=_percent(spend.get("percent")) or 0.0,
+            percent=_unclamped_percent(spend.get("percent")),
         )
 
     extra = _dict(payload.get("extra_usage"))
@@ -499,7 +600,7 @@ def _parse_spend(payload: dict) -> Spend | None:
             limit_minor=_int(extra.get("monthly_limit")),
             currency=_str(extra.get("currency"), "USD"),
             exponent=_exponent(extra.get("decimal_places")),
-            percent=_percent(extra.get("utilization")) or 0.0,
+            percent=_unclamped_percent(extra.get("utilization")),
         )
 
     return None
@@ -530,16 +631,47 @@ def _first_exponent(*blocks: dict) -> int:
 # ---------------------------------------------------------------------------
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow a redirect, because following one would leak the token.
+
+    ``urllib``'s default ``HTTPRedirectHandler.redirect_request`` copies every
+    header except ``content-length`` and ``content-type`` onto the new request,
+    so a 30x from ``api.anthropic.com`` to anywhere else would re-send
+    ``Authorization: Bearer <token>`` to that host. httpx and requests both drop
+    the header on a cross-host redirect; the stdlib does not, and this module
+    holds a subscription credential. The endpoint does not redirect, so refusing
+    outright costs nothing and needs no host comparison to get right.
+
+    Returning ``None`` makes ``urllib`` raise the 30x as an ``HTTPError``, which
+    the caller turns back into ``(status, body)`` — the redirect is reported as
+    the status it was, not as a success.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """An opener that follows no redirects and consults no proxy env vars.
+
+    ``ProxyHandler({})`` is passed explicitly so the credentialed request cannot
+    be routed through whatever ``http_proxy`` happens to be set in the daemon's
+    environment.
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
 def _urllib_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
     """The default ``Transport``: one GET, stdlib only.
 
     An ``HTTPError`` is a response, not a transport failure, so it is turned back
     into ``(status, body)`` — that is what routes a 401 or a 403 into the status
-    branch instead of the exception branch.
+    branch instead of the exception branch, and what turns a refused redirect
+    into a reported 30x.
     """
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with _build_opener().open(request, timeout=timeout) as response:
             return int(response.status), response.read(_MAX_BODY_BYTES)
     except urllib.error.HTTPError as exc:
         try:
@@ -576,8 +708,7 @@ def fetch_snapshot(
         status, body = send(url, headers, timeout)
     except Exception as exc:  # noqa: BLE001 — a diagnostic fetch never propagates
         logger.debug("subscription usage fetch failed", exc_info=True)
-        detail = _redact(f"{type(exc).__name__}: {exc}", token)[:_ERROR_BODY_CHARS]
-        return _failed(now_ts, f"could not reach api.anthropic.com ({detail})")
+        return _failed(f"could not reach api.anthropic.com ({_reason(exc, token)})")
 
     if status != 200:
         logger.debug(
@@ -585,15 +716,15 @@ def fetch_snapshot(
             status,
             _snippet(body),
         )
-        return _failed(now_ts, f"the usage endpoint returned HTTP {status}")
+        return _failed(f"the usage endpoint returned HTTP {status}")
 
     try:
         payload = json.loads(body.decode("utf-8", "replace"))
+        windows, spend = parse_usage(payload, now_ts=now_ts)
     except Exception:  # noqa: BLE001 — a proxy or a captive portal, most likely
-        logger.debug("subscription usage response was not JSON", exc_info=True)
-        return _failed(now_ts, "the usage endpoint returned a non-JSON response")
+        logger.debug("subscription usage response was not usable", exc_info=True)
+        return _failed("the usage endpoint returned a non-JSON response")
 
-    windows, spend = parse_usage(payload, now_ts=now_ts)
     if not windows:
         return UsageSnapshot(
             fetched_at=now_ts, windows=(), spend=spend, source="fetch", error=NO_WINDOWS_ERROR
@@ -601,8 +732,24 @@ def fetch_snapshot(
     return UsageSnapshot(fetched_at=now_ts, windows=windows, spend=spend, source="fetch")
 
 
-def _failed(now_ts: float, message: str) -> UsageSnapshot:
-    return UsageSnapshot(fetched_at=now_ts, source="none", error=message)
+def _reason(exc: BaseException, token: str) -> str:
+    """A short cause for a transport failure, with no room for the credential.
+
+    Deliberately the exception *class* plus its module, not ``str(exc)``. A
+    message is attacker- and stdlib-influenced text: ``http.client`` embeds a
+    rejected header value in its ``ValueError`` as a repr, which a substring
+    redaction would miss. ``_clean_token`` already refuses a credential that
+    could end up there, and this is the second half of the same guarantee —
+    ``URLError`` or ``TimeoutError`` is all an operator needs to distinguish a
+    firewall from a hang. ``_redact`` stays as a backstop over the class name in
+    case a caller ever names a class after something it should not.
+    """
+    return _redact(type(exc).__name__, token)
+
+
+def _failed(message: str) -> UsageSnapshot:
+    """A snapshot with no data. ``fetched_at`` is 0.0 on every such branch."""
+    return UsageSnapshot(fetched_at=0.0, source="none", error=message)
 
 
 def _snippet(body: bytes) -> str:
@@ -650,7 +797,16 @@ def _snapshot_to_json(snapshot: UsageSnapshot) -> dict:
     }
 
 
-def _windows_from_json(raw: Any) -> tuple[UsageWindow, ...]:
+def _windows_from_json(raw: Any, now_ts: float | None) -> tuple[UsageWindow, ...]:
+    """Rebuild the cached windows, recomputing the countdown against ``now_ts``.
+
+    ``resets_in_seconds`` is derived, not data: it is a delta from the moment of
+    the fetch. Restoring it verbatim would render "resets in 58 minutes" six
+    hours after the window actually reset, which is exactly the reading the
+    stale-cache path exists to serve. It is recomputed from ``resets_at``
+    whenever a clock is supplied, and the stored value is used only when there is
+    no clock or no parseable ``resets_at``.
+    """
     if not isinstance(raw, list):
         return ()
     out: list[UsageWindow] = []
@@ -662,21 +818,34 @@ def _windows_from_json(raw: Any) -> tuple[UsageWindow, ...]:
         percent = _percent(entry.get("percent"))
         if not key or not label or percent is None:
             continue
-        resets_in = entry.get("resets_in_seconds")
+        stored = entry.get("resets_in_seconds")
         is_active = entry.get("is_active")
-        resets_at = entry.get("resets_at")
+        if now_ts is None:
+            resets_at, _ = _normalize_resets_at(entry.get("resets_at"))
+            resets_in = None if isinstance(stored, bool) else _optional_int(stored)
+        else:
+            resets_at, resets_in = _window_times(entry.get("resets_at"), now_ts)
+            if resets_in is None and not isinstance(stored, bool):
+                resets_in = _optional_int(stored)
         out.append(
             UsageWindow(
                 key=key,
                 label=label,
                 percent=percent,
-                resets_at=resets_at if isinstance(resets_at, str) else None,
-                resets_in_seconds=_int(resets_in) if isinstance(resets_in, (int, float)) else None,
+                resets_at=resets_at,
+                resets_in_seconds=resets_in,
                 severity=_str(entry.get("severity")),
                 is_active=is_active if isinstance(is_active, bool) else None,
             )
         )
     return tuple(out)
+
+
+def _optional_int(value: Any) -> int | None:
+    """``_int`` that distinguishes "absent" from "zero"."""
+    if _number(value) is None:
+        return None
+    return max(0, _int(value))
 
 
 def _spend_from_json(raw: Any) -> Spend | None:
@@ -688,13 +857,13 @@ def _spend_from_json(raw: Any) -> Spend | None:
         limit_minor=_int(raw.get("limit_minor")),
         currency=_str(raw.get("currency"), "USD"),
         exponent=_exponent(raw.get("exponent")),
-        percent=_percent(raw.get("percent")) or 0.0,
+        percent=_unclamped_percent(raw.get("percent")),
     )
 
 
 def _read_raw(path: Path) -> dict | None:
     try:
-        raw = json.loads(Path(path).read_text())
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except Exception:  # noqa: BLE001 — corrupt / truncated / permissions
@@ -703,61 +872,71 @@ def _read_raw(path: Path) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
-def _snapshot_from_raw(raw: dict) -> UsageSnapshot | None:
-    fetched_at = raw.get("fetched_at")
-    if isinstance(fetched_at, bool) or not isinstance(fetched_at, (int, float)):
+def _snapshot_from_raw(raw: dict, now_ts: float | None) -> UsageSnapshot | None:
+    """A cached snapshot, or ``None`` for anything unusable. Never raises."""
+    try:
+        fetched_at = _number(raw.get("fetched_at"))
+        if fetched_at is None:
+            return None
+        windows = _windows_from_json(raw.get("windows"), now_ts)
+        if not windows:
+            return None
+        return UsageSnapshot(
+            fetched_at=fetched_at,
+            windows=windows,
+            spend=_spend_from_json(raw.get("spend")),
+            source="cache",
+        )
+    except Exception:  # noqa: BLE001 — a cache is never repaired, only ignored
+        logger.debug("subscription usage cache entry unusable", exc_info=True)
         return None
-    if not math.isfinite(float(fetched_at)):
-        return None
-    windows = _windows_from_json(raw.get("windows"))
-    if not windows:
-        return None
-    return UsageSnapshot(
-        fetched_at=float(fetched_at),
-        windows=windows,
-        spend=_spend_from_json(raw.get("spend")),
-        source="cache",
-    )
 
 
 def read_cache(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnapshot | None:
     """The cached reading if it exists and is within TTL, else ``None``.
 
     A negative age — the clock moved backwards, or the file claims to be from
-    next week — counts as stale rather than as fresh forever. Use
-    ``read_cache_any_age`` for the stale-fallback path.
+    next week — counts as stale rather than as fresh forever. A TTL of 0 or
+    below expires everything, which is the direction an operator setting it to
+    zero means; the loader floors the configured value at 1 so nobody reaches
+    that by accident. Use ``read_cache_any_age`` for the stale-fallback path.
     """
     raw = _read_raw(path)
     if raw is None:
         return None
-    snapshot = _snapshot_from_raw(raw)
+    snapshot = _snapshot_from_raw(raw, now_ts)
     if snapshot is None:
         return None
     age = now_ts - snapshot.fetched_at
-    if age < 0:
-        return None
-    if ttl_seconds > 0 and age > ttl_seconds:
+    if age < 0 or age > ttl_seconds:
         return None
     return snapshot
 
 
-def read_cache_any_age(path: Path) -> UsageSnapshot | None:
-    """The cached reading regardless of TTL. ``None`` if absent or unusable."""
+def read_cache_any_age(path: Path, *, now_ts: float | None = None) -> UsageSnapshot | None:
+    """The cached reading regardless of TTL. ``None`` if absent or unusable.
+
+    Pass ``now_ts`` to have each window's countdown recomputed against it. This
+    is the stale-fallback path, where the stored countdown is by definition out
+    of date, so a caller that has a clock should always pass it.
+    """
     raw = _read_raw(path)
     if raw is None:
         return None
-    return _snapshot_from_raw(raw)
+    return _snapshot_from_raw(raw, now_ts)
 
 
 def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     """Persist a successful reading. Best-effort; never raises.
 
     Two processes read and write this file — ``istota-scheduler`` and
-    ``istota-web`` are separate units — so the write goes to a sibling ``.tmp``
-    and is ``os.replace``d into place: a reader sees an old file or a new one,
-    never a truncated one. Two processes racing a fetch is possible and harmless
-    (one redundant request, last writer wins, both readings are equally true), so
-    there is no lock to deadlock.
+    ``istota-web`` are separate units — so the write goes to a **pid-scoped**
+    temp file and is ``os.replace``d into place. The pid is what makes the claim
+    true: ``os.replace`` is atomic with respect to the rename, not with respect
+    to two processes opening one fixed temp name ``O_TRUNC`` and writing at
+    independent offsets, which publishes a torn file. Same pattern as
+    ``money/work.py``. Racing the *fetch* is still fine — one redundant request,
+    last writer wins, both readings are equally true — so there is no lock.
 
     ``0600``: the payload is not a credential, but it is account data and the
     data dir is shared. A snapshot carrying an ``error`` is never written — the
@@ -766,16 +945,16 @@ def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     if snapshot.error or not snapshot.windows:
         return
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(_snapshot_to_json(snapshot))
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w") as handle:
-                handle.write(payload)
-        finally:
-            os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except Exception:  # noqa: BLE001 — a cache write is best-effort
         logger.debug("subscription usage cache write failed: %s", path, exc_info=True)
@@ -850,11 +1029,31 @@ def get_snapshot(
        reading is worth. No cache to fall back on → the fetch failure.
 
     ``env`` and ``home`` default to this process's own and are parameters only so
-    a test never reads the real ones. Never raises.
+    a test never reads the real ones.
+
+    Never raises, and the outer guard is deliberate: this is the daemon's boot
+    path, and an unforeseen exception out of any helper must read as a missing
+    number rather than a failed boot. The helpers are total in their own right —
+    ``parse_usage`` and the cache readers are tested directly for that — so the
+    guard is a backstop, not the mechanism.
     """
+    try:
+        return _get_snapshot(config, now_ts, transport, env, home)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic never fails a boot
+        logger.debug("subscription usage snapshot failed unexpectedly", exc_info=True)
+        return _failed(f"subscription usage could not be read ({type(exc).__name__})")
+
+
+def _get_snapshot(
+    config: object,
+    now_ts: float,
+    transport: Transport | None,
+    env: Mapping[str, str] | None,
+    home: Path | None,
+) -> UsageSnapshot:
     enabled, ttl, timeout = _settings(config)
     if not enabled:
-        return UsageSnapshot(fetched_at=0.0, source="none", error=DISABLED_ERROR)
+        return _failed(DISABLED_ERROR)
 
     data_dir = _data_dir(config)
     path = cache_path(data_dir) if data_dir is not None else None
@@ -866,10 +1065,10 @@ def get_snapshot(
 
     resolved = resolve_token(
         os.environ if env is None else env,
-        Path.home() if home is None else home,
+        _home_dir() if home is None else home,
     )
     if resolved is None:
-        return UsageSnapshot(fetched_at=0.0, source="none", error=NO_CREDENTIAL_ERROR)
+        return _failed(NO_CREDENTIAL_ERROR)
 
     snapshot = fetch_snapshot(resolved[0], timeout=timeout, now_ts=now_ts, transport=transport)
     if not snapshot.error:
@@ -877,7 +1076,22 @@ def get_snapshot(
             write_cache(path, snapshot)
         return snapshot
 
-    stale = read_cache_any_age(path) if path is not None else None
+    stale = read_cache_any_age(path, now_ts=now_ts) if path is not None else None
     if stale is not None:
         return replace(stale, source="stale-cache", error=snapshot.error)
     return snapshot
+
+
+def _home_dir() -> Path | None:
+    """This process's home directory, or ``None`` if it has none.
+
+    ``Path.home()`` raises ``RuntimeError`` when ``HOME`` is unset *and* the
+    running uid has no passwd entry — the ``docker run --user 1000:1000`` shape
+    against an image that never created that uid, and systemd units routinely do
+    not set ``HOME``. That is a deployment with no credential file to read, not a
+    reason to take the daemon's boot down.
+    """
+    try:
+        return Path.home()
+    except Exception:  # noqa: BLE001 — no home is a fact, not a failure
+        return None
