@@ -73,6 +73,11 @@ _FAILURE_FILENAME = "subscription_usage.failure.json"
 # unbounded string off disk would push the rest of a report off the screen.
 MAX_ERROR_CHARS = 300
 
+# Ceiling on either file's size. Both are a few kB when this module writes them;
+# past this they are corrupt, and reading them whole is a memory cost chosen by
+# whatever is in a shared data dir rather than by this module.
+_MAX_FILE_CHARS = 1 << 20
+
 # Bound on the macOS Keychain probe. Short: it is a local lookup, and a hung
 # `security` call would stall a doctor run or a dashboard refresh. Named for what
 # it bounds rather than `PROBE_TIMEOUT`, which is a *different* value (10) in
@@ -938,12 +943,25 @@ def _spend_from_json(raw: Any) -> Spend | None:
 
 
 def _read_raw(path: Path) -> dict | None:
-    """A JSON object off disk, or ``None``. Shared by the cache and the timer."""
+    """A JSON object off disk, or ``None``. Shared by the cache and the timer.
+
+    The read is capped. Both files are a few kB when this module writes them, so
+    anything past the cap is corrupt by definition — but nothing outside this
+    module guarantees that, and an uncapped ``read_text`` on the daemon's boot
+    path is a memory cost set by whatever happens to be in a shared data dir.
+    The cap is deliberately generous: it is a guard, not a size expectation, and
+    it is the same reasoning as ``_MAX_BODY_BYTES`` on the wire.
+    """
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read(_MAX_FILE_CHARS + 1)
+        if len(text) > _MAX_FILE_CHARS:
+            logger.debug("subscription usage file is implausibly large: %s", path)
+            return None
+        raw = json.loads(text)
     except FileNotFoundError:
         return None
-    except Exception:  # noqa: BLE001 — corrupt / truncated / permissions
+    except Exception:  # noqa: BLE001 — corrupt / truncated / a directory / perms
         logger.debug("subscription usage read failed: %s", path, exc_info=True)
         return None
     return raw if isinstance(raw, dict) else None
@@ -1015,7 +1033,16 @@ def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     """
     if snapshot.error or not snapshot.windows:
         return
-    _write_json(path, _snapshot_to_json(snapshot))
+    try:
+        payload = _snapshot_to_json(snapshot)
+    except Exception:  # noqa: BLE001 — a snapshot this function cannot serialize
+        # Inside the guard rather than beside it: `_write_json` cannot protect an
+        # argument evaluated at its call site, and "never raises" has to hold for
+        # a direct caller too, not only for the one behind `get_snapshot`'s
+        # blanket except.
+        logger.debug("subscription usage snapshot could not be serialized", exc_info=True)
+        return
+    _write_json(path, payload)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -1075,10 +1102,66 @@ def _write_json(path: Path, payload: dict) -> None:
 # flattened and capped message, and *no backoff* for anything unusable. Failing
 # open costs one extra request; failing closed would suppress the reading
 # indefinitely on a deployment where nothing is wrong.
+#
+# **Only a failure the endpoint itself produced goes in the file.** A 403, a 500
+# and an unreachable host are facts about the deployment, and every process that
+# shares the data dir is entitled to reuse them. "No credential here" is not: it
+# is a fact about the environment and home directory of *the calling process*,
+# which is what `resolve_token` reads. `istota-scheduler` and `istota-web` take
+# the token from a systemd `EnvironmentFile`; an operator's `istota doctor` in a
+# shell usually does not, and on macOS a background agent and a login session do
+# not see the same keychain. Writing that process's answer into the shared file
+# would have one read-only diagnostic run tell the dashboard for a full TTL that
+# there is no credential while the daemon is happily using one. So the
+# no-credential branch is rate-limited by a **process-local** record instead —
+# which is where its cost is anyway. The expense the spec names is the macOS
+# `security` subprocess, and a process bounds its own subprocesses perfectly
+# well without publishing its environment as a deployment fact.
+
+# Keyed by data dir, because that is what a "deployment" is to this module and a
+# process could be pointed at two configs. Expired entries are pruned on write,
+# so it stays the size of the number of configs in flight (one, in the daemon).
+_NO_CREDENTIAL_AT: dict[str, float] = {}
+_NO_CREDENTIAL_LOCK = threading.Lock()
 
 
 def failure_path(data_dir: Path) -> Path:
     return Path(data_dir) / _FAILURE_FILENAME
+
+
+def _within(age: float, ttl_seconds: float) -> bool:
+    """True while a recorded moment is still inside its window.
+
+    Written as a range rather than as ``age < ttl_seconds`` so a nonsense clock
+    fails *open*: a ``nan`` age satisfies neither comparison, so it reads as "not
+    within", which is no backoff — the direction every unusable timer here takes.
+    A negative age is a clock that moved backwards, or a hand-edited file, and it
+    must not produce a timer nobody can wait out.
+
+    The upper bound is exclusive where ``read_cache``'s is inclusive, and the two
+    mean opposite things: that one bounds how long a reading stays *fresh*, this
+    one bounds how long an attempt stays *suppressed*. Both err toward serving
+    data — a reading exactly ``ttl`` old is still returned, and a failure exactly
+    ``ttl`` old is retried — which also makes the retry interval exactly the TTL
+    rather than a tick more.
+    """
+    return 0 <= age < ttl_seconds
+
+
+def _no_credential_recently(key: str, now_ts: float, ttl_seconds: float) -> bool:
+    with _NO_CREDENTIAL_LOCK:
+        recorded = _NO_CREDENTIAL_AT.get(key)
+    return recorded is not None and _within(now_ts - recorded, ttl_seconds)
+
+
+def _record_no_credential(key: str, now_ts: float, ttl_seconds: float) -> None:
+    with _NO_CREDENTIAL_LOCK:
+        expired = [
+            k for k, ts in _NO_CREDENTIAL_AT.items() if not _within(now_ts - ts, ttl_seconds)
+        ]
+        for k in expired:
+            del _NO_CREDENTIAL_AT[k]
+        _NO_CREDENTIAL_AT[key] = now_ts
 
 
 def _clean_message(value: Any) -> str:
@@ -1089,7 +1172,12 @@ def _clean_message(value: Any) -> str:
     result is capped. The strings this module writes are built from literals and
     a status code and need none of this — the file is what needs it.
     """
-    text = _str(value)
+    # Truncate first, then flatten. The other order rebuilds the whole string
+    # character by character before throwing all but 300 of them away, which
+    # turns an implausibly large file into an implausibly large allocation on
+    # the daemon's boot path. The slack is for the whitespace runs that collapse
+    # below; anything past it could not have reached the cap anyway.
+    text = _str(value)[: MAX_ERROR_CHARS * 4]
     if not text:
         return ""
     flattened = "".join(ch if ch.isprintable() else " " for ch in text)
@@ -1100,10 +1188,12 @@ def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnaps
     """The recorded failure if it is still inside the backoff, else ``None``.
 
     ``None`` means "no backoff": the file is absent, expired, corrupt, or claims
-    a time in the future — a clock that moved backwards must not produce a timer
-    nobody can wait out. The returned snapshot is indistinguishable from the one
+    a time in the future. The returned snapshot is indistinguishable from the one
     the suppressed attempt would have produced, which is the point: a caller
-    cannot tell a bounded retry from a real one, and none of them has to.
+    cannot tell a bounded retry from a real one, and none of them has to. That
+    is also why the no-credential branch is not in this file — its live answer
+    takes no stale fallback, so replaying it from here would produce a pairing
+    (no credential, beside real windows) the live path cannot.
     """
     raw = _read_raw(path)
     if raw is None:
@@ -1112,8 +1202,7 @@ def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnaps
         failed_at = _number(raw.get("failed_at"))
         if failed_at is None:
             return None
-        age = now_ts - failed_at
-        if age < 0 or age >= ttl_seconds:
+        if not _within(now_ts - failed_at, ttl_seconds):
             return None
         error = _clean_message(raw.get("error"))
         if not error:
@@ -1131,20 +1220,27 @@ def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnaps
 def write_failure(path: Path, *, now_ts: float, error: str, token_source: str = "") -> None:
     """Record a failed reading so the next TTL's worth of callers reuse it.
 
-    ``error`` is the reason to hand the suppressed callers; a blank one records
-    nothing, symmetrically with ``write_cache`` refusing a failed snapshot.
+    ``error`` is the reason to hand the suppressed callers; a blank one — or one
+    that is not a usable string at all — records nothing, symmetrically with
+    ``write_cache`` refusing a failed snapshot. It goes through the same cleaner
+    the reader uses, so this stays total on any argument: "nothing here raises"
+    covers a public name called directly, not only the path behind
+    ``get_snapshot``'s guard.
+
     ``token_source`` is the resolver's branch *name*, never the credential — it
-    is what lets the doctor say which one was refused without re-resolving.
+    is what lets the doctor say which one was refused without re-resolving — and
+    it is validated on the way in as well as on the way out.
     """
-    if not error:
+    message = _clean_message(error)
+    if not message:
         return
     _write_json(
         path,
         {
             "version": 1,
             "failed_at": now_ts,
-            "error": error[:MAX_ERROR_CHARS],
-            "token_source": token_source,
+            "error": message,
+            "token_source": _token_source(token_source),
         },
     )
 
@@ -1228,12 +1324,17 @@ def get_snapshot(
     3. A failure recorded less than one TTL ago → return that failure, without
        resolving a credential and without a request. The TTL is the retry
        interval, which is what the rejected-credential case has always promised.
+       Two records, deliberately: what the endpoint said is deployment-wide and
+       lives in a file beside the cache, while "this process found no credential"
+       is process-local and never written down — see the failure-timer section.
     4. No credential → an error snapshot. Still **not** written to the reading
-       cache — that holds readings — but the failure timer does bound it: "cheap
-       to re-check" is true of an environment variable and false of a
-       ``security`` subprocess, and one TTL of delay in noticing a credential
-       that appeared five minutes ago is the trade that buys it.
-    5. Fetch. On success, write the cache, clear the timer and return
+       cache — that holds readings — and not to the shared file either, but it is
+       rate-limited: "cheap to re-check" is true of an environment variable and
+       false of a ``security`` subprocess, and one TTL of delay in noticing a
+       credential that appeared five minutes ago is the trade that buys it. No
+       stale fallback on this branch, as before — the fetch that would have
+       earned one never happened.
+    5. Fetch. On success, write the cache, clear the record and return
        ``source="fetch"``. Clearing immediately is what keeps recovery from
        waiting on a record of a failure that is over.
     6. On failure, record it, then fall back to a cache of any age:
@@ -1272,15 +1373,23 @@ def _get_snapshot(
     data_dir = _data_dir(config)
     path = cache_path(data_dir) if data_dir is not None else None
     timer = failure_path(data_dir) if data_dir is not None else None
+    # The same identity the two files have, for the process-local record. A
+    # config with no `db_path` has no data dir, so it gets no cache, no timer
+    # and no rate limit — it fetches every time, exactly as it did before.
+    local_key = str(data_dir) if data_dir is not None else None
 
     if path is not None:
         cached = read_cache(path, ttl, now_ts=now_ts)
         if cached is not None:
             return cached
 
-    # After the cache and before the resolver, deliberately on both counts: a
-    # usable reading is never withheld by a record of a failure, and the
-    # keychain subprocess the timer exists to bound is inside `resolve_token`.
+    # Both checks sit after the cache and before the resolver, deliberately on
+    # both counts: a usable reading is never withheld by a record of a failure,
+    # and the keychain subprocess this exists to bound is inside `resolve_token`.
+    if local_key is not None and _no_credential_recently(local_key, now_ts, ttl):
+        # No stale fallback, because the live branch below takes none either.
+        return _failed(NO_CREDENTIAL_ERROR)
+
     if timer is not None:
         recorded = read_failure(timer, ttl, now_ts=now_ts)
         if recorded is not None:
@@ -1291,10 +1400,13 @@ def _get_snapshot(
         _home_dir() if home is None else home,
     )
     if resolved is None:
-        if timer is not None:
-            write_failure(timer, now_ts=now_ts, error=NO_CREDENTIAL_ERROR)
+        if local_key is not None:
+            _record_no_credential(local_key, now_ts, ttl)
         return _failed(NO_CREDENTIAL_ERROR)
 
+    # No record to clear here: reaching the resolver at all means the check above
+    # found none active, so the only entry that could still be in the map for
+    # this data dir is an expired one, which the next write prunes.
     token, token_source = resolved
     snapshot = fetch_snapshot(
         token, timeout=timeout, now_ts=now_ts, transport=transport, token_source=token_source

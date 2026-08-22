@@ -51,6 +51,20 @@ def _the_real_module(monkeypatch):
     monkeypatch.setattr(su, "_urllib_transport", _REAL_URLLIB_TRANSPORT)
 
 
+@pytest.fixture(autouse=True)
+def _no_carried_over_backoff():
+    """The no-credential rate limit is process-local, and pytest is one process.
+
+    Every test uses its own ``tmp_path``, which is the key, so nothing should
+    carry over — but a module-global that survives a test is worth clearing
+    rather than reasoning about, especially under xdist where the ordering is
+    not the file's.
+    """
+    su._NO_CREDENTIAL_AT.clear()
+    yield
+    su._NO_CREDENTIAL_AT.clear()
+
+
 # ---------------------------------------------------------------------------
 # Fixture payload
 # ---------------------------------------------------------------------------
@@ -1822,6 +1836,56 @@ class TestFailureTimerFile:
         su.write_failure(p, now_ts=NOW, error="", token_source="env")
         assert not p.exists()
 
+    @pytest.mark.parametrize("error", [None, 7, [], {"a": 1}, True, "   "])
+    def test_a_write_with_an_unusable_error_records_nothing_and_does_not_raise(
+        self, tmp_path, error
+    ):
+        """These are public names, so "nothing here raises" has to hold directly.
+
+        Truncating a non-string argument would have raised out of a function
+        documented as best-effort, and ``get_snapshot``'s blanket guard is no
+        answer for a caller that reaches this one on its own.
+        """
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error=error, token_source="env")
+        assert not p.exists()
+
+    @pytest.mark.parametrize("token_source", ["kubernetes", "ENV", 7, None, ""])
+    def test_an_unusable_token_source_is_refused_on_the_way_in_too(
+        self, tmp_path, token_source
+    ):
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error="boom", token_source=token_source)
+        recorded = su.read_failure(p, 300, now_ts=NOW + 10)
+        assert recorded is not None
+        assert recorded.token_source == ""
+
+    @pytest.mark.parametrize("clock", [float("nan"), float("inf"), float("-inf")])
+    def test_a_nonsense_clock_is_no_backoff(self, tmp_path, clock):
+        """A ``nan`` age satisfies neither comparison, so it must read as expired.
+
+        Written as ``0 <= age < ttl`` rather than ``age >= ttl`` for exactly
+        this: the naive form leaves ``nan`` inside the window and suppresses the
+        reading permanently. Not reachable from either caller today — both pass a
+        real clock — but the module's discipline is to reject a non-finite number
+        at the door, and this is the one comparison that could have let one in.
+        """
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error="boom", token_source="env")
+        assert su.read_failure(p, 300, now_ts=clock) is None
+
+    def test_an_implausibly_large_file_is_no_backoff(self, tmp_path):
+        """Capped at the read, not after rebuilding it character by character.
+
+        Nothing outside this module guarantees what is in a shared data dir, and
+        this read is on the daemon's boot path.
+        """
+        p = _timer(tmp_path)
+        p.write_text(
+            json.dumps({"version": 1, "failed_at": NOW, "error": "x" * (2 << 20)})
+        )
+        assert su.read_failure(p, 300, now_ts=NOW + 10) is None
+
     def test_clear_removes_it_and_is_idempotent(self, tmp_path):
         p = _timer(tmp_path)
         su.write_failure(p, now_ts=NOW, error="boom", token_source="env")
@@ -1972,8 +2036,93 @@ class TestFailureBackoff:
             assert snap.error == su.NO_CREDENTIAL_ERROR
             assert snap.token_source == ""
         assert len(runs) == 1
-        # The absent credential is still not in the *reading* cache.
+        # The absent credential is still not in the *reading* cache — and not in
+        # the shared timer either. It is this process's answer, not the
+        # deployment's; see `test_the_no_credential_record_is_not_shared`.
         assert not su.cache_path(tmp_path).exists()
+        assert not _timer(tmp_path).exists()
+
+    def test_the_no_credential_record_is_not_shared_between_processes(
+        self, tmp_path, monkeypatch
+    ):
+        """`resolve_token` reads *this process's* environment and home directory.
+
+        `istota-scheduler` and `istota-web` take the token from a systemd
+        `EnvironmentFile`; an operator's `istota doctor` in a shell usually does
+        not, and on macOS a background agent and a login session do not see the
+        same keychain. If one process's "no credential" went into the file the
+        others read, one read-only diagnostic run would tell the dashboard for a
+        full TTL that there is no credential while the daemon was using one.
+
+        Clearing the module-global stands in for the second process; the file is
+        the only thing the two would really share.
+        """
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        config = _config(tmp_path)
+        first = su.get_snapshot(
+            config, now_ts=NOW, transport=_stub_transport(), env={}, home=tmp_path
+        )
+        assert first.error == su.NO_CREDENTIAL_ERROR
+        assert not _timer(tmp_path).exists()
+
+        su._NO_CREDENTIAL_AT.clear()  # a different process, same data dir
+        calls: list = []
+        second = su.get_snapshot(
+            config,
+            now_ts=NOW + 60,
+            transport=_stub_transport(calls=calls),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert second.ok
+        assert len(calls) == 1
+
+    def test_a_rejected_credential_is_shared_because_the_endpoint_said_so(
+        self, tmp_path
+    ):
+        """The other half of the same rule: a 403 *is* a deployment-wide fact.
+
+        Which is why it goes in the file and survives the process that saw it.
+        """
+        su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        recorded = su.read_failure(_timer(tmp_path), 300, now_ts=NOW + 60)
+        assert recorded is not None
+        assert recorded.error == "the usage endpoint returned HTTP 403"
+
+    def test_a_suppressed_no_credential_call_matches_the_live_one(self, tmp_path, monkeypatch):
+        """Same on-disk state, one minute apart, must read the same.
+
+        With a stale cache present the two branches could easily disagree — the
+        live one returns no data, and a replay routed through the stale fallback
+        would return windows beside `NO_CREDENTIAL_ERROR`, a pairing the live
+        path cannot produce and that doctor's branch order is not written for.
+        The dashboard would then alternate between "unavailable" and "stale
+        reading" every poll with nothing on the host changing.
+        """
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        config = _config(tmp_path)
+        seen = [
+            su.get_snapshot(
+                config,
+                now_ts=NOW + offset,
+                transport=_stub_transport(),
+                env={},
+                home=tmp_path,
+            )
+            for offset in (400, 460, 520)
+        ]
+        for snap in seen:
+            assert snap.source == "none"
+            assert snap.error == su.NO_CREDENTIAL_ERROR
+            assert not snap.has_data
+
 
     def test_the_keychain_subprocess_is_spawned_once(self, tmp_path, monkeypatch):
         """The cost the timer actually exists to bound on a developer's laptop."""
@@ -1996,25 +2145,44 @@ class TestFailureBackoff:
             )
         assert len(spawns) == 1
 
-    def test_a_credential_appearing_later_is_picked_up_within_one_ttl(
+    def test_a_credential_appearing_later_waits_out_one_ttl_and_no_more(
         self, tmp_path, monkeypatch
     ):
-        """The trade the amendment accepts: one TTL of delay, not indefinite."""
+        """The trade the amendment accepts, both halves of it.
+
+        A token added five minutes after the check that found none is not picked
+        up instantly — that is the cost of not re-resolving — but the wait is one
+        TTL and the delay is bounded to the process that did the checking.
+        """
         monkeypatch.setattr(su.platform, "system", lambda: "Linux")
         config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
         snap = su.get_snapshot(
             config, now_ts=NOW, transport=_stub_transport(), env={}, home=tmp_path
         )
         assert snap.error == su.NO_CREDENTIAL_ERROR
+
+        calls: list = []
+        early = su.get_snapshot(
+            config,
+            now_ts=NOW + 60,
+            transport=_stub_transport(calls=calls),
+            env=env,
+            home=tmp_path,
+        )
+        assert early.error == su.NO_CREDENTIAL_ERROR
+        assert calls == []
+
         snap = su.get_snapshot(
             config,
             now_ts=NOW + 300,
-            transport=_stub_transport(),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            transport=_stub_transport(calls=calls),
+            env=env,
             home=tmp_path,
         )
         assert snap.ok
         assert snap.token_source == "env"
+        assert len(calls) == 1
 
     def test_a_stale_cache_is_still_served_during_the_backoff(self, tmp_path):
         """Constraint 3: an old real reading outranks a fresh failure."""
