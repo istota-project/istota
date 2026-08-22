@@ -34,6 +34,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # The forge-binary resolution rule lives in a stdlib-only leaf so `doctor` can
 # reach it without importing `istota.skills` (whose __init__ star-imports every
@@ -78,7 +79,46 @@ def _write_forge_cli(dev_bin: Path, name: str) -> Path:
     )
 
 
-def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
+def _plain_http_host_entry(forge_url: str) -> str:
+    """glab's config for a forge reached over plain HTTP, or "" for anything else.
+
+    glab discards the scheme inside ``GITLAB_HOST`` and keeps the port, so a
+    deployment configured against ``http://gitlab.internal:8080`` forces https
+    and every call dies with "tls: first record does not look like a TLS
+    handshake". Measured on glab 1.114.0, the version ``docker/devbox`` pins.
+    ``GITLAB_API_PROTOCOL`` is not read either; the one lever glab offers is a
+    per-host ``api_protocol`` in its own config file.
+
+    That file is the one ``_seed_cli_config_dir`` truncates on every task, so
+    the entry has to be written by the same code that empties it — a caller
+    cannot seed it and have it survive.
+
+    Returns "" for https and for an unset URL, which keeps the file empty
+    wherever it does not have to carry something: whatever is in it is honoured
+    by both CLIs before dispatch, so it is not a surface to grow idly.
+    """
+    if not forge_url:
+        return ""
+    parts = urlsplit(forge_url if "://" in forge_url else f"https://{forge_url}")
+    if parts.scheme != "http":
+        return ""
+    # `netloc`, not `hostname`: glab looks the entry up by the host:port it
+    # derived from GITLAB_HOST, so an entry filed under the bare hostname is
+    # never consulted and the call still forces https.
+    host = parts.netloc
+    if not host:
+        return ""
+    # Quoted, because a netloc carrying a port is a YAML mapping key containing
+    # a colon — unquoted, that is not the key it looks like.
+    return (
+        "hosts:\n"
+        f'  "{host}":\n'
+        "    api_protocol: http\n"
+        f'    api_host: "{host}"\n'
+    )
+
+
+def _seed_cli_config_dir(dev_bin: Path, name: str, *, forge_url: str = "") -> Path:
     """A pre-seeded CLI config directory, at the modes each CLI will accept.
 
     ``config.yml`` is mode 0600, not 0400, because glab refuses to start on
@@ -90,17 +130,25 @@ def _seed_cli_config_dir(dev_bin: Path, name: str) -> Path:
     Seeding an empty file rather than leaving the directory bare is
     deliberate. gh expands ``aliases`` from ``config.yml`` *before* command
     dispatch, so an absent file is one the model could otherwise supply.
+
+    ``forge_url`` is consulted only to reach a plain-HTTP forge — see
+    :func:`_plain_http_host_entry`. It is passed for both CLIs and matters for
+    neither gh nor an https GitLab; gh cannot address a non-443 forge at all
+    (``forge_cli._hostname`` strips the port by construction), so there is
+    nothing an entry here could fix for it.
     """
     cfg = dev_bin / name
     cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
     config_yml = cfg / "config.yml"
-    # Truncated on every run, not seeded once. user_temp_dir persists across
-    # tasks, so a "write it only if absent" guard would make the seed a
-    # one-time act: anything that got an alias table in there once — a
-    # deployment without bwrap, or a host-side write — would have it honoured
-    # by every later task. The wrapper and the policy are both rewritten
-    # unconditionally; this is the file that most needs to be.
-    _atomic_write(config_yml, "", 0o600)
+    # Rewritten on every run, not seeded once, and *replaced* rather than
+    # appended to. user_temp_dir persists across tasks, so a "write it only if
+    # absent" guard would make the seed a one-time act: anything that got an
+    # alias table in there once — a deployment without bwrap, or a host-side
+    # write — would have it honoured by every later task. The wrapper and the
+    # policy are both rewritten unconditionally; this is the file that most
+    # needs to be. Everything written here is derived from config, so a
+    # non-empty body is as reproducible as the empty one it replaced.
+    _atomic_write(config_yml, _plain_http_host_entry(forge_url), 0o600)
     return cfg
 
 
@@ -229,7 +277,9 @@ def setup_env(ctx) -> dict[str, str]:
             )
             section["url"] = url
             section["real_bin"] = real_bin
-            section["config_dir"] = str(_seed_cli_config_dir(dev_bin, f"{forge}-config"))
+            section["config_dir"] = str(
+                _seed_cli_config_dir(dev_bin, f"{forge}-config", forge_url=url)
+            )
             section["data_dir"] = str(_pinned_data_dir(dev_bin, f"{forge}-data"))
             section["state_dir"] = str(state_dir)
             # With the skill proxy off there is no socket to ask, and the

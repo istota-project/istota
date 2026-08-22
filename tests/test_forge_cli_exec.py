@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -732,6 +733,88 @@ class TestAgainstRealBinary:
         finally:
             strict.chmod(0o700)
             loose.chmod(0o700)
+
+    def test_real_glab_reaches_a_plain_http_forge_through_the_seeded_config(
+        self, deployed, tmp_path, sock_path
+    ):
+        """The whole plain-HTTP chain, against the real binary and a real socket.
+
+        `TestPlainHttpGitlabReachesTheConfiguredHost` in tests/test_executor.py
+        asserts the *shape* of the file the deployment seeds. Shape is not the
+        property that matters — glab either reaches the listener or it does
+        not, and a file that parses as the right YAML while naming a key glab
+        never consults would pass every assertion there.
+
+        So this seeds the config with the same production helper, starts a
+        plain-HTTP listener, and asserts a request physically arrived. Without
+        the seeded entry glab forces https and dies on the TLS handshake, which
+        is what the deployment did before the entry existed.
+        """
+        glab = shutil.which("glab")
+        if glab is None:
+            pytest.skip("glab not installed")
+        from istota.skills.developer import _seed_cli_config_dir
+
+        seen = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("PRIVATE-TOKEN") or ""))
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(
+            target=lambda: server.serve_forever(poll_interval=0.02), daemon=True
+        )
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+
+        glab_wrapper = deployed[0].parent / "glab"
+        shutil.copy(_MODULE, glab_wrapper)
+        glab_wrapper.chmod(0o700)
+        cfg = _seed_cli_config_dir(tmp_path, "gitlab-config", forge_url=url)
+        _write_policy(glab_wrapper.parent, glab, cfg, forge="gitlab", url=url)
+
+        proxy = FakeCredentialProxy(sock_path, {"value": SENTINEL})
+        try:
+            result = _run(
+                glab_wrapper,
+                ["api", "/projects"],
+                {"ISTOTA_SKILL_PROXY_SOCK": proxy.path},
+            )
+        finally:
+            proxy.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        assert result.returncode == 0, (
+            f"glab did not reach the plain-HTTP forge\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        )
+        assert seen, (
+            "nothing reached the listener; glab most likely forced https\n"
+            f"--- stderr ---\n{result.stderr}"
+        )
+        path, token = seen[0]
+        assert path == "/api/v4/projects", path
+        # The token was injected on the way through. Its *value* is not
+        # asserted — the length is enough to say one arrived, and a failing
+        # assertion here renders into the report.
+        assert len(token) == len(SENTINEL), (
+            "no token reached the forge; the wrapper fetched one but did not "
+            "pass it on"
+        )
 
     def test_real_gh_ignores_a_planted_extension(self, deployed, tmp_path, sock_path):
         """gh execs gh-<name> from $XDG_DATA_HOME/gh/extensions for an unknown

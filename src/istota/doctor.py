@@ -45,6 +45,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
     from .config import Config
@@ -1018,6 +1019,91 @@ def check_forge_policy(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
+    """A forge token that travels over plain HTTP.
+
+    WARN, never FAIL: the operator wrote the `http://` themselves, the
+    deployment works, and refusing to run over it is not doctor's call. What it
+    is is a credential leaving the host in cleartext, which nothing else in the
+    report says.
+
+    This is newly reachable rather than newly true. A plain-HTTP `gitlab_url`
+    used to die at the TLS handshake — glab forces https and discards the
+    scheme in `GITLAB_HOST` — so no token ever left, and the deployment was
+    broken rather than insecure. The developer skill now seeds glab's own
+    `api_protocol` for that case (`_plain_http_host_entry`), which makes the
+    call work and the plaintext transport real.
+
+    Both forges are checked even though gh cannot address a non-443 host at
+    all: `forge_cli._hostname` strips the port, so gh would reach
+    `https://<host>` instead. The scheme is still what the operator wrote, and
+    reporting on the deployment we wish they had is how a check earns being
+    ignored.
+
+    The detail names the URL and never the token. A URL can carry userinfo, so
+    it is redacted rather than printed raw.
+    """
+    dev, reason = _dev_gate(config)
+    if dev is None:
+        return CheckResult("developer.forge_transport", SKIP, reason, scope=DEPLOYMENT)
+    token_reason = _forge_token_gate(dev)
+    if token_reason:
+        return CheckResult(
+            "developer.forge_transport", SKIP, token_reason, scope=DEPLOYMENT
+        )
+
+    plaintext = []
+    for label, url, token in (
+        ("gitlab_url", dev.gitlab_url, dev.gitlab_token),
+        ("github_url", dev.github_url, dev.github_token),
+    ):
+        # Only where a token would actually be sent. A configured-but-tokenless
+        # forge sends no credential, so its scheme is not this check's business.
+        if not token or not url:
+            continue
+        if urlsplit(url).scheme == "http":
+            plaintext.append(f"{label} = {_redact_userinfo(url)}")
+
+    if not plaintext:
+        return CheckResult(
+            "developer.forge_transport",
+            OK,
+            "every configured forge with a token is reached over https",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        "developer.forge_transport",
+        WARN,
+        f"a forge token is sent over plain HTTP: {', '.join(plaintext)}",
+        remedy=(
+            "Point the URL at https, or accept that the token — and everything "
+            "the CLI sends with it — crosses the network in the clear. A "
+            "loopback URL is usually a tunnel, and what is on its far side is "
+            "not visible from here."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
+def _redact_userinfo(url: str) -> str:
+    """A URL safe to print: userinfo replaced, everything else intact.
+
+    A forge URL is operator-written config and is not supposed to carry
+    credentials, but `https://user:token@host` parses fine and this string goes
+    straight into a report that reaches the admin dashboard and the log.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "(unparseable)"
+    if "@" not in (parts.netloc or ""):
+        return url
+    _, _, hostport = parts.netloc.rpartition("@")
+    return urlunsplit(
+        (parts.scheme, hostport, parts.path, parts.query, parts.fragment)
+    )
+
+
 # ---------------------------------------------------------------------------
 # web.*
 # ---------------------------------------------------------------------------
@@ -1212,6 +1298,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.forge_versions", check_forge_versions),
     ("developer.forge_wrapper_shadowing", check_forge_wrapper_shadowing),
     ("developer.forge_policy", check_forge_policy),
+    ("developer.forge_transport", check_forge_transport),
     ("web.static", check_web_static),
     ("sandbox.masks", check_sandbox_masks),
 )
@@ -1241,6 +1328,7 @@ CHECK_SCOPES: dict[str, str] = {
     "developer.forge_versions": IMAGE,
     "developer.forge_wrapper_shadowing": IMAGE,
     "developer.forge_policy": DEPLOYMENT,
+    "developer.forge_transport": DEPLOYMENT,
     "web.static": IMAGE,
     "sandbox.masks": DEPLOYMENT,
 }

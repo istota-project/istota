@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A self-hosted GitLab reached over plain `http://` now works. The GitLab CLI ignores the scheme in the address it is given and always tries HTTPS, so every forge command against such a server died on the TLS handshake with an error naming a protocol nobody had configured. The bot now tells the CLI which protocol to use for that host, so the address you wrote is the one it uses. `istota doctor` warns while this is in effect, because a forge token then crosses the network in the clear — treat an HTTPS address as the default and plain HTTP as something you chose.
+
 - A quote or a backslash in a password no longer breaks a fresh Docker install. The container writes its own settings file on first boot, and it dropped four values straight in without escaping them — your Nextcloud app password, your mail password and both forge tokens. A double quote in any of them ended the value early and left the file unreadable, while the boot log still said the settings had been written; every later boot then reused the broken file, because the container only generates one when none exists. If you hit this, delete the generated file and restart the container.
 
 - A settings file that fails to generate no longer leaves a broken one behind. Generation writes to a temporary file and moves it into place at the end, so an interruption part-way through — no disk space, a missing dependency — now fails the boot loudly instead of leaving a half-written file that every later boot accepts as finished.
