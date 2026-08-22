@@ -7,9 +7,10 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 
 
 from typing import TYPE_CHECKING
@@ -19,6 +20,12 @@ from .brain import Brain, EFFORT_LEVELS, make_brain
 from .memory import search as memory_search_mod
 from .process_group import kill_process_group
 from .config import Config
+# The cost-render rule, imported rather than copied. It already has two
+# implementations — this one and `web/src/lib/usageFormat.ts` — pinned against
+# each other by a parity test; a third, inside a surface, is exactly what those
+# tests exist to prevent. `usage_render` is a stdlib-only leaf, so it costs this
+# module (imported on the Talk polling path) nothing to take at import time.
+from .usage_render import COST_PLACEHOLDER, fmt_int, fmt_money, render_cost
 
 if TYPE_CHECKING:
     from .transport.registry import TransportRegistry
@@ -100,6 +107,11 @@ _COMMAND_ALIASES: dict[str, str] = {
     "n": "confirm",
     "decline": "confirm",
     "reject": "confirm",
+    # For the reader who wants only the plan windows and guesses a name for
+    # them. It runs the same handler and does not filter the output — the token
+    # totals directly above the windows are half of the answer to "how much
+    # headroom is left", and splitting them would mean always typing both.
+    "limits": "usage",
 }
 
 # Brain kinds that can actually be steered mid-flight today (`!steer`). A brain
@@ -874,6 +886,327 @@ async def cmd_status(ctx: CommandContext):
         lines.append(f"**System:** {total_running} running, {total_pending} queued")
 
     return "\n".join(lines)
+
+
+# =============================================================================
+# !usage command
+# =============================================================================
+
+# The 20-character ASCII bar the removed `!usage` drew, kept as it was: it reads
+# well in a chat client, needs no markup, and is the one thing the admin card
+# cannot do as compactly.
+_USAGE_BAR_WIDTH = 20
+
+# A reading younger than this gets no age footer. A timestamp on every reply is
+# noise; past a minute the number is old enough that a reader deciding whether to
+# start a long run deserves to know how old it is.
+_USAGE_FRESH_SECONDS = 60
+
+
+@command("usage", "Show token usage, and plan limits on a subscription")
+async def cmd_usage(ctx: CommandContext):
+    """Token and cost totals, plus the Claude Code plan windows for an admin.
+
+    Deliberately the same report as `istota usage` (`cli.cmd_usage`) and the
+    dashboard's Token usage card, with one section they do not have — which is
+    why the handler shares a name with the CLI's rather than apologising for it.
+
+    **Three sections, gated additively**, exactly as `cmd_status` above appends
+    its `**System:**` block: everyone sees their own token totals, an admin sees
+    the fleet's, the by-brain split and the plan. No `_ADMIN_ONLY` set, no
+    `dispatch` gate, no `!help` filter and no catalogue filter — the command is
+    useful to everyone and only its account-wide parts are withheld. A non-admin
+    is told nothing about what is missing, the way `!status` simply omits its
+    system line.
+
+    **Section 3 is gated on whether a reading is available, not on
+    `config.brain.kind`.** `source_type_overrides` and `[brain] fallback` between
+    them make the configured brain a poor proxy for "does this deployment burn
+    the subscription" — a `native` deployment with a `claude_code` fallback is
+    the case that most needs the number, and a `claude_code` one with an override
+    sending scheduled work elsewhere still burns it. A credential the endpoint
+    answers for is direct evidence instead. With no reading the section is
+    omitted silently; a chat reply is not where an unreachable diagnostic
+    endpoint gets reported, and `runtime.subscription_usage` says so properly.
+
+    This handler renders and nothing else. The credential, the request, the parse
+    and the deployment-wide cache all live in `subscription_usage`, so `!usage`,
+    the admin card and the doctor check share one reading and one parser — the
+    restored command is not the one that was deleted, which carried its own HTTP
+    call, its own token reader and its own formatter.
+    """
+    import asyncio
+
+    config, user_id = ctx.config, ctx.user_id
+    is_admin = config.is_admin(user_id)
+
+    # Both halves block — SQLite queries, and on a cache miss an HTTPS GET — and
+    # this coroutine runs on the loop that polls every Talk conversation. Hence
+    # `to_thread` rather than `cmd_check`'s bare `subprocess.run`.
+    lines = await asyncio.to_thread(_usage_token_sections, config, user_id, is_admin)
+
+    if is_admin:
+        # Imported here, not at module scope: `commands` is imported on the Talk
+        # polling path and `subscription_usage` pulls in urllib and subprocess.
+        from . import subscription_usage
+
+        # One clock for the fetch, the cache freshness and the age footer.
+        now = time.time()
+        snapshot = await asyncio.to_thread(
+            subscription_usage.get_snapshot, config, now_ts=now
+        )
+        lines += _usage_plan_section(snapshot, config, user_id, now)
+
+    return "\n".join(lines)
+
+
+def _usage_token_sections(config: Config, user_id: str, is_admin: bool) -> list[str]:
+    """Sections 1 and 2, from `task_usage`. Blocking — call it in a thread.
+
+    Opens its own connection rather than taking the handler's: this runs in a
+    worker thread, and a sqlite3 connection refuses to be used from any thread
+    but the one that made it, which in `dispatch` is the event loop's.
+    `outbound_drafts.release` reaches the database from `!drafts` the same way.
+    """
+    now = datetime.now(timezone.utc)
+    day_since = _usage_since(now, 1)
+    month_since = _usage_since(now, 30)
+    # A non-admin is filtered to their own rows and learns nothing about anyone
+    # else's consumption; an admin gets the fleet.
+    scope = None if is_admin else user_id
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            day = db.usage_summary(conn, since=day_since, user_id=scope)
+            month = db.usage_summary(conn, since=month_since, user_id=scope)
+            brains = (
+                db.usage_summary(conn, since=month_since, group_by="brain")
+                if is_admin
+                else []
+            )
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        # A fresh deployment, not a fault: the table is created on the next
+        # database open. Guarded because `dispatch` turns anything raised here
+        # into "Command `!usage` failed: no such table: task_usage" in a chat
+        # room, and because section 3 is still worth rendering underneath.
+        return [
+            "**Token usage**",
+            "",
+            "No usage data yet — the `task_usage` table is created on the next "
+            "database open.",
+        ]
+
+    lines = [f"**Token usage** — {'fleet' if is_admin else user_id}", ""]
+    if not day["rows"] and not month["rows"]:
+        # Not a row of zeroes, which reads as a measured nothing. `istota usage`
+        # declines the same way.
+        lines.append("No usage recorded.")
+    else:
+        lines.append(f"- 24h: {_usage_totals_line(day)}")
+        lines.append(f"- 30d: {_usage_totals_line(month)}")
+
+    if brains:
+        # The section that answers "which brain is spending", and the reason the
+        # command needs no brain in its name.
+        lines += ["", "**By brain** (30d)", ""]
+        for group in brains:
+            key = str(group.get("key") or "unknown")
+            lines.append(
+                f"- {key}: {_compact_tokens(group['total_tokens'])} tokens, "
+                f"{render_cost(group['cost_by_basis'])}"
+            )
+    return lines
+
+
+def _usage_since(now: datetime, days: int) -> str:
+    """A window bound in the format `task_usage.created_at` stores.
+
+    ISO-Z, not `datetime('now')`. `' '` sorts below `'T'`, so a space-separated
+    bound against this column is silently wrong rather than an error.
+    """
+    start = now - timedelta(days=days)
+    return start.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start.microsecond // 1000:03d}Z"
+
+
+def _usage_totals_line(summary: dict) -> str:
+    """One window's row count, tokens, cache hit rate and cost."""
+    rows = summary["rows"]
+    return (
+        f"{fmt_int(rows)} row{'' if rows == 1 else 's'}, "
+        f"{_compact_tokens(summary['total_tokens'])} tokens, "
+        f"{summary['cache_hit_rate'] * 100:.0f}% cached, "
+        f"{render_cost(summary['cost_by_basis'])}"
+    )
+
+
+def _compact_tokens(value) -> str:
+    """`31.4M`, `1.2M`, `9,840`.
+
+    Compact only past a million, where the separators stop helping: the CLI's
+    table gives a fleet total 15 characters of its own, while a chat line carries
+    four figures and has to stay one line. Below that the comma-grouped integer
+    is both shorter and exact.
+    """
+    try:
+        total = int(value or 0)
+    except (TypeError, ValueError):
+        return COST_PLACEHOLDER
+    for unit, size in (("B", 1_000_000_000), ("M", 1_000_000)):
+        if abs(total) >= size:
+            return f"{total / size:.1f}{unit}"
+    return f"{total:,}"
+
+
+def _usage_plan_section(snapshot, config: Config, user_id: str, now_ts: float) -> list[str]:
+    """Section 3 — the plan windows — or nothing at all.
+
+    Omitted silently when there is nothing to show. A *stale* reading is not
+    nothing: an old real number outranks a blank, and the footer admits its age.
+
+    The heading names the brain, which is the disambiguation a `!cc-` prefix
+    would have bought without spending the command name on it (and `!cc-usage` is
+    unspellable anyway — `parse_command`'s `\\w` excludes hyphens).
+    """
+    if not getattr(snapshot, "has_data", False):
+        return []
+
+    zone, zone_is_fallback = _usage_timezone(config, user_id)
+    lines = ["", "**Claude Code subscription**", ""]
+    for window in snapshot.windows:
+        lines.append(
+            f"- {window.label}: [{_usage_bar(window.percent)}] "
+            f"{window.percent:.0f}%{_usage_reset(window, zone, zone_is_fallback)}"
+        )
+
+    spend = snapshot.spend
+    if spend is not None and spend.enabled:
+        # Money the account has actually committed, reported in minor units with
+        # an explicit currency — not a token count priced at list. That is why it
+        # does not contradict the rule keeping a dollar figure off the lines
+        # above on a subscription deployment.
+        lines += [
+            "",
+            f"**Extra usage:** {_usage_money(spend.used_minor, spend)} / "
+            f"{_usage_money(spend.limit_minor, spend)} ({spend.percent:.0f}%)",
+        ]
+
+    age = snapshot.age_seconds(now_ts)
+    if snapshot.error or age > _USAGE_FRESH_SECONDS:
+        # The error itself stays out of the reply: what went wrong belongs in
+        # `runtime.subscription_usage`, and all a reader needs here is that the
+        # number is not current.
+        lines += ["", f"_Reading is {_usage_age(age)} old._"]
+    return lines
+
+
+def _usage_bar(percent: float) -> str:
+    """A 20-character bar, filled proportionally.
+
+    The module clamps `percent` to [0, 100] on the way in; the clamp is repeated
+    because this renders a fixed-width field and a value arriving some other way
+    would otherwise produce a ragged one, or a negative repeat count.
+    """
+    try:
+        ratio = float(percent) / 100.0
+    except (TypeError, ValueError):
+        ratio = 0.0
+    if ratio != ratio:  # NaN, which compares false against everything including 0
+        ratio = 0.0
+    filled = min(_USAGE_BAR_WIDTH, max(0, round(ratio * _USAGE_BAR_WIDTH)))
+    return "#" * filled + "-" * (_USAGE_BAR_WIDTH - filled)
+
+
+def _usage_reset(window, zone: tzinfo, zone_is_fallback: bool) -> str:
+    """`" (resets Aug 22 17:40)"` in the reader's own clock, or nothing.
+
+    Absolute, where the admin card's sub-line is relative: a chat reply is read
+    once and possibly hours later, while the card re-renders every 60 seconds.
+    Both derive from the one `resets_at`.
+    """
+    raw = getattr(window, "resets_at", None)
+    if not raw:
+        return ""
+    try:
+        text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = datetime.fromisoformat(text)
+    except (AttributeError, TypeError, ValueError):
+        # The module carries an unparseable value through verbatim rather than
+        # dropping the window. It is not a clock time, so it does not go on the
+        # line — the percentage is still the reading.
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    local = parsed.astimezone(zone)
+    # Built field by field rather than with `%-d`, which is a glibc/BSD
+    # extension rather than a portable strftime directive.
+    stamp = f"{local:%b} {local.day} {local:%H:%M}"
+    if zone_is_fallback:
+        # Name the clock, because it is not the reader's own.
+        stamp += " UTC"
+    return f" (resets {stamp})"
+
+
+def _usage_timezone(config: Config, user_id: str) -> tuple[tzinfo, bool]:
+    """`(zone, is_utc_fallback)` for the invoking user.
+
+    A user with no profile, or one whose configured `timezone` does not parse,
+    gets UTC — and the caller says "UTC" on the line rather than silently
+    rendering another zone's clock time as if it were theirs.
+    """
+    from zoneinfo import ZoneInfo
+
+    user = config.get_user(user_id)
+    name = str(getattr(user, "timezone", "") or "") if user is not None else ""
+    if name:
+        try:
+            return ZoneInfo(name), False
+        except Exception:
+            # A typo in a profile is not a reason to fail a reply.
+            logger.debug("unusable timezone %r for %s in !usage", name, user_id)
+    return timezone.utc, True
+
+
+def _usage_money(minor: int, spend) -> str:
+    """A pay-as-you-go amount, in major units of its own currency.
+
+    The divisor comes from the payload's own `exponent`, never a hardcoded 100:
+    that is wrong for every currency that is not two-decimal, and it is the bug
+    the removed implementation carried.
+    """
+    try:
+        exponent = int(spend.exponent)
+    except (AttributeError, TypeError, ValueError):
+        exponent = 2
+    try:
+        major = float(minor) / (10 ** max(0, exponent))
+    except (TypeError, ValueError):
+        return COST_PLACEHOLDER
+    currency = str(getattr(spend, "currency", "") or "USD")
+    return f"${fmt_money(major)}" if currency == "USD" else f"{fmt_money(major)} {currency}"
+
+
+def _usage_age(seconds: float) -> str:
+    """`45s`, `2m`, `1h 04m`, `6d 2h`. Two units at most.
+
+    `doctor._duration` is the same six lines, and is not imported: `doctor` is
+    reached from inside every `load_config`, while this module sits on the Talk
+    polling path, so the dependency would run the wrong way for a formatter this
+    small. The cost rule is shared because it carries a correctness rule; a
+    coarse duration does not.
+    """
+    total = int(max(0.0, seconds))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
 
 
 @command("memory", "Show memory: `!memory user`, `!memory channel`, `!memory facts`")
