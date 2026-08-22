@@ -79,10 +79,25 @@ FORGE = Profile("forge", services=("model", "gitlab"))
 # session's real image turned out to be — there is no constant to write down.
 NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 
+# Exactly one full profile, and the asymmetry with the lean shape above is
+# deliberate. The argument for fine-grained profiles — that a stack with every
+# subsystem enabled has the daemon polling mail, feeds and Talk during every
+# unrelated test — is an argument about a thirty-second boot. It inverts at ten
+# minutes: `StackPool` keys by profile name, so `full` and `full-mail` would be
+# two cold boots of the same six containers to run four scenarios. One profile
+# is where the tier spends its cold boot, and the extra poller is what the
+# watermark discipline absorbs.
+#
+# The `mail` service the spec's sketch names is not here yet — Stage 6 adds it,
+# along with the overlay that runs the container. A profile naming a service the
+# registry does not hold fails the guard in `tests/test_testbed_services.py`,
+# which is the point of that guard.
+FULL = Profile("full", shape="full", services=("model", "nextcloud"))
+
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
-ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE)
+ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, FULL)
 
 
 def by_name(name: str) -> Profile:

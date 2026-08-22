@@ -1,0 +1,584 @@
+"""The full tier's own wiring, held down without booting six containers.
+
+`tests/full/` costs a cold boot of the deployment as shipped, so everything
+about it that *can* be checked in the default suite is checked here instead —
+the same split, and the same reasoning, as `tests/test_smoke_tier.py` one shape
+over. The difference is that the thing most worth guarding here is not a fixture
+but a *map*: `full_env` decides which subsystems a `full` profile actually turns
+on, which credentials the stack gets, and what URL Nextcloud will bake into its
+`oauth2_clients` row at first install. Every one of those is a pure function of
+a profile and a credential set, and a wrong answer costs ten minutes to discover
+any other way.
+
+Two tests shell out to `docker compose config`, which is compose's own parser
+and the only thing that applies the interpolation and schema rules a real
+invocation will. It parses locally and needs no daemon.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from testbed import profiles
+from testbed import stack as compose_support
+from testbed.services import nextcloud as nextcloud_service
+
+REPO = Path(__file__).resolve().parents[1]
+FULL_COMPOSE = REPO / "docker" / "docker-compose.yml"
+TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+
+#: Obviously fake, so nothing here invents a credential-shaped string.
+CREDENTIALS = compose_support.FullCredentials(
+    postgres_password="unit-test-postgres",
+    admin_password="unit-test-admin",
+    bot_password="unit-test-bot",
+    user_password="unit-test-user",
+    nc_port=18080,
+)
+
+
+class _Stub:
+    """A `Service` for the parts of `full_env` that only read `config_env`."""
+
+    def __init__(self, name: str, env: dict[str, str] | None = None) -> None:
+        self.name = name
+        self._env = env or {}
+
+    def config_env(self) -> dict[str, str]:
+        return dict(self._env)
+
+
+class TestTheModuleSwitches:
+    """What makes `Profile` mean anything on this shape.
+
+    `docker-compose.yml` defaults every subsystem on. A `full` profile declaring
+    two services would otherwise boot a daemon polling mail, feeds, Talk, money,
+    location, both sleep cycles and a browser that is not in the tier — which is
+    exactly what the profile mechanism exists to prevent, and which on a shape
+    with one shared stack couples every test to every background loop.
+    """
+
+    def test_everything_is_off_unless_a_service_asks_for_it(self):
+        environment = compose_support.full_env({}, CREDENTIALS)
+
+        for variable in compose_support.FULL_MODULE_SWITCHES:
+            assert environment[variable] == "false", variable
+
+    def test_nextcloud_in_the_profile_is_what_turns_talk_on(self):
+        """And it is the map's job rather than the service's `config_env()`.
+
+        `NextcloudService.config_env()` is empty by design: the shipped compose
+        file already points the daemon at its own `nextcloud`, so a service
+        inventing a variable to announce its presence would be the fixture
+        side-loading config. Whether Talk is *enabled* is a profile question,
+        and this is where a profile answers it.
+        """
+        with_nc = compose_support.full_env({"nextcloud": _Stub("nextcloud")}, CREDENTIALS)
+        without = compose_support.full_env({}, CREDENTIALS)
+
+        assert with_nc["ISTOTA_TALK_ENABLED"] == "true"
+        assert without["ISTOTA_TALK_ENABLED"] == "false"
+
+    def test_every_switch_names_a_variable_the_compose_file_passes_through(self):
+        """The two-file constraint, on the map rather than on a service.
+
+        A switch compose does not pass through is a switch that does nothing,
+        and the symptom is a poller running through every test in a profile that
+        declared it off. Grepped against the shipped file, which is the only
+        thing that decides.
+        """
+        body = FULL_COMPOSE.read_text()
+        for variable in compose_support.FULL_MODULE_SWITCHES:
+            assert f"{variable}: ${{{variable}" in body, variable
+
+    def test_every_owner_is_a_service_that_exists_or_is_planned(self):
+        """A typo in an owner name silently leaves its module off forever.
+
+        `mail` and `feeds` are named by the map before the registry holds them,
+        because the switches they own are the ones a `full` profile most needs
+        turned *off* today. `PLANNED_SERVICES` is what keeps the guard from
+        degrading into "accept any string".
+        """
+        from testbed.services import REGISTRY
+
+        known = set(REGISTRY) | compose_support.PLANNED_SERVICES
+        for variable, owner in compose_support.FULL_MODULE_SWITCHES.items():
+            assert owner == "" or owner in known, (variable, owner)
+
+    def test_a_planned_service_that_landed_must_be_taken_off_the_list(self):
+        """The ratchet. Once `mail` is in the registry, leaving it named here
+        would let a typo in a *future* planned name pass unnoticed."""
+        from testbed.services import REGISTRY
+
+        assert not compose_support.PLANNED_SERVICES & set(REGISTRY)
+
+
+class TestTheCallbackUrl:
+    """The one value `provision-nc.sh` bakes in irreversibly at first install.
+
+    `:106` reads `ISTOTA_WEB_CALLBACK_URL` and writes it into `oauth2_clients`,
+    and `docker-compose.yml` warns twice that changing the host afterwards
+    leaves a stale registration no restart repairs.
+    """
+
+    def test_it_is_written_out_rather_than_left_to_compose_defaults(self):
+        environment = compose_support.full_env({}, CREDENTIALS)
+
+        assert environment["ISTOTA_WEB_CALLBACK_URL"] == (
+            "http://localhost:18080/istota/callback"
+        )
+
+    def test_it_agrees_with_the_port_the_stack_publishes(self):
+        """The pair is the assertion. `NC_PORT` feeds `OVERWRITEHOST`,
+        `OVERWRITECLIURL`, `ISTOTA_WEB_NC_EXTERNAL_URL`,
+        `ISTOTA_WEB_SITE_HOSTNAME` and the callback URL through four levels of
+        nested compose defaults, and a value assembled by four
+        `${A:-${B:-${C:-D}}}` substitutions is not one a test can check without
+        re-implementing compose's interpolation."""
+        environment = compose_support.full_env({}, CREDENTIALS)
+
+        assert environment["NC_PORT"] in environment["ISTOTA_WEB_CALLBACK_URL"]
+
+
+class TestTheCredentials:
+    def test_all_four_required_variables_are_present(self):
+        """`docker-compose.yml` preflights each with `${…:?}`, so a missing one
+        fails `up` during interpolation rather than at boot."""
+        environment = compose_support.full_env({}, CREDENTIALS)
+
+        for key in compose_support.CREDENTIAL_KEYS:
+            assert environment[key], key
+
+    def test_generated_passwords_are_all_different(self):
+        generated = compose_support.generate_credentials(1234)
+
+        assert len(set(generated.as_env().values())) == 4
+
+    def test_a_generated_password_survives_an_env_file_round_trip(self, tmp_path):
+        """`token_urlsafe` rather than anything with punctuation, because a
+        compose env-file is parsed as bare `KEY=VALUE` with no quoting rules to
+        hide behind."""
+        generated = compose_support.generate_credentials(1234)
+        path = compose_support.write_env_file(
+            tmp_path / "compose.env", generated.as_env()
+        )
+
+        parsed = dict(
+            line.split("=", 1) for line in path.read_text().splitlines() if line
+        )
+        assert parsed == generated.as_env()
+
+    def test_the_repr_carries_no_password(self):
+        """pytest renders the repr of whatever a failing comparison touched, and
+        this object reaches a `Stack`."""
+        generated = compose_support.generate_credentials(1234)
+
+        rendered = repr(generated)
+        for value in generated.as_env().values():
+            assert value not in rendered
+        assert "1234" in rendered
+
+    def test_the_env_a_stack_exposes_has_them_redacted(self):
+        environment = compose_support.full_env({}, CREDENTIALS)
+        stack = compose_support.Stack(
+            profile=profiles.FULL,
+            args=["docker", "compose", "--project-name", "unit"],
+            services={},
+            env=environment,
+        )
+
+        for key in compose_support.CREDENTIAL_KEYS:
+            assert stack.env[key] == "<redacted>"
+        # And the things a scenario actually reads survive.
+        assert stack.env["ISTOTA_WEB_CALLBACK_URL"] == environment[
+            "ISTOTA_WEB_CALLBACK_URL"
+        ]
+        assert stack.env["USER_NAME"] == "testuser"
+
+
+class TestTheEnvFile:
+    def test_a_newline_in_a_value_is_refused_by_name(self, tmp_path):
+        """A compose env-file has no escaping, so a newline silently becomes a
+        second malformed entry — which reads as *unset*, which on this compose
+        file is a `${…:?}` failure blamed on the wrong key."""
+        with pytest.raises(compose_support.StackError, match="TOKEN"):
+            compose_support.write_env_file(
+                tmp_path / "compose.env", {"TOKEN": "one\ntwo"}
+            )
+
+    def test_it_is_written_private(self, tmp_path):
+        path = compose_support.write_env_file(tmp_path / "compose.env", {"A": "b"})
+
+        assert oct(path.stat().st_mode)[-3:] == "600"
+
+    def test_a_service_claiming_a_variable_twice_is_refused(self):
+        """Silent last-wins would boot a stack pointing at the wrong service,
+        with dict order deciding which."""
+        one = _Stub("one", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://a"})
+        two = _Stub("two", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://b"})
+
+        with pytest.raises(compose_support.StackError, match="BASE_URL"):
+            compose_support.full_env({"one": one, "two": two}, CREDENTIALS)
+
+    def test_a_service_may_override_a_module_switch(self):
+        """The forge is the worked example: `gitlab.config_env()` returns
+        `ISTOTA_DEVELOPER_ENABLED=true`, and the map defaults it off. The
+        service's answer has to win, or a `full` profile with a forge in it
+        would boot with the developer skill disabled."""
+        forge = _Stub("gitlab", {"ISTOTA_DEVELOPER_ENABLED": "true"})
+
+        environment = compose_support.full_env({"gitlab": forge}, CREDENTIALS)
+
+        assert environment["ISTOTA_DEVELOPER_ENABLED"] == "true"
+
+
+class TestReadiness:
+    def test_the_full_shape_waits_on_nextcloud_and_istota(self):
+        assert compose_support.READY_SERVICES["full"] == ("nextcloud", "istota")
+
+    def test_it_waits_on_neither_web_nor_nginx(self):
+        """Both restart-loop through a cold boot by design: `web` polls for
+        `config.toml` for 120 seconds and exits 1 while `istota` may take up to
+        600 seconds to write it, and `nginx` depends on `web`. Waiting on either
+        would time out on a stack that came up correctly."""
+        assert "web" not in compose_support.READY_SERVICES["full"]
+        assert "nginx" not in compose_support.READY_SERVICES["full"]
+
+    def test_the_shared_budget_is_shared(self, monkeypatch):
+        """Not `timeout` each. The second wait is only interesting once the
+        first has finished, and giving each the whole budget would let a stack
+        spend fifty minutes reporting a failure visible in ten."""
+        seen = []
+
+        def fake_wait(args, service, timeout, env=None):
+            seen.append((service, timeout))
+
+        monkeypatch.setattr(compose_support, "wait_ready", fake_wait)
+        compose_support.wait_all_ready([], ("a", "b"), timeout=100)
+
+        assert [service for service, _ in seen] == ["a", "b"]
+        assert all(timeout <= 100 for _, timeout in seen)
+
+    def test_an_exhausted_budget_names_what_was_reached(self, monkeypatch):
+        """The message has to distinguish "b never got waited on" from "b timed
+        out", because they are different faults: the first is a slow `a`."""
+        clock = [0.0]
+        monkeypatch.setattr(compose_support.time, "monotonic", lambda: clock[0])
+
+        def slow(args, service, timeout, env=None):
+            clock[0] += 1000
+
+        monkeypatch.setattr(compose_support, "wait_ready", slow)
+        with pytest.raises(TimeoutError, match=r"reached: \('a',\)"):
+            compose_support.wait_all_ready([], ("a", "b"), timeout=100)
+
+
+class TestTheComposeInvocation:
+    def test_the_overlay_goes_on_last(self, tmp_path):
+        """Its concessions have to win. A profile overlay adds a service; adding
+        one must not be able to undo the seccomp grant."""
+        pool = _pool(tmp_path)
+        profile = profiles.FULL.__class__(
+            "x", shape="full", compose_overlays=(Path("/tmp/mail.yml"),)
+        )
+
+        args, _ = pool._compose_args_full(profile, tmp_path)
+
+        files = [args[i + 1] for i, token in enumerate(args) if token == "-f"]
+        assert files == [str(FULL_COMPOSE), "/tmp/mail.yml", str(TESTBED_OVERLAY)]
+
+    def test_the_env_file_rides_in_the_argument_list(self, tmp_path):
+        """Compose interpolates on *every* subcommand, so a variable supplied
+        only to `up` makes `ps`, `exec`, `logs` and `down` fail during
+        interpolation, before they touch a container."""
+        pool = _pool(tmp_path)
+
+        args, env_file = pool._compose_args_full(profiles.FULL, tmp_path)
+
+        assert "--env-file" in args
+        assert args[args.index("--env-file") + 1] == str(env_file)
+
+    def test_a_kept_project_name_is_stable_and_an_ephemeral_one_is_not(
+        self, tmp_path
+    ):
+        """Compose scopes a named volume to the project, so a fresh uuid every
+        session would leave the kept volumes attached to a project nothing ever
+        looks at again — `KEEP` would keep a growing pile of orphans and cache
+        nothing."""
+        ephemeral = _pool(tmp_path, keep=False)
+        first, _ = ephemeral._compose_args_full(profiles.FULL, tmp_path)
+        second, _ = ephemeral._compose_args_full(profiles.FULL, tmp_path)
+        assert _project(first) != _project(second)
+
+        kept = _pool(tmp_path, keep=True)
+        one, _ = kept._compose_args_full(profiles.FULL, tmp_path)
+        two, _ = kept._compose_args_full(profiles.FULL, tmp_path)
+        assert _project(one) == _project(two)
+
+
+class TestKeepSemantics:
+    """`ISTOTA_TESTBED_KEEP`, and the two corrections the boot path forces.
+
+    The spec's version wiped `shared_files` along with `istota_data`. That
+    removes `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never
+    rewrites — it is a `post-installation` hook and the Nextcloud image runs
+    those only when it performs the install — so `entrypoint.sh` waits its 600
+    seconds for a flag nothing will write, exits 1, and `restart: unless-stopped`
+    does that forever.
+    """
+
+    def test_only_the_daemons_own_volumes_are_wiped(self):
+        assert set(compose_support.StackPool.KEEP_WIPES) == {
+            "istota_data",
+            "redis_data",
+        }
+
+    def test_the_nextcloud_volumes_are_not_wiped(self):
+        """They hold the whole cost: the install, and the two app-store
+        downloads `provision-nc.sh` triggers."""
+        for volume in ("nextcloud_html", "nextcloud_data", "postgres_data"):
+            assert volume not in compose_support.StackPool.KEEP_WIPES
+
+    def test_shared_files_is_not_wiped(self):
+        assert "shared_files" not in compose_support.StackPool.KEEP_WIPES
+
+    def test_a_lean_stack_loses_its_volumes_even_in_a_kept_session(
+        self, tmp_path, monkeypatch
+    ):
+        """One pool serves both shapes. A lean stack's named volume is the
+        framework DB every assertion is read out of, so keeping it would make
+        the next session's assertions depend on this one's rows."""
+        seen = []
+        monkeypatch.setattr(
+            compose_support,
+            "down",
+            lambda args, volumes=False, env=None: seen.append(volumes),
+        )
+        pool = _pool(tmp_path, keep=True)
+
+        pool._down(["docker", "compose", "--project-name", "p"], shape="lean")
+
+        assert seen == [True]
+
+
+class TestTheOverlayIsAddressable:
+    """Parsed by compose itself, which is the only thing that decides."""
+
+    def test_the_merged_model_parses(self, tmp_path):
+        config = _compose_config(tmp_path)
+
+        assert "istota" in config["services"]
+
+    def test_the_seccomp_grant_reaches_the_istota_service(self, tmp_path):
+        """Without it Docker's default profile blocks the
+        `unshare(CLONE_NEWUSER)` bubblewrap needs, and every task that runs a
+        Bash tool call fails. Measured on the shipped image: `bwrap
+        --unshare-user --ro-bind / / -- /bin/true` exits 1 without the grant and
+        0 with it."""
+        config = _compose_config(tmp_path)
+
+        assert "seccomp:unconfined" in config["services"]["istota"]["security_opt"]
+
+    def test_the_host_gateway_alias_reaches_the_istota_service(self, tmp_path):
+        """`host.docker.internal` is built in on Docker Desktop and absent on
+        Docker Engine, and every full-shape task reaches the scripted endpoint
+        through it."""
+        config = _compose_config(tmp_path)
+        hosts = config["services"]["istota"]["extra_hosts"]
+
+        assert any("host-gateway" in str(entry) for entry in _entries(hosts))
+
+    def test_the_istota_service_gains_a_health_check(self, tmp_path):
+        """The shipped service has none, and `restart: unless-stopped` makes a
+        wedged boot look alive — so without this `wait_ready` has nothing
+        honest to wait on."""
+        config = _compose_config(tmp_path)
+        check = config["services"]["istota"]["healthcheck"]
+
+        assert "tasks" in " ".join(str(part) for part in check["test"])
+
+    def test_the_three_brain_credentials_are_literals_not_interpolations(
+        self, tmp_path
+    ):
+        """The one thing that cannot live in the env-file: compose lets the
+        *process* environment outrank an `--env-file`, so a developer with
+        `ANTHROPIC_API_KEY` exported would win over anything `StackPool` writes.
+        A literal in a compose file does not lose that contest — asserted by
+        running the parse with all three exported to a value nothing should
+        adopt."""
+        poisoned = {
+            "ANTHROPIC_API_KEY": "not-a-real-key-but-exported",
+            "CLAUDE_CODE_OAUTH_TOKEN": "not-a-real-token-but-exported",
+            "ISTOTA_BRAIN_NATIVE_API_KEY": "not-a-real-key-but-exported",
+        }
+        config = _compose_config(tmp_path, extra_env=poisoned)
+        environment = config["services"]["istota"]["environment"]
+
+        assert environment["ANTHROPIC_API_KEY"] in ("", None)
+        assert environment["CLAUDE_CODE_OAUTH_TOKEN"] in ("", None)
+        assert (
+            environment["ISTOTA_BRAIN_NATIVE_API_KEY"]
+            == "unused-by-the-scripted-endpoint"
+        )
+        assert (
+            config["services"]["web"]["environment"]["ISTOTA_BRAIN_NATIVE_API_KEY"]
+            == "unused-by-the-scripted-endpoint"
+        )
+
+
+class TestTheFullProfile:
+    def test_it_declares_the_full_shape(self):
+        assert profiles.FULL.shape == "full"
+
+    def test_it_is_the_only_one(self):
+        """Every other axis in this tier gets its own profile, because on the
+        lean shape a profile costs thirty seconds. On the full shape it costs
+        minutes, and `StackPool` keys by name — so `full` plus `full-mail` is
+        two cold boots of the same six containers to run four scenarios."""
+        full_profiles = [p for p in profiles.ALL if p.shape == "full"]
+
+        assert [p.name for p in full_profiles] == ["full"]
+
+    def test_the_user_ids_the_service_defaults_to_are_the_ones_compose_gets(self):
+        """`testbed.stack` imports `testbed.services`, so the two cannot share a
+        constant without a cycle. Pinned here instead: a service authenticating
+        as a user the stack never created reads as "Talk is broken"."""
+        assert (
+            nextcloud_service.DEFAULT_BOT_USER
+            == compose_support.FULL_IDENTITY["BOT_USER"]
+        )
+        assert (
+            nextcloud_service.DEFAULT_TEST_USER
+            == compose_support.FULL_IDENTITY["USER_NAME"]
+        )
+
+
+class TestTheMarker:
+    def test_the_full_tier_is_deselected_by_default(self):
+        """Otherwise `uv run pytest` boots six containers."""
+        body = (REPO / "pyproject.toml").read_text()
+
+        assert "and not full'" in body
+
+    def test_every_full_test_carries_the_marker(self):
+        files = sorted((REPO / "tests" / "full").glob("test_*.py"))
+        assert files, "no full tests found; this guard would pass vacuously"
+        for path in files:
+            assert "pytestmark = pytest.mark.full" in path.read_text(), path
+
+    def test_the_xdist_guard_covers_it(self):
+        """Session-scoped fixtures are per-worker, so N workers would each bring
+        up their own six-container stack under one project prefix."""
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pytest", "-m", "full", "-n", "2",
+                "--collect-only", "-q", "-p", "no:cacheprovider",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+            timeout=300,
+        )
+
+        assert result.returncode == 4, result.stdout + result.stderr
+        assert "must run with -n0" in result.stdout + result.stderr
+
+
+class TestTheProvisioningSuiteRefusesAKeptVolumeSet:
+    def test_it_skips_rather_than_asserting_against_a_previous_session(self):
+        """Everything in `tests/full/test_provisioning.py` asserts on what
+        first-install provisioning wrote, and `KEEP` persists the volumes whose
+        first install happened in a previous session — where the
+        `post-installation` hook that runs `provision-nc.sh` will not run
+        again."""
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pytest",
+                "tests/full/test_provisioning.py", "-m", "full",
+                "--collect-only", "-q", "-p", "no:cacheprovider", "-n0",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+            env={**os.environ, "ISTOTA_TESTBED_KEEP": "1"},
+            timeout=300,
+        )
+
+        # Collection succeeds; the skip is at session-fixture setup. What this
+        # asserts is that the guard is wired to the tier at all — the message
+        # itself is checked by reading it, since running the fixture means
+        # booting the stack the guard exists to avoid.
+        assert result.returncode == 0, result.stdout + result.stderr
+        body = (REPO / "tests" / "full" / "conftest.py").read_text()
+        assert "ISTOTA_TESTBED_KEEP" in body
+        assert "pytest.skip" in body
+
+
+def _pool(tmp_path, *, keep: bool = False) -> compose_support.StackPool:
+    return compose_support.StackPool(
+        workdir=tmp_path,
+        lean=compose_support.LeanShape(
+            compose_file=Path("/nonexistent/docker-compose.test.yml"),
+            render_script=Path("/nonexistent/render-config.sh"),
+            image="istota-test/lean:unit",
+            prebuilt_overlay=Path("/nonexistent/prebuilt.yml"),
+        ),
+        full=compose_support.FullShape(
+            compose_file=FULL_COMPOSE,
+            overlay=TESTBED_OVERLAY,
+            keep=keep,
+            keep_dir=tmp_path / "keep",
+        ),
+    )
+
+
+def _project(args: list[str]) -> str:
+    return args[args.index("--project-name") + 1]
+
+
+def _entries(value):
+    """`extra_hosts` is a list in the file and may be a dict after merging."""
+    if isinstance(value, dict):
+        return [f"{key}:{item}" for key, item in value.items()]
+    return list(value)
+
+
+def _compose_config(tmp_path, *, extra_env: dict[str, str] | None = None) -> dict:
+    """`docker compose config --format json` over the merged model.
+
+    Compose's own parser, which is the only thing that applies the
+    interpolation and schema rules a real invocation will. Local: no daemon.
+    """
+    import shutil
+
+    if shutil.which("docker") is None:
+        pytest.skip("the docker CLI is not installed")
+
+    environment = compose_support.full_env({}, CREDENTIALS)
+    env_file = compose_support.write_env_file(tmp_path / "compose.env", environment)
+    result = subprocess.run(
+        [
+            "docker", "compose",
+            "-f", str(FULL_COMPOSE),
+            "-f", str(TESTBED_OVERLAY),
+            "--project-name", "istota-testbed-unit",
+            "--env-file", str(env_file),
+            "config", "--format", "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, **(extra_env or {})},
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"`docker compose config` exited {result.returncode}\n{result.stderr}",
+            pytrace=False,
+        )
+    return json.loads(result.stdout)

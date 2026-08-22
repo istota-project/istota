@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from testbed import profiles, services
+from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
 from testbed.services import REGISTRY, ServiceCall, gitlab
 from testbed.services.model_endpoint import serve_script
@@ -27,6 +28,17 @@ from testbed.services.model_endpoint import serve_script
 REPO = Path(__file__).resolve().parents[1]
 RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
 FULL_COMPOSE = REPO / "docker" / "docker-compose.yml"
+
+#: A stand-in for what `StackPool` generates on the full shape. Fixed values, so
+#: nothing here invents a password-shaped string that a scan could flag, and
+#: obviously fake ones so a reader never wonders whether they are real.
+_CREDENTIALS = stack_support.FullCredentials(
+    postgres_password="unit-test-postgres",
+    admin_password="unit-test-admin",
+    bot_password="unit-test-bot",
+    user_password="unit-test-user",
+    nc_port=18080,
+)
 
 
 def _serve(stub: HttpStub, **kwargs) -> HttpStub:
@@ -109,17 +121,33 @@ class TestTheCredentialRuleIsStructural:
         finally:
             stub.close()
 
-    def test_the_minimal_argument_table_covers_every_registered_service(self):
-        """So the guard below cannot silently stop covering a new service.
+    def test_every_registered_service_is_classified(self):
+        """The rule below applies to the stubs, so the split has to be total.
+
+        `HOST_STUBS` and `ATTACHED` partition `REGISTRY`, and if they stop doing
+        so the guard beneath silently covers less than it says. That is the
+        exact failure the docstring below anticipated when the registry held
+        only stubs: "a future service that is not an HTTP stub at all takes no
+        `host` and will fail here, which is the right moment to decide what its
+        own rule is." Stage 3 is that moment, and this is the decision — a
+        service that binds no socket has no unauthenticated-listener hazard and
+        no credential to publish, so demanding one of it would be asserting
+        something false.
+        """
+        assert services.HOST_STUBS | services.ATTACHED == set(REGISTRY)
+        assert not services.HOST_STUBS & services.ATTACHED
+
+    def test_the_minimal_argument_table_covers_every_host_stub(self):
+        """So the guard below cannot silently stop covering a new stub.
 
         A row per service rather than reflection over the factory: `REGISTRY`
         holds lazy factories (`services/__init__` is what every stub imports
         `ServiceCall` from, so a top-level import of the stubs would close the
         cycle), and reflecting through one of those inspects the wrapper.
         """
-        assert set(_MINIMAL_ARGS) == set(REGISTRY)
+        assert set(_MINIMAL_ARGS) == services.HOST_STUBS
 
-    def test_no_registered_service_binds_a_public_interface_uncredentialed(
+    def test_no_registered_stub_binds_a_public_interface_uncredentialed(
         self, tmp_path
     ):
         """The rule asserted through each factory, not just on the base.
@@ -127,18 +155,15 @@ class TestTheCredentialRuleIsStructural:
         This is what notices a stub that built its own `ThreadingHTTPServer`
         instead of going through `HttpStub.start` — the failure mode being a
         new service quietly publishing an unauthenticated listener, which
-        nothing else in the suite would report. A future service that is not an
-        HTTP stub at all (a container, an attach to a real server) takes no
-        `host` and will fail here, which is the right moment to decide what its
-        own rule is.
+        nothing else in the suite would report.
         """
-        for name, factory in REGISTRY.items():
+        for name in sorted(services.HOST_STUBS):
             args, kwargs = _MINIMAL_ARGS[name](tmp_path)
             with pytest.raises(ValueError, match="credential"):
-                factory(*args, host="0.0.0.0", **kwargs)
+                REGISTRY[name](*args, host="0.0.0.0", **kwargs)
 
 
-#: Enough arguments to construct each registered service, for the guard above.
+#: Enough arguments to construct each registered *stub*, for the guard above.
 _MINIMAL_ARGS = {
     "model": lambda tmp_path: (([{"text": "ok"}],), {}),
     "gitlab": lambda tmp_path: ((tmp_path / "repos",), {}),
@@ -514,7 +539,9 @@ class TestTheServiceBuilder:
 
     def test_it_covers_every_registered_service(self, tmp_path):
         for name in REGISTRY:
-            service = services.build(name, scratch=tmp_path, host=LOOPBACK)
+            service = services.build(
+                name, scratch=tmp_path, host=LOOPBACK, credentials=_CREDENTIALS
+            )
             try:
                 assert service.name == name
             finally:
@@ -522,6 +549,17 @@ class TestTheServiceBuilder:
 
     def test_an_unregistered_name_says_what_exists(self, tmp_path):
         with pytest.raises(KeyError, match="gitlab"):
+            services.build("feeds", scratch=tmp_path, host=LOOPBACK)
+
+    def test_an_attached_service_refuses_to_be_built_without_a_stack(self, tmp_path):
+        """`nextcloud` attaches to a running full stack, and says so.
+
+        The lean shape generates no credentials because it boots no Nextcloud,
+        so a `lean` profile naming this service is a mistake with no sensible
+        default — and the failure without this guard is a `TypeError` about a
+        `None` attribute several frames inside a session fixture.
+        """
+        with pytest.raises(ValueError, match="full stack"):
             services.build("nextcloud", scratch=tmp_path, host=LOOPBACK)
 
     def test_the_forge_arrives_with_its_repository_already_seeded(self, tmp_path):
@@ -550,7 +588,7 @@ class TestTheServiceBuilder:
         finally:
             endpoint.close()
 
-    def test_every_service_is_built_with_the_credential_it_publishes(
+    def test_every_stub_is_built_with_the_credential_it_publishes(
         self, tmp_path
     ):
         """The pool binds all interfaces, so `build` has to satisfy the rule.
@@ -566,8 +604,12 @@ class TestTheServiceBuilder:
         during an ordinary `uv run pytest`. That is the property `HttpStub`'s
         own docstring says the default suite must never break. The refusal
         itself is covered by `TestTheCredentialRuleIsStructural` above.
+
+        Scoped to `HOST_STUBS`: `nextcloud` binds no socket and publishes no
+        credential of its own, which is the classification that test asserts is
+        total.
         """
-        for name in REGISTRY:
+        for name in sorted(services.HOST_STUBS):
             service = services.build(name, scratch=tmp_path / name, host=LOOPBACK)
             try:
                 assert service.credential, name

@@ -183,11 +183,12 @@ markers = [
     "linux: requires a real Linux kernel and a usable bubblewrap (deselected by default; run via scripts/test-linux.sh)",
     "image: builds and runs a Docker image (needs a Docker daemon, run with -n0; deselected by default)",
     "smoke: end-to-end against the lean compose stack (needs a Docker daemon, run with -n0; deselected by default)",
+    "full: end-to-end against the full compose stack incl. a real Nextcloud (needs a Docker daemon and minutes to boot, run with -n0; deselected by default)",
     "requires_dac: needs POSIX permission bits to constrain the process (skipped as root)",
     "profile: which testbed profile the `stack` fixture should hand this test (default \"base\"; `fresh=True` for a private stack)",
     "script: the turns the scripted model endpoint should replay for this test",
 ]
-addopts = "-m 'not integration and not live and not linux and not image and not smoke' -n auto"
+addopts = "-m 'not integration and not live and not linux and not image and not smoke and not full' -n auto"
 asyncio_mode = "auto"
 
 [tool.uv.sources]

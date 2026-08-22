@@ -1007,12 +1007,15 @@ class TestStackPool:
 
         assert len(seen) == 2
 
-    def test_a_full_shape_profile_is_refused_rather_than_booted_as_lean(
-        self, tmp_path
-    ):
-        """Stage 3 adds the full shape. Until it does, a profile declaring it
-        must not quietly get a one-container lean stack that answers every
-        assertion wrongly."""
+    def test_a_full_shape_profile_needs_a_full_shape_to_boot_from(self, tmp_path):
+        """A pool with no `full=` must say so rather than boot a lean stack.
+
+        A one-container lean stack has no Nextcloud, no entrypoint and no
+        provisioning, so it would answer every assertion in `tests/full/`
+        wrongly rather than failing. The pool is constructible without a
+        `FullShape` on purpose — an external driver consuming `testbed` may only
+        want the lean one — which is what makes the guard necessary.
+        """
         pool = compose_support.StackPool(
             workdir=tmp_path,
             lean=compose_support.LeanShape(
@@ -1022,10 +1025,24 @@ class TestStackPool:
                 prebuilt_overlay=PREBUILT_OVERLAY,
             ),
         )
-        full = dataclasses.replace(profiles.BASE, name="full", shape="full")
 
-        with pytest.raises(compose_support.StackError, match="lean shape"):
-            pool.get(full)
+        with pytest.raises(compose_support.StackError, match="no `full="):
+            pool.get(profiles.FULL)
+
+    def test_an_unknown_shape_names_the_shapes_that_exist(self, tmp_path):
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            lean=compose_support.LeanShape(
+                compose_file=COMPOSE_FILE,
+                render_script=Path("/nonexistent/render-config.sh"),
+                image="istota-test/lean:unit",
+                prebuilt_overlay=PREBUILT_OVERLAY,
+            ),
+        )
+        nonsense = dataclasses.replace(profiles.BASE, name="odd", shape="medium")
+
+        with pytest.raises(compose_support.StackError, match="'full', 'lean'"):
+            pool.get(nonsense)
 
 
 class TestRenderConfig:

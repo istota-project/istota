@@ -29,11 +29,14 @@ the like — and is merged over `os.environ`, never substituted for it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import time
 import uuid
@@ -78,6 +81,28 @@ _IN_FLIGHT_SQL = "'pending', 'locked', 'running'"
 PUBLIC_BIND = "0.0.0.0"
 
 READY_TIMEOUT = 120
+
+#: The full shape's budget, and it is not the lean shape's with a margin. A cold
+#: volume set spends most of it on Nextcloud installing itself and on the two
+#: app-store downloads `provision-nc.sh` triggers, and `entrypoint.sh` then
+#: allows itself 600 seconds waiting on the provisioning flag before it gives
+#: up. A timeout shorter than that would report the harness's impatience as a
+#: deployment failure.
+FULL_READY_TIMEOUT = 1500
+
+#: The compose services readiness means, per shape.
+#:
+#: `web` and `nginx` are deliberately absent from the full shape's tuple, and
+#: not because they do not matter — because they restart-loop through a cold
+#: boot *by design*. `web` polls for `config.toml` for 120 seconds and exits 1
+#: (`docker-compose.yml:422-425`) while `istota` may take up to 600 seconds to
+#: write it, and `nginx` depends on `web`. Waiting on either would time out on a
+#: stack that came up correctly; noting it here is what stops the loop being
+#: diagnosed as a fault.
+READY_SERVICES: dict[str, tuple[str, ...]] = {
+    "lean": (ISTOTA_SERVICE,),
+    "full": ("nextcloud", ISTOTA_SERVICE),
+}
 
 # The three pieces of framework state a reset has to *write*, all through the
 # daemon's own functions rather than hand-written SQL — the harness should not
@@ -141,6 +166,16 @@ SELECT
 # `find -mindepth 1 -maxdepth 1 -exec rm -rf` rather than `rm -rf "$d"/*`,
 # because a glob misses dotfiles and the thing most likely to be left behind in
 # a checkout is `.git`.
+# "has entrypoint.sh reached its last line", asked of /proc rather than of
+# `pgrep`, which lives in `procps` and is not guaranteed to be in the image.
+# `tr` rather than `grep -a`, because `cmdline` is NUL-separated and a plain
+# `grep` treats the file as binary and prints nothing useful.
+_SCHEDULER_RUNNING = (
+    "for p in /proc/[0-9]*/cmdline; do "
+    "tr '\\0' ' ' < \"$p\" 2>/dev/null | grep -q istota-scheduler && exit 0; "
+    "done; exit 1"
+)
+
 _CLEAR_SCRATCH = (
     'set -eu; for d in "$@"; do '
     'if [ -d "$d" ]; then find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi; '
@@ -240,6 +275,20 @@ def compose_args(
     if env_file is not None:
         args += ["--env-file", str(env_file)]
     return args
+
+
+def _project_of(args: list[str]) -> str:
+    """The `--project-name` value out of a compose argument list.
+
+    Read back rather than remembered, because the argument list is the one
+    thing that definitively ties a call to a stack — a project name held
+    separately is a second source of truth for the same fact, and the failure
+    when they disagree is `docker volume rm` silently removing nothing.
+    """
+    try:
+        return args[args.index("--project-name") + 1]
+    except (ValueError, IndexError):  # pragma: no cover - assembled by us
+        raise StackError(f"no --project-name in {args!r}") from None
 
 
 def _child_env(env: dict | None) -> dict:
@@ -448,6 +497,41 @@ def wait_ready(
     )
 
 
+def wait_all_ready(
+    args: list[str],
+    services: tuple[str, ...],
+    *,
+    timeout: int,
+    env: dict | None = None,
+    on_ready=None,
+) -> None:
+    """Wait on several services against one shared budget.
+
+    Not `timeout` each. The full shape waits on `nextcloud` and then on
+    `istota`, and the second wait is only interesting once the first has
+    finished — giving each the whole budget would let a stack spend fifty
+    minutes before reporting a failure that was visible in ten.
+
+    `on_ready(service, seconds)` is called as each one lands, so a caller can
+    record where a cold boot actually went. A ten-minute wait that ends in a
+    bare timeout is the failure mode most likely to make someone stop running
+    the tier, and a ten-minute wait that *succeeds* and says nothing is how
+    "roughly ten minutes" stays an impression instead of a number.
+    """
+    started = time.monotonic()
+    for service in services:
+        remaining = int(timeout - (time.monotonic() - started))
+        if remaining <= 0:
+            raise TimeoutError(
+                f"the budget of {timeout}s was spent before {service} was "
+                f"waited on at all (reached: {services[:services.index(service)]})"
+            )
+        at = time.monotonic()
+        wait_ready(args, service, timeout=remaining, env=env)
+        if on_ready is not None:
+            on_ready(service, time.monotonic() - at)
+
+
 def sweep_projects(prefix: str) -> None:
     """Tear down leftover compose projects whose name starts with `prefix`.
 
@@ -602,6 +686,242 @@ def render_config(
     return config_file
 
 
+# -- the full shape's environment ------------------------------------------
+
+#: Every module `docker-compose.yml` turns on by default, mapped to the service
+#: whose presence in a profile is what turns it back on. Empty means nothing in
+#: this tier turns it on.
+#:
+#: This map is what makes `Profile` mean anything on the full shape. The shipped
+#: file defaults them all on — Talk, email, feeds, money, location, both sleep
+#: cycles and the browser (with no browser container in the tier) — so a `full`
+#: profile declaring `services=("model", "nextcloud")` would boot a daemon
+#: polling every subsystem, which is exactly what the profile mechanism exists
+#: to prevent.
+#:
+#: Two are absent on purpose. `ISTOTA_MEMORY_SEARCH_ENABLED` is in-process
+#: indexing rather than a poller, and switching it off would change what the
+#: assembled prompt contains for every full-shape scenario. `ISTOTA_TALK_ENABLED`
+#: is here rather than being left to `nextcloud.config_env()`, because that
+#: service's `config_env()` is empty by design — the shipped compose file
+#: already points the daemon at its own `nextcloud`, and a service inventing a
+#: variable to say "I am present" would be the fixture side-loading config.
+#: Services the spec's later stages add, named here so `FULL_MODULE_SWITCHES`
+#: can point at them before they exist.
+#:
+#: Without this the guard on that map would have to accept any string, which is
+#: the same as not checking for a typo at all. It is also a ratchet: a unit test
+#: asserts this set and `REGISTRY` stay disjoint, so registering `mail` fails
+#: until the name is removed from here.
+PLANNED_SERVICES = frozenset({"mail", "feeds"})
+
+FULL_MODULE_SWITCHES: dict[str, str] = {
+    "ISTOTA_TALK_ENABLED": "nextcloud",
+    "ISTOTA_EMAIL_ENABLED": "mail",
+    "ISTOTA_FEEDS_ENABLED": "feeds",
+    "ISTOTA_DEVELOPER_ENABLED": "gitlab",
+    "ISTOTA_MONEY_ENABLED": "",
+    "ISTOTA_LOCATION_ENABLED": "",
+    "ISTOTA_BROWSER_ENABLED": "",
+    "ISTOTA_SLEEP_CYCLE_ENABLED": "",
+    "ISTOTA_CHANNEL_SLEEP_CYCLE_ENABLED": "",
+}
+
+#: Identity the full stack requires by name. `docker-compose.yml` preflights
+#: `USER_NAME` with `${USER_NAME:?}`, so an absent value fails `up` during
+#: interpolation rather than at boot.
+FULL_IDENTITY: dict[str, str] = {
+    "USER_NAME": "testuser",
+    "BOT_USER": "istota",
+    "USER_TIMEZONE": "UTC",
+    "ISTOTA_BOT_NAME": "Istota",
+}
+
+#: The four `${…:?}` credentials `docker-compose.yml` refuses to start without.
+CREDENTIAL_KEYS = (
+    "POSTGRES_PASSWORD",
+    "ADMIN_PASSWORD",
+    "BOT_PASSWORD",
+    "USER_PASSWORD",
+)
+
+
+@dataclass(frozen=True)
+class FullCredentials:
+    """This session's generated passwords, plus the port they were bound to.
+
+    Generated rather than read from `docker/.env`, which on a developer machine
+    is a gitignored file holding real ones. Nothing in this tier reads it.
+
+    `nc_port` travels with them because it is credential-shaped state in one
+    specific sense: `provision-nc.sh:106` bakes `ISTOTA_WEB_CALLBACK_URL` —
+    which is derived from the port — into the `oauth2_clients` row at first
+    install and never revisits it. A kept volume set and a different port is a
+    stale registration, so the port is persisted alongside the passwords rather
+    than re-invented.
+
+    `__repr__` is redacted, and for the same reason `ServiceCall`'s is: pytest's
+    assertion rewriting renders the repr of whatever a failing comparison
+    touched, and this object reaches a `Stack`. A generated password in a
+    failure report on a public repo is a password in a terminal scrollback that
+    gets pasted into an issue.
+    """
+
+    postgres_password: str
+    admin_password: str
+    bot_password: str
+    user_password: str
+    nc_port: int
+
+    def as_env(self) -> dict[str, str]:
+        return {
+            "POSTGRES_PASSWORD": self.postgres_password,
+            "ADMIN_PASSWORD": self.admin_password,
+            "BOT_PASSWORD": self.bot_password,
+            "USER_PASSWORD": self.user_password,
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic
+        return f"FullCredentials(<4 redacted>, nc_port={self.nc_port})"
+
+
+def reserve_port() -> int:
+    """Bind an ephemeral port, read it back, release it.
+
+    `docker-compose.yml:456` binds `${NC_PORT:-8080}:80` on nginx — a *fixed*
+    host port, unlike the lean stack which publishes nothing — so a developer's
+    own demo stack or a second worktree collides and `up` fails. Measured while
+    this was written: a demo stack was holding 8080 on the machine.
+
+    Racy by construction, and knowingly so: the kernel can hand the same port to
+    something else between the release here and compose's bind. The alternative
+    is holding the socket open, which compose then cannot bind at all. A lost
+    race fails `up` loudly with "address already in use", which is the right
+    failure for a condition this rare.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def generate_credentials(nc_port: int) -> FullCredentials:
+    """Four fresh passwords for one session.
+
+    `token_urlsafe` rather than anything with punctuation in it, because these
+    are written into a compose `--env-file`, which is parsed as bare
+    `KEY=VALUE` with no quoting rules to hide behind, and then handed to
+    Nextcloud's `occ user:add --password-from-env`.
+    """
+    return FullCredentials(
+        postgres_password=secrets.token_urlsafe(24),
+        admin_password=secrets.token_urlsafe(24),
+        bot_password=secrets.token_urlsafe(24),
+        user_password=secrets.token_urlsafe(24),
+        nc_port=nc_port,
+    )
+
+
+def full_env(
+    services: dict[str, Service],
+    credentials: FullCredentials,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Everything the full shape's compose env-file carries.
+
+    A pure function of the profile's services and this session's credentials, so
+    the tier's central "what does a `full` profile actually boot" question has a
+    unit test rather than a stack behind it.
+
+    Four groups, in the order they are layered:
+
+    1. **Identity and credentials.** `docker-compose.yml` preflights five of
+       these with `${…:?}` and will not interpolate without them.
+    2. **The module switches**, every one off unless the profile names the
+       service that owns it. See `FULL_MODULE_SWITCHES`.
+    3. **`NC_PORT` and an explicit `ISTOTA_WEB_CALLBACK_URL`.** The port feeds
+       `OVERWRITEHOST`, `OVERWRITECLIURL`, `ISTOTA_WEB_NC_EXTERNAL_URL`,
+       `ISTOTA_WEB_SITE_HOSTNAME` and the callback URL through four levels of
+       nested compose defaults. The callback URL is written out rather than
+       left to that chain because `provision-nc.sh` bakes it irreversibly into
+       the `oauth2_clients` row at first install, and a value assembled by
+       four `${A:-${B:-${C:-D}}}` substitutions is not one a test can assert
+       against without re-implementing compose's interpolation.
+    4. **Each service's `config_env()`**, then the profile's own `config`.
+
+    The three credential-shaped brain variables are *not* here and must not be:
+    compose lets the process environment outrank an `--env-file`, so a developer
+    with `ANTHROPIC_API_KEY` exported would win. They are literals in
+    `testbed/compose/testbed.yml` instead, which nothing outranks.
+
+    A service claiming a variable this function already set is refused rather
+    than resolved, on the same reasoning as `render_config`: silent last-wins
+    would boot a stack pointing at the wrong service, and dict order would be
+    what decided.
+    """
+    environment: dict[str, str] = dict(FULL_IDENTITY)
+    environment.update(credentials.as_env())
+
+    for variable, owner in FULL_MODULE_SWITCHES.items():
+        environment[variable] = "true" if owner and owner in services else "false"
+
+    environment["NC_PORT"] = str(credentials.nc_port)
+    environment["ISTOTA_WEB_CALLBACK_URL"] = (
+        f"http://localhost:{credentials.nc_port}/istota/callback"
+    )
+
+    claimed: dict[str, str] = {}
+    for name, service in services.items():
+        for variable, value in service.config_env().items():
+            if variable in claimed:
+                raise StackError(
+                    f"{name} and {claimed[variable]} both set {variable}; one "
+                    "of them would silently win and the stack would boot "
+                    "pointing at the other"
+                )
+            claimed[variable] = name
+            environment[variable] = value
+    environment.update(extra or {})
+    return environment
+
+
+def write_env_file(path: Path, environment: dict[str, str]) -> Path:
+    """Write a compose `--env-file`, refusing a value it cannot represent.
+
+    Compose's env-file parser is line-oriented `KEY=VALUE` with no escaping, so
+    a newline in a value silently becomes a second, malformed entry — and a
+    malformed entry is a variable that reads as unset, which on this compose
+    file means a `${…:?}` preflight failure blamed on the wrong key. Refused
+    here, by name, rather than diagnosed there.
+
+    Written 0600. Four of these values are passwords.
+    """
+    lines = []
+    for key, value in environment.items():
+        if "\n" in value or "\r" in value:
+            raise StackError(
+                f"{key} contains a newline; a compose env-file cannot carry one"
+            )
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o600)
+    return path
+
+
+def redacted(environment: dict[str, str]) -> dict[str, str]:
+    """The env map with every credential-shaped value replaced.
+
+    What a `Stack` exposes to a scenario. A test needs `USER_NAME`,
+    `ISTOTA_WEB_CALLBACK_URL` and the module switches; none needs a password,
+    and a dict on a `Stack` is exactly the kind of thing that ends up in a
+    pytest failure report.
+    """
+    return {
+        key: ("<redacted>" if key in CREDENTIAL_KEYS else value)
+        for key, value in environment.items()
+    }
+
+
 class Stack:
     """A running stack and everything pointed at it.
 
@@ -622,11 +942,20 @@ class Stack:
         args: list[str],
         services: dict[str, Service],
         config_dir: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self.profile = profile
         self.args = args
         self.services = services
         self.config_dir = config_dir
+        #: The compose environment this stack booted from, **redacted**. Empty
+        #: on the lean shape, which renders on the host and carries nothing a
+        #: scenario needs. On the full shape it is what the provisioning
+        #: assertions compare against — `ISTOTA_WEB_CALLBACK_URL` above all,
+        #: since the whole point is that the value Nextcloud baked into its
+        #: `oauth2_clients` row is the one compose was given. Passwords read
+        #: `<redacted>`; nothing in the tier asserts on one.
+        self.env = redacted(env or {})
         self.probe = Probe(compose_args=args, service=ISTOTA_SERVICE)
         #: The watermark the most recent `reset` returned, for the negative
         #: assertions in `Probe.rows_above`. Set by the fixture that drives the
@@ -666,8 +995,14 @@ class Stack:
         *,
         service: str = ISTOTA_SERVICE,
         timeout: int = 60,
+        user: str = "",
     ) -> subprocess.CompletedProcess:
         """Run one command inside a service, capturing both streams.
+
+        `user` is for the one caller that needs it: Nextcloud's `occ` refuses to
+        run as root, and the message it prints then ("Console has to be executed
+        with the user that owns the file config/config.php") is not one anybody
+        reads as "wrong `-u`".
 
         Named because four call sites were each rebuilding the
         `docker compose exec -T` prefix, and `-T` is the part that is easy to
@@ -685,9 +1020,10 @@ class Stack:
         once per test, and a measurement that left them out would report a
         fraction under a label that says `docker compose exec`.
         """
+        prefix = ["exec", "-T"] + (["-u", user] if user else [])
         with probe_support.counted_exec():
             return subprocess.run(
-                self.args + ["exec", "-T", service, *argv],
+                self.args + prefix + [service, *argv],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -981,8 +1317,57 @@ class Stack:
         The idempotence half of a provisioning scenario is "boot it twice", and
         `down` then `up` is not that — it would also be a different project's
         worth of teardown risk.
+
+        It does **not** wait: `compose restart` returns as soon as the container
+        is running, which on the full shape is the beginning of a boot that
+        polls Nextcloud, re-provisions rooms and only then opens the database.
+        `wait_healthy` is the other half, and separate so a caller that restarts
+        two services waits once.
         """
         _run(self.args + ["restart", service], timeout=DOWN_TIMEOUT + UP_TIMEOUT)
+
+    def wait_healthy(self, *, timeout: int | None = None) -> None:
+        """Block until the daemon has finished booting, after a restart.
+
+        Two conditions, and the second is what makes this usable at all.
+
+        The compose health check answers "can the daemon do work" by looking for
+        the `tasks` table. That is exactly right at a *cold* boot, when the
+        database does not exist until `istota init` has run. It is nearly
+        useless after a restart, because the database is on a named volume and
+        survives: the probe passes within seconds while `entrypoint.sh` is still
+        polling Nextcloud and re-provisioning rooms. An idempotence assertion
+        that trusted it would read the pre-restart state and pass for the wrong
+        reason.
+
+        So the full shape also waits for the entrypoint to reach its last line —
+        `exec uv run istota-scheduler` — by looking for that process. Read out of
+        `/proc` rather than with `pgrep`, which is `procps` and not guaranteed to
+        be in the image, and with `tr` rather than `grep -a` so the NUL
+        separators in `cmdline` do not hide the match.
+
+        Only on the full shape. The lean stack's entrypoint is a `sh -c` whose
+        own command line contains the string from the moment it starts, so the
+        probe would answer "yes" before `istota init` had run.
+        """
+        if timeout is None:
+            timeout = (
+                FULL_READY_TIMEOUT if self.profile.shape == "full" else READY_TIMEOUT
+            )
+        deadline = time.monotonic() + timeout
+        wait_ready(self.args, ISTOTA_SERVICE, timeout=timeout)
+        if self.profile.shape != "full":
+            return
+
+        while time.monotonic() < deadline:
+            if self.exec(["sh", "-c", _SCHEDULER_RUNNING], timeout=30).returncode == 0:
+                return
+            time.sleep(POLL_INTERVAL)
+        raise TimeoutError(
+            f"the istota container reported healthy but had not reached "
+            f"`exec uv run istota-scheduler` within {timeout}s — it is still "
+            "somewhere in entrypoint.sh\n--- last logs ---\n" + self.logs(60)
+        )
 
     # -- reading it back --------------------------------------------------
 
@@ -1076,6 +1461,41 @@ class LeanShape:
     """Merged over `DEFAULT_RENDER_ENV`, for a caller with a house value."""
 
 
+@dataclass(frozen=True)
+class FullShape:
+    """Everything booting the deployment as shipped needs.
+
+    Where `LeanShape` names a generator to run on the host, this shape names
+    none: the container runs `render-config.sh` itself, from the environment
+    compose passed it, exactly as in production. That is the whole reason the
+    shape exists, and it is why the two-file constraint bites harder here — a
+    variable the generator reads but `docker-compose.yml` does not pass through
+    is unreachable on this shape.
+    """
+
+    compose_file: Path
+    """`docker/docker-compose.yml` — the production artifact, unedited."""
+
+    overlay: Path
+    """`testbed/compose/testbed.yml`, the harness concessions. Read it."""
+
+    ready_timeout: int = FULL_READY_TIMEOUT
+
+    keep: bool = False
+    """`ISTOTA_TESTBED_KEEP`: persist the expensive volumes between sessions.
+
+    See `StackPool._teardown` for what is kept and what is always wiped, and
+    for the two corrections the boot path forces on the obvious version of this.
+    """
+
+    keep_dir: Path | None = None
+    """Where the persisted credentials live when `keep` is set.
+
+    Outside the checkout: these are real generated passwords, and the repo has a
+    pre-commit hook that exists because credentials end up in trees.
+    """
+
+
 class StackPool:
     """Lazily-started stacks, keyed by profile name, for the length of a session.
 
@@ -1105,17 +1525,25 @@ class StackPool:
         *,
         workdir: Path,
         lean: LeanShape,
+        full: FullShape | None = None,
         platform: str = "",
         project_prefix: str = "istota-testbed-",
     ) -> None:
         self.workdir = workdir
         self.lean = lean
+        self.full = full
         self.platform = platform
         self.project_prefix = project_prefix
         self._cached: dict[str, Stack] = {}
         self._private: list[Stack] = []
         self._booted = 0
         self._built = False
+        self._credentials: FullCredentials | None = None
+        #: `(profile name, service, seconds)` for every readiness wait the pool
+        #: has done, so a caller can print where a cold boot went. Open question
+        #: 2 asks whether the provisioned volume set needs snapshotting, and it
+        #: is meant to be settled against a number rather than an impression.
+        self.boot_times: list[tuple[str, str, float]] = []
 
     # -- the pool ---------------------------------------------------------
 
@@ -1166,20 +1594,28 @@ class StackPool:
     # -- booting ----------------------------------------------------------
 
     def _boot(self, profile: Profile) -> Stack:
+        """Boot the shape the profile declares."""
+        if profile.shape == "lean":
+            return self._boot_lean(profile)
+        if profile.shape == "full":
+            return self._boot_full(profile)
+        raise StackError(
+            f"profile {profile.name!r} declares shape {profile.shape!r}; the "
+            f"shapes are {sorted(READY_SERVICES)}"
+        )
+
+    def _scratch(self, profile: Profile) -> Path:
+        self._booted += 1
+        return self.workdir / f"{profile.name}-{self._booted}"
+
+    def _boot_lean(self, profile: Profile) -> Stack:
         """Start the profile's services, render, bring the stack up, wait ready.
 
         The order is not arrangeable: the services have to be listening before
         the config that names their ports is rendered, and the config has to
         exist before the container that reads it starts.
         """
-        if profile.shape != "lean":
-            raise StackError(
-                f"profile {profile.name!r} declares shape {profile.shape!r}; "
-                "only the lean shape is implemented"
-            )
-
-        self._booted += 1
-        scratch = self.workdir / f"{profile.name}-{self._booted}"
+        scratch = self._scratch(profile)
         config_dir = scratch / "config"
         config_dir.mkdir(parents=True)
 
@@ -1227,6 +1663,164 @@ class StackPool:
             profile=profile, args=args, services=services, config_dir=config_dir
         )
 
+    def _boot_full(self, profile: Profile) -> Stack:
+        """Bring up the deployment as shipped and wait for it to provision itself.
+
+        Different from the lean boot in one structural way and several
+        consequential ones. Structurally: nothing is rendered here. The container
+        runs `render-config.sh` itself, from the environment compose passed it,
+        which is what makes this shape a witness for `entrypoint.sh` and
+        `provision-nc.sh` at all. So the services' `config_env()` goes into the
+        compose env-file rather than into a render environment, and the
+        constraint that a service may only be wired in through a variable the
+        shipped generator reads gains a second half: `docker-compose.yml` has to
+        pass it through too.
+
+        Consequentially: the credentials are generated per session, the host
+        port is ephemeral because `docker-compose.yml` binds a fixed one on
+        nginx, and every module is switched off except the ones the profile
+        names. All three are `full_env`'s.
+
+        `--build` is unconditional here rather than once-per-session. The lean
+        shape shares one tag across every stack, so a second `up --build` would
+        move it under a running container; the full shape's `build:` blocks name
+        no `image:`, so compose tags them `<project>-<service>` and each stack
+        builds its own. Compose's layer cache makes the second one cheap.
+        """
+        if self.full is None:
+            raise StackError(
+                f"profile {profile.name!r} declares the full shape, but this "
+                "pool was constructed with no `full=FullShape(...)`"
+            )
+
+        scratch = self._scratch(profile)
+        scratch.mkdir(parents=True, exist_ok=True)
+
+        services: dict[str, Service] = {}
+        args: list[str] = []
+        environment: dict[str, str] = {}
+        credentials = self._full_credentials()
+        started = time.monotonic()
+        try:
+            for name in profile.services:
+                services[name] = service_support.build(
+                    name,
+                    scratch=scratch,
+                    host=PUBLIC_BIND,
+                    credentials=credentials,
+                )
+            environment = full_env(services, credentials, extra=profile.config)
+            args, env_file = self._compose_args_full(profile, scratch)
+            write_env_file(env_file, environment)
+
+            up(args, platform=self.platform, build=True)
+            wait_all_ready(
+                args,
+                READY_SERVICES["full"],
+                timeout=self.full.ready_timeout,
+                on_ready=lambda service, seconds: self.boot_times.append(
+                    (profile.name, service, seconds)
+                ),
+            )
+            stack = Stack(
+                profile=profile, args=args, services=services, env=environment
+            )
+            # The one service that cannot be built before the stack is: it
+            # attaches to a container this boot just started, and it needs a way
+            # to run `occ` inside it. Bound after the fact rather than by
+            # threading the argument list through `services.build`, which has no
+            # stack to give it.
+            for service in services.values():
+                binder = getattr(service, "bind_stack", None)
+                if binder is not None:
+                    binder(stack)
+            # The health check answers "the tasks table exists", which
+            # `entrypoint.sh` satisfies at `istota init` — several steps before
+            # it execs the scheduler. A scenario submitting into that gap gets a
+            # row nothing dispatches, and the first symptom is a task that timed
+            # out `pending`.
+            remaining = int(self.full.ready_timeout - (time.monotonic() - started))
+            stack.wait_healthy(timeout=max(1, remaining))
+        except BaseException:
+            if args:
+                self._down(args, shape="full")
+            for service in services.values():
+                try:
+                    service.close()
+                except Exception:  # pragma: no cover - cleanup is best effort
+                    logger.debug("closing a service during a failed boot raised")
+            raise
+
+        self.boot_times.append(
+            (profile.name, "total", time.monotonic() - started)
+        )
+        return stack
+
+    def _full_credentials(self) -> FullCredentials:
+        """This session's passwords and host port, generated once and reused.
+
+        Under `ISTOTA_TESTBED_KEEP` they are read back from disk instead, because
+        the Nextcloud users already have them and the OAuth2 client already names
+        the port. Regenerating either against a kept volume set gives a stack
+        that boots and then authenticates against nothing — which is the failure
+        mode this whole file's `KEEP` handling exists to avoid.
+        """
+        if self._credentials is not None:
+            return self._credentials
+
+        keep_file = self._keep_file()
+        if keep_file is not None and keep_file.exists():
+            saved = json.loads(keep_file.read_text())
+            self._credentials = FullCredentials(**saved)
+            return self._credentials
+
+        self._credentials = generate_credentials(reserve_port())
+        if keep_file is not None:
+            keep_file.parent.mkdir(parents=True, exist_ok=True)
+            keep_file.write_text(json.dumps(self._credentials.__dict__))
+            keep_file.chmod(0o600)
+        return self._credentials
+
+    def _keep_file(self) -> Path | None:
+        if self.full is None or not self.full.keep or self.full.keep_dir is None:
+            return None
+        return self.full.keep_dir / "credentials.json"
+
+    def _compose_args_full(
+        self, profile: Profile, scratch: Path
+    ) -> tuple[list[str], Path]:
+        """The compose prefix for the full shape, and the env-file it rides in.
+
+        The overlay goes on last so its concessions win, and the profile's own
+        overlays go between — a `mail` overlay adds a service, and adding one
+        must not be able to undo the seccomp grant.
+
+        The project name is *stable* under `KEEP` and random otherwise. That is
+        not cosmetic: compose scopes a named volume to the project, so a fresh
+        uuid every session would leave the kept volumes attached to a project
+        nothing ever looks at again — `KEEP` would silently keep a growing pile
+        of orphans and cache nothing.
+        """
+        assert self.full is not None
+        if self.full.keep:
+            digest = hashlib.sha256(
+                str(self.full.compose_file.resolve()).encode()
+            ).hexdigest()[:8]
+            project = f"{self.project_prefix}full-keep-{digest}"
+        else:
+            project = f"{self.project_prefix}full-{uuid.uuid4().hex[:8]}"
+        env_file = scratch / "compose.env"
+        overlays = [*profile.compose_overlays, self.full.overlay]
+        return (
+            compose_args(
+                self.full.compose_file,
+                project=project,
+                env_file=env_file,
+                overlays=overlays,
+            ),
+            env_file,
+        )
+
     def _compose_args(
         self, profile: Profile, scratch: Path, config_dir: Path
     ) -> list[str]:
@@ -1262,10 +1856,72 @@ class StackPool:
             overlays=overlays,
         )
 
+    #: Under `KEEP`, the volumes that are wiped anyway, by unqualified name.
+    #:
+    #: `istota_data` holds `/data/config/config.toml`, and `entrypoint.sh:344`
+    #: gates the *entire* render on `[ ! -f "$CONFIG_FILE" ]` — so a kept
+    #: `istota_data` means session 2's env-file is never read and the daemon
+    #: boots pointing at session 1's now-dead scripted-endpoint port. It also
+    #: holds `.api-provisioned`, whose absence is what makes the entrypoint
+    #: re-run room provisioning through the find-by-name recovery path.
+    #: `redis_data` is a cache with nothing in it worth a second of boot time.
+    KEEP_WIPES = ("istota_data", "redis_data")
+
+    def _down(self, args: list[str], *, shape: str) -> None:
+        """Tear a stack down, keeping the expensive volumes if asked to.
+
+        `shape` rather than `self.full.keep` alone: one pool serves both shapes,
+        and a lean stack in a session that also ran a kept full one must still
+        lose its volumes — its named volume is the framework DB every assertion
+        is read out of.
+
+        **`shared_files` is kept, and the spec that asked for it to be wiped was
+        wrong.** The reasoning there was that wiping it forces the daemon to
+        re-provision against the session's own env-file. What it actually does
+        is remove `/mnt/shared/.istota-provisioned`, which
+        `provision-nc.sh` will never rewrite: it is mounted as a
+        `post-installation` hook, and the Nextcloud image runs
+        `run_path post-installation` only inside the branch where the installed
+        version is `0.0.0.0` (verified by reading `/entrypoint.sh` in
+        `nextcloud:30-apache`, not by reasoning). So on a kept volume set the
+        hook does not run, the flag never appears, `entrypoint.sh` waits its
+        600 seconds and exits 1, and `restart: unless-stopped` does that
+        forever. Wiping `istota_data` alone gets the re-render and the room
+        re-provisioning that wiping `shared_files` was supposed to buy.
+
+        The second correction is in `_compose_args_full`: the port has to be
+        pinned across kept sessions, because `provision-nc.sh` bakes the OAuth2
+        redirect URI at first install and — same hook, same reason — does not
+        revisit it.
+
+        The consequence for scenarios is that `KEEP` and the provisioning suite
+        are mutually exclusive: a suite asserting on first-install state cannot
+        run against a volume set whose first install was a previous session's.
+        `tests/full/conftest.py` refuses that combination by name rather than
+        letting it fail as four unrelated-looking assertions.
+        """
+        keep = shape == "full" and self.full is not None and self.full.keep
+        if not keep:
+            # Volumes too: the DB is a named volume, and leaving it behind would
+            # make the next session's assertions depend on this one's rows.
+            down(args, volumes=True)
+            return
+
+        down(args, volumes=False)
+        project = _project_of(args)
+        for volume in self.KEEP_WIPES:
+            try:
+                subprocess.run(
+                    ["docker", "volume", "rm", "-f", f"{project}_{volume}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            except (subprocess.SubprocessError, OSError) as exc:  # pragma: no cover
+                logger.warning("could not remove %s_%s: %s", project, volume, exc)
+
     def _teardown(self, stack: Stack) -> None:
-        # Volumes too: the DB is a named volume, and leaving it behind would
-        # make the next session's assertions depend on this one's rows.
-        down(stack.args, volumes=True)
+        self._down(stack.args, shape=stack.profile.shape)
         for service in stack.services.values():
             try:
                 service.close()

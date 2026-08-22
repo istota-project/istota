@@ -265,3 +265,302 @@ def resolve_platform(config) -> str:
     if not raw:
         return ""
     return raw if "/" in raw else f"linux/{raw}"
+
+
+# --- Deployment tiers: the stack fixtures both shapes share ----------------
+#
+# Hoisted here from `tests/smoke/conftest.py` in Stage 3 of the
+# deployment-testbed spec, at the point the reason for hoisting appeared:
+# `tests/full/` needs the same `stacks` / `stack` pair, and a fixture defined in
+# a sibling package's conftest is invisible to another. What stays down in
+# `tests/smoke/conftest.py` is what is specific to the *lean* shape — its image
+# tag and the negative control's image.
+#
+# **Nothing here is autouse**, and that is the constraint that shaped it. The
+# sweep and the exec measurement were autouse session fixtures while they lived
+# under `tests/smoke/`, where they only ever applied to that directory. At the
+# rootdir an autouse session fixture runs on *every* `uv run pytest`, and the
+# sweep shells out to `docker info`. They are requested by `stacks` instead, so
+# they still run exactly once and only when a stack is actually asked for.
+
+import hashlib  # noqa: E402 - this file's imports are split by section, above
+import time  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from testbed import probe as probe_support  # noqa: E402
+from testbed import profiles  # noqa: E402
+from testbed import stack as stack_support  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[1]
+LEAN_COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
+RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
+LEAN_PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
+FULL_COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
+TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+
+LEAN_READY_TIMEOUT = 120
+
+#: The tiers that must run `-n0`, and therefore the ones the guard below covers.
+SERIAL_TIER_MARKERS = ("smoke", "full")
+
+#: Every compose project these tiers create starts with it, which is what makes
+#: the session-start sweep able to find leftovers without touching anything else
+#: — a developer's own demo or red-team stack is never named this.
+PROJECT_PREFIX = "istota-testbed-"
+
+#: The prefix the smoke tier used before Stage 3 gave both shapes one pool.
+#: Swept as well as the current one, so a stack left behind by a run from before
+#: the rename is still reclaimed rather than surviving forever.
+LEGACY_PROJECT_PREFIXES = ("istota-smoke-",)
+
+_XDIST_MESSAGE = (
+    "the smoke and full tiers must run with -n0. Session-scoped fixtures are "
+    "per-worker, so N workers would each build the image and bring up their own "
+    "stacks under one project prefix, race the same daemon, and sweep each "
+    "other's projects."
+)
+
+# What a test gets when it declares no `script` marker. One plain answer, which
+# is enough for any scenario that only needs a task to complete —
+# `test_lean_stack.py` asserts on this exact string.
+DEFAULT_SCRIPT = [{"text": "the scripted answer"}]
+
+
+def lean_image_tag() -> str:
+    """One image tag per checkout, shared by every lean stack in the session.
+
+    Compose names a built image after the project, and the project is unique per
+    stack so an interrupted run's containers are never adopted by the next
+    session. Images are not reclaimed by `down --volumes`, so that left one
+    permanent tag per stack. A single tag collapses them.
+
+    Scoped by checkout path rather than fixed, because work in this repo runs in
+    parallel git worktrees: two of them sharing a tag means the second
+    `up --build` moves it out from under the first run's containers, mid-run.
+    Same reasoning as `tests/image/conftest._tag_for`.
+
+    The full shape needs no equivalent. Its `build:` blocks name no `image:`, so
+    compose tags them `<project>-<service>` and each stack gets its own.
+    """
+    digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
+    return f"istota-test/lean:{digest}"
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Fail early when a serial tier is selected under xdist.
+
+    `trylast` matters because this hook is also where `-m` deselection happens —
+    without it the unfiltered item list is what arrives, and an ordinary
+    `uv run pytest` fails with a usage error about a tier it had already
+    deselected.
+
+    **It cannot see a real parallel run**, which is the actual scenario. Under
+    `-n 2` the controller never calls this (it holds no items) and xdist clears
+    `numprocesses` in the workers so they do not re-fan-out. `_require_no_xdist`
+    is the check that binds.
+    """
+    if not any(
+        item.get_closest_marker(marker)
+        for item in items
+        for marker in SERIAL_TIER_MARKERS
+    ):
+        return
+
+    workers = getattr(config.option, "numprocesses", None)
+    distribution = config.getoption("dist", "no")
+    if workers or distribution not in ("no", None):
+        raise pytest.UsageError(
+            f"{_XDIST_MESSAGE} (saw -n {workers}, --dist {distribution})"
+        )
+
+
+def _require_no_xdist(config) -> None:
+    """Refuse inside an xdist worker.
+
+    `workerinput` is set by xdist on the worker's config and absent in a
+    single-process run — the only signal that survives into the place where the
+    damage would be done.
+    """
+    if hasattr(config, "workerinput"):
+        worker = config.workerinput.get("workerid", "?")
+        pytest.fail(
+            f"{_XDIST_MESSAGE} (running in xdist worker {worker})", pytrace=False
+        )
+
+
+def require_docker() -> None:
+    if not stack_support.docker_available():
+        pytest.skip("no Docker daemon available")
+
+
+@pytest.fixture(scope="session")
+def _sweep_leftover_stacks():
+    """Reclaim stacks an earlier run was killed before tearing down.
+
+    A unique project name per stack stops one run from adopting another's
+    containers mid-flight, but it also means nothing ever reclaims them: a killed
+    session leaves a container and a named volume behind for good. One sweep at
+    the first stack request closes that, scoped by prefix so it can never touch a
+    developer's own stack.
+    """
+    if stack_support.docker_available():
+        for prefix in (PROJECT_PREFIX, *LEGACY_PROJECT_PREFIXES):
+            stack_support.sweep_projects(prefix)
+    yield
+
+
+@pytest.fixture(scope="session")
+def _measure_probe_exec(request):
+    """Report what the tier spent inside `docker compose exec`.
+
+    Open question 4 in the deployment-testbed spec asks whether a `Probe` query
+    per poll is fast enough once one stack serves a whole session, and answers it
+    with a measurement rather than a long-lived reader process nobody has shown
+    is needed. This is that measurement, and it stays because the answer changes
+    as the tier grows — a number printed on every run is what makes a regression
+    visible before it is a complaint. Stage 2 measured 31% for the lean shape;
+    the full shape has a longer session and the same counters.
+
+    The span opens at the first stack request and closes at session teardown, so
+    a `-m smoke` or `-m full` run reports a fraction of the thing that was
+    actually running.
+    """
+    probe_support.reset_exec_stats()
+    started = time.monotonic()
+    yield
+    stats = probe_support.exec_stats()
+    elapsed = time.monotonic() - started
+    if not stats.calls or elapsed <= 0:
+        return
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - only under a custom -p
+        return
+    reporter.write_line(
+        f"probe: {stats.calls} `docker compose exec` call(s), "
+        f"{stats.seconds:.1f}s of {elapsed:.1f}s "
+        f"({stats.seconds / elapsed:.0%} of the tier), "
+        f"{stats.seconds / stats.calls * 1000:.0f}ms each"
+    )
+
+
+def _keep_scope() -> str:
+    """One kept credential set per checkout, matching the kept project name.
+
+    `StackPool._compose_args_full` derives the project from the compose file's
+    resolved path for the same reason: two worktrees sharing a kept volume set
+    would each boot the other's half-provisioned Nextcloud.
+    """
+    return hashlib.sha256(str(FULL_COMPOSE_FILE.resolve()).encode()).hexdigest()[:8]
+
+
+def _report_boot_times(config, pool) -> None:
+    """Print where a cold boot went, once, at session end.
+
+    Open question 2 asks whether the provisioned volume set needs snapshotting,
+    and says it should be settled against Stage 3's measurement rather than
+    against the "roughly ten minutes" a comment remembers. A number nobody has to
+    instrument for is what makes that possible later.
+    """
+    if not pool.boot_times:
+        return
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - only under a custom -p
+        return
+    for profile, service, seconds in pool.boot_times:
+        reporter.write_line(f"boot: {profile} waited {seconds:.0f}s on {service}")
+
+
+@pytest.fixture(scope="session")
+def stacks(pytestconfig, tmp_path_factory, _sweep_leftover_stacks, _measure_probe_exec):
+    """Lazily-started, session-scoped stacks, keyed by profile name.
+
+    Nothing is booted here. The pool starts a stack the first time a test
+    declares its profile, so a run selecting only the forge scenarios never pays
+    for a `base` stack, and one selecting only lean scenarios never pays the full
+    shape's cold boot — and `close_all` tears down whatever ended up running.
+
+    One pool for both shapes rather than one per tier, so a session that happened
+    to select from both sweeps once and tears down once.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+
+    keep = bool(os.environ.get("ISTOTA_TESTBED_KEEP"))
+    pool = stack_support.StackPool(
+        workdir=tmp_path_factory.mktemp("testbed"),
+        lean=stack_support.LeanShape(
+            compose_file=LEAN_COMPOSE_FILE,
+            render_script=RENDER_CONFIG,
+            image=lean_image_tag(),
+            prebuilt_overlay=LEAN_PREBUILT_OVERLAY,
+            ready_timeout=LEAN_READY_TIMEOUT,
+        ),
+        full=stack_support.FullShape(
+            compose_file=FULL_COMPOSE_FILE,
+            overlay=TESTBED_OVERLAY,
+            keep=keep,
+            # Outside the checkout, with the other machine-wide test state:
+            # these are real generated passwords, and the repo's pre-commit hook
+            # exists because credentials end up in trees.
+            keep_dir=Path.home() / ".cache" / "istota-testbed" / _keep_scope(),
+        ),
+        platform=resolve_platform(pytestconfig),
+        project_prefix=PROJECT_PREFIX,
+    )
+    try:
+        yield pool
+    finally:
+        pool.close_all()
+        _report_boot_times(pytestconfig, pool)
+
+
+@pytest.fixture
+def stack(request, stacks):
+    """The stack for the profile this test declared, reset and quiescent.
+
+    `reset` runs *before* the test rather than after, so a failed test's state is
+    still there to inspect and the next test is still clean.
+
+    `no-forge` is the one profile whose image cannot be written down: it is
+    derived from whichever image the session actually built. The tag is filled in
+    here, and `getfixturevalue` rather than a fixture argument so a run with no
+    negative control in it never builds the second image — and so this fixture,
+    which now lives at the rootdir, does not have to see a lean-only fixture that
+    still lives under `tests/smoke/`.
+
+    The reset's watermark is stashed as `stack.mark`, because the instant it is
+    taken is the one that matters: after this test's reset and before anything it
+    does. A scenario taking its own would take it after `submit`, which is too
+    late for the row it wants to prove was never written.
+    """
+    marker = request.node.get_closest_marker("profile")
+    name = marker.args[0] if marker and marker.args else profiles.BASE.name
+    fresh = bool(marker.kwargs.get("fresh")) if marker else False
+
+    profile = profiles.by_name(name)
+    if profile.name == profiles.NO_FORGE.name:
+        profile = replace(profile, image=request.getfixturevalue("no_forge_image"))
+
+    running = stacks.get(profile, fresh=fresh)
+    script_marker = request.node.get_closest_marker("script")
+    turns = (
+        list(script_marker.args[0])
+        if script_marker and script_marker.args
+        else list(DEFAULT_SCRIPT)
+    )
+    try:
+        try:
+            # `pytrace=False`, because a reset that could not quiesce is a
+            # harness condition rather than a code defect, and a traceback through
+            # three fixture frames buries the one line that says which task ids
+            # were still in flight. `testbed` raises rather than calling
+            # `pytest.fail` itself — it is an installable package two repos
+            # outside this one consume — so the translation happens here.
+            running.mark = running.reset(turns)
+        except (TimeoutError, stack_support.StackError) as exc:
+            pytest.fail(str(exc), pytrace=False)
+        yield running
+    finally:
+        if fresh:
+            stacks.release(running)

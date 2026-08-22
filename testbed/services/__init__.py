@@ -141,6 +141,12 @@ def _gitlab_service(*args, **kwargs) -> Service:
     return gitlab.serve(*args, **kwargs)
 
 
+def _nextcloud_service(*args, **kwargs) -> Service:
+    from . import nextcloud
+
+    return nextcloud.attach(*args, **kwargs)
+
+
 #: Profile service names to the factory that produces one. A profile names
 #: services by string, so a typo is a `KeyError` at fixture setup rather than an
 #: import error; `tests/test_testbed_services.py` closes that by checking every
@@ -148,10 +154,28 @@ def _gitlab_service(*args, **kwargs) -> Service:
 REGISTRY: dict[str, Callable[..., Service]] = {
     "model": _model_service,
     "gitlab": _gitlab_service,
+    "nextcloud": _nextcloud_service,
 }
 
+#: Registry names that open a listening socket in the pytest process.
+#:
+#: The distinction is not cosmetic — it is exactly the set the credential rule
+#: applies to. `HttpStub.start` refuses a non-loopback bind with no credential
+#: because the tier binds all interfaces so a container can reach it, which on a
+#: laptop on a shared network is an unauthenticated listener. A service that
+#: binds nothing has no such hazard and no credential to publish, so a guard
+#: iterating `REGISTRY` and demanding one of every member would be asserting
+#: something false about half of it.
+HOST_STUBS = frozenset({"model", "gitlab"})
 
-def build(name: str, *, scratch: Path, host: str) -> Service:
+#: Registry names that attach to something the compose stack already runs.
+#:
+#: One member so far, and the shape it establishes is what the spec's `mail`
+#: service will join: a real server we control rather than one we wrote.
+ATTACHED = frozenset({"nextcloud"})
+
+
+def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
     """Construct one registered service the way a *stack* needs it.
 
     A separate function rather than a uniform `REGISTRY` signature, because the
@@ -163,12 +187,18 @@ def build(name: str, *, scratch: Path, host: str) -> Service:
     "give me a service" signature that always supplies a credential would make
     that guard unwritable.
 
-    So this is the adapter: the two things a pool has (a scratch directory and
-    the interface to bind) turned into what each service's own factory takes,
-    including the credential each one publishes. It is an explicit branch per
-    service rather than a table of partials, because each branch has something
-    to say — the forge needs its repository seeded before a scenario can clone
-    it, and a table would have hidden that in a lambda.
+    So this is the adapter: the three things a pool has (a scratch directory,
+    the interface to bind, and — on the full shape — this session's generated
+    credentials) turned into what each service's own factory takes, including
+    the credential each one publishes. It is an explicit branch per service
+    rather than a table of partials, because each branch has something to say —
+    the forge needs its repository seeded before a scenario can clone it, and a
+    table would have hidden that in a lambda.
+
+    `credentials` is a `stack.FullCredentials` and is `None` on the lean shape,
+    which generates nothing. Only `nextcloud` reads it, and it *requires* it:
+    that service is the one member of the registry that cannot exist without a
+    running full stack to attach to.
     """
     if name not in REGISTRY:
         raise KeyError(
@@ -208,6 +238,25 @@ def build(name: str, *, scratch: Path, host: str) -> Service:
             stub.close()
             raise
         return stub
+
+    if name == "nextcloud":
+        from . import nextcloud
+
+        if credentials is None:
+            raise ValueError(
+                "the nextcloud service attaches to a running full stack, so it "
+                "needs that stack's generated credentials; the lean shape has "
+                "none and cannot run this service"
+            )
+        # `localhost:<NC_PORT>`, which is nginx. Not `http://nextcloud`: that
+        # name resolves only inside the compose network, and this object runs in
+        # the pytest process. `container_url` is the other half of the pair.
+        return nextcloud.attach(
+            base_url=f"http://localhost:{credentials.nc_port}",
+            admin_password=credentials.admin_password,
+            bot_password=credentials.bot_password,
+            test_password=credentials.user_password,
+        )
 
     raise KeyError(  # pragma: no cover - unreachable while the two agree
         f"{name!r} is registered but `build` does not know how to construct it"
