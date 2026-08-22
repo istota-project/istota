@@ -1,0 +1,34 @@
+# Negative control 3 of 3: the devbox image with the real `gh` on PATH.
+#
+# This is the bypass `TestTheWrapperIsWhatResolvesByName` exists to catch, and
+# neither of the other two controls produces it. `/usr/local/bin/gh` is a copy
+# of the wrapper rather than a symlink into `/usr/local/lib/istota_forge`
+# (`docker/devbox/Dockerfile:156`), so deleting that directory leaves the PATH
+# entry intact and four of the file's thirteen assertions green.
+#
+# What it reproduces: an image where `gh` resolves by name to the real CLI. The
+# deny policy is then never consulted and the token is never injected — a task
+# typing `gh repo delete` gets the real thing. That is the exact property the
+# off-PATH placement buys, and it is worth a control of its own precisely
+# because nothing about it is visible from reading the tests.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-real-binary-on-path \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-real-binary-on-path:local docker/test
+ARG BASE
+FROM ${BASE}
+
+# See Dockerfile.devbox-no-forge: the base ends as `dev` and /usr/local/bin is
+# root-owned. Dropped back to `dev` at the end.
+USER root
+
+# Overwrite the wrapper on PATH with the real binary, leaving everything else
+# — including the off-PATH originals — exactly as the product ships them, so
+# the only difference is what the name resolves to.
+RUN cp /usr/local/lib/istota_forge/gh /usr/local/bin/gh \
+    && cp /usr/local/lib/istota_forge/glab /usr/local/bin/glab \
+    && echo "control: gh and glab on PATH are now the real binaries"
+
+USER dev

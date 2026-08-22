@@ -301,8 +301,17 @@ def run_in(
     # scrubbing stdout alone does not cover.
     safe_args = [scrub(part, env) for part in cmd]
     try:
+        # `errors="replace"` rather than the default `strict`: several
+        # assertions read the first bytes of a file to decide what it is, and a
+        # binary there raises UnicodeDecodeError inside `Popen` before `sh()`
+        # returns. The test then goes red without its assertion ever running or
+        # its message ever rendering — red for the right image but the wrong
+        # reason, which is indistinguishable from an assertion that works and
+        # is exactly what the negative controls exist to tell apart. Found by
+        # the ISSUE-281 control that puts a real ELF binary on PATH.
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=child_env
+            cmd, capture_output=True, text=True, errors="replace",
+            timeout=timeout, env=child_env,
         )
     except subprocess.TimeoutExpired:
         # TimeoutExpired.__str__ is "Command '<full argv>' timed out after N
