@@ -52,7 +52,7 @@ A currency figure is shown only where it is real money. `cost_basis` records whi
 
 `claude_code` infers the basis from the `apiKeySource` on the CLI's init frame. Newer CLI versions answer a bare `--output-format json` with a single-object envelope carrying no init frame, which used to send every daemon-side call — the nightly sleep cycle, the code reviewer, shared briefing blocks — into `unknown` while it carried real reported cost. The non-streaming path passes `--verbose`, which brings the init frame back on both deployed versions, so those rows now record the same basis as the task rows beside them. A CLI that ignores the flag still degrades to `unknown` rather than to a guess: inferring the basis from config would risk labelling a subscription's list-price equivalent as real spend.
 
-Both the CLI and the dashboard show the `api` figure and nothing else, and never sum across bases. A group holding rows of two kinds shows the real figure alone — not one added-up number, and not a list of the other bases, which overflowed the dashboard's cost column and named a distinction a reader cannot act on. Usage in a group with no `api` rows is read through the token counts instead. `--json` and `GET /admin/stats` still carry the whole `cost_by_basis` map.
+Every surface shows the `api` figure and nothing else, and none of them sums across bases. The CLI, the dashboard and `!usage` apply one rule from two implementations — `src/istota/usage_render.py` and `web/src/lib/usageFormat.ts`, one per language, pinned to each other by a parity test. A group holding rows of two kinds shows the real figure alone — not one added-up number, and not a list of the other bases, which overflowed the dashboard's cost column and named a distinction a reader cannot act on. Usage in a group with no `api` rows is read through the token counts instead. `--json` and `GET /admin/stats` still carry the whole `cost_by_basis` map.
 
 Sub-cent figures render at four decimals. A 24-hour per-user cost is routinely below a cent, and `$0.00` cannot be told apart from a genuine zero.
 
@@ -76,6 +76,8 @@ The command is operator-facing and runs from the operator's shell, so `--user` i
 
 The admin dashboard carries the same figures. A **Token usage** card shows 24-hour and 30-day totals, cache hit rate and the two context averages, then per-model, per-brain and per-origin breakdowns. Per-user tokens and cost sit on the Users rows beside that user's task counts, rather than being repeated in the usage card where the two copies could disagree.
 
+On a subscription deployment the cost column is all dashes by the rule above, so a separate **Claude Code subscription** card above it carries the plan's rate-limit windows — the budget the cost column cannot report. The same reading backs the `runtime.subscription_usage` doctor check and the admin-only plan section of [`!usage`](../reference/commands.md#usage-and-plan-limits).
+
 ## Retention
 
 Usage rows are pruned at `scheduler.usage_retention_days`, default **180**. That is deliberately far above `task_retention_days` (7): the point of a separate table is that spend outlives the task it came from. `task_id` dangles once the task is deleted, and the denormalized identity columns keep every row self-sufficient, so no aggregate ever joins `tasks`. `tasks.id` is `AUTOINCREMENT`, so a dangling id can never be reassigned to a different task.
@@ -88,3 +90,4 @@ Six months rather than a year because `db_backup` snapshots the framework DB int
 - [Database](../architecture/database.md#usage) — the table definitions
 - [Native brain](../configuration/native-brain.md) — how each brain reports its figures
 - [CLI reference](../reference/cli.md#usage-and-cost)
+- [Commands](../reference/commands.md#usage-and-plan-limits) — `!usage`, and the plan's rate-limit windows

@@ -34,6 +34,12 @@ from .tasks_file_poller import (
     discover_tasks_files,
     poll_user_tasks_file,
 )
+from .usage_render import (
+    COST_PLACEHOLDER,
+    fmt_context,
+    fmt_int,
+    render_cost,
+)
 
 
 def _installed_version() -> str:
@@ -295,60 +301,6 @@ def cmd_run(args):
     reset_async_runtime()
 
 
-# A dollar figure renders only for rows whose cost is real money, and it is the
-# whole of what the column says. A subscription's list-price equivalent and a
-# catalog estimate both read as spend at a glance, and a surface that quietly
-# invents an invoice is worse than one that declines to guess — so neither
-# reaches the column, as a figure or as a name. `--json` is exempt: the full
-# `cost_by_basis` map travels there, so a consumer can apply its own rule.
-COST_PLACEHOLDER = "—"
-
-
-def _render_cost(cost_by_basis: dict) -> str:
-    """One rule: no currency unless it is money.
-
-    Returns the group's `api` total as a dollar figure, and the bare
-    placeholder when there is no `api` row at all. Nothing is summed across
-    bases — an operator who switched the CLI's auth mid-window has rows of both
-    kinds, and adding a plan-equivalent to real spend is the misread this whole
-    design refuses.
-
-    The other bases are not named. A `+estimated+subscription+unknown` suffix
-    used to follow the figure; it overflowed the dashboard's fixed-width column
-    into the one beside it, and it asked the reader to act on a distinction
-    they have no way to act on. The full breakdown stays available in
-    `cost_by_basis` — `--json` emits it, and `_render_cost` is only the column.
-    """
-    real = (cost_by_basis or {}).get("api")
-    if real is not None:
-        return f"${_fmt_money(real)}"
-    return COST_PLACEHOLDER
-
-
-def _fmt_money(value: float) -> str:
-    """Two decimals, or four when that would round a real figure to nothing.
-
-    A 24h per-user figure is routinely sub-cent, and at two decimals it renders
-    `$0.00` — indistinguishable from a genuine zero, which is the one thing a
-    cost column must not be ambiguous about. `web/src/lib/usageFormat.ts` states
-    the same rule for the dashboard; the two are separate implementations of
-    one rule and must not disagree.
-    """
-    if value != 0 and abs(value) < 0.01:
-        return f"{value:.4f}"
-    return f"{value:.2f}"
-
-
-def _fmt_int(value) -> str:
-    return f"{int(value):,}" if value is not None else COST_PLACEHOLDER
-
-
-def _fmt_context(value) -> str:
-    if value is None:
-        return COST_PLACEHOLDER
-    return f"{int(round(value)):,}"
-
-
 def _usage_window(args):
     """Resolve the CLI's date arguments into one window, in both formats.
 
@@ -471,11 +423,11 @@ def cmd_usage(args):
     for g in groups:
         key = str(g.get("key") or "")[:22]
         print(
-            f"{key:<22} {g['rows']:>6} {_fmt_int(g['billed_input_tokens']):>15} "
-            f"{_fmt_int(g['cache_read_tokens']):>15} "
-            f"{_fmt_int(g['cache_write_tokens']):>15} "
-            f"{_fmt_int(g['output_tokens']):>12} "
-            f"{g['cache_hit_rate'] * 100:>5.1f}% {_render_cost(g['cost_by_basis']):>16}"
+            f"{key:<22} {g['rows']:>6} {fmt_int(g['billed_input_tokens']):>15} "
+            f"{fmt_int(g['cache_read_tokens']):>15} "
+            f"{fmt_int(g['cache_write_tokens']):>15} "
+            f"{fmt_int(g['output_tokens']):>12} "
+            f"{g['cache_hit_rate'] * 100:>5.1f}% {render_cost(g['cost_by_basis']):>16}"
         )
 
     print()
@@ -499,8 +451,8 @@ def cmd_usage(args):
         )
         print(
             f"{key:<22} {g['context_rows']:>9} "
-            f"{_fmt_context(g.get('avg_initial_context_tokens')):>13} "
-            f"{_fmt_context(peak):>13} {pct:>18}"
+            f"{fmt_context(g.get('avg_initial_context_tokens')):>13} "
+            f"{fmt_context(peak):>13} {pct:>18}"
         )
 
     if unmeasured:

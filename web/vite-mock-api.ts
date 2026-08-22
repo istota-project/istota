@@ -882,6 +882,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         { name: 'stop', help: 'Cancel your currently running task' },
         { name: 'trust', help: 'Trust an email sender: `!trust sender@example.com`' },
         { name: 'untrust', help: 'Remove a trusted email sender: `!untrust sender@example.com`' },
+        { name: 'usage', help: 'Show token usage, and plan limits on a subscription' },
       ],
       model_aliases: [
         { alias: 'fast', target: 'claude-haiku-4-5', effort: null },
@@ -1553,6 +1554,65 @@ const mockAdminStats = {
     // task-origin rows that recorded no context size.
     unmeasured_tasks_24h: 3,
     context_unmeasured_rows_30d: 1150,
+  },
+  // Claude Code plan utilization. Three windows spanning the three tints the
+  // card can draw against the warn/high pair below it — green, amber, red — so
+  // `VITE_MOCK_API=1 npm run dev` exercises all of them at once rather than
+  // whichever one the day's real reading happens to fall in. `spend.enabled` is
+  // true for the same reason: the extra-usage line is otherwise unreachable in
+  // dev, and the capture it is modelled on has it off. The card's other three
+  // states are reachable through `VITE_MOCK_SUBSCRIPTION` — see
+  // `mockSubscriptionState` below.
+  subscription: {
+    available: true,
+    windows: [
+      {
+        key: 'session',
+        label: '5-hour',
+        percent: 40,
+        resets_at: new Date(Date.now() + 3847_000).toISOString(),
+        resets_in_seconds: 3847,
+        severity: 'normal',
+        is_active: true,
+      },
+      {
+        key: 'weekly_all',
+        label: 'Weekly (all models)',
+        percent: 86.4,
+        resets_at: new Date(Date.now() + 6 * 86400_000).toISOString(),
+        resets_in_seconds: 6 * 86400,
+        severity: 'normal',
+        is_active: false,
+      },
+      {
+        key: 'weekly_scoped:fable',
+        label: 'Weekly (Fable)',
+        percent: 97,
+        // A live window with no scheduled reset — the sub-line says so rather
+        // than rendering an empty second row.
+        resets_at: null,
+        resets_in_seconds: null,
+        severity: 'normal',
+        is_active: false,
+      },
+    ],
+    spend: {
+      enabled: true,
+      used_minor: 465,
+      limit_minor: 2000,
+      currency: 'USD',
+      exponent: 2,
+      percent: 23.25,
+    },
+    fetched_at: new Date(Date.now() - 40_000).toISOString(),
+    stale: false,
+    token_source: 'env',
+    // The operator's own thresholds, which the card tints by. Left at the
+    // shipping defaults here; changing them in the TOML must change the colours
+    // without a frontend edit, which is why they are on the wire at all.
+    warn_percent: 80,
+    high_percent: 95,
+    error: '',
   },
   scheduler: {
     jobs_total: 5,
@@ -2794,11 +2854,52 @@ function mockAdminConfig() {
   };
 }
 
+/**
+ * The subscription section, in whichever of its four states was asked for.
+ *
+ * `VITE_MOCK_SUBSCRIPTION=unavailable | stale | nospend`, defaulting to the
+ * populated reading above. The card has four states and a working deployment
+ * produces three of them rarely and on nobody's schedule, so without a switch
+ * the only way to look at them is to edit this file — which is exactly the
+ * check nobody performs. The component test asserts all four; this is for
+ * looking at them.
+ */
+function mockSubscriptionState() {
+  const base = mockAdminStats.subscription;
+  switch (process.env.VITE_MOCK_SUBSCRIPTION) {
+    case 'unavailable':
+      return {
+        ...base,
+        available: false,
+        windows: [],
+        spend: null,
+        fetched_at: null,
+        token_source: '',
+        error: 'no Claude Code OAuth credential found',
+      };
+    case 'stale':
+      // Real numbers from an earlier fetch, plus the failure that made them old.
+      return {
+        ...base,
+        stale: true,
+        fetched_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+        error: 'HTTP 503 from the usage endpoint',
+      };
+    case 'nospend':
+      return { ...base, spend: { ...base.spend, enabled: false } };
+    default:
+      return base;
+  }
+}
+
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   chatHandler,
 
-  ({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
+  ({ url }) =>
+    url === '/istota/api/admin/stats'
+      ? { ...mockAdminStats, subscription: mockSubscriptionState() }
+      : undefined,
 
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),

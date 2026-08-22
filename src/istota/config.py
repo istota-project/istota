@@ -1,6 +1,7 @@
 """Configuration loading for istota."""
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
@@ -1106,6 +1107,47 @@ class TmuxBrainConfig:
 
 
 @dataclass
+class ClaudeCodeBrainConfig:
+    """Settings for the headless ``claude -p`` brain (``brain.kind =
+    "claude_code"``, the default).
+
+    Today this block is the **subscription usage poll only** — the brain's model
+    selection still comes from ``[brain]`` and ``[models]``, and its subprocess
+    behaviour is not configurable here. On a subscription deployment the
+    dashboard's cost column is deliberately blank (a plan-equivalent list price
+    is not spend), so the real budget is the rate-limit windows Anthropic
+    reports at ``GET /api/oauth/usage``. ``istota.subscription_usage`` fetches
+    them; the doctor check, the ``/admin`` card and ``!usage`` render them.
+
+    Every field is defaulted, so an absent ``[brain.claude_code]`` block is the
+    shipping behaviour. The poll is read-only: the credential is never written
+    and never refreshed. ``subscription_usage = false`` makes the doctor check
+    ``SKIP`` and the admin card report ``disabled by config`` in place of its
+    tiles — the card is not hidden, because ``available: false`` always carries
+    a reason and an operator expecting the reading has to learn why it is gone.
+
+    ``_validate_claude_code_brain`` (config load) corrects a configuration that
+    would make the feature misbehave — see its docstring for the three rules.
+    """
+
+    # Poll api.anthropic.com for plan utilization at all.
+    subscription_usage: bool = True
+    # One deployment-wide fetch per this window; every surface reads the same
+    # disk cache, so the dashboard's 60s auto-refresh costs nothing.
+    subscription_usage_cache_ttl_seconds: int = 1800
+    # Matches doctor.PROBE_TIMEOUT.
+    subscription_usage_timeout_seconds: float = 10.0
+    # Doctor WARNs and the tile turns amber at or above warn; the tile turns red
+    # at or above high. Never a FAIL at any utilization — a busy plan is a fact
+    # about the plan, not a defect in the host.
+    subscription_usage_warn_percent: float = 80.0
+    subscription_usage_high_percent: float = 95.0
+    # A stale-cache reading older than this WARNs rather than being reported as
+    # a current one.
+    subscription_usage_stale_after_seconds: int = 3600
+
+
+@dataclass
 class BrainConfig:
     """Selects which brain implementation handles model invocation.
 
@@ -1113,7 +1155,9 @@ class BrainConfig:
     ``"native"`` runs istota's own agent loop in-process; its settings live in
     the nested ``native`` block (``[brain.native]`` in TOML).
     ``"tmux_claude"`` drives the interactive ``claude`` TUI via tmux; its
-    settings live in ``[brain.tmux]``.
+    settings live in ``[brain.tmux]``. ``[brain.claude_code]`` holds the
+    subscription usage poll, which is read regardless of ``kind`` — a native
+    primary with a ``claude_code`` fallback burns the same plan.
 
     ``source_type_overrides`` maps a task ``source_type`` (``scheduled``,
     ``heartbeat``, ``talk``, …) to a brain kind, overriding ``kind`` for
@@ -1124,6 +1168,7 @@ class BrainConfig:
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
     tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
+    claude_code: ClaudeCodeBrainConfig = field(default_factory=ClaudeCodeBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found / tmux launch failure), the task runs
@@ -2548,10 +2593,90 @@ def load_config(config_path: Path | None = None) -> Config:
             error_markers=_str_list("error_markers"),
             usage_limit_markers=_str_list("usage_limit_markers"),
         )
+        cc_raw = br.get("claude_code", {})
+        if not isinstance(cc_raw, dict):
+            cc_raw = {}
+        _cc_defaults = ClaudeCodeBrainConfig()
+        _cc_logger = logging.getLogger("istota.config")
+
+        # Unlike the [brain.tmux] and [brain.native] parses above, this one does
+        # not hand a raw TOML value to int()/float()/bool(). It cannot afford
+        # to: `int(float("inf"))` raises OverflowError, `int(float("nan"))`
+        # raises ValueError, and TOML really does spell `inf` and `nan`. That
+        # exception escapes load_config, which runs in the scheduler, the web
+        # app, the webhook receiver and every host-side skill CLI the proxy
+        # spawns per call — so a typo on a knob that only draws a dashboard tile
+        # would stop the daemon from starting. `_validate_claude_code_brain`
+        # promises the block corrects rather than refuses; that promise has to
+        # start here, at the point the value enters.
+        def _cc_number(key: str, cast):
+            default = getattr(_cc_defaults, key)
+            if key not in cc_raw:
+                return default
+            raw = cc_raw[key]
+            # bool is a subclass of int, so `= true` would otherwise become 1 —
+            # a one-second TTL, i.e. a fetch per read, arriving past the floor
+            # that exists to prevent exactly that.
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                _cc_logger.warning(
+                    "[brain.claude_code] %s=%r is not a number; using %r",
+                    key, raw, default,
+                )
+                return default
+            if not math.isfinite(raw):
+                _cc_logger.warning(
+                    "[brain.claude_code] %s=%r is not a finite number; using %r",
+                    key, raw, default,
+                )
+                return default
+            return cast(raw)
+
+        # The one field whose whole job is to stop an unsolicited outbound
+        # request, so a value that is not plainly a boolean must not resolve to
+        # "on". `bool("false")` is True, and a YAML boolean reaching a quoted
+        # slot in a rendered config is a failure mode this repo has already had.
+        def _cc_enabled():
+            default = _cc_defaults.subscription_usage
+            if "subscription_usage" not in cc_raw:
+                return default
+            raw = cc_raw["subscription_usage"]
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                text = raw.strip().lower()
+                if text in ("true", "yes", "on", "1"):
+                    return True
+                if text in ("false", "no", "off", "0"):
+                    return False
+            _cc_logger.warning(
+                "[brain.claude_code] subscription_usage=%r is not a boolean; using %r",
+                raw, default,
+            )
+            return default
+
+        claude_code_cfg = ClaudeCodeBrainConfig(
+            subscription_usage=_cc_enabled(),
+            subscription_usage_cache_ttl_seconds=_cc_number(
+                "subscription_usage_cache_ttl_seconds", int
+            ),
+            subscription_usage_timeout_seconds=_cc_number(
+                "subscription_usage_timeout_seconds", float
+            ),
+            subscription_usage_warn_percent=_cc_number(
+                "subscription_usage_warn_percent", float
+            ),
+            subscription_usage_high_percent=_cc_number(
+                "subscription_usage_high_percent", float
+            ),
+            subscription_usage_stale_after_seconds=_cc_number(
+                "subscription_usage_stale_after_seconds", int
+            ),
+        )
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
             native=native,
             tmux=tmux_cfg,
+            claude_code=claude_code_cfg,
             source_type_overrides={
                 str(k): str(v) for k, v in overrides_raw.items()
             },
@@ -3121,6 +3246,7 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     _validate_brain_fallback(config)
+    _validate_claude_code_brain(config)
     _validate_advisor_model(config)
     _validate_forge_clis(config)
 
@@ -3279,6 +3405,114 @@ def _validate_brain_fallback(config: "Config") -> None:
             fb,
         )
         config.brain.fallback = ""
+
+
+def _validate_claude_code_brain(config: "Config") -> None:
+    """Correct a ``[brain.claude_code]`` block that would misreport the plan.
+
+    Three rules, each logging one WARNING and correcting in place. None of them
+    can refuse to load, and none of them does any I/O — this runs inside every
+    ``load_config``, and the subscription poll itself is deliberately reached
+    only from a diagnostic path.
+
+    1. Both percentages clamp to ``[0, 100]``. A threshold outside the range the
+       endpoint reports is either unreachable or always tripped.
+    2. ``warn > high`` (after clamping) is corrected to ``warn = high``. An
+       inverted pair makes the amber band unreachable, which is more likely a
+       typo than an intent.
+    3. ``cache_ttl_seconds`` and ``timeout_seconds`` floor at 1. A zero TTL
+       would fetch on every dashboard poll — the cache exists precisely so the
+       whole deployment pays for one fetch per window.
+
+    A non-finite value is substituted with the shipping default rather than
+    clamped or floored, on both the percentage and the timeout paths. Clamping
+    a NaN percentage would land it at 0.0, i.e. WARN at every utilization for
+    ever, on a check whose whole point is that it does not cry wolf; and an
+    ``inf`` timeout is both an unbounded socket read and a value the admin
+    config pane cannot serialize. The loader's own parse already rejects these
+    at the point they enter, so this is the guard for a ``Config`` assembled
+    some other way.
+
+    ``stale_after_seconds`` is deliberately not floored: zero there means "treat
+    any stale reading as too old", which is a coherent thing to ask for.
+    """
+    cc = config.brain.claude_code
+    _logger = logging.getLogger("istota.config")
+
+    def _clamp_percent(name: str, raw: float, default: float) -> float:
+        # A non-finite value is not "out of range", it is "not a number", and
+        # clamping it would land it at 0.0 — which means WARN at every
+        # utilization, forever, on a check whose whole point is that it is not
+        # alarming. Substitute the shipping default instead. (NaN compares
+        # False against everything, so min/max would silently keep the 0.0.)
+        if not math.isfinite(raw):
+            _logger.warning(
+                "[brain.claude_code] %s=%r is not a finite number; using %r",
+                name, raw, default,
+            )
+            return default
+        clamped = min(100.0, max(0.0, float(raw)))
+        if clamped != raw:
+            _logger.warning(
+                "[brain.claude_code] %s=%r is outside [0, 100]; using %r",
+                name, raw, clamped,
+            )
+        return clamped
+
+    _defaults = ClaudeCodeBrainConfig()
+    cc.subscription_usage_warn_percent = _clamp_percent(
+        "subscription_usage_warn_percent",
+        cc.subscription_usage_warn_percent,
+        _defaults.subscription_usage_warn_percent,
+    )
+    cc.subscription_usage_high_percent = _clamp_percent(
+        "subscription_usage_high_percent",
+        cc.subscription_usage_high_percent,
+        _defaults.subscription_usage_high_percent,
+    )
+
+    if cc.subscription_usage_warn_percent > cc.subscription_usage_high_percent:
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_warn_percent=%r is above "
+            "subscription_usage_high_percent=%r, which leaves no amber band; "
+            "lowering warn to %r",
+            cc.subscription_usage_warn_percent,
+            cc.subscription_usage_high_percent,
+            cc.subscription_usage_high_percent,
+        )
+        cc.subscription_usage_warn_percent = cc.subscription_usage_high_percent
+
+    # `not (x >= 1)` rather than `x < 1`, so a NaN that reached the dataclass
+    # some way other than the loader's own parse is corrected instead of
+    # sailing through — every comparison against NaN is False, which is exactly
+    # how a floor written the obvious way lets one past.
+    if not (cc.subscription_usage_cache_ttl_seconds >= 1):
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_cache_ttl_seconds=%r would "
+            "fetch on every read; using 1",
+            cc.subscription_usage_cache_ttl_seconds,
+        )
+        cc.subscription_usage_cache_ttl_seconds = 1
+
+    if not (cc.subscription_usage_timeout_seconds >= 1):
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_timeout_seconds=%r is below "
+            "one second; using 1",
+            cc.subscription_usage_timeout_seconds,
+        )
+        cc.subscription_usage_timeout_seconds = 1.0
+    elif not math.isfinite(cc.subscription_usage_timeout_seconds):
+        # An unbounded socket timeout on a diagnostic path, and a value the
+        # admin config pane cannot serialize — starlette renders JSON with
+        # allow_nan=False, so one `inf` here 500s GET /api/admin/config for the
+        # whole instance.
+        _logger.warning(
+            "[brain.claude_code] subscription_usage_timeout_seconds=%r is not "
+            "finite; using %r",
+            cc.subscription_usage_timeout_seconds,
+            _defaults.subscription_usage_timeout_seconds,
+        )
+        cc.subscription_usage_timeout_seconds = _defaults.subscription_usage_timeout_seconds
 
 
 def _apply_user_profiles(config: "Config") -> None:

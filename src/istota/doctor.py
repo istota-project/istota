@@ -37,12 +37,14 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import math
 import os
 import platform
 import re
 import shlex
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -51,6 +53,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
     from .config import Config
+    from .subscription_usage import UsageSnapshot, UsageWindow
 
 logger = logging.getLogger(__name__)
 
@@ -507,6 +510,196 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
             "that reads as an empty workspace."
         ),
     )
+
+
+# The three remedies this check can offer. Fixed literals: `detail` and `remedy`
+# are built from these plus a percentage, a duration and a resolver branch name,
+# never from the credential, the raw response body or an exception string.
+_USAGE_REMEDY = "Check network egress to api.anthropic.com, or re-run `claude setup-token`."
+_USAGE_BUSY_REMEDY = (
+    "Tasks will fail over to the fallback brain when this window is exhausted."
+)
+# Kept separate from _USAGE_REMEDY because this one follows a *successful*
+# request: the endpoint answered, it parsed, and it named no window this reader
+# understands. Neither egress nor re-authentication is the repair, and offering
+# them would send an operator hunting for a fault on their own host.
+_USAGE_SHAPE_REMEDY = (
+    "The endpoint answered normally but named no rate-limit window this version "
+    "understands; its response shape has changed and the parser needs updating."
+)
+
+
+def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
+    """Plan utilization for the Claude Code subscription, with its reset times.
+
+    On a subscription deployment the dashboard's cost column is deliberately
+    blank — a plan-equivalent list price is not spend — so these windows are the
+    only budget there is, and the deployment currently learns it is out of plan
+    headroom at the moment a task fails over.
+
+    **This check never returns FAIL, at any utilization.** ``exit_code`` returns
+    1 on any FAIL and ``scheduler._alert_doctor_failures`` messages every admin
+    on the transition into failure. A plan at 97% is a fact about the plan, not a
+    defect in the host: it would exit non-zero on a busy but perfectly healthy
+    deployment, turn the Health pane red for a condition no operator action
+    resolves, and mail everyone about it. Proactive alerting on utilization is a
+    reasonable thing to want and belongs in a poller with its own per-window
+    threshold state, not smuggled through doctor's failure channel.
+
+    ``subscription_usage`` is imported inside the function, not at module scope:
+    ``_validate_forge_clis`` imports this module from inside every
+    ``load_config``, which runs in every CLI invocation and every host-side skill
+    CLI the proxy spawns per call.
+    """
+    name = "runtime.subscription_usage"
+    settings = getattr(getattr(config, "brain", None), "claude_code", None)
+
+    if not getattr(settings, "subscription_usage", True):
+        return CheckResult(name, SKIP, "subscription usage polling is disabled")
+    if not probe:
+        # Before the import, and before anything is asked of the module: the
+        # reading is a network request and there is no cheap filesystem answer
+        # that would still be true.
+        return CheckResult(
+            name,
+            SKIP,
+            "utilization cannot be observed without a network request (probe disabled)",
+        )
+
+    from . import subscription_usage
+
+    # One clock for the fetch, the countdowns and the staleness age. Reading the
+    # wall clock twice would let a cached snapshot's age be measured against a
+    # different moment than the one the module used to decide it was fresh.
+    now = time.time()
+    snapshot = subscription_usage.get_snapshot(config, now_ts=now)
+
+    # Two of the module's errors are conditions rather than faults, and a WARN
+    # about network egress would be nonsense for either. `DISABLED_ERROR` is
+    # unreachable through the gate above and handled anyway: the module reads
+    # the same setting defensively and its own answer is the authoritative one.
+    if snapshot.error in (
+        subscription_usage.NO_CREDENTIAL_ERROR,
+        subscription_usage.DISABLED_ERROR,
+    ):
+        return CheckResult(name, SKIP, snapshot.error)
+
+    if snapshot.error and not snapshot.has_data:
+        remedy = (
+            _USAGE_SHAPE_REMEDY
+            if snapshot.error == subscription_usage.NO_WINDOWS_ERROR
+            else _USAGE_REMEDY
+        )
+        return CheckResult(name, WARN, _usage_error(snapshot), remedy=remedy)
+
+    if not snapshot.windows:
+        # Unreachable: every error-free return from `get_snapshot` carries
+        # windows, and the one that does not sets NO_WINDOWS_ERROR. Guarded
+        # anyway, because the alternative is an IndexError below, and
+        # `run_checks` turns a raising check into exactly the FAIL this check
+        # exists never to produce. Two lines make the promise structural rather
+        # than inherited from another module's invariant.
+        return CheckResult(
+            name, WARN, subscription_usage.NO_WINDOWS_ERROR, remedy=_USAGE_SHAPE_REMEDY
+        )
+
+    # A snapshot with both windows and an error is the stale-cache branch: real
+    # numbers from an older fetch, plus the failure that made them old.
+    stale_note = ""
+    if snapshot.error:
+        age = snapshot.age_seconds(now)
+        stale_note = (
+            f"last successful reading is {_duration(age)} old: {_usage_error(snapshot)}"
+        )
+        stale_after = _setting_float(
+            settings, "subscription_usage_stale_after_seconds", 3600.0
+        )
+        if age > stale_after:
+            return CheckResult(name, WARN, stale_note, remedy=_USAGE_REMEDY)
+
+    # Worst first, and all of them: "5-hour at 12%, weekly at 94%" and "5-hour at
+    # 94%, weekly at 12%" call for different operator responses, and this one
+    # line is the whole of what a terminal reader sees.
+    windows = sorted(snapshot.windows, key=lambda w: w.percent, reverse=True)
+    detail = "; ".join(_usage_window(w) for w in windows)
+    if stale_note:
+        # Inside `stale_after` the status is still what the numbers say — that
+        # threshold is the whole point of the setting — but the line has to
+        # admit the numbers are old and say why. Otherwise an hour-long outage
+        # reads as `OK` with an hour-old percentage beside a countdown that has
+        # been recomputed against the current clock, which is the most
+        # misleading pair this check could print. The admin card and `!usage`
+        # both carry the same footer for the same reason.
+        detail = f"{detail}; {stale_note}"
+
+    warn_at = _setting_float(settings, "subscription_usage_warn_percent", 80.0)
+    high_at = _setting_float(settings, "subscription_usage_high_percent", 95.0)
+    # The status table's two busy rows differ only in which threshold caught the
+    # reading; both are WARN with the same detail and the same remedy, because
+    # `high` is what turns the dashboard tile red and doctor has no third colour.
+    # `min` reproduces both rows including an inverted pair, which the loader
+    # corrects but which a config reaching the dataclass some other way would not.
+    if windows[0].percent >= min(warn_at, high_at):
+        return CheckResult(name, WARN, detail, remedy=_USAGE_BUSY_REMEDY)
+    return CheckResult(name, OK, detail)
+
+
+def _usage_error(snapshot: "UsageSnapshot") -> str:
+    """The module's error, plus which credential produced it.
+
+    Which one it was is the whole diagnostic: a setup token in the environment
+    and an interactive login in the keychain are refused for different reasons
+    and have different repairs. The branch *name* only — the snapshot has never
+    carried the credential itself.
+    """
+    if not snapshot.token_source:
+        return snapshot.error
+    return f"{snapshot.error} (credential source: {snapshot.token_source})"
+
+
+def _usage_window(window: "UsageWindow") -> str:
+    text = f"{window.label} at {window.percent:g}%"
+    if window.resets_in_seconds is None:
+        # No reset scheduled, or an unparseable one. A terminal line is better
+        # short than padded with a clause that says nothing.
+        return text
+    if window.resets_in_seconds <= 0:
+        return f"{text} (resetting now)"
+    return f"{text} (resets in {_duration(window.resets_in_seconds)})"
+
+
+def _duration(seconds: float) -> str:
+    """A coarse human duration: ``6d 2h``, ``1h 04m``, ``12m``, ``45s``.
+
+    Two units at most. An operator reading "resets in 1h 04m" is deciding
+    whether to wait; seconds of precision six hours out is noise.
+    """
+    total = int(max(0.0, seconds))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def _setting_float(settings: object, field: str, default: float) -> float:
+    """A numeric setting, or `default` for anything that is not a real number.
+
+    The loader validates and corrects these fields; this is the second line, so
+    that a value arriving past the loader cannot make the comparison below raise
+    or silently never fire. ``bool`` is excluded explicitly — it is an ``int``,
+    and ``True`` would read as a 1% threshold.
+    """
+    value = getattr(settings, field, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    as_float = float(value)
+    return as_float if math.isfinite(as_float) else default
 
 
 # ---------------------------------------------------------------------------
@@ -1866,6 +2059,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.framework_db", check_framework_db),
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
+    ("runtime.subscription_usage", check_subscription_usage),
     ("security.skill_proxy", check_skill_proxy),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
@@ -1898,6 +2092,9 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.framework_db": DEPLOYMENT,
     "runtime.writable_dirs": DEPLOYMENT,
     "runtime.mount_liveness": DEPLOYMENT,
+    # Deployment, not image: it needs a credential and network egress, neither of
+    # which a bare `docker run` has. Not in DEEP_CHECKS — it spawns no namespace.
+    "runtime.subscription_usage": DEPLOYMENT,
     "security.skill_proxy": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
