@@ -615,3 +615,86 @@ describe('search results + anchors', () => {
     expect(container.querySelector('[data-cid="88"]')).not.toBeNull();
   });
 });
+
+describe('brain fallback notice reaches the DOM (ISSUE-278)', () => {
+  const NOTICE = '`claude_code` is unavailable. Continuing on `native`.';
+
+  it('renders the notice as its own aside, distinct from the answer body', async () => {
+    const store = writable<ChatMessage[]>([assistant()]);
+    const { container } = render(StreamHarness, { store });
+
+    freshRefsUpdate(store, 'brain_fallback', { text: NOTICE });
+    freshRefsUpdate(store, 'text_delta', { text: 'The answer is 42.' });
+    freshRefsUpdate(store, 'result', { text: 'The answer is 42.' });
+    await tick();
+
+    const notice = container.querySelector('.run-notice');
+    expect(notice).not.toBeNull();
+    expect(notice?.textContent).toContain('is unavailable');
+    // The backticked brain names render as code, not as literal backticks.
+    expect(notice?.querySelectorAll('code').length).toBe(2);
+    expect(notice?.textContent).not.toContain('`');
+    // Announced rather than silently substituted.
+    expect(notice?.getAttribute('role')).toBe('status');
+    // The answer is a separate body block — the notice did not absorb it and
+    // the result did not overwrite the notice.
+    // The notice is deliberately not a `.body` — that class owns the answer's
+    // type size and colour, both of which the notice overrides.
+    const bodies = [...container.querySelectorAll('.body')];
+    expect(bodies.map((b) => b.textContent?.trim())).toEqual(['The answer is 42.']);
+  });
+
+  it('survives the answer arriving after it', async () => {
+    const store = writable<ChatMessage[]>([assistant()]);
+    const { container } = render(StreamHarness, { store });
+
+    freshRefsUpdate(store, 'text_delta', { text: 'starting' });
+    freshRefsUpdate(store, 'brain_fallback', { text: NOTICE });
+    freshRefsUpdate(store, 'result', { text: 'done at last' });
+    freshRefsUpdate(store, 'done', {});
+    await tick();
+
+    expect(container.querySelectorAll('.run-notice').length).toBe(1);
+    expect(container.textContent).toContain('done at last');
+  });
+
+  it('keeps the live cue alive while the fallback runs', async () => {
+    // The failure ISSUE-278 opens with is a turn that shows no sign of life.
+    // A notice is a static sentence and the fallback run that follows it is the
+    // long part of the wait, so the notice must not retire the pulsing dot the
+    // way a real content group does.
+    const store = writable<ChatMessage[]>([assistant()]);
+    const { container } = render(StreamHarness, { store });
+
+    freshRefsUpdate(store, 'task_started', {});
+    store.update((arr) => {
+      const next = arr.slice();
+      next[0] = { ...arr[0], progress: 'Probing…' };
+      return next;
+    });
+    freshRefsUpdate(store, 'brain_fallback', { text: NOTICE });
+    await tick();
+
+    expect(container.querySelector('.run-notice')).not.toBeNull();
+    // Still streaming, still saying so.
+    expect(container.querySelector('.progress .dot')).not.toBeNull();
+    expect(container.querySelector('.progress .status-text')?.textContent).toBe('Probing…');
+  });
+
+  it('retires the live cue once real content follows the notice', async () => {
+    const store = writable<ChatMessage[]>([assistant()]);
+    const { container } = render(StreamHarness, { store });
+
+    freshRefsUpdate(store, 'brain_fallback', { text: NOTICE });
+    freshRefsUpdate(store, 'tool_start', {
+      tool_call_id: 'c1',
+      tool_name: 'Read',
+      description: 'Reading',
+    });
+    await tick();
+
+    // An activity group carries its own streaming cue, so the standalone dot
+    // stands down.
+    expect(container.querySelector('.progress .dot')).toBeNull();
+  });
+});
