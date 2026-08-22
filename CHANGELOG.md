@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A self-hosted GitHub reachable on a port other than the usual one is now actually reached on it. The port was dropped from the address before every `gh` call, so the request went to the default port instead — either to whatever answered there, or, inside a task, to a refusal from the network allowlist, which had the port right all along. Nothing warned, and the code alongside claimed gh could not do this at all, which turned out to be untrue when measured. GitLab was never affected.
+
+- A GitHub Enterprise Cloud account at the bare `ghe.com` address now authenticates. It was handed the wrong one of the two credentials `gh` reads — the rule covers subdomains of that address rather than the address itself, and the code had taken it one word too broadly, so every call went out unauthenticated and failed as though the token's permissions were wrong. Subdomains were always correct and are unchanged.
+
 - When the server reports memory it cannot account for, the report it writes now names the task holding it. That memory lives in the private scratch space each task gets, which the report had no way of looking into, so the most common cause of the warning was also the one thing it could never name — every occurrence needed someone to log in as root and work it out by hand. Each running task's scratch space is now measured and listed against the task's own number.
 
 - A line in that same report saying it could not read a container's memory now says why it could not. The old wording read as a passing glitch worth retrying, and an investigation was sent after the wrong suspect on the strength of it. The reason is now named exactly, and where a reason has more than one possible cause the line says so rather than picking one.
