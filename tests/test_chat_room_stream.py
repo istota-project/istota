@@ -244,6 +244,20 @@ def _hold_draft(room_token, *, user_id="alice", subject="Re: Invite"):
         )
 
 
+def _raise_notification(*, user_id="alice", task_id=4242):
+    """An open inbox row, written through the source the producers use.
+
+    Actionable, so one row moves both halves of the frame's payload and a
+    handler that reported only `open` would fail here.
+    """
+    from istota.notification_resolvers import confirmation as confirmation_source
+
+    with db.get_db(_db_path()) as conn:
+        return confirmation_source.write(
+            conn, user_id, task_id=task_id, title="a question", body="",
+        )
+
+
 @_needs_web_deps
 class TestRoomEventsSnapshot:
     async def test_requires_auth(self, stream_client):
@@ -620,6 +634,96 @@ class TestRoomStreamSSE:
         ]
         assert frames[0]["drafts"][0]["id"] == draft_id
         assert frames[-1]["drafts"] == []
+
+    async def test_an_open_notification_is_pushed_as_a_notifications_frame(
+        self, tmp_path,
+    ):
+        """The fast path for the bell, on the one route already holding a
+        stream open. The contract is the root layout's 30-second poll, which
+        works from every route; this is what makes a question parked while the
+        user is reading a room light the bell in about a second instead."""
+        await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+
+        def on_check(n):
+            if n == 2:
+                _raise_notification()
+
+        buf = await _drain(_FakeRequest(disconnect_after=4, on_check=on_check))
+
+        assert _frame(buf, "notifications") == {"open": 1, "actionable": 1}
+        # Auxiliary, like `room` and `drafts` — an `id:` here would move
+        # EventSource's resume cursor off the message tail.
+        assert "id:" not in buf
+
+    async def test_the_notifications_frame_is_added_beside_drafts(self, tmp_path):
+        """Added, not a replacement. The inline `DraftCard` under the turn that
+        composed a draft survives the inbox, and `GET /chat/events` carries the
+        same `drafts` payload for the documented polling fallback."""
+        room = await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+
+        def on_check(n):
+            if n == 2:
+                _hold_draft(room["token"])
+                _raise_notification()
+
+        buf = await _drain(_FakeRequest(disconnect_after=4, on_check=on_check))
+
+        assert _frame(buf, "drafts")["drafts"][0]["subject"] == "Re: Invite"
+        assert _frame(buf, "notifications")["open"] == 1
+
+    async def test_an_unchanged_count_is_not_re_pushed(self, tmp_path):
+        """It rides every room-check tick of every open connection, so an
+        unchanged pair must cost nothing."""
+        await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        _raise_notification()
+
+        buf = await _drain(_FakeRequest(disconnect_after=4))
+
+        assert buf.count("event: notifications") == 1
+
+    async def test_a_resolved_notification_pushes_the_lower_count(self, tmp_path):
+        """The badge has to come back down without a reload — an answer given
+        in Talk closes the row and nothing else would say so here."""
+        await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        _raise_notification()
+
+        def on_check(n):
+            if n == 2:
+                from istota import notification_store
+
+                with db.get_db(_db_path()) as c:
+                    notification_store.resolve_notification(
+                        c, "alice", "confirmation", "task:4242", by="talk",
+                    )
+
+        buf = await _drain(_FakeRequest(disconnect_after=6, on_check=on_check))
+
+        frames = [
+            json.loads(chunk.split("data: ", 1)[1].split("\n\n", 1)[0])
+            for chunk in buf.split("event: notifications\n")[1:]
+        ]
+        assert frames[0]["open"] == 1
+        assert frames[-1] == {"open": 0, "actionable": 0}
+
+    async def test_another_users_notification_is_not_counted(self, tmp_path):
+        """The count is scoped by the session's user, never by anything on the
+        request — rooms are shared, and the bell is not."""
+        await self._setup(tmp_path, room_stream_room_check_seconds=0.001)
+        _raise_notification(user_id="bob")
+
+        buf = await _drain(_FakeRequest(disconnect_after=4))
+
+        assert "event: notifications" not in buf
+
+    async def test_the_room_check_knob_disables_the_frame_too(self, tmp_path):
+        """It rides the same tick as the room and draft diffs, which is why
+        nothing may be tuned down on its account: the poll is the contract."""
+        await self._setup(tmp_path, room_stream_room_check_seconds=0)
+        _raise_notification()
+
+        buf = await _drain(_FakeRequest(disconnect_after=4))
+
+        assert "event: notifications" not in buf
 
     async def test_another_users_draft_is_not_streamed(self, tmp_path):
         """Rooms are shared. A co-member must not be handed the body and

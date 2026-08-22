@@ -2731,6 +2731,32 @@ def _drafts_snapshot(username: str) -> list[dict]:
     return sorted(out, key=lambda d: d["id"])
 
 
+def _notifications_snapshot(username: str) -> dict[str, int]:
+    """`{"open": N, "actionable": M}` for the room stream's own frame.
+
+    The bell's number comes from a 30-second poll in the root layout, which is
+    the contract and works on every route. This is the fast path for the one
+    route that already holds a stream open, so a confirmation parked while the
+    user is reading a room lights the bell in about a second instead of thirty.
+
+    Plain SQL and no resolvers, the same as `GET /notifications/count` — this
+    fires on a timer, on every open connection, and a resolver pass here would
+    open per-user module DBs on each tick. The panel's own open is what runs the
+    liveness pass and makes the number exact.
+
+    On the stream's 2s busy timeout rather than the default thirty: a room-check
+    tick must not park the generator on the scheduler's write lock. It rides the
+    same tick as the room and draft diffs, so `room_stream_room_check_seconds =
+    0` disables it too — which is why nothing may be tuned down on its account.
+    """
+    from . import db, notification_store  # noqa: PLC0415
+
+    with db.get_db(
+        _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
+    ) as conn:
+        return notification_store.counts(conn, username)
+
+
 def _room_delta_frames(before: dict[str, dict], after: dict[str, dict]) -> list[dict]:
     """`room` frame payloads for what changed between two snapshots — a rename,
     a model/effort change, or a room appearing / disappearing on another device
@@ -2841,6 +2867,11 @@ async def chat_room_stream(
         # is pushed, which is what covers one held between the client's own
         # `GET /chat/drafts` and this stream opening.
         drafts: list[dict] = []
+        # Seeded at zero for the same reason, and with one extra: a user who
+        # already has open rows when the connection opens differs from this and
+        # gets a frame immediately, instead of waiting up to thirty seconds for
+        # the layout poll to be the first thing that tells them.
+        notif_counts: dict[str, int] = {"open": 0, "actionable": 0}
         _room_stream_conn_delta(1)
         try:
             while True:
@@ -2923,6 +2954,26 @@ async def chat_room_stream(
                         drafts = held
                         yield ("event: drafts\n"
                                f"data: {json.dumps({'drafts': held})}\n\n")
+                        last_frame = time.monotonic()
+
+                    # Added *beside* the drafts frame, not in place of it. The
+                    # inline `DraftCard` under the turn that composed a draft
+                    # survives the inbox, and `GET /chat/events` carries the
+                    # same `drafts` payload for the documented polling
+                    # fallback — so that frame still has consumers.
+                    try:
+                        fresh_counts = await asyncio.to_thread(
+                            _notifications_snapshot, username,
+                        )
+                    except Exception:  # noqa: BLE001 — best-effort, like drafts
+                        fresh_counts = None
+                    if fresh_counts is not None and fresh_counts != notif_counts:
+                        # No `id:`. Auxiliary, like `room` and `drafts`: moving
+                        # EventSource's resume cursor off the message tail here
+                        # would strand it.
+                        notif_counts = fresh_counts
+                        yield ("event: notifications\n"
+                               f"data: {json.dumps(fresh_counts)}\n\n")
                         last_frame = time.monotonic()
 
                 if time.monotonic() - last_frame >= keepalive:
@@ -4838,9 +4889,10 @@ def _chat_create_web_task(
         # inherits the origin room as its token and so does park here, and since
         # ISSUE-254 a *self-addressed* one has no row in the room either, so
         # cancelling it discards mail the user cannot see in this transcript.
-        # What keeps that from being a defect is the user-scoped
-        # `/chat/confirmations` banner below, which is deliberately not
-        # room-scoped and shows the question wherever the user is looking.
+        # What keeps that from being a defect is the notification inbox, which
+        # is user-scoped rather than room-scoped and shows the question from
+        # any route in the app — the bell replaced the `/chat/confirmations`
+        # banner that used to make the same argument from above the transcript.
         # Tightening this to "tasks with a `role='user'` row in the room" would
         # make the comment true of the cancel itself. And it is skipped on a
         # **replay**:
@@ -5991,71 +6043,6 @@ def _chat_confirm_task(task_id: int) -> None:
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
         confirmations.approve(conn, task, config=_config, by="web")
-
-
-def _chat_pending_confirmations(username: str) -> list[dict]:
-    """Every question waiting on this user, oldest first.
-
-    The API equivalent of `handle_confirmation_reply`'s Path C, and the reason
-    it is its own endpoint rather than a widening of the room history query: the
-    aux gap-fill renders `tasks.prompt`, which for a gated email is exactly the
-    untrusted body the gate is holding back. `_AUX_ROOM_SCOPE` admits an email
-    task only through its mirrored `role='user'` row, and a gated turn has none
-    (`suppress_transcript_mirror`), so that stays true now the exchange has a
-    room at all (ISSUE-247).
-
-    What ships is the bot-composed prompt plus the sender / subject / routing
-    method off `processed_emails`. Sender and subject are still attacker
-    supplied, so the client renders them as text, never as markup.
-    """
-    from . import confirmations, db
-    from .transport.ingest import ROOM_SURFACES
-    out: list[dict] = []
-    with db.get_db(_config.db_path) as conn:
-        for task in confirmations.pending_for_user(conn, username):
-            # A turn that started on a room surface already renders its own
-            # `ConfirmationCard` in the transcript (its `confirmation` event
-            # replays on the task stream). Listing it here too would show one
-            # question twice with two answer paths, and answering from the
-            # banner leaves the card stale. `ROOM_SURFACES` is the same set
-            # `record_inbound` uses to decide who owns a room.
-            if (task.source_type or "") in ROOM_SURFACES:
-                continue
-            email: dict | None = None
-            if task.source_type == "email":
-                record = db.get_email_for_task(conn, task.id)
-                if record is not None:
-                    email = {
-                        "sender": record.sender_email,
-                        "subject": record.subject,
-                        "routing_method": record.routing_method,
-                    }
-            out.append({
-                "task_id": task.id,
-                "source_type": task.source_type,
-                "created_at": _iso_utc(task.created_at),
-                "prompt": task.confirmation_prompt or "",
-                "summary": confirmations.describe(conn, task),
-                "room_token": (
-                    task.conversation_token
-                    if db.get_room(conn, task.conversation_token or "") is not None
-                    else None
-                ),
-                "email": email,
-            })
-    return out
-
-
-@api_router.get("/chat/confirmations")
-async def chat_pending_confirmations(user: dict = Depends(_require_api_auth)):
-    """Questions the user has been asked but not answered, on any surface.
-
-    Unconditionally reachable from web chat — it needs no routing
-    configuration, which is what makes a web-only user able to see an email
-    gate at all (ISSUE-241).
-    """
-    items = await asyncio.to_thread(_chat_pending_confirmations, user["username"])
-    return {"confirmations": items}
 
 
 # Ceiling on an edited draft body. Not a policy about email length — it exists
