@@ -64,7 +64,7 @@ describe('formatCost', () => {
   it('does not round a sub-cent figure to a flat zero', () => {
     // A 24h per-user cost is routinely sub-cent, and `$0.00` there is
     // indistinguishable from a genuine zero — the one thing a cost column
-    // must not be ambiguous about. `cli._fmt_money` states the same rule.
+    // must not be ambiguous about. `usage_render.fmt_money` states the same rule.
     expect(formatCost({ api: 0.0004 })).toBe('$0.0004');
     expect(formatCost({ api: 0.009 })).toBe('$0.0090');
   });

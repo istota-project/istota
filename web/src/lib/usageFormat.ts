@@ -7,9 +7,10 @@
  * figure appears. A dashboard that quietly invents an invoice is worse than one
  * that declines to guess, so the rule is worth testing directly.
  *
- * The CLI applies the same rule in `cli._render_cost`. The two are deliberately
- * separate implementations of one stated rule rather than a shared artifact —
- * they render into different media — but they must not disagree about *when* a
+ * Python applies the same rule in `usage_render.render_cost`, which the CLI and
+ * the `!usage` chat command both import. The two are deliberately separate
+ * implementations of one stated rule rather than a shared artifact — they
+ * render into different media — but they must not disagree about *when* a
  * dollar sign appears, or about what follows it.
  */
 
@@ -50,8 +51,9 @@ export function formatCost(byBasis: Record<string, number> | undefined): string 
  *
  * A 24h per-user figure is routinely sub-cent, and at two decimals it renders
  * `$0.00` — indistinguishable from a genuine zero, which is the one thing a
- * cost column must not be ambiguous about. `cli._fmt_money` states the same
- * rule; the two are separate implementations of one rule and must not disagree.
+ * cost column must not be ambiguous about. `usage_render.fmt_money` states the
+ * same rule; the two are separate implementations of one rule and must not
+ * disagree.
  */
 function formatMoney(value: number): string {
   if (value !== 0 && Math.abs(value) < 0.01) return value.toFixed(4);
