@@ -146,6 +146,56 @@ export interface AdminStatsUsage {
   error?: string;
 }
 
+/** One rate-limit window of the Claude Code plan, as the endpoint reports it. */
+export interface AdminSubscriptionWindow {
+  /** Stable id — `session`, `weekly_all`, `weekly_scoped:fable`. */
+  key: string;
+  label: string;
+  /** 0–100, clamped server-side. */
+  percent: number;
+  resets_at: string | null;
+  /** Floored at 0; null when the window has no scheduled reset. */
+  resets_in_seconds: number | null;
+  /** The server's own severity scale. Carried, never acted on — see the card. */
+  severity: string;
+  is_active: boolean | null;
+}
+
+/** Pay-as-you-go credits beyond the plan, in minor units with a currency. */
+export interface AdminSubscriptionSpend {
+  enabled: boolean;
+  used_minor: number;
+  limit_minor: number;
+  currency: string;
+  /** Minor units per major = 10 ** exponent. Never assume 2. */
+  exponent: number;
+  percent: number;
+}
+
+/**
+ * Plan utilization for the Claude Code subscription.
+ *
+ * `available: false` always carries an `error`, so the card says why instead of
+ * vanishing. Every field is optional because the whole section degrades to
+ * `{error}` when it fails — the same best-effort shape `usage` has.
+ */
+export interface AdminSubscription {
+  available?: boolean;
+  windows?: AdminSubscriptionWindow[];
+  /** Null when the payload carried no credit block at all. */
+  spend?: AdminSubscriptionSpend | null;
+  fetched_at?: string | null;
+  /** Real numbers from an earlier fetch, plus the failure that made them old. */
+  stale?: boolean;
+  /** The resolver's branch name (`env` / `file` / `keychain`), never a token. */
+  token_source?: string;
+  /** The operator's own thresholds. The card tints by these and never by a
+   *  literal of its own, or a configured threshold is silently ignored. */
+  warn_percent?: number;
+  high_percent?: number;
+  error?: string;
+}
+
 export interface AdminStatsJob {
   id: number;
   user_id: string;
@@ -177,6 +227,7 @@ export interface AdminStats {
   };
   modules: Record<string, Record<string, unknown>>;
   usage: AdminStatsUsage;
+  subscription: AdminSubscription;
   tasks: {
     total: number;
     last_24h: number;

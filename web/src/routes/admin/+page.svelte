@@ -6,6 +6,7 @@
     type AdminStatsJob,
     type AdminStatsUser,
     type AdminStatsUserSource,
+    type AdminSubscriptionSpend,
   } from '$lib/api';
   import { NoticeBanner, StatTile } from '$lib/components/ui';
   import {
@@ -13,6 +14,8 @@
     formatContext,
     formatNumber,
     formatPercent,
+    formatResetIn,
+    formatUtilization,
     usageOriginTitle,
   } from '$lib/usageFormat';
 
@@ -74,6 +77,73 @@
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  /**
+   * A plan tile's tint, by the operator's own thresholds and nothing else.
+   *
+   * `warn_percent` and `high_percent` ride the stats payload precisely so this
+   * agrees with `istota doctor`'s verdict on the same number. Hardcoding 80/95
+   * here would make a configured threshold something the dashboard silently
+   * ignores, which is worse than not colouring at all — so a payload that
+   * carries neither (an older backend) gets no tint rather than a guess.
+   *
+   * The server's own `severity` is on the wire and deliberately unused. Its
+   * scale is undocumented and we have only ever seen `"normal"`; two surfaces
+   * applying one rule to one number always agree, while deferring to a second
+   * scale on one of them guarantees they eventually will not.
+   */
+  function utilizationColor(
+    percent: number,
+    warn: number | undefined,
+    high: number | undefined,
+  ): string {
+    if (typeof warn !== 'number' || typeof high !== 'number') return '';
+    if (!Number.isFinite(percent)) return '';
+    if (percent >= high) return 'var(--status-danger-fg)';
+    // `min` rather than `warn` alone, matching doctor: an inverted pair is a
+    // typo the loader corrects, and one arriving past it must still tint at the
+    // lower of the two rather than leaving the amber band unreachable.
+    if (percent >= Math.min(warn, high)) return 'var(--status-warn-fg)';
+    return 'var(--status-success-fg)';
+  }
+
+  /**
+   * Pay-as-you-go credits, as `$0.00 / $20.00 (0%)`.
+   *
+   * This is a real dollar figure on a subscription dashboard, and it does not
+   * break the rule that keeps one off the Token usage card: that rule refuses
+   * to price plan-equivalent *tokens* at list. These are credits the account
+   * has actually committed, reported by the endpoint in minor units with an
+   * explicit currency.
+   *
+   * The divisor comes from `exponent`, never a hardcoded 100 — the removed
+   * `!usage` command divided by 100 and was wrong for any currency that is not
+   * two-decimal. `Intl` is asked for exactly that many digits rather than the
+   * currency's own default, so the figure shown is the figure reported.
+   */
+  function formatSpend(spend: AdminSubscriptionSpend): string {
+    const digits =
+      Number.isFinite(spend.exponent) && spend.exponent >= 0 && spend.exponent <= 6
+        ? Math.floor(spend.exponent)
+        : 2;
+    const scale = Math.pow(10, digits);
+    const money = (minor: number): string => {
+      const value = (Number.isFinite(minor) ? minor : 0) / scale;
+      try {
+        return new Intl.NumberFormat(undefined, {
+          style: 'currency',
+          currency: spend.currency || 'USD',
+          minimumFractionDigits: digits,
+          maximumFractionDigits: digits,
+        }).format(value);
+      } catch {
+        // An unrecognized currency code makes `Intl` throw. The number is still
+        // worth showing, and the code beside it still says what it is.
+        return `${value.toFixed(digits)} ${spend.currency}`;
+      }
+    };
+    return `${money(spend.used_minor)} / ${money(spend.limit_minor)} (${formatUtilization(spend.percent)})`;
   }
 
   function moduleErrorCount(mod: Record<string, unknown>): number {
@@ -510,6 +580,49 @@
         </div>
       {/if}
     </section>
+
+    <!-- Claude Code subscription. Above Token usage and separate from it, which
+         is the whole point of the pair: on a subscription deployment the cost
+         column below is deliberately all dashes — a plan-equivalent list price
+         is not spend — and these windows are the budget that column cannot
+         report. Folding them into one card would put a live external reading
+         with its own failure mode under the same heading as an aggregate over
+         `task_usage`, leaving one card half-stale and half-fresh with two error
+         branches. Two cards each say one thing. -->
+    {#if stats.subscription}
+      {@const sub = stats.subscription}
+      <section class="card">
+        <header class="section-header">
+          <h2>Claude Code subscription</h2>
+        </header>
+        {#if sub.available && (sub.windows ?? []).length > 0}
+          <div class="kpi-grid card-grid">
+            {#each sub.windows ?? [] as w (w.key)}
+              <StatTile
+                label={w.label}
+                sub={formatResetIn(w.resets_in_seconds)}
+                valueColor={utilizationColor(w.percent, sub.warn_percent, sub.high_percent)}
+              >
+                {formatUtilization(w.percent)}
+              </StatTile>
+            {/each}
+          </div>
+          {#if sub.spend?.enabled}
+            <p class="usage-note">Extra usage: {formatSpend(sub.spend)}</p>
+          {/if}
+          <p class="usage-note">
+            Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
+              — reading is stale{#if sub.error}: {sub.error}{/if}
+            {/if}
+          </p>
+        {:else}
+          <!-- Never hidden. An operator who expects this reading and does not
+               get it has to learn why, which is why the payload's
+               `available: false` always carries a reason. -->
+          <p class="usage-note">Plan limits unavailable: {sub.error}</p>
+        {/if}
+      </section>
+    {/if}
 
     <!-- Token usage. Per-model, per-brain and per-origin live here; per-user
          lives on the Users rows above, beside that user's task counts.

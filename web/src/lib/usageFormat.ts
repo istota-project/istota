@@ -70,6 +70,62 @@ export function formatPercent(n: number | null | undefined): string {
 }
 
 /**
+ * A plan window's utilization, as a whole number where it is one.
+ *
+ * Distinct from `formatPercent` above, which takes a 0–1 rate and always shows a
+ * decimal: this takes the 0–100 figure the usage endpoint reports, where a
+ * tenth of a percent of a weekly quota is noise on a glanceable tile but `40.5`
+ * still has to render as itself rather than as `41`.
+ *
+ * Clamped rather than trusted. The server clamps too, but this figure comes off
+ * an external endpoint and is written into a tile that is also *tinted* by it —
+ * a `-5` would read as healthy green and a `140` would be a red tile claiming
+ * more than a full quota. Anything that is not a real number is the placeholder,
+ * never a zero: a fabricated 0% on an exhausted plan is the worst error here.
+ *
+ * There is no Python counterpart to keep in step. Doctor renders the same
+ * number with `:g` into a terminal line, which is close but not this: `:g`
+ * would print `40.55` where this prints `40.6`, and the two are read in
+ * different places for different decisions, so neither is pinned to the other.
+ */
+export function formatUtilization(percent: number | null | undefined): string {
+  if (percent === null || percent === undefined || !Number.isFinite(percent)) {
+    return COST_PLACEHOLDER;
+  }
+  const clamped = Math.min(100, Math.max(0, percent));
+  // `Number()` drops a trailing `.0`, so 40 renders as `40%` and 40.5 as
+  // `40.5%` — one rule rather than a branch on whether the value is an integer.
+  return `${Number(clamped.toFixed(1))}%`;
+}
+
+/**
+ * When a plan window resets, as the tile's sub-line.
+ *
+ * Two units at most, matching `doctor._duration` — `6d 2h`, `1h 04m`, `12m`,
+ * `45s`. Seconds of precision six hours out is noise, and the reader is
+ * deciding whether to wait rather than timing anything.
+ *
+ * `null` is a window with no scheduled reset (or one whose timestamp the parser
+ * could not read), and it says so rather than rendering an empty line: a tile
+ * showing a percentage and nothing under it reads as a missing value.
+ */
+export function formatResetIn(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) {
+    return 'no reset scheduled';
+  }
+  if (seconds <= 0) return 'resetting now';
+  const total = Math.floor(seconds);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (days) return `resets in ${days}d ${hours}h`;
+  if (hours) return `resets in ${hours}h ${String(minutes).padStart(2, '0')}m`;
+  if (minutes) return `resets in ${minutes}m`;
+  return `resets in ${secs}s`;
+}
+
+/**
  * The breakdown that explains a user's usage row count.
  *
  * `usage_rows_24h` exceeding `tasks_last_24h` is by design — the column

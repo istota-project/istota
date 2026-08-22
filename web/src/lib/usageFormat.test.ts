@@ -6,6 +6,8 @@ import {
   formatContext,
   formatCost,
   formatPercent,
+  formatResetIn,
+  formatUtilization,
   usageOriginTitle,
 } from '$lib/usageFormat';
 
@@ -154,5 +156,70 @@ describe('usageOriginTitle', () => {
     const out = usageOriginTitle(user({ usage_rows_24h: 1 }));
 
     expect(out).not.toContain('unmeasured');
+  });
+});
+
+describe('formatUtilization', () => {
+  it('renders a whole percentage without a decimal point', () => {
+    expect(formatUtilization(0)).toBe('0%');
+    expect(formatUtilization(40)).toBe('40%');
+    expect(formatUtilization(100)).toBe('100%');
+  });
+
+  it('keeps a fractional percentage rather than rounding it away', () => {
+    expect(formatUtilization(40.5)).toBe('40.5%');
+  });
+
+  it('clamps a figure outside the range instead of rendering it', () => {
+    // The tile is tinted by this number as well as showing it, so a negative
+    // would read as healthy green and a 140 as a red tile claiming more than a
+    // full quota. The server clamps too; this is an external reading.
+    expect(formatUtilization(140)).toBe('100%');
+    expect(formatUtilization(-5)).toBe('0%');
+  });
+
+  it('renders a placeholder rather than a zero when there is no figure', () => {
+    // A fabricated 0% on an exhausted plan is the worst error this card can
+    // make, so an absent or unusable value must never render as one.
+    expect(formatUtilization(null)).toBe(COST_PLACEHOLDER);
+    expect(formatUtilization(undefined)).toBe(COST_PLACEHOLDER);
+    expect(formatUtilization(NaN)).toBe(COST_PLACEHOLDER);
+    expect(formatUtilization(Infinity)).toBe(COST_PLACEHOLDER);
+  });
+});
+
+describe('formatResetIn', () => {
+  it('says so when the window has no scheduled reset', () => {
+    // A tile showing a percentage with an empty line under it reads as a
+    // missing value rather than as a window that simply does not reset.
+    expect(formatResetIn(null)).toBe('no reset scheduled');
+    expect(formatResetIn(undefined)).toBe('no reset scheduled');
+    expect(formatResetIn(NaN)).toBe('no reset scheduled');
+  });
+
+  it('names the moment itself rather than counting down to zero', () => {
+    expect(formatResetIn(0)).toBe('resetting now');
+    expect(formatResetIn(-30)).toBe('resetting now');
+  });
+
+  it('renders seconds only under a minute', () => {
+    expect(formatResetIn(59)).toBe('resets in 59s');
+  });
+
+  it('renders whole minutes without seconds', () => {
+    expect(formatResetIn(60)).toBe('resets in 1m');
+    expect(formatResetIn(3599)).toBe('resets in 59m');
+  });
+
+  it('pads the minutes beside an hour, as the terminal line does', () => {
+    // `doctor._duration` renders `1h 04m`; a bare `1h 4m` beside it would read
+    // as a different measurement of the same window.
+    expect(formatResetIn(3847)).toBe('resets in 1h 04m');
+    expect(formatResetIn(3600)).toBe('resets in 1h 00m');
+  });
+
+  it('drops to days and hours past a day', () => {
+    expect(formatResetIn(86400)).toBe('resets in 1d 0h');
+    expect(formatResetIn(6 * 86400 + 2 * 3600)).toBe('resets in 6d 2h');
   });
 });

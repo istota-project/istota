@@ -1,0 +1,350 @@
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { render, cleanup, screen } from '@testing-library/svelte';
+
+import type { AdminStats, AdminSubscription } from '$lib/api';
+
+/**
+ * The Claude Code subscription card on `/admin`.
+ *
+ * It is a card of its own, above Token usage rather than inside it, and the
+ * four states below are the whole of what it can be — a populated reading, an
+ * unavailable one, a stale one, and one with pay-as-you-go credits enabled.
+ * Each is asserted here rather than checked by eye against the dev server,
+ * because three of the four are states a working deployment rarely produces on
+ * demand and the fourth is off in the captured payload the mock is modelled on.
+ *
+ * Two properties are worth more than the rendering:
+ *
+ * * **The tint is the operator's rule.** `warn_percent` and `high_percent` ride
+ *   the payload so this card and `istota doctor` reach the same verdict about
+ *   the same number. A literal here would silently ignore a configured
+ *   threshold, so the test moves the thresholds rather than the percentages.
+ * * **`available: false` still renders.** An operator who expects the reading
+ *   and does not get it has to learn why. A card that vanished would report a
+ *   refused credential as an absence of the feature.
+ */
+
+vi.mock('$lib/api', () => ({ getAdminStats: vi.fn() }));
+
+import { getAdminStats } from '$lib/api';
+import Page from './+page.svelte';
+
+afterEach(cleanup);
+
+const usageTotals = () => ({
+  rows: 0,
+  measured_rows: 0,
+  billed_input_tokens: 0,
+  cache_read_tokens: 0,
+  cache_write_tokens: 0,
+  output_tokens: 0,
+  total_tokens: 0,
+  cache_hit_rate: 0,
+  cost_by_basis: {},
+  avg_initial_context_tokens: null,
+  avg_peak_context_tokens: null,
+  context_rows: 0,
+});
+
+/** The smallest payload the page will render, with the section under test on
+ *  it. Every other section is present and empty — the page reads them all. */
+function stats(subscription: AdminSubscription): AdminStats {
+  return {
+    system: {
+      version: '0.0.0-test',
+      uptime_seconds: 0,
+      db_size_bytes: 0,
+      python_version: '3.12.0',
+      last_scheduler_run: null,
+      scheduler_healthy: true,
+    },
+    users: [],
+    scheduler: { jobs_total: 0, jobs_active: 0, jobs_paused: 0, jobs: [], last_errors: [] },
+    modules: {},
+    usage: { totals_24h: usageTotals(), totals_30d: usageTotals() },
+    subscription,
+    tasks: {
+      total: 0,
+      last_24h: 0,
+      avg_per_day_30d: 0,
+      by_source: {},
+      failed_by_source_24h: {},
+      avg_duration_seconds: 0,
+      error_rate_24h: 0,
+      failed_24h: 0,
+      interactive_24h: 0,
+      automated_24h: 0,
+      interactive_avg_per_day_30d: 0,
+      automated_avg_per_day_30d: 0,
+    },
+    storage: {
+      db_size_bytes: 0,
+      backups_count: 0,
+      last_backup: null,
+      nextcloud_configured: false,
+      nextcloud_mount_healthy: false,
+    },
+  };
+}
+
+const window_ = (
+  over: Partial<AdminSubscription['windows'] extends (infer W)[] | undefined ? W : never> = {},
+) => ({
+  key: 'session',
+  label: '5-hour',
+  percent: 40,
+  resets_at: '2026-08-22T17:40:00Z',
+  resets_in_seconds: 3847,
+  severity: 'normal',
+  is_active: true,
+  ...over,
+});
+
+const populated = (over: Partial<AdminSubscription> = {}): AdminSubscription => ({
+  available: true,
+  windows: [window_()],
+  spend: {
+    enabled: false,
+    used_minor: 0,
+    limit_minor: 2000,
+    currency: 'USD',
+    exponent: 2,
+    percent: 0,
+  },
+  fetched_at: new Date(Date.now() - 40_000).toISOString(),
+  stale: false,
+  token_source: 'env',
+  warn_percent: 80,
+  high_percent: 95,
+  error: '',
+  ...over,
+});
+
+/** Render the page with one subscription payload and wait for the card. */
+async function show(subscription: AdminSubscription) {
+  vi.mocked(getAdminStats).mockResolvedValue(stats(subscription));
+  const { container } = render(Page);
+  await screen.findByText('Claude Code subscription');
+  return container;
+}
+
+/** The card's own section, addressed by its heading rather than by position. */
+function card(container: HTMLElement): HTMLElement {
+  const headings = Array.from(container.querySelectorAll('section.card h2'));
+  const heading = headings.find((h) => h.textContent?.trim() === 'Claude Code subscription');
+  expect(heading, 'the subscription card is on the page').toBeTruthy();
+  return heading!.closest('section.card') as HTMLElement;
+}
+
+const tileValue = (el: HTMLElement, label: string): HTMLElement => {
+  const tile = Array.from(el.querySelectorAll('.stat-tile')).find(
+    (t) => t.querySelector('.micro-label')?.textContent?.trim() === label,
+  );
+  expect(tile, `a tile labelled ${label}`).toBeTruthy();
+  return tile!.querySelector('.stat-value') as HTMLElement;
+};
+
+beforeEach(() => {
+  vi.mocked(getAdminStats).mockReset();
+});
+
+describe('the subscription card — populated', () => {
+  it('renders one tile per window, with its percentage and its reset', async () => {
+    const el = card(await show(populated()));
+
+    expect(tileValue(el, '5-hour').textContent?.trim()).toBe('40%');
+    expect(el.textContent).toContain('resets in 1h 04m');
+  });
+
+  it('says so rather than going blank when a window has no reset', async () => {
+    const el = card(
+      await show(populated({ windows: [window_({ resets_at: null, resets_in_seconds: null })] })),
+    );
+
+    expect(el.textContent).toContain('no reset scheduled');
+  });
+
+  it('reports how old the reading is', async () => {
+    const el = card(await show(populated()));
+
+    expect(el.textContent).toContain('Updated 40s ago');
+    expect(el.textContent).not.toContain('stale');
+  });
+
+  it('sits immediately above the Token usage card', async () => {
+    // Two cards, not one strip inside Token usage: the cost column below is all
+    // dashes on a subscription deployment, and this is the budget it cannot
+    // report. Order is the whole of what makes them read as a pair.
+    const container = await show(populated());
+    const headings = Array.from(container.querySelectorAll('section.card h2')).map((h) =>
+      h.textContent?.trim(),
+    );
+    const here = headings.indexOf('Claude Code subscription');
+
+    expect(here).toBeGreaterThanOrEqual(0);
+    expect(headings[here + 1]).toBe('Token usage');
+  });
+});
+
+describe('the subscription card — tinting', () => {
+  // The percentage is held still and the thresholds are moved, which is the
+  // only arrangement that can tell "tinted by the payload" from "tinted by a
+  // literal that happens to match the default".
+  const tintAt = async (warn: number, high: number) => {
+    const el = card(
+      await show(
+        populated({ windows: [window_({ percent: 60 })], warn_percent: warn, high_percent: high }),
+      ),
+    );
+    return tileValue(el, '5-hour').closest('.stat-tile')?.getAttribute('style') ?? '';
+  };
+
+  it('is green below the operator’s warn threshold', async () => {
+    expect(await tintAt(80, 95)).toContain('var(--status-success-fg)');
+  });
+
+  it('is amber at or above it', async () => {
+    expect(await tintAt(55, 95)).toContain('var(--status-warn-fg)');
+    cleanup();
+    expect(await tintAt(60, 95)).toContain('var(--status-warn-fg)');
+  });
+
+  it('is red at or above the high threshold', async () => {
+    expect(await tintAt(30, 55)).toContain('var(--status-danger-fg)');
+    cleanup();
+    expect(await tintAt(30, 60)).toContain('var(--status-danger-fg)');
+  });
+
+  it('does not tint at all when the payload names no thresholds', async () => {
+    // An older backend. Guessing 80/95 here is exactly how a configured
+    // threshold comes to be ignored without anything saying so.
+    const el = card(
+      await show(
+        populated({
+          windows: [window_({ percent: 99 })],
+          warn_percent: undefined,
+          high_percent: undefined,
+        }),
+      ),
+    );
+    const style = tileValue(el, '5-hour').closest('.stat-tile')?.getAttribute('style') ?? '';
+
+    expect(style).not.toContain('--status-');
+  });
+
+  it('ignores the server’s own severity', async () => {
+    // Carried on the wire, deliberately unused: its scale is undocumented, and
+    // two surfaces applying one rule to one number always agree.
+    const el = card(
+      await show(populated({ windows: [window_({ percent: 10, severity: 'critical' })] })),
+    );
+    const style = tileValue(el, '5-hour').closest('.stat-tile')?.getAttribute('style') ?? '';
+
+    expect(style).toContain('var(--status-success-fg)');
+  });
+});
+
+describe('the subscription card — unavailable', () => {
+  it('stays on the page and carries the reason', async () => {
+    const el = card(
+      await show({
+        available: false,
+        windows: [],
+        spend: null,
+        fetched_at: null,
+        stale: false,
+        token_source: '',
+        warn_percent: 80,
+        high_percent: 95,
+        error: 'no Claude Code OAuth credential found',
+      }),
+    );
+
+    expect(el.textContent).toContain('no Claude Code OAuth credential found');
+    expect(el.querySelector('.stat-tile')).toBeNull();
+  });
+
+  it('does not render a tile grid for an available reading with no windows', async () => {
+    const el = card(await show(populated({ windows: [], error: 'the endpoint named no window' })));
+
+    expect(el.textContent).toContain('the endpoint named no window');
+  });
+});
+
+describe('the subscription card — stale', () => {
+  it('shows the numbers and admits they are old', async () => {
+    // A stale reading is real numbers from an earlier fetch plus the failure
+    // that made them old. Showing the percentage without the admission is the
+    // most misleading pair this card could draw.
+    const el = card(
+      await show(
+        populated({
+          stale: true,
+          error: 'HTTP 503 from the usage endpoint',
+          fetched_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+        }),
+      ),
+    );
+
+    expect(tileValue(el, '5-hour').textContent?.trim()).toBe('40%');
+    expect(el.textContent).toContain('Updated 2h ago');
+    expect(el.textContent).toContain('reading is stale');
+    expect(el.textContent).toContain('HTTP 503 from the usage endpoint');
+  });
+});
+
+describe('the subscription card — extra usage', () => {
+  it('is absent while pay-as-you-go credits are off', async () => {
+    const el = card(await show(populated()));
+
+    expect(el.textContent).not.toContain('Extra usage');
+  });
+
+  it('reports committed credits as real money when they are on', async () => {
+    // Not a contradiction of the rule that keeps a dollar figure off the Token
+    // usage card: that refuses to price plan-equivalent tokens at list, while
+    // these are credits the account has actually committed.
+    const el = card(
+      await show(
+        populated({
+          spend: {
+            enabled: true,
+            used_minor: 465,
+            limit_minor: 2000,
+            currency: 'USD',
+            exponent: 2,
+            percent: 23.25,
+          },
+        }),
+      ),
+    );
+
+    expect(el.textContent).toContain('Extra usage:');
+    expect(el.textContent).toContain('4.65');
+    expect(el.textContent).toContain('20.00');
+    expect(el.textContent).toContain('23.3%');
+  });
+
+  it('takes the divisor from the exponent rather than assuming cents', async () => {
+    // The removed `!usage` command divided by a hardcoded 100, which is wrong
+    // for any currency that is not two-decimal.
+    const el = card(
+      await show(
+        populated({
+          spend: {
+            enabled: true,
+            used_minor: 1500,
+            limit_minor: 10000,
+            currency: 'JPY',
+            exponent: 0,
+            percent: 15,
+          },
+        }),
+      ),
+    );
+
+    expect(el.textContent).toContain('1,500');
+    expect(el.textContent).toContain('10,000');
+    expect(el.textContent).not.toContain('15.00');
+  });
+});
