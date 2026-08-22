@@ -1,11 +1,13 @@
 """Tests for !command dispatch system."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from istota import db
+from istota import subscription_usage as _subscription_usage
 from istota.commands import (
     CommandContext, CommandResult,
     _build_export_metadata, _format_history_markdown,
@@ -18,6 +20,13 @@ from istota.commands import (
 from istota.brain import BrainConfig, make_brain, set_alias_overrides
 from istota.brain.claude_code import DEFAULT_ALIASES, HAIKU, OPUS, SONNET
 from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
+
+# The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
+# suite, so a doctor sweep on a laptop cannot read the real keychain or reach the
+# real endpoint. `TestCmdUsage`'s shared-cache case is the one test here that
+# wants the real policy, so the real function is captured at import — before that
+# autouse fixture ever runs — and reinstated for that test alone.
+_REAL_GET_SNAPSHOT = _subscription_usage.get_snapshot
 
 
 @pytest.fixture
@@ -2494,3 +2503,788 @@ class TestTrustCommand:
             MagicMock()
             result = await cmd_trust(_ctx(config, conn, "alice", "room1", ""))
         assert "No trusted senders" in result
+
+
+# =============================================================================
+# TestCmdUsage
+# =============================================================================
+
+
+def _seed_usage_row(
+    conn,
+    *,
+    user_id,
+    created_at,
+    brain_kind="claude_code",
+    billed=0,
+    cache_read=0,
+    output=0,
+    cost_usd=0.0,
+    cost_basis="subscription",
+):
+    """One `task_usage` row, stamped explicitly and committed.
+
+    Raw SQL rather than `db.insert_task_usage`: these tests care only about the
+    aggregates `!usage` renders, and `created_at` has to be moved to a chosen
+    instant afterwards anyway. The literal is the ISO-Z format the column
+    stores; a space-separated one sorts below every bound and matches nothing.
+
+    Committed because the handler reads through its own connection — it does its
+    DB work in a worker thread, where the caller's connection is unusable.
+    """
+    conn.execute(
+        "INSERT INTO task_usage (created_at, user_id, brain_kind, has_totals,"
+        " billed_input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+        " cost_usd, cost_basis) VALUES (?, ?, ?, 1, ?, ?, ?, 0, ?, ?)",
+        (created_at, user_id, brain_kind, billed, output, cache_read, cost_usd, cost_basis),
+    )
+    conn.commit()
+
+
+def _recent_iso(hours_ago=1):
+    """An instant inside both the 24h and the 30d window, in the stored format."""
+    dt = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+def _window(key="session", label="5-hour", percent=40.0, resets_at=None, resets_in=None):
+    from istota import subscription_usage as su
+
+    return su.UsageWindow(
+        key=key,
+        label=label,
+        percent=percent,
+        resets_at=resets_at,
+        resets_in_seconds=resets_in,
+    )
+
+
+def _snapshot(windows=None, *, spend=None, source="cache", error="", age=0.0):
+    import time
+
+    from istota import subscription_usage as su
+
+    return su.UsageSnapshot(
+        fetched_at=time.time() - age,
+        windows=tuple(windows if windows is not None else [_window()]),
+        spend=spend,
+        source=source,
+        token_source="env",
+        error=error,
+    )
+
+
+class TestCmdUsage:
+    """`!usage`: token totals for everyone, the fleet split and the plan for admins.
+
+    Every test sets `config.admin_users` explicitly. The default empty allowlist
+    makes *everyone* an admin by `Config.is_admin`'s documented back-compat rule,
+    so a test that omits it exercises no split at all and would pass against a
+    handler with no gate in it.
+
+    `get_snapshot` is patched per test rather than left to the suite-wide autouse
+    guard in `tests/conftest.py`: that guard returns a no-credential snapshot,
+    which is the one shape that makes an unrendered section 3 look correct.
+    """
+
+    def _patch_snapshot(self, monkeypatch, snapshot):
+        """Patch `get_snapshot` and return the list it records its calls in."""
+        from istota import subscription_usage as su
+
+        calls = []
+
+        def _fake(config, **kwargs):
+            calls.append(kwargs)
+            return snapshot
+
+        monkeypatch.setattr(su, "get_snapshot", _fake)
+        return calls
+
+    async def _render(self, make_config, db_path, monkeypatch, snapshot, user_id="bob"):
+        """Run the handler as an admin against `snapshot`, with no usage rows."""
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, snapshot)
+        with db.get_db(db_path) as conn:
+            return await cmd_usage(_ctx(config, conn, user_id))
+
+    # -- the admin split -----------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_non_admin_sees_only_their_own_token_totals(
+        self, make_config, db_path, monkeypatch
+    ):
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
+            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=5_000_000)
+            result = await cmd_usage(_ctx(config, conn, "alice"))
+
+        assert "**Token usage**" in result
+        assert "1,000 tokens" in result
+        assert "5.0M" not in result
+        assert "**By brain**" not in result
+        assert "**Claude Code subscription**" not in result
+
+    @pytest.mark.asyncio
+    async def test_non_admin_never_asks_for_the_snapshot(
+        self, make_config, db_path, monkeypatch
+    ):
+        """Not "the reply carries no percentage": that assertion passes just as
+        well against a handler that fetched the plan and forgot to print it."""
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        calls = self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
+            await cmd_usage(_ctx(config, conn, "alice"))
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_an_unattributable_caller_gets_nobodys_rows(
+        self, make_config, db_path, monkeypatch
+    ):
+        """An empty `user_id` must not read as "no filter".
+
+        `db._usage_filters` gates the `WHERE u.user_id = ?` clause on
+        truthiness, so passing a falsy id straight through would drop the clause
+        and hand a caller `is_admin` just refused the whole deployment's totals.
+        """
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        calls = self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(conn, user_id="alice", created_at=_recent_iso(), billed=1000)
+            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=5_000_000)
+            result = await cmd_usage(_ctx(config, conn, ""))
+
+        assert "No usage recorded." in result
+        assert "1,000 tokens" not in result
+        assert "5.0M" not in result
+        assert "**By brain**" not in result
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_admin_gets_all_three_sections_fleet_wide(
+        self, make_config, db_path, monkeypatch
+    ):
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        calls = self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(
+                conn, user_id="alice", created_at=_recent_iso(), billed=1000,
+                brain_kind="claude_code",
+            )
+            _seed_usage_row(
+                conn, user_id="bob", created_at=_recent_iso(), billed=2000,
+                brain_kind="native", cost_usd=4.18, cost_basis="api",
+            )
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert len(calls) == 1
+        assert "**Token usage** — fleet" in result
+        assert "3,000 tokens" in result  # alice's row is inside bob's total
+        assert "**By brain** (30d)" in result
+        assert "- claude_code: 1,000 tokens, —" in result
+        assert "- native: 2,000 tokens, $4.18" in result
+        assert "**Claude Code subscription**" in result
+
+    @pytest.mark.asyncio
+    async def test_cost_rule_survives_the_move_to_usage_render(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A subscription-only group renders the placeholder, never a figure.
+
+        The rule is imported from `usage_render` rather than written here; this
+        is the case that notices if the import went to the wrong thing.
+        """
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(
+                conn, user_id="bob", created_at=_recent_iso(), billed=1000,
+                cost_usd=12.34, cost_basis="subscription",
+            )
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "12.34" not in result
+        assert "- claude_code: 1,000 tokens, —" in result
+
+    # -- rendering -----------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_bar_is_twenty_characters_at_every_extreme(
+        self, make_config, db_path, monkeypatch
+    ):
+        snapshot = _snapshot([
+            _window(key="a", label="Empty", percent=0.0),
+            _window(key="b", label="Middle", percent=40.0),
+            _window(key="c", label="Full", percent=100.0),
+        ])
+        result = await self._render(make_config, db_path, monkeypatch, snapshot)
+
+        assert "- Empty: [--------------------] 0%" in result
+        assert "- Middle: [########------------] 40%" in result
+        assert "- Full: [####################] 100%" in result
+        bars = [
+            line.split("[", 1)[1].split("]", 1)[0]
+            for line in result.splitlines()
+            if line.startswith("- ") and "[" in line
+        ]
+        assert bars and all(len(bar) == 20 for bar in bars)
+
+    @pytest.mark.asyncio
+    async def test_reset_renders_in_the_users_timezone(
+        self, make_config, db_path, monkeypatch
+    ):
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        # +08:45 — an offset no other zone this suite might pick up by accident
+        # produces, so the assertion below fails if the conversion is skipped.
+        config.users = {"bob": UserConfig(timezone="Australia/Eucla")}
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 17:45)" in result
+        assert "UTC" not in result
+
+    @pytest.mark.asyncio
+    async def test_reset_uses_the_live_profile_row_not_the_booted_config(
+        self, make_config, db_path, monkeypatch
+    ):
+        """The DB row wins over the in-memory `UserConfig`, and must.
+
+        `Config.resolve_user_timezone` prefers the live `user_profiles` row so a
+        web-UI timezone edit takes effect without a scheduler restart
+        (ISSUE-099). Pinned at the resolver rather than at a rendered string: the
+        two sources are deliberately set to *different* zones, so swapping back
+        to `config.get_user(user_id).timezone` renders 03:00 and fails here.
+        """
+        from istota import user_profiles
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        # What the daemon booted with...
+        config.users = {"bob": UserConfig(timezone="America/Denver")}
+        # ...and what the user has since set in the web UI. +08:45.
+        user_profiles.ensure_profile(db_path, "bob", timezone="Australia/Eucla")
+
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 17:45)" in result
+        assert "03:00" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_resolver_is_given_the_connection_already_open(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A caller holding a framework-DB connection must not make it open
+        another — per-call FD churn on the FUSE-backed mount is why
+        `resolve_user_timezone` takes a `conn` at all."""
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+
+        seen = []
+        real = config.resolve_user_timezone
+
+        def _spy(user_id, *, conn=None):
+            seen.append(conn)
+            return real(user_id, conn=conn)
+
+        config.resolve_user_timezone = _spy
+
+        with db.get_db(db_path) as conn:
+            await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert seen == [conn]
+
+    @pytest.mark.asyncio
+    async def test_an_explicitly_configured_utc_is_labelled_too(
+        self, make_config, db_path, monkeypatch
+    ):
+        """The line says which zone it rendered in, not why that zone was
+        picked. A UTC clock is labelled UTC however it was arrived at."""
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        config.users = {"bob": UserConfig(timezone="UTC")}
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 09:00 UTC)" in result
+
+    @pytest.mark.asyncio
+    async def test_reset_falls_back_to_utc_for_a_missing_profile(
+        self, make_config, db_path, monkeypatch
+    ):
+        """No profile row and no `UserConfig`, so the resolver returns its own
+        `"UTC"` fallback and the line says so."""
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        config.users = {}  # bob has no profile at all
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 09:00 UTC)" in result
+
+    @pytest.mark.asyncio
+    async def test_reset_falls_back_to_utc_for_an_unparseable_zone(
+        self, make_config, db_path, monkeypatch
+    ):
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        config.users = {"bob": UserConfig(timezone="Mars/Olympus_Mons")}
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=3600)]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "(resets Aug 22 09:00 UTC)" in result
+
+    @pytest.mark.asyncio
+    async def test_a_range_edge_reset_drops_its_stamp_instead_of_raising(
+        self, make_config, db_path, monkeypatch
+    ):
+        """`astimezone` raises `OverflowError` at the edge of the date range.
+
+        `9999-12-31T23:00:00Z` is *canonical* — it survives
+        `subscription_usage._normalize_resets_at` unchanged — and it is one
+        keystroke from the sentinel expiry this codebase writes into credential
+        files. Shifting it east of UTC overflows, and `dispatch` would post the
+        raw exception to the room. The percentage is still the reading.
+        """
+        from istota.commands import cmd_usage
+        from istota.config import UserConfig
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        config.users = {"bob": UserConfig(timezone="Australia/Eucla")}
+        self._patch_snapshot(
+            monkeypatch,
+            _snapshot([_window(percent=40.0, resets_at="9999-12-31T23:00:00Z")]),
+        )
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "- 5-hour: [########------------] 40%" in result
+        assert "resets" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_bar_reserves_its_two_ends(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A quota display is read at the ends, so neither may lie.
+
+        `round` fills all twenty blocks from 97.5% up and empties the bar below
+        2.5% — drawing a window with headroom as exhausted, and one being
+        consumed as untouched.
+        """
+        snapshot = _snapshot([
+            _window(key="a", label="Nearly", percent=97.6),
+            _window(key="b", label="Barely", percent=0.4),
+        ])
+        result = await self._render(make_config, db_path, monkeypatch, snapshot)
+
+        assert "- Nearly: [###################-] 98%" in result
+        assert "- Barely: [#-------------------] 0%" in result
+
+    @pytest.mark.asyncio
+    async def test_a_window_with_no_reset_says_nothing_about_one(
+        self, make_config, db_path, monkeypatch
+    ):
+        result = await self._render(
+            make_config, db_path, monkeypatch, _snapshot([_window(percent=0.0)])
+        )
+
+        assert "- 5-hour: [--------------------] 0%" in result
+        assert "resets" not in result
+
+    @pytest.mark.asyncio
+    async def test_extra_usage_line_only_when_spend_is_enabled(
+        self, make_config, db_path, monkeypatch
+    ):
+        from istota import subscription_usage as su
+
+        off = su.Spend(enabled=False, used_minor=0, limit_minor=2000, percent=0.0)
+        result = await self._render(
+            make_config, db_path, monkeypatch, _snapshot(spend=off)
+        )
+        assert "Extra usage" not in result
+
+        on = su.Spend(enabled=True, used_minor=125, limit_minor=2000, percent=6.0)
+        result = await self._render(
+            make_config, db_path, monkeypatch, _snapshot(spend=on)
+        )
+        assert "**Extra usage:** $1.25 / $20.00 (6%)" in result
+
+    @pytest.mark.asyncio
+    async def test_extra_usage_takes_its_divisor_from_the_exponent(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A zero-decimal currency is not cents. Dividing by a hardcoded 100 is
+        the bug the removed implementation carried."""
+        from istota import subscription_usage as su
+
+        spend = su.Spend(
+            enabled=True, used_minor=500, limit_minor=2000,
+            currency="JPY", exponent=0, percent=25.0,
+        )
+        result = await self._render(
+            make_config, db_path, monkeypatch, _snapshot(spend=spend)
+        )
+        # Zero-decimal, so no fabricated ".00" either: the exponent sets the
+        # divisor and the precision, and 500 yen is 500 yen.
+        assert "**Extra usage:** 500 JPY / 2000 JPY (25%)" in result
+
+    @pytest.mark.asyncio
+    async def test_staleness_footer_only_on_an_old_reading(
+        self, make_config, db_path, monkeypatch
+    ):
+        fresh = await self._render(make_config, db_path, monkeypatch, _snapshot())
+        assert "Reading is" not in fresh
+
+        stale = await self._render(
+            make_config,
+            db_path,
+            monkeypatch,
+            _snapshot(source="stale-cache", error="could not reach api.anthropic.com", age=125.0),
+        )
+        assert "_Reading is 2m old._" in stale
+
+    @pytest.mark.asyncio
+    async def test_the_staleness_footer_never_carries_the_fetch_error(
+        self, make_config, db_path, monkeypatch
+    ):
+        """A chat reply is not where a diagnostic endpoint's failure is
+        reported; `runtime.subscription_usage` is."""
+        result = await self._render(
+            make_config,
+            db_path,
+            monkeypatch,
+            _snapshot(source="stale-cache", error="HTTP 403 from api.anthropic.com", age=300.0),
+        )
+        assert "403" not in result
+        assert "_Reading is 5m old._" in result
+
+    # -- degradation ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_an_unavailable_snapshot_omits_section_three_silently(
+        self, make_config, db_path, monkeypatch
+    ):
+        from istota import subscription_usage as su
+        from istota.commands import cmd_usage
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(
+            monkeypatch,
+            su.UsageSnapshot(
+                fetched_at=0.0, source="none", error=su.NO_CREDENTIAL_ERROR
+            ),
+        )
+        with db.get_db(db_path) as conn:
+            _seed_usage_row(conn, user_id="bob", created_at=_recent_iso(), billed=1000)
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "**Token usage**" in result
+        assert "**By brain**" in result
+        assert "**Claude Code subscription**" not in result
+        assert "credential" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_usage_rows_says_so_and_still_renders_the_plan(
+        self, make_config, db_path, monkeypatch
+    ):
+        result = await self._render(make_config, db_path, monkeypatch, _snapshot())
+
+        assert "No usage recorded." in result
+        assert "**By brain**" not in result
+        assert "**Claude Code subscription**" in result
+
+    @pytest.mark.asyncio
+    async def test_a_missing_task_usage_table_degrades_to_one_line(
+        self, make_config, db_path, monkeypatch
+    ):
+        """`dispatch` would otherwise put `no such table: task_usage` into a
+        chat room. The table is created on the next database open."""
+        import sqlite3 as _sqlite3
+
+        from istota import db as db_mod
+        from istota.commands import cmd_usage
+
+        def _no_table(*args, **kwargs):
+            raise _sqlite3.OperationalError("no such table: task_usage")
+
+        monkeypatch.setattr(db_mod, "usage_summary", _no_table)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert isinstance(result, str)
+        assert "no such table" not in result
+        assert "task_usage" in result
+        # The remedy has to name something that actually creates the table.
+        # `db.get_db` only connects; `init_db` runs the schema.
+        assert "istota init" in result
+        assert "**Claude Code subscription**" in result
+
+    @pytest.mark.asyncio
+    async def test_any_other_operational_error_is_not_swallowed(
+        self, make_config, db_path, monkeypatch
+    ):
+        """Only the missing-table case degrades. A locked database is a real
+        fault and `dispatch` reports it, exactly as `istota usage` does."""
+        import sqlite3 as _sqlite3
+
+        from istota import db as db_mod
+        from istota.commands import cmd_usage
+
+        def _locked(*args, **kwargs):
+            raise _sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(db_mod, "usage_summary", _locked)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            with pytest.raises(_sqlite3.OperationalError):
+                await cmd_usage(_ctx(config, conn, "bob"))
+
+    @pytest.mark.asyncio
+    async def test_a_different_missing_table_is_not_reported_as_task_usage(
+        self, make_config, db_path, monkeypatch
+    ):
+        """"no such table" alone would dress a real fault up as a fresh
+        deployment, and point the reader at a remedy that fixes nothing."""
+        import sqlite3 as _sqlite3
+
+        from istota import db as db_mod
+        from istota.commands import cmd_usage
+
+        def _other(*args, **kwargs):
+            raise _sqlite3.OperationalError("no such table: task_usage_models")
+
+        monkeypatch.setattr(db_mod, "usage_summary", _other)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            with pytest.raises(_sqlite3.OperationalError):
+                await cmd_usage(_ctx(config, conn, "bob"))
+
+    # -- the shared reading --------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_the_handler_issues_no_fetch_of_its_own(
+        self, make_config, db_path, monkeypatch
+    ):
+        """Two `!usage` calls against a fresh cache open no connection at all.
+
+        This is the test that catches a fetch reimplemented inside the handler:
+        the spy is on `urllib.request.urlopen`, not on the module's transport
+        seam, so a second implementation that bypassed `subscription_usage`
+        entirely would still trip it.
+        """
+        import time
+        import urllib.request
+
+        from istota import subscription_usage as su
+        from istota.commands import cmd_usage
+
+        # The root conftest replaces `get_snapshot`; this is the one test here
+        # that wants the real policy, because the cache hit is what it asserts.
+        monkeypatch.setattr(su, "get_snapshot", _REAL_GET_SNAPSHOT)
+
+        opened = []
+
+        def _spy(*args, **kwargs):
+            opened.append(args)
+            raise AssertionError("!usage opened a connection of its own")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _spy)
+        monkeypatch.setattr(urllib.request.OpenerDirector, "open", _spy)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        su.write_cache(
+            su.cache_path(config.db_path.parent),
+            _snapshot([_window(percent=40.0)]),
+        )
+        # The TTL comes off the config the handler will use, not a literal:
+        # otherwise the precondition checks one policy and the behaviour under
+        # test another, and the test passes only while the two agree.
+        ttl = float(config.brain.claude_code.subscription_usage_cache_ttl_seconds)
+        assert su.read_cache(
+            su.cache_path(config.db_path.parent), ttl, now_ts=time.time()
+        ) is not None
+
+        with db.get_db(db_path) as conn:
+            first = await cmd_usage(_ctx(config, conn, "bob"))
+            second = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert opened == []
+        assert "- 5-hour: [########------------] 40%" in first
+        assert first == second
+
+    # -- the credential ------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_the_token_value_never_reaches_the_reply(
+        self, make_config, db_path, tmp_path, monkeypatch
+    ):
+        """A sentinel in every resolvable source, absent from the returned text.
+
+        Nothing downstream would catch a leak here: this credential is not in the
+        config, so the redaction pass covering configured secrets has never seen
+        it. Driven through the *real* `get_snapshot` against a stub host, so the
+        resolver and the fetch both actually run — a stubbed snapshot cannot leak
+        a token it was never given, and the test would prove nothing.
+
+        A stale cache is seeded deliberately. Without one, a refused credential
+        produces no windows, section 3 is omitted, and "the token is absent" is
+        true of a reply that rendered nothing at all. With one, the 403 lands on
+        the stale-cache branch, so the section *and* the footer built beside
+        `snapshot.error` both render — which is the only place a leak could go.
+        """
+        import json as _json
+        import subprocess as _subprocess
+
+        from istota import subscription_usage as su
+        from istota.commands import cmd_usage
+
+        sentinel = "sk-ant-oat01-" + "z" * 40
+        blob = _json.dumps({"claudeAiOauth": {"accessToken": sentinel}})
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / ".credentials.json").write_text(blob)
+
+        sent_headers = []
+
+        def _transport(url, headers, timeout):
+            sent_headers.append(headers)
+            # A 403 is the branch that has an error string to render, which is
+            # where a leak would surface if one were going to. The body echoes
+            # the token back, as a hostile endpoint could.
+            return 403, b'{"error":{"message":"' + sentinel.encode() + b'"}}'
+
+        # Darwin too, so the keychain branch is a resolvable source rather than
+        # one skipped on a Linux runner: all three carry the sentinel.
+        monkeypatch.setattr(su.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            su.subprocess,
+            "run",
+            lambda *a, **k: _subprocess.CompletedProcess(a[0] if a else [], 0, blob, ""),
+        )
+
+        def _real(config, *, now_ts, **kwargs):
+            return _REAL_GET_SNAPSHOT(
+                config, now_ts=now_ts, transport=_transport,
+                env={"CLAUDE_CODE_OAUTH_TOKEN": sentinel, "USER": "someone"},
+                home=home,
+            )
+
+        monkeypatch.setattr(su, "get_snapshot", _real)
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        # Older than the 300s TTL, so it is not served instead of the fetch, but
+        # still there for the stale fallback the 403 takes.
+        su.write_cache(
+            su.cache_path(config.db_path.parent),
+            _snapshot([_window(percent=40.0)], age=4000.0),
+        )
+
+        with db.get_db(db_path) as conn:
+            result = await cmd_usage(_ctx(config, conn, "bob"))
+
+        assert "**Claude Code subscription**" in result, "the leak-prone branch never ran"
+        assert "_Reading is 1h 06m old._" in result
+        assert sentinel not in result
+        assert "sk-ant" not in result
+        assert "403" not in result
+        assert sent_headers, "the fetch never ran, so this proves nothing"
+        assert sentinel in sent_headers[0]["Authorization"], (
+            "the token belongs in the header and nowhere else"
+        )
+
+    # -- registration --------------------------------------------------------
+
+    def test_usage_is_registered_for_everyone(self):
+        from istota.commands import COMMANDS
+
+        assert "usage" in COMMANDS
+
+    @pytest.mark.asyncio
+    async def test_limits_is_a_hidden_alias_for_usage(self, make_config, db_path, monkeypatch):
+        from istota.commands import COMMANDS, _COMMAND_ALIASES
+
+        assert _COMMAND_ALIASES["limits"] == "usage"
+        assert "limits" not in COMMANDS
+
+        config = make_config()
+        config.admin_users = {"bob"}
+        self._patch_snapshot(monkeypatch, _snapshot())
+        with db.get_db(db_path) as conn:
+            result = await dispatch(
+                config, "bob", "room1", "!limits",
+                surface="web", conn=conn, registry=_FakeRegistry(None),
+            )
+        assert result.handled
+        assert "**Claude Code subscription**" in (result.text or "")

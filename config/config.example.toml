@@ -187,6 +187,27 @@ features = []
 # usage_limit_markers = ["session limit reached", "usage limit reached", "Claude usage limit"]
 #                                   # pane substrings → stop_reason=usage_limit → fallback brain
 #
+# Headless `claude -p` brain settings. The brain's model selection still comes
+# from [brain] and [models]; this block is the subscription usage poll only, and
+# it is read whatever `kind` is set to — a native primary with a claude_code
+# fallback burns the same plan. All fields default in code, so an absent block
+# is the shipping behaviour.
+# [brain.claude_code]
+# Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
+# on /admin and in `istota doctor`. Read-only: the credential is never written or
+# refreshed. Off = the doctor check SKIPs and the admin card says so in place of
+# its tiles, rather than disappearing.
+# subscription_usage = true
+# subscription_usage_cache_ttl_seconds = 300     # one deployment-wide fetch per this window;
+#                                                #   floored at 1 (0 would fetch on every read)
+# subscription_usage_timeout_seconds = 10        # matches doctor.PROBE_TIMEOUT; floored at 1
+# subscription_usage_warn_percent = 80.0         # doctor WARNs, the tile turns amber
+# subscription_usage_high_percent = 95.0         # the tile turns red; still a WARN, never a FAIL
+#                                                #   both clamp to [0, 100]; warn above high is
+#                                                #   lowered to high (logged) — an inverted pair
+#                                                #   leaves no amber band
+# subscription_usage_stale_after_seconds = 3600  # a stale-cache reading older than this WARNs
+#
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on
 # the native brain while interactive talk/email stays on claude_code. Unknown

@@ -12,6 +12,7 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!retry [#ID]` | Re-run a failed or cancelled task from scratch |
 | `!resume [#ID]` | Re-run a failed or cancelled task, continuing from its captured progress |
 | `!status` | Show running/pending tasks and system stats |
+| `!usage` | Show token usage; adds a by-brain split and the Claude Code plan's rate-limit windows for admins (hidden alias: `!limits`) |
 | `!room` | Show this room's standing model/effort default; `!room model ALIAS` / `!room effort LEVEL` set it, `default` clears |
 | `!memory user` | Show USER.md contents |
 | `!memory channel` | Show CHANNEL.md contents |
@@ -43,6 +44,14 @@ It is room-scoped — it targets your most recent `running`/`locked` task in the
 `!retry` re-runs the most recent `failed` or `cancelled` task in the room from scratch; `!resume` re-runs it with the failed attempt's captured execution trace (tool calls and intermediate text) prepended, framed as "continue from where you left off". Both accept an explicit `!retry #1234` / `!resume #1234`. Own tasks only, unless you are an admin.
 
 Each creates a **new** task rather than re-queueing the old row, so the failed attempt stays intact in history and out of the automatic backoff. Delivery fields (`output_target`, model, effort, skill) are copied; attachments are not. A task that is still running is rejected (`!stop` it first), as is one that already completed. `!resume` degrades to `!retry` with a note when no usable trace was captured.
+
+## Usage and plan limits
+
+`!usage` reports what the deployment has been consuming, in up to three blocks. Everyone gets a **Token usage** block, headed `fleet` for an admin and with your own user id for anyone else, carrying rows, tokens, cache hit rate and cost over the last 24 hours and the last 30 days. The other two blocks are admin-only: **By brain**, the 30-day split that answers which brain is spending, and **Claude Code subscription**, the plan's rate-limit windows drawn as 20-character bars with their reset times. A non-admin's Token usage block is filtered to their own rows and the other two are simply absent, with nothing saying they were withheld, the same way `!status` omits its `**System:**` block. The subscription is one credential for the whole deployment, so on a multi-user install the fleet totals and the plan are the operator's business.
+
+The plan block is the answer to the dash in the cost column above it. A currency figure appears only where the cost is real money (see [cost basis](../features/usage.md#cost-basis)), so on a subscription deployment `!usage` reports tokens and no dollars, and the windows underneath supply the budget that column cannot. They render from the same cached reading as the `/admin` card and the `runtime.subscription_usage` doctor check — the handler issues no request of its own, and within the cache TTL no request happens at all. Reset times are absolute and in your own timezone, resolved live from your profile rather than from the zone the daemon booted with; a missing or unreadable timezone falls back to UTC and the line says so. An `Extra usage:` line appears only when pay-as-you-go credits are enabled on the account. A `_Reading is … old._` footer appears whenever the number is more than a minute old, which with a shared five-minute cache is most of the time — it is there so an admin deciding whether to start a long run can tell a live percentage from a four-minute-old one, and it does not mean anything is wrong.
+
+That block appears when a reading is available, not when `brain.kind` is `claude_code`. A `native` deployment with a `claude_code` fallback burns the same plan and is the case that most needs the number, and a `source_type_overrides` entry makes the configured brain a poor proxy in the other direction too. With no reading the block is omitted silently: a chat reply is not where an unreachable diagnostic endpoint gets reported, and `istota doctor` says so properly. `!limits` is a hidden alias for the whole command rather than for that one block — it runs the same handler and filters nothing, because the token totals directly above the windows are half the answer to "how much headroom is left".
 
 ## Room model default
 
