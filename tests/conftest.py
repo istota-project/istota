@@ -90,11 +90,13 @@ def _no_subscription_usage_lookups(monkeypatch):
 
     ``doctor.run_checks`` runs ``runtime.subscription_usage`` with
     ``probe=True``, and several tests sweep the whole registry. Left alone, on a
-    developer's macOS laptop that spawns ``security find-generic-password``
-    against the real keychain — which can pop an authorization dialog in the
-    middle of a suite run — and then issues a live GET to api.anthropic.com. In
-    CI no credential resolves and the check SKIPs, so the sweep would also mean
-    two different things on two machines.
+    developer's macOS laptop that reads the real keychain credential through a
+    ``security find-generic-password`` subprocess and then issues a live GET to
+    api.anthropic.com, once per sweeping test. In CI nothing resolves and the
+    check SKIPs, so the sweep would also mean two different things on two
+    machines. (Whether the keychain lookup answers silently or asks the operator
+    for authorization depends on that item's ACL, which is another reason not to
+    find out from inside a test run.)
 
     Same shape as ``_no_network_symbol_lookups`` above, and the same escape
     hatch: ``tests/test_subscription_usage.py`` exercises the module itself and

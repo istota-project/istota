@@ -1589,9 +1589,15 @@ class TestTokenSource:
         assert su.read_cache(path, 300, now_ts=NOW + 10).token_source == "keychain"
         assert su.read_cache_any_age(path).token_source == "keychain"
 
-    @pytest.mark.parametrize("stored", [None, 7, {"a": 1}, "  "])
+    @pytest.mark.parametrize("stored", [None, 7, {"a": 1}, "  ", "kubernetes", "ENV"])
     def test_an_unusable_stored_value_reads_as_empty(self, tmp_path, stored):
-        """`None` here is the key being absent — a cache written before the field."""
+        """`None` here is the key being absent — a cache written before the field.
+
+        The two strings are the reason this validates against a set rather than
+        just coercing to `str`: the cache is a file on disk, so what comes back
+        out of it is input, and both the doctor check and the admin payload
+        interpolate this value into text a person reads.
+        """
         path = su.cache_path(tmp_path)
         su.write_cache(path, _good_snapshot())
         raw = json.loads(path.read_text())

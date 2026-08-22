@@ -3301,9 +3301,11 @@ async def admin_doctor(deep: int = 0, _: dict = Depends(_require_admin)):
     def _run(**kwargs):
         return doctor.redact(doctor.run_checks(config, **kwargs), config)
 
-    # Every probing check bounds its own subprocess (`doctor.PROBE_TIMEOUT`), so
-    # the shallow phase needs no outer timer — only to be off the event loop,
-    # which it would otherwise stall for a dozen `--version` spawns.
+    # Every probing check bounds its own probe — `doctor.PROBE_TIMEOUT` for the
+    # ones that spawn a subprocess, and its own configured fetch timeout for
+    # `runtime.subscription_usage`, the one that makes a network request — so the
+    # shallow phase needs no outer timer, only to be off the event loop, which it
+    # would otherwise stall for a dozen `--version` spawns.
     results = await asyncio.to_thread(_run, deep=False)
 
     if deep:

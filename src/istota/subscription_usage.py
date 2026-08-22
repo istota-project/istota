@@ -37,6 +37,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
@@ -92,6 +93,14 @@ _ERROR_BODY_CHARS = 200
 DEFAULT_SUBSCRIPTION_USAGE = True
 DEFAULT_CACHE_TTL_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 10.0
+
+# Every value ``resolve_token`` can report, and the only ones a caller may
+# render. The cache is a file on disk, so what comes back out of it is input:
+# the doctor check and (from Stage 4) the admin payload interpolate this into
+# text a person reads, and an unvalidated read would let a hand-edited cache put
+# arbitrary content there. Anything else reads as "unknown", which is what an
+# unrecognized branch is.
+TOKEN_SOURCES = frozenset({"env", "file", "keychain"})
 
 NO_CREDENTIAL_ERROR = "no Claude Code OAuth credential found"
 NO_WINDOWS_ERROR = "the endpoint returned no recognizable rate-limit windows"
@@ -887,6 +896,12 @@ def _windows_from_json(raw: Any, now_ts: float | None) -> tuple[UsageWindow, ...
     return tuple(out)
 
 
+def _token_source(value: Any) -> str:
+    """A stored branch name, or ``""`` for anything not in ``TOKEN_SOURCES``."""
+    name = _str(value).strip()
+    return name if name in TOKEN_SOURCES else ""
+
+
 def _optional_int(value: Any) -> int | None:
     """``_int`` that distinguishes "absent" from "zero"."""
     if _number(value) is None:
@@ -932,9 +947,9 @@ def _snapshot_from_raw(raw: dict, now_ts: float | None) -> UsageSnapshot | None:
             windows=windows,
             spend=_spend_from_json(raw.get("spend")),
             source="cache",
-            # Absent in a file written before the field existed, and ``_str``
-            # turns anything else unusable into the same empty string.
-            token_source=_str(raw.get("token_source")).strip(),
+            # Absent in a file written before the field existed, and anything
+            # that is not one of the three branch names reads as unknown.
+            token_source=_token_source(raw.get("token_source")),
         )
     except Exception:  # noqa: BLE001 — a cache is never repaired, only ignored
         logger.debug("subscription usage cache entry unusable", exc_info=True)
@@ -979,13 +994,17 @@ def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     """Persist a successful reading. Best-effort; never raises.
 
     Two processes read and write this file — ``istota-scheduler`` and
-    ``istota-web`` are separate units — so the write goes to a **pid-scoped**
-    temp file and is ``os.replace``d into place. The pid is what makes the claim
-    true: ``os.replace`` is atomic with respect to the rename, not with respect
-    to two processes opening one fixed temp name ``O_TRUNC`` and writing at
-    independent offsets, which publishes a torn file. Same pattern as
-    ``money/work.py``. Racing the *fetch* is still fine — one redundant request,
-    last writer wins, both readings are equally true — so there is no lock.
+    ``istota-web`` are separate units — so the write goes to a temp file scoped
+    to the **writer**, not to a fixed name, and is ``os.replace``d into place.
+    That scoping is what makes the claim true: ``os.replace`` is atomic with
+    respect to the rename, not with respect to two writers opening one fixed temp
+    name ``O_TRUNC`` and writing at independent offsets, which publishes a torn
+    file. Same pattern as ``money/work.py``. The thread id is in the name as well
+    as the pid because the second writer is not always another process: the admin
+    doctor endpoint runs its shallow phase through ``asyncio.to_thread`` with no
+    semaphore, so two dashboards refreshing at once are two threads of one
+    process. Racing the *fetch* is still fine — one redundant request, last writer
+    wins, both readings are equally true — so there is no lock.
 
     ``0600``: the payload is not a credential, but it is account data and the
     data dir is shared. A snapshot carrying an ``error`` is never written — the
@@ -994,7 +1013,7 @@ def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     if snapshot.error or not snapshot.windows:
         return
     path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(_snapshot_to_json(snapshot))

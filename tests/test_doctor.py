@@ -615,7 +615,13 @@ class _UsageTransport:
         return self.status, self.body
 
 
-def _usage_body(*percents, resets_in=3847):
+# A reset far enough from a minute boundary that the rendered countdown cannot
+# tick over between building the payload and reading the result: 1h 04m 30s, so
+# the assertion holds for any delay under 30 seconds.
+_RESETS_IN = 3870
+
+
+def _usage_body(*percents, resets_in=_RESETS_IN):
     """A `limits[]` payload with one window per percentage, resetting soon.
 
     `resets_at` is built from the wall clock rather than a frozen constant
@@ -649,7 +655,15 @@ def _usage_config(make_config, **fields):
     return make_config(brain=BrainConfig(claude_code=ClaudeCodeBrainConfig(**fields)))
 
 
-def _drive_usage(monkeypatch, *, transport=None, env=None, home=None, darwin_blob=None):
+# Never the running developer's real home. `get_snapshot(home=None)` means "use
+# `Path.home()`", not "there is no home", so a helper defaulting to None would
+# read `~/.claude/.credentials.json` on the machine running the suite.
+_NO_HOME = Path("/nonexistent/istota-test-home")
+
+
+def _drive_usage(
+    monkeypatch, *, transport=None, env=None, home=_NO_HOME, darwin_blob=None
+):
     """Reinstate the real `get_snapshot` with only the host substituted.
 
     The check calls `get_snapshot(config, now_ts=...)` and has nowhere to pass a
@@ -799,6 +813,53 @@ class TestSubscriptionUsage:
         if expect_warn:
             assert r.remedy, "a WARN an operator cannot act on is a log line"
 
+    @pytest.mark.parametrize("percent,expect_warn", [(45, False), (55, True)])
+    def test_the_configured_thresholds_are_the_ones_that_are_read(
+        self, make_config, monkeypatch, percent, expect_warn
+    ):
+        """Every other threshold case sets the value the dataclass already has.
+
+        A check that ignored `[brain.claude_code]` entirely and used its own
+        hardcoded 80/95 would pass all of them. This is the case that fails on
+        such a check: 55% is a WARN only if the configured 50 was read, and 45%
+        is an OK only if the hardcoded 80 was not.
+        """
+        config = _usage_config(
+            make_config,
+            subscription_usage_warn_percent=50.0,
+            subscription_usage_high_percent=60.0,
+        )
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(percent)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == (WARN if expect_warn else OK)
+
+    def test_an_inverted_threshold_pair_still_warns_in_the_gap(
+        self, make_config, monkeypatch
+    ):
+        """`warn` above `high` would otherwise make the band unreachable.
+
+        The loader corrects the pair, so this is the second line: a config that
+        reached the dataclass some other way must not silently stop warning.
+
+        75% is chosen to sit below the *default* warn of 80 as well, so a check
+        that ignored the configured pair entirely would answer OK here.
+        """
+        config = _usage_config(
+            make_config,
+            subscription_usage_warn_percent=90.0,
+            subscription_usage_high_percent=70.0,
+        )
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(75)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        assert self._result(config).status == WARN
+
     @pytest.mark.parametrize("percent", [0, 79.9, 80, 94.9, 95, 100, 150])
     def test_no_utilization_ever_fails(self, make_config, monkeypatch, percent):
         """A plan at 97% is a fact about the plan, not a defect in the host.
@@ -887,6 +948,33 @@ class TestSubscriptionUsage:
         r = self._result(_usage_config(make_config))
         assert r.status == WARN
         assert "no recognizable rate-limit windows" in r.detail
+        # The request succeeded and the body parsed, so egress and the credential
+        # are both fine. Sending the operator to look at either would be a
+        # wild-goose chase.
+        assert "shape has changed" in r.remedy
+        assert "api.anthropic.com" not in r.remedy
+
+    def test_a_windowless_success_warns_rather_than_raising(
+        self, make_config, monkeypatch
+    ):
+        """The guard behind the never-FAIL promise, driven directly.
+
+        `get_snapshot` cannot return this today — an error-free snapshot always
+        carries windows — so the only way to exercise the guard is to hand the
+        check one. It is worth exercising because the failure mode is an
+        IndexError, and `run_checks` converts a raising check into the one status
+        this check must never produce.
+        """
+        from istota import subscription_usage as su
+
+        monkeypatch.setattr(
+            su,
+            "get_snapshot",
+            lambda config, **kwargs: su.UsageSnapshot(fetched_at=time.time()),
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == WARN
+        assert r.remedy
 
     def _seed_cache(self, config, age_seconds, percent=40):
         """Write a good cache entry `age_seconds` old, as a fetch would have."""
@@ -903,7 +991,14 @@ class TestSubscriptionUsage:
     def test_a_stale_reading_within_the_window_still_reports_its_numbers(
         self, make_config, monkeypatch
     ):
-        """An old-but-real reading is worth more than nothing."""
+        """An old-but-real reading is worth more than nothing — but say it is old.
+
+        The status stays OK below `stale_after`; that threshold is the whole
+        point of the setting. What must not happen is an hour-long outage reading
+        as a plain OK, because the countdown beside the percentage is recomputed
+        against the current clock while the percentage is not, and that pair is
+        the most misleading line this check could print.
+        """
         config = _usage_config(make_config, subscription_usage_stale_after_seconds=3600)
         self._seed_cache(config, age_seconds=900)
         _drive_usage(
@@ -914,6 +1009,23 @@ class TestSubscriptionUsage:
         r = self._result(config)
         assert r.status == OK
         assert "5-hour at 40%" in r.detail
+        assert "last successful reading is 15m old" in r.detail
+        assert "500" in r.detail
+
+    def test_the_configured_stale_window_is_the_one_that_is_read(
+        self, make_config, monkeypatch
+    ):
+        """The same 900s reading, against a 60s window instead of the default."""
+        config = _usage_config(make_config, subscription_usage_stale_after_seconds=60)
+        self._seed_cache(config, age_seconds=900)
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(status=500, body=b""),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == WARN
+        assert "5-hour at 40%" not in r.detail, "past the window it is not a reading"
 
     def test_a_reading_older_than_stale_after_warns_with_its_age(
         self, make_config, monkeypatch

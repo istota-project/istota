@@ -510,12 +510,20 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-# The two remedies this check can offer. Fixed literals: `detail` and `remedy`
+# The three remedies this check can offer. Fixed literals: `detail` and `remedy`
 # are built from these plus a percentage, a duration and a resolver branch name,
 # never from the credential, the raw response body or an exception string.
 _USAGE_REMEDY = "Check network egress to api.anthropic.com, or re-run `claude setup-token`."
 _USAGE_BUSY_REMEDY = (
     "Tasks will fail over to the fallback brain when this window is exhausted."
+)
+# Kept separate from _USAGE_REMEDY because this one follows a *successful*
+# request: the endpoint answered, it parsed, and it named no window this reader
+# understands. Neither egress nor re-authentication is the repair, and offering
+# them would send an operator hunting for a fault on their own host.
+_USAGE_SHAPE_REMEDY = (
+    "The endpoint answered normally but named no rate-limit window this version "
+    "understands; its response shape has changed and the parser needs updating."
 )
 
 
@@ -575,23 +583,52 @@ def check_subscription_usage(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(name, SKIP, snapshot.error)
 
     if snapshot.error and not snapshot.has_data:
-        return CheckResult(name, WARN, _usage_error(snapshot), remedy=_USAGE_REMEDY)
-
-    stale_after = _setting_float(settings, "subscription_usage_stale_after_seconds", 3600.0)
-    if snapshot.error and snapshot.age_seconds(now) > stale_after:
-        return CheckResult(
-            name,
-            WARN,
-            f"last successful reading is {_duration(snapshot.age_seconds(now))} old: "
-            f"{_usage_error(snapshot)}",
-            remedy=_USAGE_REMEDY,
+        remedy = (
+            _USAGE_SHAPE_REMEDY
+            if snapshot.error == subscription_usage.NO_WINDOWS_ERROR
+            else _USAGE_REMEDY
         )
+        return CheckResult(name, WARN, _usage_error(snapshot), remedy=remedy)
+
+    if not snapshot.windows:
+        # Unreachable: every error-free return from `get_snapshot` carries
+        # windows, and the one that does not sets NO_WINDOWS_ERROR. Guarded
+        # anyway, because the alternative is an IndexError below, and
+        # `run_checks` turns a raising check into exactly the FAIL this check
+        # exists never to produce. Two lines make the promise structural rather
+        # than inherited from another module's invariant.
+        return CheckResult(
+            name, WARN, subscription_usage.NO_WINDOWS_ERROR, remedy=_USAGE_SHAPE_REMEDY
+        )
+
+    # A snapshot with both windows and an error is the stale-cache branch: real
+    # numbers from an older fetch, plus the failure that made them old.
+    stale_note = ""
+    if snapshot.error:
+        age = snapshot.age_seconds(now)
+        stale_note = (
+            f"last successful reading is {_duration(age)} old: {_usage_error(snapshot)}"
+        )
+        stale_after = _setting_float(
+            settings, "subscription_usage_stale_after_seconds", 3600.0
+        )
+        if age > stale_after:
+            return CheckResult(name, WARN, stale_note, remedy=_USAGE_REMEDY)
 
     # Worst first, and all of them: "5-hour at 12%, weekly at 94%" and "5-hour at
     # 94%, weekly at 12%" call for different operator responses, and this one
     # line is the whole of what a terminal reader sees.
     windows = sorted(snapshot.windows, key=lambda w: w.percent, reverse=True)
     detail = "; ".join(_usage_window(w) for w in windows)
+    if stale_note:
+        # Inside `stale_after` the status is still what the numbers say — that
+        # threshold is the whole point of the setting — but the line has to
+        # admit the numbers are old and say why. Otherwise an hour-long outage
+        # reads as `OK` with an hour-old percentage beside a countdown that has
+        # been recomputed against the current clock, which is the most
+        # misleading pair this check could print. The admin card and `!usage`
+        # both carry the same footer for the same reason.
+        detail = f"{detail}; {stale_note}"
 
     warn_at = _setting_float(settings, "subscription_usage_warn_percent", 80.0)
     high_at = _setting_float(settings, "subscription_usage_high_percent", 95.0)
