@@ -15,6 +15,7 @@ slowly:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,24 @@ _XDIST_MESSAGE = (
 # Every project this tier creates starts with it, which is what makes the
 # session-start sweep able to find leftovers without touching anything else.
 PROJECT_PREFIX = "istota-smoke-"
+
+
+def lean_image_tag() -> str:
+    """One image tag per checkout, shared by every stack this tier starts.
+
+    Compose names a built image after the project, and the project is unique
+    per test so an interrupted run's stack is never adopted by the next one.
+    Images are not reclaimed by `down --volumes`, so that left one permanent
+    tag per test. A single tag collapses them.
+
+    Scoped by checkout path rather than fixed, because work in this repo runs
+    in parallel git worktrees: two of them sharing a tag means the second
+    `up --build` moves it out from under the first run's containers, mid-run.
+    Same reasoning as `tests/image/conftest._tag_for`, which carries the same
+    component for the same reason.
+    """
+    digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
+    return f"istota-test/lean:{digest}"
 
 
 @pytest.hookimpl(trylast=True)
@@ -207,7 +226,10 @@ def lean_stack(pytestconfig, tmp_path, request):
     # An --env-file rides along in the argument list, so every subcommand gets
     # it and no caller has to remember.
     env_file = tmp_path / "compose.env"
-    env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={config_dir}\n")
+    env_file.write_text(
+        f"ISTOTA_TEST_CONFIG_DIR={config_dir}\n"
+        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}\n"
+    )
     args = compose_support.compose_args(
         COMPOSE_FILE, project=project, env_file=env_file
     )
@@ -343,7 +365,10 @@ def _forge_stack(pytestconfig, tmp_path, request, *, image: str = ""):
     project = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:8]}"
 
     env_file = tmp_path / "compose.env"
-    lines = [f"ISTOTA_TEST_CONFIG_DIR={config_dir}"]
+    lines = [
+        f"ISTOTA_TEST_CONFIG_DIR={config_dir}",
+        f"ISTOTA_TEST_LEAN_IMAGE={lean_image_tag()}",
+    ]
     overlays = []
     if image:
         # Both the overlay and the variable it interpolates. Compose reads the
