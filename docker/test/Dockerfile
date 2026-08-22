@@ -48,23 +48,24 @@ COPY pyproject.toml uv.lock ./
 # arrives at run time via the bind mount, and pythonpath = ["src"] makes it
 # importable.
 #
-# Extras: everything the developer host has (`uv sync --all-extras`) *except*
-# `memory-search`, which pulls torch and sentence-transformers — a couple of GB
-# of wheels for an image whose job is mount namespaces. Nothing imports them at
-# module scope: `memory/search.py` imports `sqlite_vec` inside a function and
-# the tests that reach it mock or skip, so the suite collects and runs clean
-# without the extra, and the real library stays covered on the developer host.
+# Extras: `all` minus the two heavy ones. `memory-search` pulls torch and
+# sentence-transformers and `whisper` pulls faster-whisper, av and onnxruntime
+# — together about 750 MB of wheels for an image whose job is mount namespaces.
+# Nothing imports either at module scope; every heavy import in src/ is inside a
+# function, deliberately, so the suite collects and runs clean without them.
 #
-# The list is spelled out rather than `--extra all` because two of the needed
-# packages are not in `all`: `psutil` arrives via `whisper` and `jinja2` via
-# `docs`, and six test modules import them at module scope. `all` alone leaves
-# the runner reporting six collection errors that have nothing to do with the
-# code under test. If a future test imports torch or sentence-transformers at
-# module scope, collection fails loudly here and `memory-search` goes back in.
-RUN uv sync --frozen --no-install-project --group dev \
-    --extra calendar --extra email --extra markets --extra transcribe \
-    --extra location --extra web --extra money --extra feeds --extra garmin \
-    --extra whisper --extra docs
+# The one test that needs a heavy extra carries the `ml` marker and is
+# deselected by both pyproject's addopts and scripts/test-linux.sh. If a future
+# test imports torch or faster-whisper at module scope, collection fails loudly
+# here rather than quietly passing on a developer host that happens to have
+# them; the fix is the marker, not a bigger install.
+#
+# `test` is that set, defined once in pyproject.toml — it used to be nine
+# `--extra` flags spelled out here, because there is no way to subtract an extra
+# from `all`, and this file is where such a list drifts. jinja2 and psutil used
+# to be in it by proxy (via `docs` and `whisper`); they are test dependencies
+# and now live in the `dev` group, which `--group dev` below installs.
+RUN uv sync --frozen --no-install-project --group dev --extra test
 
 # ruff is not a project dependency: it appears in pyproject.toml only as
 # [tool.ruff] configuration, and [dependency-groups] dev is pytest and its

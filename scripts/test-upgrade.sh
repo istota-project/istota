@@ -119,6 +119,27 @@ if [ -n "$from_ref" ] && [ "$use_floor" -eq 1 ]; then
     exit 2
 fi
 
+# Refuse inside the sandbox, ahead of the daemon precheck. `docker version` is
+# on the devbox proxy's allowlist and container creation is not, so without
+# this the tier passes its own precheck inside a task and fails later on a
+# call the proxy forbids. See the longer note in scripts/test-linux.sh.
+if [ -n "${ISTOTA_SANDBOXED:-}" ]; then
+    echo "scripts/test-upgrade.sh cannot run inside the sandbox." >&2
+    echo "" >&2
+    echo "This tier boots the current image over an older release's state, which" >&2
+    echo "means creating and running containers. A task reaches Docker through the" >&2
+    echo "devbox allowlist proxy, which permits neither and should not." >&2
+    echo "" >&2
+    echo "This is not a test failure. Nothing is broken and nothing is red." >&2
+    echo "Say in the merge request that the change touches a migration, a config" >&2
+    echo "key or config.toml generation and that the upgrade tier is out of reach" >&2
+    echo "from a task, and ask for the run before merge." >&2
+    echo "See docs/development/testing.md, 'Deployment tiers'." >&2
+    # 75 — the tier did not run. See the note in scripts/test-linux.sh; this
+    # script already reserves 2 for a usage error and 1 for a real failure.
+    exit 75
+fi
+
 if ! docker version >/dev/null 2>&1; then
     echo "scripts/test-upgrade.sh needs a running Docker daemon." >&2
     echo "This is a discretionary tier — 'uv run pytest' on the host does not need it." >&2

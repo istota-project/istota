@@ -1,0 +1,33 @@
+# Negative control 4 of 4: the devbox image with the forge directory on PATH.
+#
+# Added after measuring which assertions the first three controls actually
+# reach. Two did not have a control at all —
+# `test_the_name_resolves_to_the_wrapper[gh]` and `[glab]` — and two more
+# (`test_the_real_binary_is_off_path`) only ever went red through the
+# `test -x` guard raising in the no-forge image, never through the comparison
+# they are written around. Four of thirteen, unfalsified, in the change whose
+# entire purpose was to stop assertions being unfalsified.
+#
+# The defect it reproduces is real and small: someone puts
+# /usr/local/lib/istota_forge on PATH, reasoning that the binaries are there
+# and it is convenient. `gh` then resolves to the real CLI ahead of the wrapper
+# at /usr/local/bin, so the deny policy is never consulted and the token is
+# never injected — the same outcome as control 3, reached by the route that is
+# actually likely rather than by overwriting a file.
+#
+# This is why the off-PATH placement is worth asserting rather than assuming:
+# it is one environment variable away from being undone, and nothing about
+# reading `docker/devbox/Dockerfile` tells you whether the tests would notice.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-forge-dir-on-path \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-forge-dir-on-path:control docker/test
+ARG BASE
+FROM ${BASE}
+
+# No file changes at all — the difference is entirely the search order, which
+# is what makes this the cleanest of the four: nothing about the image's
+# contents differs from the product.
+ENV PATH="/usr/local/lib/istota_forge:${PATH}"

@@ -1,0 +1,58 @@
+# Negative control 1 of 3: the devbox image with the forge binaries removed.
+#
+# The sibling of `Dockerfile.no-forge`, for the other half of the image tier.
+# `tests/image/test_devbox_image.py` runs thirteen assertions against a
+# separately built image, and reading them tells you almost nothing about
+# whether they can fail — the lesson of ISSUE-263, where four Group A tests
+# passed against an image with no forge binaries in it at all.
+#
+# **Three controls, not one, and that was measured rather than assumed.** The
+# file asserts three separable things: that the two images ship the same forge
+# versions, that the vendored wrapper in the image is byte-identical to
+# `src/istota/forge_cli.py`, and that `gh` and `glab` resolve on PATH to the
+# wrapper rather than to a real binary. This image breaks the first, and the
+# second only in the weak sense that the file is gone rather than different.
+# It does not touch the third at all: `/usr/local/bin/gh` is a *copy* of the
+# wrapper (`docker/devbox/Dockerfile:156`), not a symlink into this directory,
+# so it survives the `rm` and four of the thirteen assertions stay green.
+# Hence `Dockerfile.devbox-stale-wrapper` and
+# `Dockerfile.devbox-real-binary-on-path`.
+#
+# Test-owned, deliberately, for the same reason as its sibling: the
+# alternative was a build arg in the production recipe whose only purpose is
+# producing a broken artifact. Nothing in a real build reads this file.
+#
+# Usage — it takes the real devbox image as its base rather than rebuilding:
+#
+#   docker build -f docker/test/Dockerfile.devbox-no-forge \
+#       --build-arg BASE=<the tag tests/image/conftest.py built> \
+#       -t istota-test/devbox-no-forge:local docker/test
+#
+# Fed to the tier through ISTOTA_DEVBOX_IMAGE_TAG, which
+# `tests/image/conftest.py:363` already honours.
+ARG BASE
+FROM ${BASE}
+
+# The devbox image ends on `USER dev` (docker/devbox/Dockerfile:199) and the
+# forge directory is root-owned, so the control's own edit needs root. Dropped
+# back to `dev` at the end, so the image the tier receives differs from the
+# product in exactly one way rather than two.
+USER root
+
+# The directory rather than the two binaries: an image that ships a third
+# binary later should lose that one too, or the control stops matching what
+# the product does. This also removes the vendored wrapper that lives
+# alongside them, which is why the byte-identity assertion goes red here for
+# the wrong reason — it cannot read the file at all. That assertion's real
+# control is the stale-wrapper image.
+RUN rm -rf /usr/local/lib/istota_forge
+
+# What goes with the two binaries: the vendored wrapper
+# (istota_forge_cli.py) and seed-forge-policy, which live in the same
+# directory. What does not: /etc/istota-forge/policy.json, which is written
+# elsewhere and survives, and the four wrapper copies at /usr/local/bin, which
+# are copies rather than symlinks. /etc/gitconfig still names the credential
+# helper. Stated precisely because this file's whole value is being accurate
+# about what a control does and does not touch.
+
+USER dev

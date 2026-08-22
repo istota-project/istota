@@ -67,6 +67,7 @@ already are, is the cheap insurance.
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json
 import os
@@ -155,7 +156,13 @@ class ProcessRss:
 
 @dataclass(frozen=True)
 class ContainerShmUsage:
-    """A container's shm/tmpfs mount, or an explicit record that it could not be read.
+    """A tmpfs mount inside another mount namespace, or a record that it could not be read.
+
+    Two producers, and the name predates the second: a container's mounts
+    (:func:`read_container_shm`) and a running task's bwrap sandbox
+    (:func:`read_sandbox_shm`). The shape is identical because the question is
+    — a pid, a mount point, and how full it is — and the snapshot labels the
+    two sections differently rather than the rows carrying a kind.
 
     ``available=False`` rows are emitted rather than dropped. An absent line and
     a zero line must not look alike when the whole point is attribution.
@@ -978,6 +985,45 @@ def _docker_get(socket_path: Path, path: str, timeout: float):
         conn.close()
 
 
+def _mounts_detail(pid: int, exc: Exception) -> str:
+    """Why ``/proc/<pid>/mounts`` could not be read, in terms of what to do next.
+
+    The wording is the finding of ISSUE-286, not decoration. The production
+    snapshot of 2026-08-22 said ``/proc/537462/mounts unreadable`` for all three
+    containers, which reads as a race — a pid that exited mid-scan, worth
+    re-running to catch. It was not one: that path had never returned a number
+    on that host, and an investigation went after the containers on the strength
+    of the wording. So the errno is carried through rather than collapsed to one
+    word.
+
+    **The errno is named; the cause is not inferred.** The recorded evidence is
+    a message that predates this function and carries no errno, so which one
+    produced it is not known. ``EACCES``/``EPERM`` is unambiguous. ``ENOENT`` is
+    deliberately *not* rendered as a bare "process gone": on a foreign pid it
+    also means ``hidepid=`` is set, or that the pid was reported by a Docker
+    daemon in a different pid namespace from this reader — both permanent, and
+    both would otherwise get the same false-race wording this exists to remove.
+    """
+    if isinstance(exc, OSError):
+        name = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return (
+                f"/proc/{pid}/mounts: {name} — this uid cannot read that process "
+                f"(permanent; retrying will not help)"
+            )
+        # EINVAL belongs here rather than in the generic arm: the kernel returns
+        # it from `mounts_open_common` when the target has no `nsproxy`, which
+        # is a task mid-exit. Rendered generically it reads as a code bug.
+        if exc.errno in (errno.ENOENT, errno.ESRCH, errno.EINVAL):
+            return (
+                f"/proc/{pid}/mounts: {name} — the process has exited or is exiting, "
+                f"or the pid is not visible to this reader (hidepid, ProtectProc, "
+                f"or another pid namespace)"
+            )
+        return f"/proc/{pid}/mounts unreadable: {name} {exc.strerror or exc}"
+    return f"/proc/{pid}/mounts unreadable: {exc}"
+
+
 def container_shm_for_pid(
     name: str,
     pid: int,
@@ -998,16 +1044,13 @@ def container_shm_for_pid(
             ContainerShmUsage(name, "?", 0, 0, available=False, detail="container not running")
         ]
 
-    mounts_text = _read_text(proc_root / str(pid) / "mounts")
-    if mounts_text is None:
+    mounts_path = proc_root / str(pid) / "mounts"
+    try:
+        mounts_text = mounts_path.read_text()
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
         return [
             ContainerShmUsage(
-                name,
-                "?",
-                0,
-                0,
-                available=False,
-                detail=f"/proc/{pid}/mounts unreadable",
+                name, "?", 0, 0, available=False, detail=_mounts_detail(pid, exc),
             )
         ]
 
@@ -1040,6 +1083,7 @@ def read_container_shm(
     docker_socket: Path = Path("/var/run/docker.sock"),
     *,
     proc_root: Path = Path("/proc"),
+    statvfs: Callable[[str], object] = os.statvfs,
     timeout: float = _DOCKER_TIMEOUT_SECONDS,
 ) -> list[ContainerShmUsage]:
     """tmpfs usage inside every running container.
@@ -1089,7 +1133,184 @@ def read_container_shm(
                 )
             )
             continue
-        out.extend(container_shm_for_pid(name, pid, proc_root=proc_root))
+        out.extend(
+            container_shm_for_pid(name, pid, proc_root=proc_root, statvfs=statvfs)
+        )
+    return out
+
+
+# How many pids the descent below will look at before giving up. The tree it
+# walks is two or three deep in practice (outer bwrap -> sandboxed bwrap ->
+# the CLI), and it stops at the first level that answers, so this bound is only
+# ever reached by a pathological tree — where spending the snapshot's time
+# enumerating it would be the wrong trade.
+_SANDBOX_WALK_MAX_PIDS = 64
+
+
+def _read_link(path: Path) -> str | None:
+    try:
+        return os.readlink(str(path))
+    except (OSError, ValueError):
+        return None
+
+
+def _mount_namespace(proc_root: Path, pid: int) -> str | None:
+    """The ``mnt:[4026532...]`` identity of a pid's mount namespace, or None."""
+    return _read_link(proc_root / str(pid) / "ns" / "mnt")
+
+
+def _child_pids(proc_root: Path, pid: int) -> list[int]:
+    """A pid's direct children, from the reader's own pid-namespace view.
+
+    ``/proc/<pid>/task/<tid>/children`` is same-uid readable and needs no
+    ptrace access, which is what keeps this affordable where the container rows
+    beside it are not.
+    """
+    text = _read_text(proc_root / str(pid) / "task" / str(pid) / "children")
+    if not text:
+        return []
+    out: list[int] = []
+    for token in text.split():
+        try:
+            out.append(int(token))
+        except ValueError:
+            continue
+    return out
+
+
+def find_sandboxed_pid(
+    pid: int,
+    own_namespace: str,
+    *,
+    proc_root: Path = Path("/proc"),
+) -> int | None:
+    """The nearest descendant of ``pid`` living in a different mount namespace.
+
+    **Without this the whole attribution is inverted, which is how the first
+    version of this fix was wrong.** ``tasks.worker_pid`` is the pid
+    ``subprocess.Popen`` returned, and that is the *outer* ``bwrap`` — the
+    privileged monitor that stays in the daemon's own namespace and writes the
+    uid map. bwrap forks during namespace setup, so the process that owns the
+    private ``/`` and ``/tmp`` is its child. Reading the recorded pid's mount
+    table therefore returns the *daemon's* table, and the rows would restate
+    the host tmpfs mounts already listed above them, once per running task,
+    under a ``sandbox task=`` label. That is worse than printing nothing: it
+    double-counts against the section above and attributes host memory to a
+    task. The same fork is why per-task cgroup placement had to move into
+    ``preexec_fn`` (ISSUE-285); this is that fact showing up a second time.
+
+    Breadth-first, so the answer comes from the shallowest level that has one
+    and the deep end of a busy task's process tree is never enumerated.
+    Returns ``None`` when no descendant differs — an uncontained deployment,
+    or a task that already exited — and the caller must render that rather than
+    fall back to ``pid``.
+    """
+    proc_root = Path(proc_root)
+    frontier = [pid]
+    seen: set[int] = {pid}
+    while frontier and len(seen) <= _SANDBOX_WALK_MAX_PIDS:
+        nxt: list[int] = []
+        for current in frontier:
+            for child in _child_pids(proc_root, current):
+                if child in seen:
+                    continue
+                seen.add(child)
+                if _mount_namespace(proc_root, child) not in (None, own_namespace):
+                    return child
+                nxt.append(child)
+                if len(seen) > _SANDBOX_WALK_MAX_PIDS:
+                    break
+        frontier = nxt
+    return None
+
+
+def read_sandbox_shm(
+    task_pids: Sequence[tuple[int, int]],
+    *,
+    proc_root: Path = Path("/proc"),
+    statvfs: Callable[[str], object] = os.statvfs,
+) -> list[ContainerShmUsage]:
+    """tmpfs usage inside each running task's sandbox, labelled by task id.
+
+    **The blind spot ISSUE-286 was filed for.** ``read_tmpfs_usage`` reads the
+    *daemon's* mount table, and bwrap gives every task a private mount namespace
+    with ``/`` and ``/tmp`` as tmpfs of their own. Nothing a task writes under
+    ``/tmp`` therefore appears in any table the snapshot consults, and the
+    arithmetic charges the growth to ``shmem_unaccounted`` — defensible
+    bookkeeping and useless attribution. It is not an edge case: the residue
+    climbs when a task runs a build or a test suite, which is exactly when the
+    sandbox tmpfs fills. On 2026-08-22 the whole 2.3 GB residue was one
+    ``pytest-of-*`` tree in a sandbox ``/tmp``, and the snapshot named nothing.
+
+    ``task_pids`` is ``(task_id, worker_pid)`` and arrives as a parameter — this
+    module does not reach for the database, so the caller supplies what it
+    already has in the task row. No privilege is needed to read through those
+    pids even where ``kernel.yama.ptrace_scope`` is 1: the sandbox is a
+    descendant of the daemon and shares its uid, which is what makes this cheap
+    where the container rows beside it are not.
+
+    **The recorded pid is not the pid to read.** It is the outer ``bwrap``,
+    which stays in the daemon's own mount namespace; ``find_sandboxed_pid``
+    descends to the child that actually holds the private ``/`` and ``/tmp``.
+    Every row is emitted against a pid whose mount namespace has been *observed*
+    to differ from this process's, so the failure mode is a missing row rather
+    than the host's own mounts relabelled as a task's.
+
+    A pid that exits mid-read yields an unavailable row rather than raising, so
+    a task finishing between the database read and this one costs a line rather
+    than the snapshot. **Pid reuse is narrowed, not closed**: a recycled number
+    would have to belong to a process that is itself in a non-daemon mount
+    namespace before any row is printed for it, but if it is, the row names the
+    wrong owner. `worker_pid` is cleared on every transition out of ``running``
+    and reuse needs ``pid_max`` to wrap in the seconds between the two reads, so
+    this is left as a known bound rather than paid for with a starttime check.
+    """
+    proc_root = Path(proc_root)
+    own_namespace = _read_link(proc_root / "self" / "ns" / "mnt")
+    if own_namespace is None:
+        # Without our own namespace identity there is nothing to compare
+        # against, so no descendant can be shown to be sandboxed. Say that
+        # rather than read a pid whose mounts might be the host's.
+        return [
+            ContainerShmUsage(
+                str(task_id), "?", 0, 0, available=False,
+                detail="this process's mount namespace is unreadable",
+            )
+            for task_id, _pid in task_pids
+        ]
+
+    out: list[ContainerShmUsage] = []
+    for task_id, pid in task_pids:
+        label = str(task_id)
+        # Distinct from `container_shm_for_pid`'s own pid<=0 branch, whose
+        # wording ("container not running") would be a category error here: a
+        # task row with no pid means the brain never reported one — NativeBrain
+        # never does, and neither does ClaudeCodeBrain's non-streaming path —
+        # not that something stopped.
+        if pid <= 0:
+            out.append(
+                ContainerShmUsage(
+                    label, "?", 0, 0, available=False, detail="no worker pid recorded",
+                )
+            )
+            continue
+        sandbox_pid = find_sandboxed_pid(pid, own_namespace, proc_root=proc_root)
+        if sandbox_pid is None:
+            out.append(
+                ContainerShmUsage(
+                    label, "?", 0, 0, available=False,
+                    detail=(
+                        f"no descendant of pid {pid} is in its own mount namespace "
+                        f"(task not sandboxed, or already exited)"
+                    ),
+                )
+            )
+            continue
+        out.extend(
+            container_shm_for_pid(
+                label, sandbox_pid, proc_root=proc_root, statvfs=statvfs
+            )
+        )
     return out
 
 
@@ -1105,6 +1326,8 @@ def snapshot(
     sample: PressureSample | None = None,
     tmpfs: Sequence[TmpfsUsage] | None = None,
     containers: Sequence[ContainerShmUsage] | None = None,
+    sandboxes: Sequence[ContainerShmUsage] | None = None,
+    task_pids: Sequence[tuple[int, int]] | None = None,
     statvfs: Callable[[str], object] = os.statvfs,
     docker_socket: Path = Path("/var/run/docker.sock"),
 ) -> str:
@@ -1112,9 +1335,19 @@ def snapshot(
 
     Answers the question the incident could not: which allocation holds the
     memory. Reads the headline figures, every tmpfs mount, every container's
-    tmpfs mounts, the top processes by RSS, and — only when the residue says no
-    mount can account for it — the per-process count of unlinked shmem
-    descriptors.
+    tmpfs mounts, every running task's *sandbox* tmpfs mounts, the top
+    processes by RSS, and — only when the residue says no mount can account for
+    it — the per-process count of unlinked shmem descriptors.
+
+    ``task_pids`` distinguishes "no task is running" (an empty sequence) from
+    "nobody asked" (``None``, the default). Only a caller with the task table
+    can answer the first, so the CLI and any test that omits it renders
+    ``sandbox not-queried`` rather than a clean bill of health it has not
+    earned. A precomputed ``sandboxes`` wins and ``task_pids`` is then not
+    consulted at all, matching how ``tmpfs`` and ``containers`` already
+    override their readers. Sandbox usage is deliberately *not* folded into
+    ``tmpfs_sum_kb`` or the residue: those two feed ``snapshot_trigger``, and
+    this change is meant to explain the residue, not move it.
 
     Best-effort throughout. Whatever could not be read is named on its own line
     rather than omitted, because during an outage a missing line and a zero line
@@ -1186,7 +1419,9 @@ def snapshot(
         lines.append(f"  shmem_unaccounted_kb={residue_kb}")
 
     if containers is None:
-        containers = read_container_shm(docker_socket, proc_root=proc_root)
+        containers = read_container_shm(
+            docker_socket, proc_root=proc_root, statvfs=statvfs
+        )
     for container in containers:
         if container.available:
             lines.append(
@@ -1200,6 +1435,37 @@ def snapshot(
                 f"  container name={_escape_field(container.name)} "
                 f"mount={_escape_field(container.mount_point)} "
                 f"used_kb=unavailable detail={container.detail}"
+            )
+
+    if sandboxes is None and task_pids is None:
+        # Not the same as an empty list, and the difference is the whole
+        # ISSUE-286 lesson applied to its own fix: a caller with no task table
+        # cannot say that no task is running.
+        lines.append("  sandbox not-queried")
+        sandboxes = ()
+    elif sandboxes is None:
+        sandboxes = read_sandbox_shm(task_pids or (), proc_root=proc_root, statvfs=statvfs)
+        if not sandboxes:
+            lines.append("  sandbox none-running")
+    elif not sandboxes:
+        # Only "nothing is running" if the caller did not also hand over pids.
+        # An empty `sandboxes` alongside a non-empty `task_pids` is a caller
+        # contradicting itself, and printing `none-running` would forward the
+        # contradiction as a finding.
+        lines.append("  sandbox none-running" if not task_pids else "  sandbox inconsistent-input")
+    for sandbox in sandboxes:
+        if sandbox.available:
+            lines.append(
+                f"  sandbox task={_escape_field(sandbox.name)} "
+                f"mount={_escape_field(sandbox.mount_point)} "
+                f"used_kb={sandbox.used_bytes // 1024} "
+                f"size_kb={sandbox.size_bytes // 1024}"
+            )
+        else:
+            lines.append(
+                f"  sandbox task={_escape_field(sandbox.name)} "
+                f"mount={_escape_field(sandbox.mount_point)} "
+                f"used_kb=unavailable detail={sandbox.detail}"
             )
 
     processes = read_process_rss(proc_root, top_n=top_n)

@@ -14,6 +14,7 @@
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
+  import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
   import PendingConfirmations from '$lib/components/chat/PendingConfirmations.svelte';
   import DraftCard from '$lib/components/chat/DraftCard.svelte';
   import {
@@ -116,6 +117,7 @@
 
   // The room whose settings modal is open (null = closed).
   let settingsRoom = $state<ChatRoom | null>(null);
+  let memoryRoom = $state<ChatRoom | null>(null);
 
   let sidebarOpen = $state(false);
   // Author labels for message headers; fall back to generic labels until /me
@@ -803,7 +805,13 @@
           </button>
           <KebabMenu
             ariaLabel="Room actions"
-            items={[{ label: 'Settings', onSelect: () => (settingsRoom = room) }]}
+            items={[
+              { label: 'Settings', onSelect: () => (settingsRoom = room) },
+              // A sibling of Settings rather than a button inside it: the pane
+              // is a full-width markdown editor, and opening one modal from
+              // another is a shape nothing else in this frontend uses.
+              { label: 'Memory', onSelect: () => (memoryRoom = room) },
+            ]}
           />
         </div>
       {/each}
@@ -996,6 +1004,15 @@
       onDelete={deleteRoom}
       onPromote={promoteRoom}
       onClose={() => (settingsRoom = null)}
+    />
+  {/if}
+
+  {#if memoryRoom}
+    <RoomMemory
+      open
+      roomId={memoryRoom.id}
+      roomName={memoryRoom.name}
+      onClose={() => (memoryRoom = null)}
     />
   {/if}
 

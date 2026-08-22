@@ -28,6 +28,8 @@ import re
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
+
 from istota import forge_bin
 from istota.config import DeveloperConfig
 from istota.skills.developer import _resolve_real_bin
@@ -50,21 +52,14 @@ PINNED = (
     "GLAB_DEB_SHA256_ARM64",
 )
 
-# The devbox image is amd64-only (its Go toolchain is a hardcoded amd64
-# tarball), so it pins one checksum per binary where this image pins two.
-#
-# That leaves the two arm64 checksums guarded by nothing here: a version bump
-# that updates the amd64 pair and forgets the arm64 pair passes every test in
-# this file and fails only at `sha256sum -c -` during an actual arm64 build.
-# Both current values were verified against the vendors' published artifacts
-# when they were pinned; re-verify on a bump rather than trusting this file to
-# catch it.
-DEVBOX_EQUIVALENT = {
-    "GH_VERSION": "GH_VERSION",
-    "GLAB_VERSION": "GLAB_VERSION",
-    "GH_DEB_SHA256_AMD64": "GH_DEB_SHA256",
-    "GLAB_DEB_SHA256_AMD64": "GLAB_DEB_SHA256",
-}
+# Both images now pin all six, so the mapping is the identity and every value
+# is compared. It used to map the amd64 pair onto the devbox's single-arch
+# names, because that image was amd64-only — which left the two arm64 checksums
+# guarded by nothing: a version bump that updated the amd64 pair and forgot the
+# arm64 pair passed every test here and failed only at `sha256sum -c -` during
+# an actual arm64 build. ISSUE-280 made the devbox recipe per-architecture, and
+# that hole closed as a side effect.
+DEVBOX_EQUIVALENT = {name: name for name in PINNED}
 
 
 def _build_args(body: str) -> dict[str, str]:
@@ -80,12 +75,26 @@ def _forge_run_block(body: str) -> str:
     lines of comment above it — and this codebase writes comments that name the
     paths they are explaining, so `/usr/local/bin/gh` appearing in prose would
     fail a test whose message talks about a policy bypass.
+
+    Anchored on the layer that fetches `gh.deb`, not simply on the first
+    `RUN set -eux; arch=` in the file: the devbox Dockerfile grew a second block
+    of that shape when its Go toolchain became per-architecture (ISSUE-280), and
+    a positional match silently returned the wrong layer.
     """
-    start = body.index('RUN set -eux; \\\n    arch=')
-    end = body.index("\n\n", start)
-    return "\n".join(
-        line for line in body[start:end].split("\n") if not line.lstrip().startswith("#")
-    )
+    candidates = [m.start() for m in re.finditer(r"^RUN set -eux; \\$", body, re.M)]
+    assert candidates, "no `RUN set -eux;` layer found"
+    for start in candidates:
+        # `\Z` as the fallback: a layer that is the last thing in the file has
+        # no trailing blank line, and `body.index` would raise a bare
+        # "substring not found" naming neither the file nor the layer.
+        end = re.search(r"\n\n|\Z", body[start:])
+        block = body[start:start + end.start()]
+        if "gh.deb" in block:
+            return "\n".join(
+                line for line in block.split("\n")
+                if not line.lstrip().startswith("#")
+            )
+    raise AssertionError("no RUN layer in this Dockerfile fetches gh.deb")
 
 
 def _developer_block(body: str) -> str:
@@ -133,20 +142,46 @@ class TestTheImageShipsTheForgeBinaries:
         assert f"{FORGE_LIB}/gh --version" in body
         assert f"{FORGE_LIB}/glab --version" in body
 
-    def test_the_asset_is_chosen_per_architecture(self):
-        # The main image builds on arm64 (an Apple Silicon `docker compose
-        # build` is the common case); hardcoding the amd64 asset the way the
-        # amd64-only devbox image does would break that build outright.
-        run = _forge_run_block(DOCKERFILE.read_text())
+    @pytest.mark.parametrize(
+        "dockerfile", [DOCKERFILE, DEVBOX_DOCKERFILE], ids=["istota", "devbox"]
+    )
+    def test_the_asset_is_chosen_per_architecture(self, dockerfile):
+        # Both images build on arm64 (an Apple Silicon `docker compose build` is
+        # the common case), and hardcoding the amd64 asset breaks that build
+        # outright. The devbox image did exactly that until ISSUE-280, which is
+        # why its own test tier effectively never ran.
+        run = _forge_run_block(dockerfile.read_text())
         assert 'arch="$(dpkg --print-architecture)"' in run
         assert "_linux_${arch}.deb" in run
         assert "_linux_amd64.deb" not in run
 
-    def test_an_unpinned_architecture_fails_the_build(self):
+    def test_the_devbox_go_toolchain_is_chosen_per_architecture(self):
+        # The third hardcoded string, and the one that gated the devbox build:
+        # the forge assets are only two of the three.
+        body = DEVBOX_DOCKERFILE.read_text()
+        assert "linux-${arch}.tar.gz" in body
+        assert "linux-amd64.tar.gz" not in body
+        # It had no checksum at all before, so an unverified download would
+        # satisfy a naive "is it per-arch" check.
+        assert "GO_SHA256_AMD64" in body
+        assert "GO_SHA256_ARM64" in body
+        # Scoped to the Go tarball, not `"sha256sum -c -" in body`: the forge
+        # layer in this same file already contains two of those, so the loose
+        # form passed against a Dockerfile with the Go verification deleted and
+        # its two GO_SHA256_* args left dangling. Which is exactly the
+        # regression this assertion exists for.
+        assert '"${go_sha}  /tmp/go.tar.gz" | sha256sum -c -' in body
+
+    @pytest.mark.parametrize(
+        "dockerfile", [DOCKERFILE, DEVBOX_DOCKERFILE], ids=["istota", "devbox"]
+    )
+    def test_an_unpinned_architecture_fails_the_build(self, dockerfile):
         # The one thing worse than no binary is an unverified one: a fallback
         # that skipped the checksum on an unexpected arch would do exactly that.
-        body = DOCKERFILE.read_text()
-        assert "no pinned gh/glab checksum for" in body
+        assert "no pinned gh/glab checksum for" in dockerfile.read_text()
+
+    def test_an_unpinned_architecture_fails_the_devbox_go_layer_too(self):
+        assert "no pinned go checksum for" in DEVBOX_DOCKERFILE.read_text()
 
     def test_the_binaries_land_off_path(self):
         # Nothing should resolve the real binary by name; that is the wrapper's

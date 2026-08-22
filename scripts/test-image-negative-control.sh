@@ -13,6 +13,16 @@
 # groups that must fail against it. **A clean run here is the failure**: it
 # means the tier would pass on the bug it exists to catch.
 #
+# It covers both halves of the tier:
+#
+#   * the istota image, via docker/test/Dockerfile.no-forge;
+#   * the devbox image, via three controls, because that file asserts three
+#     separable things and no single broken image reaches all of them. The
+#     forge-less image leaves four of its thirteen assertions green, since
+#     /usr/local/bin/gh is a *copy* of the wrapper rather than a symlink into
+#     the directory being removed. See the three docker/test/Dockerfile.devbox-*
+#     files for what each one breaks and why.
+#
 #   scripts/test-image-negative-control.sh [amd64]
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
@@ -77,5 +87,142 @@ if [ "$status" -eq 0 ]; then
     exit 1
 fi
 
-echo "[control] OK: the tier failed on the broken image, as it must."
+echo "[control] OK: the istota tier failed on the broken image, as it must."
 echo "[control] Read the failures above and confirm they name the missing path."
+
+
+# --------------------------------------------------------------------------
+# The devbox half.
+
+devbox_base_tag="$(
+    ISTOTA_TEST_PLATFORM="$platform" uv run python -c '
+import os, sys
+sys.path.insert(0, "tests")
+from image.conftest import _tag_for, DEVBOX_DOCKERFILE, resolve_platform
+
+
+class _Config:
+    def getoption(self, name):
+        return None
+
+
+print(_tag_for(DEVBOX_DOCKERFILE, resolve_platform(_Config()), "devbox"))
+'
+)"
+
+echo
+echo "[control] devbox base image: $devbox_base_tag"
+if ! docker image inspect "$devbox_base_tag" >/dev/null 2>&1; then
+    echo "[control] not built yet — run \`uv run pytest -m image -n0\` first." >&2
+    exit 2
+fi
+
+# One control per claim the devbox file makes, and each names the exact
+# parametrized node ids it must turn red.
+#
+# Naming the *class* and checking only the exit status is not enough, and that
+# is not hypothetical: the first cut did exactly that, and control 3 passed on
+# a UnicodeDecodeError raised inside `subprocess` before its assertion ran.
+# Red for the right image, for the wrong reason — indistinguishable from a
+# working assertion, and precisely what these controls exist to tell apart.
+# So the expected FAILED lines have to appear in pytest's own summary.
+#
+# Tags carry the base image's revision component. `tests/image/conftest.py`
+# reasons at length about why a fixed tag is unsafe when work runs in parallel
+# git worktrees — a second `docker build -t <same tag>` moves the tag out from
+# under a run in progress — and this script holds a tag across a build plus a
+# full pytest invocation, four times over.
+control_suffix="${devbox_base_tag##*:}"
+
+run_devbox_control() {
+    control_name="$1"
+    control_dockerfile="$2"
+    control_expect="$3"
+    shift 3
+    # Remaining args are the node ids that must fail. Held in "$@" rather than
+    # an array: macOS ships bash 3.2.
+
+    tag="istota-test/${control_name}:${control_suffix}"
+    echo
+    echo "[control] devbox/${control_name}: ${control_expect}"
+    docker build -q -f "docker/test/${control_dockerfile}" \
+        --build-arg "BASE=$devbox_base_tag" -t "$tag" docker/test >/dev/null
+
+    # The verdict comes from the captured output, not from `$?` — deliberately.
+    # A pipeline reports its *last* command's status, so `| tee` would hand
+    # back tee's 0 on a failed run. That is fine here and nowhere else: what
+    # this needs to know is which node ids failed, which the status cannot say.
+    control_out="$(mktemp)"
+    set +e
+    if [ -n "$platform" ]; then
+        ISTOTA_DEVBOX_IMAGE_TAG="$tag" uv run pytest -m image -n0 -q --no-header \
+            --platform "$platform" "$@" 2>&1 | tee "$control_out"
+    else
+        ISTOTA_DEVBOX_IMAGE_TAG="$tag" uv run pytest -m image -n0 -q --no-header \
+            "$@" 2>&1 | tee "$control_out"
+    fi
+    set -e
+
+    # Every named node id must appear on a FAILED line. `grep -F` because a
+    # parametrized id contains `[gh]`, which is a bracket expression to a
+    # regex engine and a glob to the shell.
+    control_missing=""
+    for node in "$@"; do
+        if ! grep -Fq "FAILED ${node}" "$control_out"; then
+            control_missing="${control_missing} ${node}"
+        fi
+    done
+    rm -f "$control_out"
+
+    if [ -n "$control_missing" ]; then
+        echo "[control] FAILED: devbox/${control_name} did not turn these red:"
+        for node in $control_missing; do echo "[control]   ${node}"; done
+        echo "[control] Expected: ${control_expect}"
+        echo "[control] Those assertions are matching nothing, or they failed"
+        echo "[control] somewhere other than where they were supposed to."
+        exit 1
+    fi
+    echo "[control] OK: devbox/${control_name} turned every named assertion red."
+}
+
+DEVBOX_TESTS="tests/image/test_devbox_image.py"
+
+run_devbox_control \
+    "devbox-no-forge" \
+    "Dockerfile.devbox-no-forge" \
+    "the forge binaries are gone, so the version assertions cannot pass" \
+    "${DEVBOX_TESTS}::TestTheForgeBinariesMatchTheMainImage::test_the_binary_is_present_and_runs[gh]" \
+    "${DEVBOX_TESTS}::TestTheForgeBinariesMatchTheMainImage::test_the_binary_is_present_and_runs[glab]" \
+    "${DEVBOX_TESTS}::TestTheForgeBinariesMatchTheMainImage::test_the_installed_version_matches_this_images_pin[gh-GH_VERSION]" \
+    "${DEVBOX_TESTS}::TestTheForgeBinariesMatchTheMainImage::test_the_installed_version_matches_this_images_pin[glab-GLAB_VERSION]" \
+    "${DEVBOX_TESTS}::TestTheForgeBinariesMatchTheMainImage::test_the_two_images_ship_the_same_version[gh-GH_VERSION]" \
+    "${DEVBOX_TESTS}::TestTheForgeBinariesMatchTheMainImage::test_the_two_images_ship_the_same_version[glab-GLAB_VERSION]"
+
+run_devbox_control \
+    "devbox-stale-wrapper" \
+    "Dockerfile.devbox-stale-wrapper" \
+    "the wrapper is present and readable but its bytes differ from src/" \
+    "${DEVBOX_TESTS}::TestTheWrapperCopyIsInSync::test_the_image_copy_is_byte_identical_to_the_source"
+
+run_devbox_control \
+    "devbox-real-binary-on-path" \
+    "Dockerfile.devbox-real-binary-on-path" \
+    "gh and glab on PATH are the real CLIs, so what resolves is not the wrapper" \
+    "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_what_resolves_is_the_python_wrapper_not_a_real_binary[gh]" \
+    "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_what_resolves_is_the_python_wrapper_not_a_real_binary[glab]"
+
+# The fourth exists because the first three left four of the thirteen
+# assertions untouched — two with no control at all, and two that only ever
+# went red through a guard raising rather than through their own comparison.
+run_devbox_control \
+    "devbox-forge-dir-on-path" \
+    "Dockerfile.devbox-forge-dir-on-path" \
+    "the forge dir is on PATH, so the name resolves ahead of the wrapper" \
+    "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_the_name_resolves_to_the_wrapper[gh]" \
+    "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_the_name_resolves_to_the_wrapper[glab]" \
+    "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_the_real_binary_is_off_path[gh]" \
+    "${DEVBOX_TESTS}::TestTheWrapperIsWhatResolvesByName::test_the_real_binary_is_off_path[glab]"
+
+echo
+echo "[control] OK: both halves of the image tier can see a broken artifact,"
+echo "[control] and every assertion in the devbox file has one that reaches it."

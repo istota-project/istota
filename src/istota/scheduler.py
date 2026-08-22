@@ -4957,6 +4957,31 @@ def _emit_host_pressure_snapshot(
     failure mode being closed — and is best-effort on top: a wedged Talk must
     not stop the evidence being recorded.
     """
+    # The running tasks' sandbox pids, so the snapshot can attribute the tmpfs
+    # inside each bwrap namespace — the daemon's own mount table cannot see it,
+    # and it is the most common holder of the residue that triggers the
+    # snapshot in the first place (ISSUE-286). Read before the block so a
+    # database that will not open costs the sandbox section rather than the
+    # whole snapshot; `None` renders `sandbox not-queried`, which is what
+    # actually happened, rather than `none-running`, which would be a claim.
+    #
+    # The dispatch loop's read timeout, not `get_db`'s 30s default. This runs
+    # while the host is thrashing and the daemon may itself be `memory.high`
+    # throttled, which is exactly when a lock is real — and a 30s wait would
+    # put that much drift between the `sample=` figures captured earlier and
+    # the block printed beside them, the drift `snapshot`'s own docstring says
+    # makes a block read as a bug in the trigger. Timing out here degrades to
+    # `not-queried` through the handler below, which is the honest answer.
+    timeout_ms = config.scheduler.main_loop_read_timeout_ms
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=timeout_ms) as conn:
+            task_pids = db.get_running_task_pids(conn)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "host_pressure_error running-task pids unreadable: %s", exc, exc_info=True
+        )
+        task_pids = None
+
     snapshot_written = False
     try:
         # An empty socket path is the operator switching container lookup off,
@@ -4967,7 +4992,9 @@ def _emit_host_pressure_snapshot(
         extra = (
             {"docker_socket": Path(socket_path)} if socket_path else {"containers": []}
         )
-        block = host_pressure_mod.snapshot(sample=sample, tmpfs=tmpfs, **extra)
+        block = host_pressure_mod.snapshot(
+            sample=sample, tmpfs=tmpfs, task_pids=task_pids, **extra
+        )
         logger.warning("%s\n  trigger=%s", block, reason)
         snapshot_written = True
     except Exception as exc:  # noqa: BLE001

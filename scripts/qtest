@@ -38,13 +38,28 @@ dev server. The one gap is `kill -9` on qtest itself, which no process can
 handle; that leaks the group and frees the slot at the same time, so prefer
 Ctrl-C or SIGTERM.
 
+Every run ends with one verdict line on stderr, and that line is the result:
+
+    qtest: PASS exit=0 time=3m41s cmd: uv run pytest
+    qtest: FAIL exit=1 time=3m41s cmd: uv run pytest
+
+The exit code alone is not enough for the way these runs are actually invoked.
+`scripts/qtest uv run pytest | tail -40` reports *tail's* status, so a suite
+that failed exits 0 and the failure has to be inferred from whatever the filter
+happened to keep. The verdict is text, on stderr, which is not in that pipe at
+all: it survives any amount of stdout filtering. stdout stays a clean
+passthrough for the command's own output, so nothing that reads it has to learn
+about qtest.
+
 Exit codes: the command's own, or 2 for a usage error, or 75 (EX_TEMPFAIL) if
-no slot came free before the timeout. On 75 the command has NOT been run.
+no slot came free before the timeout. On 75 the command has NOT been run, which
+is why it gets its own verdict label rather than being reported as a failure.
 """
 
 import errno
 import fcntl
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -59,8 +74,33 @@ DEFAULT_TIMEOUT = 1800.0
 POLL_INTERVAL = 0.25
 
 
-def fail(message, code=EXIT_USAGE):
-    print(f"qtest: {message}", file=sys.stderr)
+def write_stderr(text):
+    """Write to stderr, tolerating a stream that has gone away.
+
+    The verdict is a courtesy, not the result. A caller that closed stderr, or
+    a reader that exited early, must not turn a passing suite into a traceback
+    from the last line qtest prints.
+    """
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+
+
+def verdict(label, code, detail=""):
+    """Print the single line every qtest run ends with.
+
+    Same shape on every exit path, always last, always on stderr: `qtest: ` is
+    greppable, and the final line of stderr names the outcome whatever the
+    caller did to stdout.
+    """
+    write_stderr(f"qtest: {label} exit={code}{' ' + detail if detail else ''}\n")
+
+
+def fail(message, code=EXIT_USAGE, label="ERROR", detail=""):
+    write_stderr(f"qtest: {message}\n")
+    verdict(label, code, detail)
     raise SystemExit(code)
 
 
@@ -232,13 +272,58 @@ def run(command):
     return 128 - status if status < 0 else status
 
 
+def outcome_label(code):
+    """PASS, FAIL, or the signal that ended it.
+
+    A signal death is worth naming separately: `KILLED-SIGKILL` on a suite is
+    usually the OOM killer or a timeout, not a test that failed, and the two
+    call for different next steps.
+    """
+    if code == 0:
+        return "PASS"
+    if 128 < code <= 128 + 64:
+        try:
+            return f"KILLED-{signal.Signals(code - 128).name}"
+        except ValueError:
+            pass
+    return "FAIL"
+
+
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{int(seconds) // 60}m{int(seconds) % 60:02d}s"
+
+
+def run_and_report(command):
+    """Run the command, then say plainly how it went. Returns its exit code."""
+    started = time.monotonic()
+    try:
+        code = run(command)
+    except FileNotFoundError:
+        fail(f"command not found: {command[0]}", code=127)
+    elapsed = time.monotonic() - started
+
+    if code != 0:
+        write_stderr(
+            "qtest: the command did NOT pass. A pipeline reports the pipe's "
+            "exit code, not this one -- read the line below, not $?.\n"
+        )
+    verdict(
+        outcome_label(code),
+        code,
+        f"time={format_duration(elapsed)} cmd: {shlex.join(command)}",
+    )
+    return code
+
+
 def main(argv):
     command = argv[1:]
     if not command:
         fail("usage: qtest <command> [args...]")
 
     if os.environ.get("QTEST_DISABLE", "").lower() in ("1", "true", "yes"):
-        raise SystemExit(run(command))
+        raise SystemExit(run_and_report(command))
 
     slots = env_int("QTEST_SLOTS", DEFAULT_SLOTS, minimum=1)
     timeout = env_float("QTEST_TIMEOUT", DEFAULT_TIMEOUT, minimum=0.0)
@@ -259,6 +344,8 @@ def main(argv):
             f"command not run. Another test suite is still going -- retry, or set "
             f"QTEST_DISABLE=1 to bypass the queue.",
             code=EXIT_NO_SLOT,
+            label="NO-SLOT",
+            detail="command not run",
         )
     if waited >= POLL_INTERVAL:
         print(
@@ -267,10 +354,7 @@ def main(argv):
             flush=True,
         )
 
-    try:
-        raise SystemExit(run(command))
-    except FileNotFoundError:
-        fail(f"command not found: {command[0]}", code=127)
+    raise SystemExit(run_and_report(command))
 
 
 if __name__ == "__main__":
