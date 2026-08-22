@@ -184,12 +184,24 @@ class UsageSnapshot:
     "this is a current, trustworthy reading" and ``has_data`` to mean "there is
     something here to render". A snapshot carrying an ``error`` is never written
     to the cache.
+
+    ``token_source`` is :func:`resolve_token`'s branch name — ``"env"``,
+    ``"file"`` or ``"keychain"`` — and **never the token**. It is here rather
+    than re-derived by each caller because both of them need to name which
+    credential produced the reading, and re-resolving to recover it would spawn
+    ``security`` on every cache hit on macOS, which is the cost the cache exists
+    to avoid. It is populated on the failures too: "which credential was
+    rejected" is the whole value of the field, and a setup token in the
+    environment and an interactive login in the keychain fail for different
+    reasons and have different repairs. It is empty where no branch resolved
+    anything (disabled, no credential).
     """
 
     fetched_at: float
     windows: tuple[UsageWindow, ...] = ()
     spend: Spend | None = None
     source: str = "fetch"
+    token_source: str = ""
     error: str = ""
 
     @property
@@ -698,6 +710,7 @@ def fetch_snapshot(
     timeout: float,
     now_ts: float,
     transport: Transport | None = None,
+    token_source: str = "",
 ) -> UsageSnapshot:
     """One GET against the usage endpoint. Returns; never raises.
 
@@ -705,6 +718,10 @@ def fetch_snapshot(
     the URL, not into a log line, and not into the returned snapshot. An HTTP
     error body is read for the DEBUG log only and never echoed into ``error``,
     which is built from a fixed set of literals plus a status code.
+
+    ``token_source`` is stamped onto every snapshot this returns, the failures
+    included. It is the resolver's branch *name*; passing anything derived from
+    the credential itself would defeat the paragraph above.
     """
     url = f"{BASE_URL}{USAGE_PATH}"
     headers = {
@@ -719,7 +736,9 @@ def fetch_snapshot(
         status, body = send(url, headers, timeout)
     except Exception as exc:  # noqa: BLE001 — a diagnostic fetch never propagates
         logger.debug("subscription usage fetch failed", exc_info=True)
-        return _failed(f"could not reach api.anthropic.com ({_reason(exc, token)})")
+        return _failed(
+            f"could not reach api.anthropic.com ({_reason(exc, token)})", token_source
+        )
 
     if status != 200:
         logger.debug(
@@ -727,20 +746,31 @@ def fetch_snapshot(
             status,
             _snippet(body),
         )
-        return _failed(f"the usage endpoint returned HTTP {status}")
+        return _failed(f"the usage endpoint returned HTTP {status}", token_source)
 
     try:
         payload = json.loads(body.decode("utf-8", "replace"))
         windows, spend = parse_usage(payload, now_ts=now_ts)
     except Exception:  # noqa: BLE001 — a proxy or a captive portal, most likely
         logger.debug("subscription usage response was not usable", exc_info=True)
-        return _failed("the usage endpoint returned a non-JSON response")
+        return _failed("the usage endpoint returned a non-JSON response", token_source)
 
     if not windows:
         return UsageSnapshot(
-            fetched_at=now_ts, windows=(), spend=spend, source="fetch", error=NO_WINDOWS_ERROR
+            fetched_at=now_ts,
+            windows=(),
+            spend=spend,
+            source="fetch",
+            token_source=token_source,
+            error=NO_WINDOWS_ERROR,
         )
-    return UsageSnapshot(fetched_at=now_ts, windows=windows, spend=spend, source="fetch")
+    return UsageSnapshot(
+        fetched_at=now_ts,
+        windows=windows,
+        spend=spend,
+        source="fetch",
+        token_source=token_source,
+    )
 
 
 def _reason(exc: BaseException, token: str) -> str:
@@ -758,9 +788,11 @@ def _reason(exc: BaseException, token: str) -> str:
     return _redact(type(exc).__name__, token)
 
 
-def _failed(message: str) -> UsageSnapshot:
+def _failed(message: str, token_source: str = "") -> UsageSnapshot:
     """A snapshot with no data. ``fetched_at`` is 0.0 on every such branch."""
-    return UsageSnapshot(fetched_at=0.0, source="none", error=message)
+    return UsageSnapshot(
+        fetched_at=0.0, source="none", token_source=token_source, error=message
+    )
 
 
 def _snippet(body: bytes) -> str:
@@ -783,6 +815,9 @@ def _snapshot_to_json(snapshot: UsageSnapshot) -> dict:
     return {
         "version": 1,
         "fetched_at": snapshot.fetched_at,
+        # The branch name, not the credential. A reader of this file learns which
+        # of the three sources the deployment is running on and nothing else.
+        "token_source": snapshot.token_source,
         "windows": [
             {
                 "key": w.key,
@@ -897,6 +932,9 @@ def _snapshot_from_raw(raw: dict, now_ts: float | None) -> UsageSnapshot | None:
             windows=windows,
             spend=_spend_from_json(raw.get("spend")),
             source="cache",
+            # Absent in a file written before the field existed, and ``_str``
+            # turns anything else unusable into the same empty string.
+            token_source=_str(raw.get("token_source")).strip(),
         )
     except Exception:  # noqa: BLE001 — a cache is never repaired, only ignored
         logger.debug("subscription usage cache entry unusable", exc_info=True)
@@ -1088,7 +1126,10 @@ def _get_snapshot(
     if resolved is None:
         return _failed(NO_CREDENTIAL_ERROR)
 
-    snapshot = fetch_snapshot(resolved[0], timeout=timeout, now_ts=now_ts, transport=transport)
+    token, token_source = resolved
+    snapshot = fetch_snapshot(
+        token, timeout=timeout, now_ts=now_ts, transport=transport, token_source=token_source
+    )
     if not snapshot.error:
         if path is not None:
             write_cache(path, snapshot)
@@ -1096,7 +1137,12 @@ def _get_snapshot(
 
     stale = read_cache_any_age(path, now_ts=now_ts) if path is not None else None
     if stale is not None:
-        return replace(stale, source="stale-cache", error=snapshot.error)
+        # The windows are the cache's; the ``token_source`` is the one that was
+        # *just* refused, which is what makes the pair legible — the reading is
+        # old precisely because that credential stopped working.
+        return replace(
+            stale, source="stale-cache", token_source=token_source, error=snapshot.error
+        )
     return snapshot
 
 

@@ -31,7 +31,6 @@ import pytest
 
 from istota import subscription_usage as su
 
-
 # ---------------------------------------------------------------------------
 # Fixture payload
 # ---------------------------------------------------------------------------
@@ -1497,3 +1496,101 @@ class TestGetSnapshot:
             )
             assert token not in repr(snap)
         assert token not in su.cache_path(tmp_path).read_text()
+
+
+class TestTokenSource:
+    """Which credential produced — or failed to produce — a reading.
+
+    The field exists so a caller can say *which* credential the endpoint refused
+    without re-resolving: on macOS that would spawn ``security`` again on every
+    cache hit, which is the cost the cache exists to avoid. It is the branch name
+    only, never the token, and it is populated on the failures too, since a
+    rejected credential is exactly the case worth naming.
+    """
+
+    def test_a_successful_fetch_names_the_branch(self, tmp_path):
+        snap = su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW,
+            transport=_stub_transport(),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert snap.token_source == "env"
+
+    def test_a_rejected_credential_still_names_the_branch(self, tmp_path):
+        _write_credentials(tmp_path, {"claudeAiOauth": {"accessToken": "file-token"}})
+        snap = su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env={},
+            home=tmp_path,
+        )
+        assert snap.error
+        assert snap.token_source == "file"
+
+    def test_the_stale_fallback_names_the_credential_that_was_just_refused(self, tmp_path):
+        """The stale windows came from an older fetch; the rejection is current.
+
+        Naming the branch that just failed is the useful answer — the reading is
+        old precisely because *that* credential stopped working.
+        """
+        su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        snap = su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW + 3600,
+            transport=_stub_transport(403, b"denied"),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert snap.source == "stale-cache"
+        assert snap.token_source == "env"
+
+    @pytest.mark.parametrize("overrides", [{"subscription_usage": False}, {}])
+    def test_a_branch_that_resolved_nothing_leaves_it_empty(
+        self, tmp_path, monkeypatch, overrides
+    ):
+        """Disabled, and no credential anywhere: there is no branch to name."""
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        snap = su.get_snapshot(
+            _config(tmp_path, **overrides),
+            now_ts=NOW,
+            transport=_stub_transport(),
+            env={},
+            home=tmp_path,
+        )
+        assert snap.error
+        assert snap.token_source == ""
+
+    def test_it_survives_the_cache_round_trip(self, tmp_path):
+        path = su.cache_path(tmp_path)
+        su.write_cache(path, replace(_good_snapshot(), token_source="keychain"))
+        assert su.read_cache(path, 300, now_ts=NOW + 10).token_source == "keychain"
+        assert su.read_cache_any_age(path).token_source == "keychain"
+
+    @pytest.mark.parametrize("stored", [None, 7, {"a": 1}, "  "])
+    def test_an_unusable_stored_value_reads_as_empty(self, tmp_path, stored):
+        """`None` here is the key being absent — a cache written before the field."""
+        path = su.cache_path(tmp_path)
+        su.write_cache(path, _good_snapshot())
+        raw = json.loads(path.read_text())
+        if stored is None:
+            raw.pop("token_source", None)
+        else:
+            raw["token_source"] = stored
+        path.write_text(json.dumps(raw))
+        assert su.read_cache_any_age(path).token_source == ""
+
+    def test_it_is_never_the_token(self, tmp_path):
+        """The whole point of the field is that it is a *name*, not a value."""
+        token = "sk-ant-oat-SENTINEL-TOKEN"
+        snap = su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": token},
+            home=tmp_path,
+        )
+        assert snap.token_source == "env"
+        assert token not in repr(snap)
