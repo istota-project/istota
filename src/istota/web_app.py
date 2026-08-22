@@ -1232,7 +1232,13 @@ def _gather_admin_stats() -> dict:
     """
     from . import __version__, db
 
-    db_path = _config.db_path
+    # Read the global once. `_reload_config` rebinds it wholesale on SIGHUP, and
+    # the subscription section below takes the deployment's own config: whether
+    # the poll is enabled at all, and which directory the shared cache file
+    # lives in. A payload built against two configs is the hazard the doctor
+    # route snapshots against for the same reason.
+    config = _config
+    db_path = config.db_path
     now = datetime.now(timezone.utc)
 
     payload: dict = {
@@ -1271,12 +1277,16 @@ def _gather_admin_stats() -> dict:
     payload["brain_status"] = _admin_brain_status_section()
     # Best-effort like every other section, and with more reason than most: this
     # one can make a network request. A failure is an error string in the
-    # payload, not a 500 on the whole dashboard. It is legal here at all only
+    # payload, not a 500 on the whole dashboard. It is off the event loop only
     # because the endpoint dispatches `_gather_admin_stats` through
-    # `asyncio.to_thread` — a blocking fetch on the event loop would stall every
-    # other request in the process.
+    # `asyncio.to_thread` — without that, a slow fetch would stall every other
+    # request in the process. Note what that does *not* buy: the thread comes
+    # from the loop's shared default executor, and `subscription_usage`'s
+    # timeout is urllib's per-socket-operation one rather than a deadline on the
+    # request, so a server dripping bytes holds a pool thread for longer than
+    # the configured seconds.
     try:
-        payload["subscription"] = _admin_subscription_section(_config, now)
+        payload["subscription"] = _admin_subscription_section(config, now)
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin subscription section failed")
         payload["subscription"] = {"error": str(exc)}
@@ -1353,13 +1363,17 @@ def _admin_subscription_section(config, now: datetime) -> dict:
     The doctor check reads the same snapshot, and the two agree on both words
     that matter: *available* means there are windows to draw, and *stale* means
     the numbers are real but came from an earlier fetch than the one that just
-    failed.
+    failed. They part company on the *verdict*: doctor weighs the age against
+    ``subscription_usage_stale_after_seconds`` and the percentages against the
+    warn/high pair to reach a status, and none of those three thresholds is on
+    the wire here. That is deliberate — this payload reports the reading, and
+    `istota doctor` and the Health pane are where it is judged.
 
     ``available: false`` is a rendering state, not an absence — it always
     carries an ``error``, so the card can say why instead of vanishing. Disabled,
     no credential, a refused credential and a shape change all land here, and an
     operator who expects the reading and does not get it has to learn the
-    reason.
+    reason. That is enforced below rather than taken on trust.
 
     ``token_source`` is the resolver's branch name (``env`` / ``file`` /
     ``keychain``) and never the token. Nothing downstream would catch a leak:
@@ -1377,6 +1391,16 @@ def _admin_subscription_section(config, now: datetime) -> dict:
     # stale — an old real reading, plus the failure that made it old. Doctor
     # renders the same pair off the same condition.
     stale = bool(snapshot.error) and snapshot.has_data
+
+    # `available: false` with a blank reason is the one payload this section
+    # must not emit, and `get_snapshot` already promises not to produce it — a
+    # windowless success carries NO_WINDOWS_ERROR. Restated here rather than
+    # inherited, exactly as doctor restates it, because the failure mode is a
+    # card that says nothing and there is nowhere downstream to notice.
+    error = snapshot.error
+    if not snapshot.has_data and not error:
+        error = subscription_usage.NO_WINDOWS_ERROR
+
     return {
         "available": snapshot.has_data,
         "windows": [
@@ -1395,7 +1419,7 @@ def _admin_subscription_section(config, now: datetime) -> dict:
         "fetched_at": _iso_utc_from_epoch(snapshot.fetched_at),
         "stale": stale,
         "token_source": snapshot.token_source,
-        "error": snapshot.error,
+        "error": error,
     }
 
 
@@ -1425,11 +1449,15 @@ def _iso_utc_from_epoch(ts: float) -> str | None:
     A snapshot carrying no data has ``fetched_at = 0.0``, and rendering that as
     1970 would put a timestamp on a card that has nothing to timestamp. The
     guard is wider than that one case on purpose: this number comes back out of
-    a JSON file on disk, and ``fromtimestamp`` raises on a NaN, an infinity and
-    anything past the year 9999.
+    a JSON file on disk that two processes write, and ``fromtimestamp`` raises
+    on a NaN, an infinity and anything past the year 9999. The magnitude arm is
+    load-bearing rather than belt-and-braces — the module's coercer bounds an
+    integer from that file but not a float, so ``1e300`` reaches here intact.
+    ``bool`` is excluded because ``True`` is an ``int`` that would otherwise
+    render as one second past the epoch.
     """
     try:
-        if not ts or ts <= 0:
+        if isinstance(ts, bool) or not ts or ts <= 0:
             return None
         return _iso_utc(datetime.fromtimestamp(ts, tz=timezone.utc).isoformat())
     except (OverflowError, OSError, ValueError, TypeError):

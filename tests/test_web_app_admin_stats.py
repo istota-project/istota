@@ -6,8 +6,9 @@ only budget there is. This section carries them onto `/admin`.
 
 Three properties are worth a test file of their own:
 
-* **The payload shape is a contract.** `web/src/lib/api.ts` types it and the card
-  renders it, so the tests assert the whole dict rather than a key at a time.
+* **The payload shape is a contract.** The `api.ts` type and the card that
+  renders it are a later stage's work, so nothing on the frontend pins this yet
+  and these tests assert the whole dict rather than a key at a time.
 * **`available: false` still renders.** Disabled, no credential and a failed
   fetch with no stale fallback all produce `available: false` *with* an `error`,
   so the card can say why rather than vanishing. An operator who expects the
@@ -127,18 +128,26 @@ async def _login(client, username):
 class _UsageTransport:
     """A stub `subscription_usage` transport that records every call.
 
-    Recording rather than raising: the section is called inside a best-effort
+    Recording rather than asserting: the section is called inside a best-effort
     try/except, so a transport that asserted by raising would be swallowed into
     an `{"error": ...}` payload and the test would pass whatever happened.
+
+    `raises` is the exception to throw instead of answering, and it is how the
+    one realistic leak gets exercised: `http.client` puts a rejected header
+    value into its own `ValueError` as a repr, so an exception message is the
+    single place the credential can re-enter a string the module builds.
     """
 
-    def __init__(self, status=200, body=b"{}"):
+    def __init__(self, status=200, body=b"{}", raises=None):
         self.status = status
         self.body = body
+        self.raises = raises
         self.calls = []
 
     def __call__(self, url, headers, timeout):
         self.calls.append((url, headers, timeout))
+        if self.raises is not None:
+            raise self.raises
         return self.status, self.body
 
 
@@ -171,6 +180,10 @@ def _drive_real_snapshot(monkeypatch, transport, env):
     """
     from pathlib import Path
 
+    # The env branch wins before the resolver ever reaches the keychain, so this
+    # is belt-and-braces — but a `security find-generic-password` spawned by a
+    # test on a developer's laptop can pop an authorization dialog, and the
+    # resolver's order is not this test's to depend on.
     monkeypatch.setattr(su.platform, "system", lambda: "Linux")
 
     def _wrapper(config, *, now_ts, **kwargs):
@@ -263,11 +276,19 @@ class TestSubscriptionSection:
         assert section["fetched_at"] == "2026-08-22T16:35:12Z"
 
     @pytest.mark.parametrize(
-        "error",
-        [su.NO_CREDENTIAL_ERROR, su.DISABLED_ERROR, "the usage endpoint returned HTTP 403"],
+        "error,token_source",
+        [
+            # No branch resolved anything, so there is no credential to name.
+            (su.NO_CREDENTIAL_ERROR, ""),
+            (su.DISABLED_ERROR, ""),
+            # A refused credential *is* named — which one was rejected is the
+            # whole diagnostic, and the module stamps the branch on its failures
+            # for exactly that reason.
+            ("the usage endpoint returned HTTP 403", "env"),
+        ],
     )
     def test_the_unavailable_cases_still_render_with_a_reason(
-        self, tmp_path, monkeypatch, error
+        self, tmp_path, monkeypatch, error, token_source
     ):
         """Disabled, no credential and a dead fetch with no cache behind it.
 
@@ -278,7 +299,9 @@ class TestSubscriptionSection:
 
         _patch_snapshot(
             monkeypatch,
-            su.UsageSnapshot(fetched_at=0.0, source="none", error=error),
+            su.UsageSnapshot(
+                fetched_at=0.0, source="none", error=error, token_source=token_source
+            ),
         )
 
         section = web_app._admin_subscription_section(_config(tmp_path), NOW)
@@ -291,7 +314,7 @@ class TestSubscriptionSection:
         # No data means no fetch time: a `fetched_at` of 0 rendered as 1970 is
         # worse than an absent one.
         assert section["fetched_at"] is None
-        assert section["token_source"] == ""
+        assert section["token_source"] == token_source
 
     def test_a_successful_request_that_named_no_window_is_unavailable(
         self, tmp_path, monkeypatch
@@ -318,6 +341,26 @@ class TestSubscriptionSection:
         assert section["stale"] is False
         assert section["error"] == su.NO_WINDOWS_ERROR
         assert section["fetched_at"] == "2026-08-22T16:35:12Z"
+
+    def test_unavailable_is_never_rendered_without_a_reason(
+        self, tmp_path, monkeypatch
+    ):
+        """The one payload this section must not emit.
+
+        `get_snapshot` already promises a windowless result carries
+        `NO_WINDOWS_ERROR`, so this drives a snapshot it does not produce —
+        which is the point: a card reading `available: false` with a blank note
+        tells an operator nothing, and there is nowhere downstream to notice.
+        Doctor guards the same case for the same reason.
+        """
+        from istota import web_app
+
+        _patch_snapshot(monkeypatch, _snapshot(windows=(), source="fetch", error=""))
+
+        section = web_app._admin_subscription_section(_config(tmp_path), NOW)
+
+        assert section["available"] is False
+        assert section["error"] == su.NO_WINDOWS_ERROR
 
     def test_a_window_with_no_reset_keeps_its_nulls(self, tmp_path, monkeypatch):
         """`resets_at: null` is a real state — the card says "no reset
@@ -355,6 +398,44 @@ class TestSubscriptionSection:
             }
         ]
         assert section["spend"] is None
+
+
+@_needs_web_deps
+class TestFetchedAtRendering:
+    """`_iso_utc_from_epoch` — the one number in this payload that is not
+    already a string when it arrives.
+
+    It comes back out of a JSON file on disk that two processes write and an
+    operator can edit, so the guard is not theoretical. Driven directly because
+    every one of these inputs is unreachable through a `UsageSnapshot` built by
+    the module, which is exactly why deleting the guard would leave the rest of
+    the file green.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            0.0,
+            -1.0,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            1e18,  # past the year 9999
+            "not a number",
+            None,
+        ],
+    )
+    def test_an_unusable_stamp_renders_as_null(self, value):
+        from istota import web_app
+
+        assert web_app._iso_utc_from_epoch(value) is None
+
+    def test_a_real_stamp_renders_as_iso_utc(self):
+        from istota import web_app
+
+        assert (
+            web_app._iso_utc_from_epoch(FETCHED.timestamp()) == "2026-08-22T16:35:12Z"
+        )
 
 
 @_needs_web_deps
@@ -403,8 +484,13 @@ class TestSubscriptionOnTheStatsEndpoint:
         assert "error" not in payload
 
     async def test_the_key_is_always_present(self, tmp_path, monkeypatch):
-        """Present and empty-ish rather than absent, so the card has one shape
-        to render either way."""
+        """Present rather than absent, on the branch that has nothing to report.
+
+        There are two shapes on the wire, not one: this section's full dict, and
+        the `{"error": ...}` the best-effort wrapper substitutes when it raises
+        (above). Whatever the card is typed against has to tolerate both, and
+        the key itself is the only thing common to them.
+        """
         config = _config(tmp_path)
         _patch_snapshot(
             monkeypatch,
@@ -460,3 +546,51 @@ class TestSubscriptionOnTheStatsEndpoint:
         assert (
             _TOKEN_SENTINEL in transport.calls[0][1]["Authorization"]
         ), "the token belongs in the header and nowhere else"
+
+    async def test_a_transport_exception_carrying_the_token_leaks_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """The one path where the credential can re-enter an error string.
+
+        Both status cases above return normally, so neither reaches the branch
+        that builds an error out of an *exception* — and that is where a leak
+        would come from: `http.client` embeds a rejected header value in its own
+        `ValueError` as a repr. The module answers by reporting the exception's
+        class rather than its message, and an implementation that used
+        `str(exc)` would pass every other test in this file and fail this one.
+
+        The app log is deliberately not asserted here. The module logs the
+        failure at DEBUG with `exc_info=True`, so the traceback carries whatever
+        the exception said — but a real transport cannot raise carrying an
+        *accepted* credential, because `_clean_token` rejects exactly the tokens
+        `http.client` would refuse and quote back. This stub constructs the case
+        that resolution already removes, so an assertion on the log here would
+        pin a promise the module does not make.
+        """
+        config = _config(tmp_path)
+        transport = _UsageTransport(
+            raises=ValueError(f"Invalid header value {_TOKEN_SENTINEL!r}")
+        )
+        _drive_real_snapshot(
+            monkeypatch,
+            transport,
+            {"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        app = _patch_app(config)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://example.com"
+        ) as client:
+            cookies = await _login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+
+        assert resp.status_code == 200
+        section = resp.json()["subscription"]
+        assert section["available"] is False
+        assert _TOKEN_SENTINEL not in resp.text
+        assert "sk-ant" not in resp.text
+        # The class name, not the message: that substitution is the mechanism,
+        # and an error reading "an unreachable endpoint" with nothing in it
+        # would satisfy the two assertions above just as well.
+        assert "ValueError" in section["error"]
+        assert "Invalid header value" not in section["error"]
