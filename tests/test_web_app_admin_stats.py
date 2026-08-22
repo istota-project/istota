@@ -261,16 +261,33 @@ class TestSubscriptionSection:
         assert section["warn_percent"] == 55.0
         assert section["high_percent"] == 70.0
 
-    @pytest.mark.parametrize("value", ["80", None, True, float("nan"), 400.0, -5.0])
-    def test_an_unusable_threshold_never_reaches_the_card_as_one(
-        self, tmp_path, monkeypatch, value
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # Not a number: the default, so the wire never carries a `null` the
+            # frontend would have to invent a literal for.
+            ("80", 80.0),
+            (None, 80.0),
+            (float("nan"), 80.0),
+            (float("inf"), 80.0),
+            # `True` is an `int`, and 1.0 would tint every tile amber at 1%.
+            (True, 80.0),
+            # A real number out of range is carried through *unchanged*. See the
+            # test below: clamping it here is what would split the two readers.
+            (400.0, 400.0),
+            (-5.0, -5.0),
+            (0, 0.0),
+        ],
+    )
+    def test_an_unusable_threshold_falls_back_to_the_documented_default(
+        self, tmp_path, monkeypatch, value, expected
     ):
-        """A number the card can act on, always.
+        """Asserted value by value, not by type and range.
 
-        The loader clamps and corrects these, so this is the second line: a
-        config assembled in code bypasses it, and `null` on the wire would put
-        the frontend back to inventing a literal. `True` is the pointed case —
-        it is an `int`, and it would tint every tile amber at 1%.
+        A range assertion passes against a broken guard: drop the `bool` arm and
+        `True` becomes `1.0`, which is a float inside `[0, 100]` and so satisfies
+        every weaker test that could be written here — while tinting every tile
+        amber at 1%, which is the regression this exists to catch.
         """
         from istota import web_app
 
@@ -280,8 +297,32 @@ class TestSubscriptionSection:
 
         section = web_app._admin_subscription_section(config, NOW)
 
+        assert section["warn_percent"] == expected
         assert isinstance(section["warn_percent"], float)
-        assert 0.0 <= section["warn_percent"] <= 100.0
+
+    def test_a_threshold_is_not_clamped_on_its_way_to_the_card(
+        self, tmp_path, monkeypatch
+    ):
+        """The same rule as doctor's, including the clamp neither applies.
+
+        This looks like the one place a tightening would be free, and it is the
+        one place it costs something: the card and `istota doctor` are two
+        readers of one number, and doctor compares against `min(warn, high)`
+        unclamped. Clamp only here and a `150` becomes 100 on the wire, so the
+        card paints a full window red while doctor calls the same reading OK.
+        The loader is where a nonsense threshold is corrected.
+        """
+        from istota import web_app
+
+        _patch_snapshot(monkeypatch, _snapshot())
+        config = _config(tmp_path)
+        config.brain.claude_code.subscription_usage_warn_percent = 150.0
+        config.brain.claude_code.subscription_usage_high_percent = 150.0
+
+        section = web_app._admin_subscription_section(config, NOW)
+
+        assert section["warn_percent"] == 150.0
+        assert section["high_percent"] == 150.0
 
     def test_it_reads_the_payload_s_own_clock(self, tmp_path, monkeypatch):
         """One clock for the whole payload.

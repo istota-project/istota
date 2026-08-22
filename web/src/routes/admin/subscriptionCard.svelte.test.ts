@@ -136,6 +136,22 @@ function card(container: HTMLElement): HTMLElement {
   return heading!.closest('section.card') as HTMLElement;
 }
 
+/**
+ * The card's own money rendering, computed rather than written out.
+ *
+ * `Intl.NumberFormat(undefined, …)` follows the runtime's default locale, so a
+ * literal `'4.65'` here asserts that whoever runs the suite is on en-US: under
+ * `LC_ALL=de_DE` the card renders `4,65 $` and the test fails on a card that is
+ * behaving correctly.
+ */
+const money = (value: number, currency: string, digits: number): string =>
+  new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value);
+
 const tileValue = (el: HTMLElement, label: string): HTMLElement => {
   const tile = Array.from(el.querySelectorAll('.stat-tile')).find(
     (t) => t.querySelector('.micro-label')?.textContent?.trim() === label,
@@ -232,6 +248,16 @@ describe('the subscription card — tinting', () => {
     expect(style).not.toContain('--status-');
   });
 
+  it('collapses the amber band into danger on an inverted pair', async () => {
+    // The loader corrects `warn > high`; a pair arriving past it must still
+    // flag, and at the lower of the two. That is the reading doctor reaches
+    // too — it has one WARN branch at `min(warn, high)`, so every percentage it
+    // flags is one this tints rather than leaving green.
+    expect(await tintAt(95, 55)).toContain('var(--status-danger-fg)');
+    cleanup();
+    expect(await tintAt(95, 80)).toContain('var(--status-success-fg)');
+  });
+
   it('ignores the server’s own severity', async () => {
     // Carried on the wire, deliberately unused: its scale is undocumented, and
     // two surfaces applying one rule to one number always agree.
@@ -265,9 +291,24 @@ describe('the subscription card — unavailable', () => {
   });
 
   it('does not render a tile grid for an available reading with no windows', async () => {
+    // Defensive rather than a wire state: `available` is set from
+    // `UsageSnapshot.has_data`, which is `bool(windows)`, so the server cannot
+    // emit this pair. The card must not draw an empty grid if it ever does.
     const el = card(await show(populated({ windows: [], error: 'the endpoint named no window' })));
 
     expect(el.textContent).toContain('the endpoint named no window');
+    expect(el.querySelector('.stat-tile')).toBeNull();
+  });
+
+  it('gives a reason even when the payload carries none', async () => {
+    // The section itself never emits a blank reason, but the stats endpoint's
+    // best-effort catch does: it writes `{error: str(exc)}`, and `str(exc)` is
+    // empty for an exception raised with no arguments. A card reading "Plan
+    // limits unavailable: " tells an operator nothing at all.
+    const el = card(await show({ error: '' }));
+
+    expect(el.textContent).toContain('Plan limits unavailable');
+    expect(el.textContent).toContain('unreported reason');
   });
 });
 
@@ -320,8 +361,8 @@ describe('the subscription card — extra usage', () => {
     );
 
     expect(el.textContent).toContain('Extra usage:');
-    expect(el.textContent).toContain('4.65');
-    expect(el.textContent).toContain('20.00');
+    expect(el.textContent).toContain(money(4.65, 'USD', 2));
+    expect(el.textContent).toContain(money(20, 'USD', 2));
     expect(el.textContent).toContain('23.3%');
   });
 
@@ -343,8 +384,56 @@ describe('the subscription card — extra usage', () => {
       ),
     );
 
-    expect(el.textContent).toContain('1,500');
-    expect(el.textContent).toContain('10,000');
-    expect(el.textContent).not.toContain('15.00');
+    expect(el.textContent).toContain(money(1500, 'JPY', 0));
+    expect(el.textContent).toContain(money(10000, 'JPY', 0));
+    // Not 1500 cents. The exponent is 0, so the minor unit *is* the yen.
+    expect(el.textContent).not.toContain(money(15, 'JPY', 0));
+  });
+
+  it('does not clamp an overage back to a full bar', async () => {
+    // The one figure on this card that is not a token count.
+    // `subscription_usage._unclamped_percent` exists to keep a spend percentage
+    // above 100, because that is money already committed — rendering it as 100%
+    // would hide the overage while the two money figures beside it still showed
+    // one, which is one line contradicting itself.
+    const el = card(
+      await show(
+        populated({
+          spend: {
+            enabled: true,
+            used_minor: 3000,
+            limit_minor: 2000,
+            currency: 'USD',
+            exponent: 2,
+            percent: 150,
+          },
+        }),
+      ),
+    );
+
+    expect(el.textContent).toContain('150%');
+    expect(el.textContent).not.toContain('100%');
+  });
+
+  it('still shows the figure when the currency code is malformed', async () => {
+    // `Intl` throws on a code that is not three letters (an unknown but
+    // well-formed one formats fine), and the number is worth showing anyway.
+    const el = card(
+      await show(
+        populated({
+          spend: {
+            enabled: true,
+            used_minor: 465,
+            limit_minor: 2000,
+            currency: 'US',
+            exponent: 2,
+            percent: 23.25,
+          },
+        }),
+      ),
+    );
+
+    expect(el.textContent).toContain('4.65 US');
+    expect(el.textContent).toContain('20.00 US');
   });
 });

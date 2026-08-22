@@ -77,25 +77,37 @@ export function formatPercent(n: number | null | undefined): string {
  * tenth of a percent of a weekly quota is noise on a glanceable tile but `40.5`
  * still has to render as itself rather than as `41`.
  *
- * Clamped rather than trusted. The server clamps too, but this figure comes off
- * an external endpoint and is written into a tile that is also *tinted* by it —
- * a `-5` would read as healthy green and a `140` would be a red tile claiming
- * more than a full quota. Anything that is not a real number is the placeholder,
- * never a zero: a fabricated 0% on an exhausted plan is the worst error here.
+ * Clamped by default rather than trusted. The server clamps a plan window too,
+ * but this figure comes off an external endpoint and is written into a tile that
+ * is also *tinted* by it — a `-5` would read as healthy green and a `140` would
+ * be a red tile claiming more than a full quota. Anything that is not a real
+ * number is the placeholder, never a zero: a fabricated 0% on an exhausted plan
+ * is the worst error here.
  *
- * There is no Python counterpart to keep in step. Doctor renders the same
- * number with `:g` into a terminal line, which is close but not this: `:g`
- * would print `40.55` where this prints `40.6`, and the two are read in
- * different places for different decisions, so neither is pinned to the other.
+ * **`clamp: false` for pay-as-you-go credits, and only those.** A plan window's
+ * ceiling is the plan, so above 100 is nonsense there; a spend percentage above
+ * 100 is real money already committed, and `subscription_usage._unclamped_percent`
+ * exists on the Python side to keep it — so clamping it back here would hide an
+ * overage on the one figure in this card that is not a token count.
+ *
+ * No Python counterpart is pinned to this. Two render the same number and both
+ * differ deliberately: `doctor._usage_window` uses `:g` (`40.55` where this
+ * gives `40.6`) and `commands.cmd_usage` uses `:.0f` for a compact chat line
+ * (`40%` where this gives `40.5%`). Each is sized for its own medium, and the
+ * spec says these helpers need no parity test for exactly that reason.
  */
-export function formatUtilization(percent: number | null | undefined): string {
+export function formatUtilization(
+  percent: number | null | undefined,
+  options: { clamp?: boolean } = {},
+): string {
   if (percent === null || percent === undefined || !Number.isFinite(percent)) {
     return COST_PLACEHOLDER;
   }
-  const clamped = Math.min(100, Math.max(0, percent));
+  const clamp = options.clamp ?? true;
+  const bounded = clamp ? Math.min(100, Math.max(0, percent)) : Math.max(0, percent);
   // `Number()` drops a trailing `.0`, so 40 renders as `40%` and 40.5 as
   // `40.5%` — one rule rather than a branch on whether the value is an integer.
-  return `${Number(clamped.toFixed(1))}%`;
+  return `${Number(bounded.toFixed(1))}%`;
 }
 
 /**

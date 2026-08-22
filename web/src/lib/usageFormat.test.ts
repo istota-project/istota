@@ -178,6 +178,18 @@ describe('formatUtilization', () => {
     expect(formatUtilization(-5)).toBe('0%');
   });
 
+  it('keeps an overage when the caller opts out of the clamp', () => {
+    // Pay-as-you-go credits, and only those. A plan window's ceiling is the
+    // plan; 150% of a spend cap is money already committed, which is why
+    // `subscription_usage._unclamped_percent` keeps it on the Python side.
+    // Clamping it back here would hide an overage.
+    expect(formatUtilization(150, { clamp: false })).toBe('150%');
+    expect(formatUtilization(23.25, { clamp: false })).toBe('23.3%');
+    // A negative is still floored — it is not an overage, it is nonsense.
+    expect(formatUtilization(-5, { clamp: false })).toBe('0%');
+    expect(formatUtilization(null, { clamp: false })).toBe(COST_PLACEHOLDER);
+  });
+
   it('renders a placeholder rather than a zero when there is no figure', () => {
     // A fabricated 0% on an exhausted plan is the worst error this card can
     // make, so an absent or unusable value must never render as one.

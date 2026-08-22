@@ -1451,7 +1451,14 @@ def _subscription_threshold(settings, field: str, default: float) -> float:
     Doctor's ``_setting_float`` is the same rule for the same fields, restated
     rather than imported — that module is imported from inside every
     ``load_config``, and the web app has no business dragging it in for four
-    lines.
+    lines. **The same rule to the letter, including not clamping**, which is the
+    part that is easy to get wrong here: a clamp looks like tightening and is
+    the one edit that would make the two surfaces disagree. An unclamped ``150``
+    reaching both means doctor never warns (its threshold is ``min(warn, high)``
+    = 150) and the card never tints, which is one wrong answer rather than two
+    different ones; clamped to 100 here, the card would paint a full window red
+    while doctor still called it OK. The loader is where a nonsense threshold is
+    corrected, and correcting it in one of two readers is worse than nowhere.
     """
     value = getattr(settings, field, None)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1459,7 +1466,7 @@ def _subscription_threshold(settings, field: str, default: float) -> float:
     as_float = float(value)
     if not math.isfinite(as_float):
         return default
-    return min(100.0, max(0.0, as_float))
+    return as_float
 
 
 def _admin_subscription_spend(spend) -> dict | None:

@@ -101,10 +101,13 @@
     if (typeof warn !== 'number' || typeof high !== 'number') return '';
     if (!Number.isFinite(percent)) return '';
     if (percent >= high) return 'var(--status-danger-fg)';
-    // `min` rather than `warn` alone, matching doctor: an inverted pair is a
-    // typo the loader corrects, and one arriving past it must still tint at the
-    // lower of the two rather than leaving the amber band unreachable.
-    if (percent >= Math.min(warn, high)) return 'var(--status-warn-fg)';
+    // Ordered high-first, so an inverted pair arriving past the loader's
+    // correction collapses the amber band into danger at the lower of the two
+    // rather than tinting nothing. That is the same reading doctor reaches: it
+    // has one WARN branch at `min(warn, high)`, and every percentage it flags
+    // is one this tints. `Math.min` here would be dead code — the branch above
+    // has already returned for everything at or over `high`.
+    if (percent >= warn) return 'var(--status-warn-fg)';
     return 'var(--status-success-fg)';
   }
 
@@ -121,6 +124,12 @@
    * `!usage` command divided by 100 and was wrong for any currency that is not
    * two-decimal. `Intl` is asked for exactly that many digits rather than the
    * currency's own default, so the figure shown is the figure reported.
+   *
+   * The percentage is rendered **unclamped**, unlike a plan window's. Above 100
+   * here is real money already committed, and
+   * `subscription_usage._unclamped_percent` exists on the Python side to keep
+   * it; clamping it back would hide an overage while the two money figures
+   * beside it still showed one.
    */
   function formatSpend(spend: AdminSubscriptionSpend): string {
     const digits =
@@ -138,12 +147,16 @@
           maximumFractionDigits: digits,
         }).format(value);
       } catch {
-        // An unrecognized currency code makes `Intl` throw. The number is still
-        // worth showing, and the code beside it still says what it is.
+        // A *malformed* code makes `Intl` throw — one that is not three
+        // letters. An unknown but well-formed one does not: `XYZ` formats as
+        // `XYZ 4.65`, which is the right outcome and needs no branch. The
+        // number is still worth showing either way, and the code beside it
+        // still says what it is.
         return `${value.toFixed(digits)} ${spend.currency}`;
       }
     };
-    return `${money(spend.used_minor)} / ${money(spend.limit_minor)} (${formatUtilization(spend.percent)})`;
+    const percent = formatUtilization(spend.percent, { clamp: false });
+    return `${money(spend.used_minor)} / ${money(spend.limit_minor)} (${percent})`;
   }
 
   function moduleErrorCount(mod: Record<string, unknown>): number {
@@ -618,8 +631,13 @@
         {:else}
           <!-- Never hidden. An operator who expects this reading and does not
                get it has to learn why, which is why the payload's
-               `available: false` always carries a reason. -->
-          <p class="usage-note">Plan limits unavailable: {sub.error}</p>
+               `available: false` always carries a reason. The fallback sentence
+               is for the one shape that can arrive without one: the stats
+               endpoint's own best-effort catch emits `{error: str(exc)}`, and
+               `str(exc)` is empty for an exception raised with no arguments. -->
+          <p class="usage-note">
+            Plan limits unavailable: {sub.error || 'the reading failed for an unreported reason'}
+          </p>
         {/if}
       </section>
     {/if}

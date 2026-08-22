@@ -1472,7 +1472,9 @@ const mockAdminStats = {
   // `VITE_MOCK_API=1 npm run dev` exercises all of them at once rather than
   // whichever one the day's real reading happens to fall in. `spend.enabled` is
   // true for the same reason: the extra-usage line is otherwise unreachable in
-  // dev, and the capture it is modelled on has it off.
+  // dev, and the capture it is modelled on has it off. The card's other three
+  // states are reachable through `VITE_MOCK_SUBSCRIPTION` — see
+  // `mockSubscriptionState` below.
   subscription: {
     available: true,
     windows: [
@@ -2764,11 +2766,52 @@ function mockAdminConfig() {
   };
 }
 
+/**
+ * The subscription section, in whichever of its four states was asked for.
+ *
+ * `VITE_MOCK_SUBSCRIPTION=unavailable | stale | nospend`, defaulting to the
+ * populated reading above. The card has four states and a working deployment
+ * produces three of them rarely and on nobody's schedule, so without a switch
+ * the only way to look at them is to edit this file — which is exactly the
+ * check nobody performs. The component test asserts all four; this is for
+ * looking at them.
+ */
+function mockSubscriptionState() {
+  const base = mockAdminStats.subscription;
+  switch (process.env.VITE_MOCK_SUBSCRIPTION) {
+    case 'unavailable':
+      return {
+        ...base,
+        available: false,
+        windows: [],
+        spend: null,
+        fetched_at: null,
+        token_source: '',
+        error: 'no Claude Code OAuth credential found',
+      };
+    case 'stale':
+      // Real numbers from an earlier fetch, plus the failure that made them old.
+      return {
+        ...base,
+        stale: true,
+        fetched_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+        error: 'HTTP 503 from the usage endpoint',
+      };
+    case 'nospend':
+      return { ...base, spend: { ...base.spend, enabled: false } };
+    default:
+      return base;
+  }
+}
+
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   chatHandler,
 
-  ({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
+  ({ url }) =>
+    url === '/istota/api/admin/stats'
+      ? { ...mockAdminStats, subscription: mockSubscriptionState() }
+      : undefined,
 
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
