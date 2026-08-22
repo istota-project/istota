@@ -2676,15 +2676,37 @@
     state: absent
   when: not istota_devbox_enabled and not istota_web_only
 
-- name: Drop devbox iptables rules when disabled
+# The comments below are not decoration, and this is why the teardown is two
+# tasks rather than one loop: `ansible.builtin.iptables` runs `iptables -C
+# <full spec>` before deleting, and a `-m comment --comment ...` match is part
+# of a rule's identity. A delete spec without the comment does not match the
+# rule the apply tasks added, so `-C` returns non-zero, the module concludes
+# the rule is already absent, and reports ok/changed=false having done
+# nothing — silently, since `failed_when: false` is never even reached. That
+# left all four DROP rules on the host after `istota_devbox_enabled: false`,
+# filtering a subnet the role no longer owns and which is inside Docker's
+# default address pool. Each delete must therefore carry the same comment its
+# matching apply task set, verbatim (ISSUE-283).
+- name: Drop devbox cloud-metadata iptables rule when disabled
+  ansible.builtin.iptables:
+    chain: DOCKER-USER
+    source: "{{ istota_devbox_network_subnet }}"
+    destination: "169.254.169.254/32"
+    jump: DROP
+    comment: "istota-devbox: block cloud metadata"
+    state: absent
+  when: not istota_devbox_enabled and not istota_web_only
+  failed_when: false
+
+- name: Drop devbox RFC1918 iptables rules when disabled
   ansible.builtin.iptables:
     chain: DOCKER-USER
     source: "{{ istota_devbox_network_subnet }}"
     destination: "{{ item }}"
     jump: DROP
+    comment: "istota-devbox: block {{ item }}"
     state: absent
   loop:
-    - 169.254.169.254/32
     - 10.0.0.0/8
     - 172.16.0.0/12
     - 192.168.0.0/16

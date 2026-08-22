@@ -686,7 +686,22 @@ def fetch_forge_credentials(
         url = reply.get("url")
         return str(value), str(url) if isinstance(url, str) else ""
 
-    raise NoProxyError("no credential proxy available")
+    # Name the deployment shape, not the socket path. The path is a fact about
+    # this process's environment and tells the reader nothing about why it is
+    # missing; the shape is the actual answer, and the two shapes differ on
+    # purpose (ISSUE-282). Under Ansible a per-user `istota-devbox-proxy@`
+    # instance provides the socket; the docker-compose devbox has no proxy and
+    # is not meant to, so forge commands there are unavailable rather than
+    # broken.
+    raise NoProxyError(
+        "no credential proxy: neither ISTOTA_SKILL_PROXY_SOCK (sandbox) nor "
+        "ISTOTA_CRED_SOCK (devbox) is set in this environment. The Ansible "
+        "deployment runs a per-user credential proxy for the devbox; the "
+        "docker-compose deployment deliberately does not, so forge commands "
+        "are not available inside the devbox on that shape. Report this "
+        "rather than retrying — no retry finds a socket that is not "
+        "configured."
+    )
 
 
 

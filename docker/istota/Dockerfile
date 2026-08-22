@@ -57,9 +57,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # be bumped with these pins). Same reasoning and the same versions as
 # docker/devbox/Dockerfile; a test asserts the two stay in step.
 #
-# Unlike the devbox image — amd64-only regardless, since its Go toolchain is a
-# hardcoded linux-amd64 tarball — this one builds on arm64 too, so the asset is
-# chosen per architecture and each has its own pinned checksum. The arch comes
+# This builds on arm64 as well as amd64, so the asset is chosen per
+# architecture and each has its own pinned checksum. The devbox image does the
+# same, in the same way, and a test holds the two in step — it used to be
+# amd64-only because of a hardcoded Go tarball, until ISSUE-280. The arch comes
 # from dpkg rather than BuildKit's TARGETARCH: dpkg's names are already the
 # ones these two projects use for their assets, and it is correct under the
 # legacy builder, where TARGETARCH is simply empty. An architecture with no
