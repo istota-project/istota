@@ -113,9 +113,12 @@ class ToolEnv:
     # Whether Bash spills over-cap output to a file (vs. cap-only truncation).
     bash_spill_full_output: bool = True
     # Per-task cgroup v2 directory (A6), or ``None`` where the deployment has
-    # no delegated subtree. Bash moves each child it spawns into it, which is
-    # the only way this brain's subprocesses get contained: it has no single
-    # long-lived child for the executor's ``on_pid`` path to place.
+    # no delegated subtree. Each child Bash spawns places *itself* into it from
+    # ``preexec_fn``, before it execs — membership is inherited at ``fork``, so
+    # moving it afterwards would leave everything the child had already forked
+    # outside the group for good (ISSUE-285). This is the only way this brain's
+    # subprocesses get contained: it has no single long-lived child for the
+    # executor's ``on_pid`` path to place.
     task_cgroup: Path | None = None
 
     # Native WebFetch policy. ``None`` → the tool is omitted from

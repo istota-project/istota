@@ -65,29 +65,39 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         if env.sandbox_wrap:
             cmd = env.sandbox_wrap(cmd)
 
+        # Per-task cgroup (A6), placed from the child before it execs. This used
+        # to be a write to `cgroup.procs` after the spawn, on the reasoning that
+        # a `preexec_fn` in a threaded process must not open a file — true, and
+        # the reason the open happens in the parent here and the child does one
+        # `os.write` to the inherited descriptor. The window that reasoning
+        # called bounded is not: membership is inherited at fork, so anything
+        # the child forked first stays outside the cgroup permanently, and under
+        # `sandbox_wrap` the child is bwrap, which forks during namespace setup
+        # every time (ISSUE-285).
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(env.cwd),
-                env=env.subprocess_env,
-                # Own process group so a timeout/abort/cancel can SIGKILL the
-                # whole tree — a command that backgrounds children (or a bwrap
-                # wrapper) otherwise survives a bare child kill (NB-7).
-                start_new_session=True,
-            )
+            with task_cgroup.placement(env.task_cgroup) as place_in_cgroup:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=str(env.cwd),
+                    env=env.subprocess_env,
+                    # Own process group so a timeout/abort/cancel can SIGKILL the
+                    # whole tree — a command that backgrounds children (or a bwrap
+                    # wrapper) otherwise survives a bare child kill (NB-7).
+                    start_new_session=True,
+                    preexec_fn=place_in_cgroup,
+                )
         except (OSError, ValueError) as exc:
             return ToolResult(content=[TextContent(text=f"Failed to start command: {exc}")])
 
-        # Per-task cgroup (A6). Placed from here rather than from a preexec_fn:
-        # this process is heavily threaded, and a preexec_fn runs between fork
-        # and exec where opening a file is not async-signal-safe. The cost is a
-        # short window in which the child is outside the cgroup — negligible
-        # against a `bash -c` that has yet to exec its real work, and the
-        # alternative trades a bounded race for an unbounded one.
-        if env.task_cgroup is not None:
-            task_cgroup.place(proc.pid, env.task_cgroup)
+        # Only where placement engaged — otherwise `placement` has already named
+        # the cause and this would report it a second time. A command short
+        # enough to have exited by now is not reported at all; `verify_placement`
+        # checks liveness, because leaving the cgroup at exit and never having
+        # been in it look identical from here.
+        if place_in_cgroup is not None and env.task_cgroup is not None:
+            task_cgroup.verify_placement(proc.pid, env.task_cgroup)
 
         out = bytearray()
         total_bytes = 0

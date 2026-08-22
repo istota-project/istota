@@ -72,12 +72,13 @@ class BrainRequest:
     # Per-task cgroup v2 directory (A6), already created with its limits
     # written, or None where the deployment has no delegated subtree.
     #
-    # Only NativeBrain reads this. The brains that spawn one long-lived child
-    # are placed by the executor's `on_pid` callback, which is the pid that
-    # matters for them; NativeBrain spawns a fresh child per Bash execution and
-    # never calls `on_pid` at all, so without this field the brain that runs a
-    # task's `pytest` in the daemon's own cgroup would be the one brain the
-    # containment silently skipped.
+    # Read by every brain that spawns its own subprocess, which is how the
+    # child gets placed *before* it execs — membership is inherited at fork, so
+    # the executor's `on_pid` callback arrives too late to catch anything the
+    # child forked on the way up, and bwrap forks every time (ISSUE-285).
+    # NativeBrain spawns a fresh child per Bash execution and never calls
+    # `on_pid` at all; TmuxClaudeBrain has no spawn of its own to hook and stays
+    # on the `on_pid` path.
     task_cgroup: Path | None = None
 
     # Wraps a command list (e.g. for bubblewrap sandboxing). The brain

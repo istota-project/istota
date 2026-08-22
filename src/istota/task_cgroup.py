@@ -44,9 +44,12 @@ logging of anything a caller did not pass in, and it never raises.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,10 +58,12 @@ __all__ = [
     "create",
     "destroy",
     "place",
+    "placement",
     "probe",
     "read_events",
     "resolve_root",
     "sweep_stale",
+    "verify_placement",
 ]
 
 logger = logging.getLogger(__name__)
@@ -67,6 +72,12 @@ logger = logging.getLogger(__name__)
 # the kernel default and what every other writer of this file uses, so a
 # percentage of one core is that many thousands of microseconds.
 _CPU_PERIOD_US = 100_000
+
+# How long `destroy` waits for the kernel to finish a `cgroup.kill` before it
+# gives the directory up to the next startup sweep. Half a second, spent only
+# on a cgroup that still held processes when the task ended.
+_KILL_REAP_ATTEMPTS = 10
+_KILL_REAP_INTERVAL_S = 0.05
 
 # Warnings that describe the *deployment* rather than the task: the absence of
 # a delegated subtree is one fact about the host, and logging it per task would
@@ -341,6 +352,19 @@ def probe(root: Path) -> str | None:
     written to prevent it. So this does a real ``mkdir`` + ``memory.max`` write
     + ``rmdir`` under a reserved name, at startup, once. Three syscalls to turn
     a claim into a measurement.
+
+    Delegation is still not the whole answer, because it is not the whole
+    feature: ISSUE-285 was a deployment where every write here succeeded and
+    every task ran uncontained anyway, because the tree was never placed. So
+    this also opens the scratch group's ``cgroup.procs`` for writing, which is
+    the one part of placement that varies by deployment — a subtree can be
+    delegated for its controller files and still not be writable for
+    membership. What it deliberately does not do is prove that a forked
+    descendant inherits the group. That is a kernel invariant rather than a
+    deployment fact, it costs a subprocess spawn to observe, and it is what
+    ``tests/test_task_cgroup_placement.py`` exists to hold down. Per task, the
+    honest answer comes from :func:`verify_placement` instead, which reads real
+    membership after a real spawn.
     """
     scratch = Path(root) / "task-probe"
     try:
@@ -358,21 +382,36 @@ def probe(root: Path) -> str | None:
             "controller is not delegated to this subtree"
         )
 
+    with placement(scratch, quiet=True) as preexec:
+        placeable = preexec is not None
     destroy(scratch)
+    if not placeable:
+        return (
+            "cgroup.procs in a new cgroup cannot be opened for writing — the "
+            "limits would be set and no task would ever be put under them"
+        )
     return None
 
 
-def read_events(path: Path) -> dict[str, int]:
-    """``memory.events`` for one task cgroup, or ``{}`` where it cannot be read.
+def read_events(path: Path, name: str = "memory.events") -> dict[str, int]:
+    """A cgroup's flat-keyed counter file, or ``{}`` where it cannot be read.
 
     Read before :func:`destroy`, because ``rmdir`` takes the counters with it.
     Without this a task killed by its own ``memory.max`` is unattributable: the
     brain reports a killed child, and nothing anywhere mentions a cap. That is
     a bad trade for a feature that is on by default and whose first visible
     effect on a real host is that builds which used to pass start failing.
+
+    ``pids.events`` has the same shape and the same argument behind it. Its
+    ``max`` counter is the only record that a fork was refused, and a task that
+    hits ``pids.max`` sees ``fork: Resource temporarily unavailable`` from
+    whatever it was running — a message with no mention of a cgroup in it. The
+    counter only started moving when placement began working (ISSUE-285): while
+    the cgroup held one sleeping ``bwrap``, none of the three limits was ever
+    reached by anything.
     """
     events: dict[str, int] = {}
-    text = _read_text(Path(path) / "memory.events")
+    text = _read_text(Path(path) / name)
     if text is None:
         return events
     for line in text.splitlines():
@@ -386,13 +425,180 @@ def read_events(path: Path) -> dict[str, int]:
     return events
 
 
-def place(pid: int, path: Path) -> bool:
-    """Move ``pid`` — and every process it goes on to spawn — into ``path``.
+@contextlib.contextmanager
+def placement(
+    path: Path | None, *, quiet: bool = False
+) -> Iterator[Callable[[], None] | None]:
+    """A ``preexec_fn`` that puts the child in ``path`` before it execs.
 
-    cgroup v2 membership is inherited across ``fork``, so placing the brain's
-    own child places the whole tree it builds underneath it. Writing to
-    ``cgroup.procs`` moves the entire thread group, which is why the caller
-    passes a child's pid and never the daemon's own.
+    This is the placement that works, and :func:`place` is the one that does
+    not (ISSUE-285). Membership is inherited at ``fork``, so a process moved
+    *after* it has already forked leaves those children where they were, for
+    good. ``bwrap`` forks its inner process while setting up namespaces, well
+    before ``Popen`` returns, so the post-hoc write reached the outer ``bwrap``
+    and nothing else: on the deployment server a task cgroup with a 2 GiB cap
+    held one sleeping process and ``memory.current=0`` eighteen minutes in,
+    while the CLI, its bash grandchildren and a ``pytest -n auto`` ran unbounded
+    in the daemon's own leaf.
+
+    Doing it from ``preexec_fn`` closes the window rather than narrowing it:
+    that hook runs in the forked child, after ``fork`` and before ``exec``, so
+    the process is already a member when it goes on to fork anything.
+
+    ``preexec_fn`` in a threaded daemon is a real hazard and the reason this is
+    shaped the way it is. Only one thread survives the fork, and any lock the
+    others held is held forever, so the callable must not take one. The open
+    happens in the parent; all the child does is one ``os.write`` of two bytes
+    to an already-open descriptor, which allocates nothing on the success path
+    — no import, no logging, no formatting. ``0`` means "the writing process",
+    which is why the child needs to know nothing about its own pid. CPython
+    runs ``preexec_fn`` before it closes the inherited descriptors, so the fd is
+    still open when the callable runs. The kernel-native form is
+    ``clone3(CLONE_INTO_CGROUP)``, which ``subprocess`` does not expose.
+
+    Be clear about what that argument does **not** cover, because it is the
+    sentence a later reader will trust. Passing ``preexec_fn`` at all is what
+    makes ``subprocess`` run CPython's own fork machinery: the parent takes the
+    import lock and runs every ``os.register_at_fork(before=...)`` handler —
+    ``logging._prepareFork`` takes a module-level ``RLock`` — and the child runs
+    every ``after_in_child`` handler, ``threading._after_fork`` and logging's
+    lock reinitialisation among them, before this callable gets control. Those
+    exist to repair exactly what the fork broke, and on glibc the residual risk
+    is small, but a dependency registering a lock-taking at-fork handler would
+    sit inside that window and nothing here would catch it. Passing
+    ``preexec_fn`` also rules out CPython's ``vfork`` fast path, so each spawn
+    is a real ``fork`` of the daemon rather than a page-table-sharing one.
+
+    The failure path in the callable allocates too, to build the ``OSError`` it
+    then discards. All of this is accepted against the alternative, which is not
+    a cheaper fix but no containment at all.
+
+    Errors are swallowed on both sides. ``None`` where the cgroup cannot be
+    opened at all, so the caller passes ``preexec_fn=None`` and spawns exactly
+    as it would have; and the callable itself never raises, because an
+    exception out of ``preexec_fn`` makes ``Popen`` raise and would cost the
+    task its subprocess. Losing containment must not cost the work.
+
+    That silence is what :func:`verify_placement` is for: the parent checks
+    membership after the spawn, so a placement that did not take is named
+    rather than assumed.
+    """
+    if path is None:
+        yield None
+        return
+
+    procs = Path(path) / "cgroup.procs"
+    try:
+        # No O_CREAT. The kernel makes this file and a writer cannot, so its
+        # absence is the module's usual evidence that this is not a delegated
+        # cgroup — fabricating it would make `probe` answer yes on a
+        # mis-resolved root, and leave the regular file it created behind for
+        # the startup sweep to report as a surviving process tree.
+        fd = os.open(procs, os.O_WRONLY)
+    except OSError as exc:
+        # `quiet` is for :func:`probe`, which calls this to *measure* whether
+        # placement would engage and reports its own reason. Without it the
+        # startup probe would take the one-shot key under the scratch group's
+        # path, and the identical failure on a real task would then be silent —
+        # which is the failure mode this module's logging rules exist to stop.
+        if not quiet:
+            _log_once(
+                f"placement-open-failed:{exc.errno}",
+                "task cgroup: cannot open %s (%s); this task runs uncontained",
+                procs,
+                exc.strerror or exc,
+            )
+        yield None
+        return
+
+    def _place_self() -> None:
+        try:
+            os.write(fd, b"0\n")
+        except OSError:
+            # In the child, between fork and exec. Nothing here can report a
+            # failure to anyone, and raising would abort the spawn.
+            pass
+
+    try:
+        yield _place_self
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _is_live(pid: int, proc_root: Path) -> bool:
+    """True while ``pid`` is a running process. False once it is gone or a zombie.
+
+    The kernel drops a task from its cgroup in ``cgroup_exit()``, before it
+    becomes a zombie and long before anyone reaps it, so "absent from
+    ``cgroup.procs``" and "already finished" are the same observation. This is
+    what tells them apart. Missing ``/proc`` — macOS, a masked mount — reads as
+    not live, which suppresses a warning nobody could act on anyway; there are
+    no cgroups to be placed in there either.
+    """
+    text = _read_text(Path(proc_root) / str(int(pid)) / "stat")
+    if text is None:
+        return False
+    # `comm` is parenthesised and may itself contain spaces and brackets, so the
+    # state field is found from the *last* ')' rather than by splitting.
+    tail = text.rpartition(")")[2].split()
+    return bool(tail) and tail[0] != "Z"
+
+
+def verify_placement(pid: int, path: Path, *, proc_root: Path = Path("/proc")) -> bool:
+    """True if ``pid`` is a member of ``path``. Says so when a live one is not.
+
+    :func:`placement` writes from the child and has no way to report what
+    happened, so this is where the module keeps its "fail open, never fail
+    silent" promise for the spawn path. One small read per spawn.
+
+    Matched field-wise rather than by substring: ``cgroup.procs`` is one pid per
+    line, and a text search for ``4`` finds ``42``.
+
+    A child that has already exited is not a failure and is not reported. The
+    Bash tool spawns a fresh process per tool call, plenty of them shorter-lived
+    than the round trip back to this read, and :func:`place` carves out the same
+    race for the same reason. Getting this wrong is worse than not checking:
+    with the warning keyed per cgroup, one spurious hit would take the key that
+    a genuine miss on that task needed.
+
+    Keyed per cgroup rather than on a constant, which is the rule :func:`place`
+    states for itself — a placement failure is a fact about *this* task, and one
+    shared key would report the first uncontained task and silence every one
+    after it.
+    """
+    text = _read_text(Path(path) / "cgroup.procs")
+    if text is not None and str(int(pid)) in text.split():
+        return True
+    if not _is_live(pid, proc_root):
+        return False
+    _log_once(
+        f"placement-not-applied:{Path(path).name}",
+        "task cgroup: pid %d is not a member of %s after spawn; this task runs "
+        "uncontained",
+        pid,
+        path,
+    )
+    return False
+
+
+def place(pid: int, path: Path) -> bool:
+    """Move ``pid`` into ``path`` after the fact. Prefer :func:`placement`.
+
+    Writing to ``cgroup.procs`` moves the writer's whole thread group, which is
+    why the caller passes a child's pid and never the daemon's own. What it
+    does **not** move is children that pid already forked: cgroup v2 membership
+    is inherited at ``fork``, and this function used to claim otherwise. For a
+    child that has not forked yet the two are equivalent; for anything that
+    forks during startup — ``bwrap`` every time — the descendants stay outside
+    the cgroup permanently (ISSUE-285).
+
+    So this remains only for a pid the daemon did not spawn itself and cannot
+    reach a ``preexec_fn`` for: TmuxClaudeBrain reports a pane pid it learns
+    from the tmux server after the fact. Containing its group leader is worth
+    more than containing nothing, and it is all that path can do.
 
     False rather than an exception for the ordinary misses. A process that
     exited between spawn and this write gives ``ESRCH``, which is a race the
@@ -468,21 +674,36 @@ def destroy(path: Path) -> bool:
         )
         return False
 
-    try:
-        path.rmdir()
-        logger.warning(
-            "task cgroup %s still held processes at task exit; killed them", path
-        )
-        return True
-    except FileNotFoundError:
-        return True
-    except OSError as exc:
-        # The kill is asynchronous, so a rmdir immediately after can still find
-        # members. The sweep at the next daemon start collects it.
-        logger.debug(
-            "task cgroup: %s not removable after kill (%s)", path, exc.strerror or exc
-        )
-        return False
+    # `cgroup.kill` is asynchronous: it delivers SIGKILL to every member and
+    # returns, so an immediate `rmdir` routinely still finds them. That used to
+    # be rare enough to leave to the next daemon start, because the cgroup held
+    # one `bwrap` that died with the task. Now that it holds the whole tree
+    # (ISSUE-285) this is the ordinary teardown path, and giving up here would
+    # leave a `task-*` directory behind for every killed task — accumulating in
+    # the one listing an operator reads during an incident, and reported by the
+    # startup sweep as a tree that survived its kill. So: wait a moment for the
+    # kernel to finish, bounded, on a path that is already the exceptional one.
+    last: OSError | None = None
+    for attempt in range(_KILL_REAP_ATTEMPTS):
+        if attempt:
+            time.sleep(_KILL_REAP_INTERVAL_S)
+        try:
+            path.rmdir()
+            logger.warning(
+                "task cgroup %s still held processes at task exit; killed them", path
+            )
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            last = exc
+    logger.debug(
+        "task cgroup: %s not removable %.1fs after kill (%s)",
+        path,
+        _KILL_REAP_ATTEMPTS * _KILL_REAP_INTERVAL_S,
+        (last.strerror or last) if last else "unknown",
+    )
+    return False
 
 
 def sweep_stale(root: Path | None = None, *, proc_root: Path = Path("/proc"),
