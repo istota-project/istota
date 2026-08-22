@@ -65,17 +65,21 @@ class TestDriverIsExecutableBash:
         assert result.returncode == 0, result.stderr
 
     @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash")
-    def test_an_empty_optional_bind_survives_set_u(self):
-        """The exact expansion the driver uses, against the shell that breaks.
+    @pytest.mark.parametrize("array", ["gitdir_bind", "progress_args"])
+    def test_an_empty_optional_array_survives_set_u(self, array):
+        """The exact expansions the driver uses, against the shell that breaks.
 
         `gitdir_bind` is empty in an ordinary clone and non-empty in a linked
         worktree, so the plain `"${a[@]}"` form worked in the checkout this was
-        developed in and would have died in everyone else's.
+        developed in and would have died in everyone else's. `progress_args`
+        has the same shape and the same trap: it is empty on exactly the
+        legacy-builder host the conditional flag exists to support, so the
+        naive form would break the case it was written to fix.
         """
-        form = re.search(r'(\$\{gitdir_bind\[@\][^\n]*?)\s*\\\n', DRIVER.read_text())
-        assert form, "could not find the gitdir_bind expansion in the driver"
+        form = re.search(rf'(\$\{{{array}\[@\][^\n]*?)\s*\\\n', DRIVER.read_text())
+        assert form, f"could not find the {array} expansion in the driver"
 
-        script = f'set -euo pipefail; a=(); printf "[%s]" {form.group(1).replace("gitdir_bind", "a")}; echo ok'
+        script = f'set -euo pipefail; a=(); printf "[%s]" {form.group(1).replace(array, "a")}; echo ok'
         result = subprocess.run(
             ["/bin/bash", "-c", script], capture_output=True, text=True,
         )
@@ -183,4 +187,88 @@ class TestRunnerImagePinsItsToolchain:
         assert re.search(r"uv tool install ruff==\d+\.\d+\.\d+", body), (
             "pin ruff: it gates the whole run and is not a project dependency, "
             "so nothing else constrains its version"
+        )
+
+
+class TestTheBuildFlagsMatchTheBuilder:
+    """`--progress` is a BuildKit flag, and the driver must not assume BuildKit.
+
+    The legacy builder rejects it outright — `unknown flag: --progress`, before
+    the Dockerfile is read. That matters because `DOCKER_BUILDKIT=0` is the
+    escape from a `docker-container` default buildx builder that cannot reach
+    the daemon, so the one host that needs the legacy path was the one the
+    driver refused to build on (ISSUE-293).
+    """
+
+    def _run_selector(self, stub_help: str, env: dict[str, str] | None = None) -> list[str]:
+        """The driver's own flag selector, against a stubbed `docker`.
+
+        Returns the arguments it selected. `/bin/bash` rather than whatever
+        `bash` resolves to, for the same reason as the rest of this class:
+        3.2 is the shell this driver has to work on, and Homebrew's 5.x is
+        what a developer's PATH would supply instead.
+
+        The environment is built explicitly rather than inherited.
+        `ISTOTA_TEST_BUILD_PROGRESS` is the value under test and the driver's
+        own header advertises exporting it, so passing `os.environ` through
+        would let a developer's debugging setting decide the assertion.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "docker"
+            stub.write_text("#!/bin/sh\ncat <<'STUB_EOF'\n" + stub_help + "\nSTUB_EOF\n")
+            stub.chmod(0o755)
+
+            script = (
+                'set -euo pipefail; '
+                f'eval "$(sed -n \'/^build_progress_args()/,/^}}/p\' {DRIVER})"; '
+                'build_progress_args'
+            )
+            result = subprocess.run(
+                ["/bin/bash", "-c", script],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{tmp}:/usr/bin:/bin", **(env or {})},
+            )
+            assert result.returncode == 0, result.stderr
+            # NUL-delimited, so a value containing a space or a newline stays
+            # one argument — which is the point of the delimiter.
+            return [arg for arg in result.stdout.split("\0") if arg]
+
+    def test_the_flag_is_dropped_when_the_builder_does_not_take_it(self):
+        selected = self._run_selector("Usage: docker build [OPTIONS] PATH\n  -t, --tag list")
+        assert selected == [], (
+            "the legacy builder refuses --progress; the driver must not pass it"
+        )
+
+    def test_the_flag_is_passed_when_the_builder_takes_it(self):
+        selected = self._run_selector("Usage: docker buildx build\n      --progress string")
+        assert selected == ["--progress", "quiet"]
+
+    def test_the_progress_override_still_reaches_a_buildkit_build(self):
+        selected = self._run_selector(
+            "      --progress string", env={"ISTOTA_TEST_BUILD_PROGRESS": "plain"},
+        )
+        assert selected == ["--progress", "plain"]
+
+    def test_a_progress_value_containing_a_newline_stays_one_argument(self):
+        """Otherwise it arrives as a second build context.
+
+        `docker build --progress pl ain -f … "$REPO_ROOT"` names two contexts
+        and fails on something unrelated to what was set.
+        """
+        selected = self._run_selector(
+            "      --progress string",
+            env={"ISTOTA_TEST_BUILD_PROGRESS": "pl\nain"},
+        )
+        assert selected == ["--progress", "pl\nain"]
+
+    def test_the_driver_does_not_pass_progress_unconditionally(self):
+        """The shape of the bug: a literal `--progress` on the build line."""
+        body = DRIVER.read_text()
+        build_line = re.search(r"^docker build .*$", body, re.MULTILINE)
+        assert build_line, "could not find the docker build invocation"
+        assert "--progress" not in build_line.group(0), (
+            f"--progress is hardcoded on the build line: {build_line.group(0)!r}"
         )

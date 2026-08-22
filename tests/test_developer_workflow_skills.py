@@ -593,9 +593,16 @@ class TestLoadBudget:
     a shared host, run anything that might outlast the 600-second tool call
     detached rather than under `timeout 590`, and never re-run a full suite a
     timeout killed. Twelve net lines, the same order as ISSUE-264's.
+
+    730 → 735 for ISSUE-291, same procedure again: the rules file first, then
+    this. The clone recipe never set `core.hooksPath`, so every bare clone the
+    skill made ran no pre-commit hooks — the repository's own credential scan
+    was inert in exactly the checkouts the agent commits from. Five net lines,
+    the smallest of these raises, and the one where a recipe kept short would
+    have left a security control silently absent rather than merely unstated.
     """
 
-    BUDGET_LINES = 730
+    BUDGET_LINES = 735
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
@@ -698,6 +705,31 @@ def bare_clone(tmp_path) -> Path:
     _git(bare, "fetch", "-q", "origin")
     _git(bare, "symbolic-ref", "HEAD", "refs/remotes/origin/main")
     return bare
+
+
+class TestTheCloneEnablesTheRepositorysOwnHooks:
+    """ISSUE-291. `core.hooksPath` is per-clone local config, so a bare clone
+    made by the recipe used `$GIT_DIR/hooks` — nothing but `.sample` files —
+    and a repository whose committed hooks scan staged content for credentials
+    got none of that in the checkouts the agent actually commits from. The
+    gitleaks work is inert without this line, which is why it is run here
+    rather than read."""
+
+    FRAGMENT = ("config core.hooksPath", "config core.hooksPath")
+
+    def test_the_recipe_sets_it_on_the_bare_clone(self, bare_clone):
+        _run_fragment(_extract(*self.FRAGMENT), bare_clone)
+
+        assert _git(bare_clone, "config", "--get", "core.hooksPath").strip() == ".githooks"
+
+    def test_a_worktree_inherits_it(self, bare_clone, tmp_path):
+        """Worktrees are where commits happen, and they read the bare repo's
+        config — so setting it once at clone time covers every branch."""
+        _run_fragment(_extract(*self.FRAGMENT), bare_clone)
+        tree = tmp_path / "wt"
+        _git(bare_clone, "worktree", "add", "-q", str(tree), "main")
+
+        assert _git(tree, "config", "--get", "core.hooksPath").strip() == ".githooks"
 
 
 class TestBareCloneRecipe:

@@ -74,6 +74,11 @@ fi
 # Always fetch latest
 git -C "$BARE_DIR" fetch origin
 
+# A fresh clone runs no hooks: core.hooksPath is per-clone config, so a repo
+# whose committed hooks scan for credentials gets none of it (ISSUE-291).
+# Worktrees inherit this; it is a no-op where the path does not exist.
+git -C "$BARE_DIR" config core.hooksPath .githooks
+
 # Everything below restores the invariant stated after this block. It runs on
 # every pass, not just at clone time: the shape lives on disk, so a clone made
 # before ISSUE-269 is still broken and the `if` above never runs for it again.
