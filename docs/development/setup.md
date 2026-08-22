@@ -11,13 +11,18 @@
 ```bash
 git clone https://github.com/istota-project/istota.git
 cd istota
-uv sync --extra all
+uv sync --extra test
 ```
 
-This installs all optional dependencies. To install only specific feature groups:
+`test` is `all` minus the two heavy ML extras, and it is what the suite needs — 291 MB against the 1.1 GB `--all-extras` costs, which is worth having when the venv is per-worktree. Use `--extra all` instead when you want the real torch and faster-whisper to hand-test against; the one test that needs them carries the `ml` marker and is deselected either way. See [Testing](testing.md).
+
+`scripts/setup.sh` does this install along with the pre-commit hook setup below.
+
+To install only specific feature groups:
 
 ```bash
-uv sync                          # Core only (see "Dependencies" below)
+uv sync                          # Core only — NOT enough to run the suite
+uv sync --extra test             # every extra the suite needs
 uv sync --extra calendar         # caldav + icalendar
 uv sync --extra email            # imap-tools
 uv sync --extra markets          # yfinance
@@ -127,6 +132,8 @@ These are not Python packages -- they're system-level tools used at runtime:
 Core (always installed): `httpx`, `requests`, `croniter`, `tomli`, `cryptography`, `Pillow`, `pillow-heif`. Pillow and its HEIC plugin are core rather than an extra because every task with an image attachment pre-shrinks it before the model sees it; `cryptography` backs the encrypted secrets store.
 
 Optional extras add feature-specific dependencies. Notable packages across extras: `caldav` + `icalendar` (calendar), `imap-tools` (email), `yfinance` (markets), `feedparser` (RSS), `pytesseract` (OCR), `faster-whisper` (audio), `sqlite-vec` + `sentence-transformers` (memory search), `fastapi` + `uvicorn` (web/location).
+
+Three extras compose others rather than naming packages: `local` (a lean single-user install), `all` (every module), and `test` (`all` minus `memory-search` and `whisper`, for a checkout that runs the suite). Dependencies that only the tests need live in the `dev` dependency group, which `uv sync` installs by default — not in an extra, so that a lean install cannot silently lose them.
 
 ## Documentation
 
