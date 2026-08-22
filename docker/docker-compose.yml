@@ -534,6 +534,13 @@ services:
   # Dockerfile + template — keep this entry in sync with
   # deploy/ansible/templates/docker-compose.devbox.yml.j2.
   #
+  # That sentence used to be the whole mechanism, and the two drifted:
+  # this shape has no credential socket, so every forge command in the
+  # box failed at a path that does not exist while the skill body
+  # promised the capability (ISSUE-282). tests/test_devbox_compose_parity.py
+  # now holds the pair together, with an allowlist naming each difference
+  # that is deliberate — including that one, which is.
+  #
   # Skill CLI shells in via the host docker socket. Not brought up by
   # default — enable the ``devbox`` profile:
   #   docker compose --profile devbox up -d devbox
@@ -542,8 +549,13 @@ services:
     profiles:
       - devbox
     build:
-      context: ..
-      dockerfile: docker/devbox/Dockerfile
+      # The context is docker/devbox, not the repo root: every COPY in that
+      # Dockerfile is relative to it (`lib/`, `scripts/`, `etc/`), and none of
+      # those paths exists at the root, so the root-context form could not
+      # build at all. Same shape as the browser service above, and it matches
+      # what the Ansible template does.
+      context: devbox/
+      dockerfile: Dockerfile
     image: istota-devbox:latest
     container_name: devbox-${USER_NAME}
     hostname: devbox-${USER_NAME}

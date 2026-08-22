@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Forge commands in the dev container now say why they cannot work on the Docker-compose install, instead of pointing at a missing file. That install has no credential service and is not meant to have one, so GitHub and GitLab commands and pushes cannot work inside the container there — the assistant is now told that up front and told to do the work outside the box, rather than discovering it and retrying. The Ansible install is unaffected.
+
+- The dev container can be built from the Docker-compose file again. It was pointed at the wrong directory, so the build failed on the first file it tried to copy. Only the standalone install was affected; the Ansible one always used the right path.
+
 - The assistant is no longer told that the dev container cannot reach your internal services, because in several cases it can. The instructions now say plainly what the network filtering does and does not cover, and tell it to keep away from internal addresses whether or not anything stops it. Nothing changes about what is actually blocked.
 
 - Turning the dev container off now removes the firewall rules it added, instead of leaving them behind. The rules were created with a label and deleted without one, and a delete that does not match its target reports success having done nothing — so a machine kept filtering a private address range it no longer had any container on, until the next reboot.

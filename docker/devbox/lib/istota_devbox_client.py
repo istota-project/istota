@@ -54,9 +54,17 @@ def call(action: str, *, timeout: float = 35.0, **fields: Any) -> dict:
         sock.settimeout(timeout)
         sock.connect(path)
     except (OSError, FileNotFoundError) as e:
+        # Name the deployment shape, not just the path. `git push` reaches
+        # this rather than the forge wrapper's exit 4, so a message that only
+        # named the socket sent the reader looking for a service that, on one
+        # of the two shapes, is not supposed to exist (ISSUE-282).
         raise ProxyUnreachable(
-            f"istota credential proxy unreachable at {path} — "
-            "is the host-side service running?"
+            f"istota credential proxy unreachable at {path}. The Ansible "
+            "deployment runs a per-user credential proxy for the devbox and "
+            "this means it is down; the docker-compose deployment "
+            "deliberately runs none, so git cannot obtain a forge credential "
+            "inside the container there at all. Report this rather than "
+            "retrying."
         ) from e
 
     try:
