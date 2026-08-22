@@ -1227,6 +1227,28 @@ github_reviewer = "reviewer-user"
         assert cfg.developer.github_default_owner == "myorg"
         assert cfg.developer.github_reviewer == "reviewer-user"
 
+    def test_load_gitlab_reviewer_from_toml(self, tmp_path):
+        """ISSUE-289. `gitlab_reviewer` is the username `glab mr create
+        --reviewer` resolves against; `gitlab_reviewer_id` is the numeric user
+        id, kept because operators have it and it is what the API paths want,
+        but read by nothing."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[developer]
+enabled = true
+repos_dir = "/srv/repos"
+gitlab_reviewer = "reviewer-user"
+gitlab_reviewer_id = "1234567"
+""")
+        cfg = load_config(config_file)
+        assert cfg.developer.gitlab_reviewer == "reviewer-user"
+        assert cfg.developer.gitlab_reviewer_id == "1234567"
+
+    def test_gitlab_reviewer_defaults_empty(self):
+        dev = DeveloperConfig()
+        assert dev.gitlab_reviewer == ""
+        assert dev.gitlab_reviewer_id == ""
+
     def test_retired_keys_load_clean_and_inert(self, tmp_path):
         """Every deployed host has these three keys in its config.toml.
         `config.toml.j2` no longer renders them, but a host keeps its

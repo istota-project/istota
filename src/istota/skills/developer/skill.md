@@ -3,7 +3,7 @@ name: developer
 triggers: [git, gitlab, github, repo, repository, commit, branch, merge request, MR, pull request, PR, code review, develop, worktree, clone]
 description: Git repository management, GitLab merge requests, and GitHub pull requests
 companion_skills: [commit, code_review, untrusted_input]
-env: [{"var":"DEVELOPER_REPOS_DIR","from":"config","config_path":"developer.repos_dir","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER_ID","from":"config","config_path":"developer.gitlab_reviewer_id","when":["developer.enabled","developer.gitlab_reviewer_id"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
+env: [{"var":"DEVELOPER_REPOS_DIR","from":"config","config_path":"developer.repos_dir","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER","from":"config","config_path":"developer.gitlab_reviewer","when":["developer.enabled","developer.gitlab_reviewer"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
 ---
 # Developer Skill — Git, GitLab & GitHub
 
@@ -16,7 +16,7 @@ Work in git repositories, manage merge requests on GitLab and pull requests on G
 | `DEVELOPER_REPOS_DIR` | Base directory for repo clones and worktrees |
 | `GITLAB_URL` | GitLab instance URL (e.g., `https://gitlab.com`) |
 | `GITLAB_DEFAULT_NAMESPACE` | Default GitLab namespace (user/group) for resolving short repo names |
-| `GITLAB_REVIEWER_ID` | GitLab reviewer for new merge requests — a **username**, see below |
+| `GITLAB_REVIEWER` | GitLab username to assign as MR reviewer |
 | `GITHUB_URL` | GitHub instance URL (e.g., `https://github.com`) |
 | `GITHUB_DEFAULT_OWNER` | Default GitHub org/user for resolving short repo names |
 | `GITHUB_REVIEWER` | GitHub username to request as PR reviewer |
@@ -349,7 +349,7 @@ git push -u origin "$BRANCH"
 # and `--reviewer ""` is an error rather than a no-op — so build the flag
 # rather than interpolating it.
 REVIEWER_ARGS=""
-[ -n "${GITLAB_REVIEWER_ID:-}" ] && REVIEWER_ARGS="--reviewer $GITLAB_REVIEWER_ID"
+[ -n "${GITLAB_REVIEWER:-}" ] && REVIEWER_ARGS="--reviewer $GITLAB_REVIEWER"
 
 glab mr create \
     --source-branch "$BRANCH" \
@@ -361,7 +361,7 @@ glab mr create \
     --yes
 ```
 
-`--yes` skips the confirmation prompt; without it the command waits for a terminal that is not there. **`--reviewer` takes a username**, despite the variable's name. If the configured value is numeric, create the MR without the flag and tell the user their `developer.gitlab_reviewer_id` needs to be the reviewer's username.
+`--yes` skips the confirmation prompt; without it the command waits for a terminal that is not there. If `glab` rejects the reviewer — `failed to find user by name` — retry once without `--reviewer` so the merge request still opens, and tell the user that `developer.gitlab_reviewer` needs the reviewer's GitLab username. Do not guess a different value for it.
 
 Then verify it exists, and capture the id for later steps (pre-submission check 2):
 

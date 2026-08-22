@@ -184,6 +184,16 @@ def _dev_gate(config: "Config") -> tuple[object | None, str]:
     return dev, ""
 
 
+def _looks_like_a_user_id(value: str) -> bool:
+    """A GitLab username is never all ASCII digits, so this can only be an id.
+
+    ``str.isdigit`` is Unicode-wide — Arabic-Indic digits and a superscript two
+    both answer True — and none of those is a user id either, so an ASCII test
+    keeps the WARN's wording ("which is a user id") true of what it matched.
+    """
+    return value.isascii() and value.isdigit()
+
+
 def _forge_token_gate(dev) -> str:
     """"" when a forge token is configured, else the reason to SKIP."""
     if dev.gitlab_token or dev.github_token:
@@ -1019,6 +1029,92 @@ def check_forge_policy(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_gitlab_reviewer(config: "Config", probe: bool) -> CheckResult:
+    """A GitLab MR reviewer that `glab` will not resolve.
+
+    ISSUE-289. The setting is silent in both directions. A value `glab` cannot
+    resolve fails inside the task, where only the model sees it; an unset one
+    produces no message at all. Either way the MR opens with nobody assigned,
+    which is the step that puts a person in the loop, and the deployment ran
+    that way for weeks. WARN rather than FAIL: an MR with no reviewer is still
+    an MR, and the operator may simply not want one.
+
+    Everything is read through ``str()``. TOML types its scalars, so an
+    unquoted ``gitlab_reviewer = 1234567`` — the natural hand-edit for a field
+    whose example value is a number in quotes — arrives as an ``int``, and a
+    check that called a string method on it would raise. ``run_checks`` turns a
+    raising check into a FAIL, which is the one status that alerts, so the
+    crash would page the operator in exactly the misconfiguration this exists
+    to describe.
+    """
+    dev, reason = _dev_gate(config)
+    if dev is None:
+        return CheckResult("developer.gitlab_reviewer", SKIP, reason)
+
+    reviewer = str(dev.gitlab_reviewer or "")
+    named = reviewer.strip()
+    if named:
+        if _looks_like_a_user_id(named):
+            return CheckResult(
+                "developer.gitlab_reviewer",
+                WARN,
+                f"developer.gitlab_reviewer is {named!r}, which is a user id, not a username",
+                remedy=(
+                    "`glab mr create --reviewer` resolves by username, and a GitLab "
+                    "username is never all digits. Set the reviewer's username; "
+                    "`glab api users/<id>` reports it."
+                ),
+            )
+        if any(char.isspace() for char in reviewer):
+            # The recipe expands `--reviewer $GITLAB_REVIEWER` unquoted, so an
+            # internal space hands `glab` a stray positional and a surrounding
+            # one is eaten by word-splitting. Neither is a username.
+            return CheckResult(
+                "developer.gitlab_reviewer",
+                WARN,
+                f"developer.gitlab_reviewer is {reviewer!r}, which contains whitespace",
+                remedy=(
+                    "A GitLab username has no spaces in it. This is most likely the "
+                    "reviewer's display name; set their username instead."
+                ),
+            )
+        return CheckResult(
+            "developer.gitlab_reviewer",
+            OK,
+            f"MR reviewer {named!r}",
+        )
+
+    recorded = str(dev.gitlab_reviewer_id or "").strip()
+    if recorded:
+        # Which message is right depends on what the operator was told. The
+        # field was documented as a username for one day before ISSUE-289 was
+        # filed (56d21548), and as a numeric id for everything before that, so
+        # both shapes are deployed and the remedy differs.
+        if _looks_like_a_user_id(recorded):
+            remedy = (
+                "The id is recorded and read by nothing. Add "
+                "developer.gitlab_reviewer with the same person's username; "
+                "`glab api users/<id>` reports it."
+            )
+        else:
+            remedy = (
+                f"{recorded!r} is already a username — copy it verbatim into "
+                "developer.gitlab_reviewer, which is the key that is read now."
+            )
+        return CheckResult(
+            "developer.gitlab_reviewer",
+            WARN,
+            "developer.gitlab_reviewer_id is set but developer.gitlab_reviewer is not, "
+            "so new merge requests get no reviewer",
+            remedy=remedy,
+        )
+    return CheckResult(
+        "developer.gitlab_reviewer",
+        OK,
+        "no MR reviewer configured",
+    )
+
+
 def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
     """A forge token that travels over plain HTTP.
 
@@ -1335,6 +1431,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.forge_versions", check_forge_versions),
     ("developer.forge_wrapper_shadowing", check_forge_wrapper_shadowing),
     ("developer.forge_policy", check_forge_policy),
+    ("developer.gitlab_reviewer", check_gitlab_reviewer),
     ("developer.forge_transport", check_forge_transport),
     ("web.static", check_web_static),
     ("sandbox.masks", check_sandbox_masks),
@@ -1365,6 +1462,7 @@ CHECK_SCOPES: dict[str, str] = {
     "developer.forge_versions": IMAGE,
     "developer.forge_wrapper_shadowing": IMAGE,
     "developer.forge_policy": DEPLOYMENT,
+    "developer.gitlab_reviewer": DEPLOYMENT,
     "developer.forge_transport": DEPLOYMENT,
     "web.static": IMAGE,
     "sandbox.masks": DEPLOYMENT,
