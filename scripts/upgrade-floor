@@ -1,0 +1,18 @@
+# The oldest release an upgrade to current main is expected to work from.
+#
+# This is a policy, not a measurement. Nothing else in the repo says how far
+# back an upgrade is supported, and `scripts/test-upgrade.sh --from-floor` is
+# what holds the answer to it. Bump it deliberately — when a migration stops
+# being able to reach that far, or when the span stops being worth the run —
+# and never to make a red run green without reading why it went red.
+#
+# Roughly a month back. The near anchor (the merge-base with main, which is
+# what an unqualified run uses) spans about three days at the current release
+# cadence, which is close to a no-op as a regression detector; this is the one
+# worth running before a release.
+#
+# `tests/test_upgrade_harness.py` refuses a floor that already renders
+# gh_bin_path — past that point the captured config names the same path the
+# image installs, developer.forge_config_drift reports ok, and the volume
+# shape passes while asserting nothing.
+v0.35.0
