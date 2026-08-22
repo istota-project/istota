@@ -210,6 +210,7 @@ istota_scheduler_tasks_file_poll_interval: 30
 istota_scheduler_shared_file_check_interval: 120  # Shared file organization check interval
 istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
 istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
+istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping sweep (ISSUE-288, 6h; 0 disables)
 istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch loop's read scans; a lock past this skips the tick instead of blocking 30s (0 = 30s default)
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
@@ -807,6 +808,18 @@ istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 istota_browser_enabled: false
 istota_browser_api_port: 9223
 istota_browser_vnc_port: 6080
+# Which host address the noVNC console is published on. noVNC serves an
+# *interactive* view of the browser holding your logged-in profile, so this
+# used to be `0.0.0.0` in the compose template while the API port beside it was
+# correctly on loopback (ISSUE-297). Loopback by default; set it to a VPN or
+# management address to reach the console for troubleshooting, which is what
+# istota_browser_vnc_external_url below assumes you have done. Anything other
+# than a loopback address requires istota_browser_vnc_password to be set — the
+# role refuses to deploy an unauthenticated console on a reachable address.
+istota_browser_vnc_bind_address: "127.0.0.1"
+# Deliberately empty rather than generated: a generated password is one you
+# cannot log in with, and generating on upgrade would change the meaning of an
+# existing empty setting. Required only when the bind address is not loopback.
 istota_browser_vnc_password: ""
 istota_browser_vnc_external_url: ""  # e.g. https://vnc.example.com:6080
 istota_browser_max_sessions: 3
@@ -846,11 +859,18 @@ istota_devbox_pids_limit: 512
 istota_devbox_workspace_tmpfs_size: "1g"
 istota_devbox_network_name: "{{ istota_namespace }}-devbox-net"
 istota_devbox_network_subnet: "172.30.0.0/24"
-# Cloud metadata endpoint blocked by default — link-local + DigitalOcean/GCP/
-# AWS/Azure all rendezvous at 169.254.169.254.
+# Metadata and link-local blocking. Covers the whole 169.254.0.0/16, not just
+# 169.254.169.254: AWS also serves instance DNS at .169.253, ECS task
+# credentials — which hand out role credentials — at .170.2, and NTP at
+# .169.123. Also covers Azure's 168.63.129.16, which is neither link-local nor
+# private and so is matched by nothing else here.
 istota_devbox_block_metadata: true
-# RFC1918 blocking: drops outbound traffic from the devbox network targeting
-# private ranges so a compromised devbox can't pivot to the host's LAN.
+# Private-range blocking: drops outbound traffic from the devbox network
+# targeting 10/8, 172.16/12, 192.168/16 and 100.64/10, so a compromised devbox
+# can't pivot to the host's LAN. The last of those is RFC 6598 carrier-grade
+# NAT rather than RFC 1918 — it is the range Tailscale hands out, and it is
+# gated by this flag despite the flag's name. If your devbox loses reach to a
+# tailnet service, this is why.
 # Disable when you want the devbox to reach a colocated service intentionally.
 istota_devbox_block_rfc1918: true
 # Users whose containers should be created. Each entry is a user_id; the
@@ -1068,9 +1088,27 @@ istota_developer_author_credit: ""                # Appended to every commit (e.
 #   gh 2.40  — `pr checks`, `run view --log-failed`
 #   glab 1.36 — `ci trace`
 # Raise these if the skill document starts depending on a newer verb.
+#   gitleaks 8.19 — `gitleaks git --staged`, which replaced `detect`/`protect`
 istota_developer_cli_floors:
   gh: "2.40.0"
   glab: "1.36.0"
+  gitleaks: "8.19.0"
+# gitleaks is the credential half of this repository's pre-commit hook, and the
+# hook refuses an unattended agent commit when it cannot run — so on a host that
+# makes agent commits this install is load-bearing, not optional.
+#
+# Pinned and fetched from the upstream release rather than taken from apt like
+# gh and glab: trixie ships 8.16, below the floor above. The digests are
+# literals here rather than a checksums file fetched from the same host, so that
+# a changed artifact shows up as a diff in this repository.
+istota_developer_gitleaks_version: "8.30.1"
+istota_developer_gitleaks_checksums:
+  amd64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  arm64: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+# The release tarballs name amd64 "x64".
+istota_developer_gitleaks_release_arch:
+  amd64: "x64"
+  arm64: "arm64"
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
 istota_developer_gitlab_token: ""                 # API token (api + write_repository scope — glab needs api, not read_api)
@@ -1103,6 +1141,19 @@ istota_developer_forge_cli_permit: []             # Baseline entries to turn off
 # install gh or glab from the vendors' own repos or by hand.
 istota_developer_gh_bin_path: "/usr/bin/gh"
 istota_developer_glab_bin_path: "/usr/bin/glab"
+
+# Worktree reaping (ISSUE-288). Nothing removed a task's worktree, so
+# `repos_dir` accumulated gigabyte checkouts with no owner and no stated
+# retention rule. The sweep runs before every developer task and removes only a
+# worktree that is clean, unlocked, idle for the window below, and carrying no
+# commit that is not already upstream. The window is what protects a
+# *concurrently running* task rather than merely a stale one: tasks for one
+# user run in parallel and none knows the others exist, so recent activity is
+# the only evidence available that a checkout is in use. Raise it on a host
+# where a checkout is routinely inspected by hand days later; `git worktree
+# lock` pins one indefinitely and is the better tool for a single case.
+istota_developer_worktree_reap_enabled: true
+istota_developer_worktree_retention_hours: 24.0
 
 # Wall-clock budget for one code-review agent. Both agents run concurrently, so
 # this is the whole review's clock and not half of it, and it covers the entire

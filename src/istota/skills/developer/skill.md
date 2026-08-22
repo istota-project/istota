@@ -74,6 +74,11 @@ fi
 # Always fetch latest
 git -C "$BARE_DIR" fetch origin
 
+# A fresh clone runs no hooks: core.hooksPath is per-clone config, so a repo
+# whose committed hooks scan for credentials gets none of it (ISSUE-291).
+# Worktrees inherit this; it is a no-op where the path does not exist.
+git -C "$BARE_DIR" config core.hooksPath .githooks
+
 # Everything below restores the invariant stated after this block. It runs on
 # every pass, not just at clone time: the shape lives on disk, so a clone made
 # before ISSUE-269 is still broken and the `if` above never runs for it again.
@@ -488,14 +493,39 @@ glab ci get -p "$PIPELINE_ID"
 
 **`gh run download` is not available.** Artifact downloads redirect to a per-request Azure Blob Storage shard, and the only network-allowlist entry that would cover it opens all of Azure Blob Storage to this sandbox. Logs carry what a fix needs; artifacts are not worth that trade. Do not try to route around it.
 
-## Cleanup After Merge
+## Worktree Retention and Cleanup
+
+**Worktrees are reaped automatically once their work has landed. Do not clean up
+after yourself, and never clean up after another task** — you cannot see whether
+the task that made it is still running, and the sweep's retention window can.
+
+`worktree_reaper.py` runs on the scheduler's own interval, not at task start. It
+removes only a worktree that is clean (untracked and gitignored files included),
+unlocked, idle for `developer.worktree_retention_hours` (24 by default), and
+carrying no commit that is not already upstream — squash- and rebase-merged
+branches included, since it asks `git cherry` rather than testing ancestry.
+Everything else is kept and counted. So leaving a worktree in place after
+opening an MR is correct: the branch is not upstream, the sweep keeps it, and a
+later sweep takes it away once the MR merges. Uncommitted work there is safe only
+until the branch lands. `git worktree lock "$WORK_DIR" --reason "..."` pins one
+indefinitely; unlock it when done, or it is a leak with your name on it.
+
+**To read the default branch as a tree**, use your own task worktree — the
+recipe above branches from `origin/$DEFAULT_BRANCH`, so it *is* the default
+branch until you commit. Never `worktree add` a checkout named after a branch:
+`project--main` is detached, outside the naming convention, and reads like a
+canonical checkout other work might trust (ISSUE-288).
+
+To take a worktree out by hand rather than waiting for the sweep:
 
 ```bash
-BARE_DIR="$DEVELOPER_REPOS_DIR/namespace/project.git"
-WORK_DIR="$DEVELOPER_REPOS_DIR/namespace/project--istota-42-add-auth"
-git -C "$BARE_DIR" worktree remove "$WORK_DIR"
-git -C "$BARE_DIR" branch -d "istota/42-add-auth"
+git -C "$BARE_DIR" worktree remove "$WORK_DIR"     # no --force: a refusal is the answer
+git -C "$BARE_DIR" update-ref -d "refs/heads/$BRANCH"
 ```
+
+`update-ref -d`, not `branch -d`: this clone's HEAD points at a deleted ref by
+design (the fossil cleanup above) and `branch -d` consults HEAD, so it fails on
+every branch here, merged ones included.
 
 ## Quick Reference
 

@@ -2,7 +2,7 @@
 
 Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 13,900 tests across ~414 files; the frontend has its own vitest suite under `web/`.
 
-Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The four discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
+Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The five discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
 
 ## What to install
 
@@ -35,46 +35,76 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 
 `addopts` in `pyproject.toml` pins `-n auto`, so the suite runs under pytest-xdist by default. New tests must be order-independent. For a local edit loop, `--testmon -n0` reruns only what your change touched; `-v` is only readable with `-n0`, since xdist interleaves worker output.
 
-Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
+Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Every run ends with one verdict line on stderr — `qtest: PASS exit=0 time=3m41s cmd: uv run pytest`, or `FAIL`, or `KILLED-SIGKILL`, or `NO-SLOT` — so a run read through `| tail`, which reports the pipe's exit code rather than the suite's, still says plainly how it went; stdout is left untouched. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
-Six marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
+Seven marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
 |---|---|---|
 | `integration` | a live Nextcloud instance, or Garmin credentials | `uv run pytest -m integration` |
 | `live` | a real LLM API key; costs money | `uv run pytest -m live` |
-| `linux` | a real Linux kernel and a usable bubblewrap | `scripts/test-linux.sh` |
+| `linux` | a real Linux kernel, a usable bubblewrap, and — for the cgroup tests — a delegated cgroup v2 subtree | `scripts/test-linux.sh` |
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
 | `smoke` | a Docker daemon | `uv run pytest -m smoke -n0` |
+| `full` | a Docker daemon, and the network — see below | `uv run pytest -m full -n0` |
 | `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
 
-A seventh marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
+**The cgroup tests need a subtree the driver builds.** `task_cgroup.resolve_root()` reads `/proc/self/cgroup` and truncates at the `.service` / `.scope` component; under Docker's default private cgroup namespace that file reads `0::/`, so it answers `None` however writable the tree is, and the `linux`-marked cgroup tests would skip inside the one runner meant to execute them. `scripts/dev/linux-tier-cgroup.sh`, sourced by the driver, remounts `/sys/fs/cgroup` read-write, empties the container's own cgroup into a `supervisor/` leaf (the `DelegateSubgroup=` shape — cgroup v2 will not let one cgroup both hold processes and enable controllers for its children), turns on the controllers, and exports `ISTOTA_TEST_CGROUP_ROOT` only after proving a `memory.max` write succeeds. The tests treat that variable as a promise: set and unusable is a failure, unset is an honest skip. So a Docker without `SYS_ADMIN` or with a read-only cgroup2 mount loses those tests and keeps the rest of the tier.
 
-`image` and `smoke` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it. The conftest fails the session with that reason rather than letting it happen.
+An eighth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
+
+`image`, `smoke` and `full` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. The conftest fails the session with that reason rather than letting it happen.
+
+**Two shapes, one seam.** `smoke` and `full` are the same fixtures over different compose files. The *lean* shape (`docker/docker-compose.test.yml`) is one container with the entrypoint bypassed and the config rendered on the host: seconds to boot, right for a subsystem whose external is an HTTP endpoint. The *full* shape (`docker/docker-compose.yml` plus `testbed/compose/testbed.yml`) is the deployment as shipped — postgres, redis, nextcloud, istota, web, nginx — booted through `entrypoint.sh` with the generator running inside the container. It is the only thing that executes `provision-nc.sh` or reaches the half of `entrypoint.sh` past the config write. Read `testbed/compose/testbed.yml` before adding to it: it is a list of harness concessions, and each one is there with its reason.
+
+**The full tier needs the network, and it is worth knowing which way that fails.** `provision-nc.sh` runs `app:enable spreed`, `calendar` and `files_external`; only the last is bundled in `nextcloud:30-apache`, and the other two are fetched from the app store at first install. Every `occ` call in that script is `|| true`, so an install with no network writes its provisioning flag and reports success having enabled nothing. `tests/full/test_provisioning.py` asserts outcomes by name for exactly that reason.
 
 ## Deployment tiers
 
-Four discretionary tiers, none of them automatic, each answering "does the artifact match what the code assumes?" rather than "does the code do the right thing?".
+Five discretionary tiers, none of them automatic, each answering "does the artifact match what the code assumes?" rather than "does the code do the right thing?".
 
 ```bash
 scripts/test-linux.sh                        # the suite + the linux tests, on a real kernel
 uv run pytest -m image -n0                   # the built image's contract
 uv run pytest -m smoke -n0                   # end-to-end against the lean compose stack
+uv run pytest -m full -n0                    # end-to-end against the full stack, incl. a real Nextcloud
 scripts/test-upgrade.sh                      # the current image over an older release's state
 ```
+
+**All four need a Docker daemon that will create and start containers, so a sandboxed agent task cannot run any of them.** A task reaches Docker through the devbox allowlist proxy, which permits ping, version, container list, and inspect, archive, restart and exec against the task's own container — and nothing that creates or starts one. The Linux tier additionally wants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and unconfined seccomp, which is the exact capability the sandbox exists to deny. This is structural, not a misconfiguration: widening the allowlist to admit it would hand every task a host escape.
+
+The two shell drivers refuse up front when `ISTOTA_SANDBOXED` is set, and say so rather than failing later. They have to refuse *before* their daemon precheck, because `docker version` is on the proxy's allowlist — a task passes that precheck and would otherwise die minutes later inside `docker build`, reporting a buildx driver error that describes nothing about the real boundary. The `image` and `smoke` tiers precheck with `docker info`, which the proxy denies, so they skip on their own.
+
+That refusal **exits 75**, the same code `scripts/qtest` uses for "the command did not run". Every real failure in those scripts exits 1, so the two are distinguishable from the status alone: 75 means the tier was out of reach and nothing was tested, and it is not a red suite.
+
+**What an agent should do instead.** When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say in the merge request that it does, name the tier that covers it, and ask for the run before merge. That is a complete handover, not an apology: the reviewer knows which command to run and why. Do not merge a sandbox-touching change while quietly reporting the default suite as green — that suite patches `_bwrap_available` and checks argv, so it has never executed the code path in question.
 
 When to run each:
 
 | Tier | Run it when | Cost |
 |---|---|---|
-| `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
-| `-m image` | you touched `docker/istota/Dockerfile`, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache |
-| `-m image --platform amd64` | before a release | about ten minutes under emulation, and it is the only thing that ever executes the amd64-only devbox image |
-| `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about three minutes |
+| `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, per-task cgroups, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
+| `-m image` | you touched either Dockerfile, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache; builds both images natively |
+| `-m image --platform amd64` | before a release, on a non-amd64 machine | about ten minutes under emulation. It checks the deployment architecture rather than reaching tests nothing else runs — since ISSUE-280 the devbox image builds natively too, so its assertions are covered by a plain `-m image` |
+| `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about a minute against a warm layer cache: one stack per profile rather than per test, so most of it is the three boots |
+| `-m full` | you touched `entrypoint.sh`, `provision-nc.sh`, `docker-compose.yml`, or anything about first-boot provisioning; and before a release | about a minute and a half against warm image and layer caches, most of it Nextcloud installing itself on a cold volume set |
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |
 
-Two of these carry a negative control, and the controls are not a formality — on a tier that asserts against an artifact, reading the test tells you almost nothing about whether it can fail. `scripts/test-image-negative-control.sh` builds the image with the forge binaries removed and requires the image tier to go red against it. The upgrade tier's control is the same image passed through `ISTOTA_IMAGE_TAG`:
+Two of these carry a negative control, and the controls are not a formality — on a tier that asserts against an artifact, reading the test tells you almost nothing about whether it can fail. `scripts/test-image-negative-control.sh` covers both halves of the image tier and requires each to go red against a deliberately broken image.
+
+The istota half is one control: the image with `/usr/local/lib/istota_forge` removed. The devbox half needs **four**, because that file asserts several separable things and no single broken image reaches all thirteen of its assertions:
+
+| Control | Turns red | Why it is separate |
+|---|---|---|
+| `Dockerfile.devbox-no-forge` | the six forge version assertions | removing the directory leaves `/usr/local/bin/gh` alone — it is a *copy* of the wrapper, not a symlink — so four assertions stay green |
+| `Dockerfile.devbox-stale-wrapper` | the byte-identity assertion | the file is present and still runs; only its bytes differ. Deleting it makes that test raise before it compares anything, which proves the file exists rather than that the comparison works |
+| `Dockerfile.devbox-real-binary-on-path` | `test_what_resolves_is_the_python_wrapper_not_a_real_binary` | the bypass reached by overwriting the wrapper on PATH |
+| `Dockerfile.devbox-forge-dir-on-path` | `test_the_name_resolves_to_the_wrapper`, `test_the_real_binary_is_off_path` | the same bypass reached by the likelier route — one `PATH` entry, no file changed. The other three controls left these four assertions either untouched or failing through a guard rather than through their own comparison |
+
+**Each control names the exact parametrized node ids it must turn red**, and the script requires those to appear in pytest's own `FAILED` summary. Checking only the exit status is not enough, and that is not hypothetical: the first cut did that, and one control passed on a `UnicodeDecodeError` raised inside `subprocess` before its assertion ever ran — red for the right image, for the wrong reason, which is indistinguishable from a working assertion and is exactly what a control exists to tell apart. The underlying harness bug is fixed too (`errors="replace"` in `tests/image/conftest.py`).
+
+The upgrade tier's control is the forge-less istota image passed through `ISTOTA_IMAGE_TAG`:
 
 ```bash
 ISTOTA_IMAGE_TAG=istota-test/no-forge:control uv run pytest -m image -n0 tests/image/test_upgrade.py
@@ -84,16 +114,18 @@ A clean run there is the failure.
 
 ### Shared machinery, and how to add a tier
 
-The pieces under `tests/support/` are general, not forge-specific. The forge chain is the first thing to use them, and it should not be the last:
+The pieces under `testbed/` are general, not forge-specific. The forge chain is the first thing to use them, and it should not be the last:
 
-- `compose.py` — bringing a compose stack up and down, waiting for a service to report healthy, and sweeping leftovers from an interrupted run.
-- `probe.py` — reading the framework database of a stack that is currently running.
-- `model_endpoint.py` — a deterministic model endpoint that serves canned turns over HTTP, so a task's path through the daemon is reproducible without an LLM.
-- `upgrade.py` — capturing an older release's `config.toml` and schema.
+- `stack.py` — bringing a compose stack up and down, waiting for a service to report healthy, sweeping leftovers from an interrupted run, and `Stack`, which is what a scenario is handed: `submit`, `script`, `exec`, `doctor`, `restart`, `logs`, `diagnostics`.
+- `probe.py` — reading the framework database of a stack that is currently running, or of a local file.
+- `httpstub.py` and `services/` — the `Service` protocol every external the daemon talks to conforms to, and the shared `ThreadingHTTPServer` base under the ones we wrote. `services/model_endpoint.py` is a deterministic model endpoint serving canned turns over HTTP, so a task's path through the daemon is reproducible without an LLM; `services/gitlab.py` answers enough REST v4 for `glab` plus a real git over HTTP.
+- `profiles.py` — what a scenario declares it needs: a shape, a set of services, and any extra config.
 
-They are written as plain functions taking explicit paths: no pytest fixtures with logic baked in, no repo-relative assumptions, and `tests/support/` is a separate package from `tests/smoke/` on purpose. A planned follow-up extracts the first three into a standalone `testbed/` package once there is a second real consumer to design the API against, and keeping them in this shape is what makes that a directory move rather than a rewrite. So when a new subsystem needs an end-to-end tier, extend `docker/docker-compose.test.yml` and reuse these — don't build a second stack alongside them.
+`tests/support/upgrade.py` — capturing an older release's `config.toml` and schema — deliberately stayed where it is. It belongs to the upgrade tier, and `scripts/test-upgrade.sh` reaches it by string path.
 
-`tests/support/model_endpoint.py`'s wire format has its own tests in the default suite (`tests/test_model_endpoint.py`), pinned against the real provider over a real socket. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
+`testbed/` sits beside `src/` rather than inside `tests/` because it is not part of the shipped application and two repos outside this one consume it. It has its own `pyproject.toml` and imports no pytest, so a failure surfaces as a raised `StackError` rather than as a call into a test runner that is not installed. Two rules bind anything added to it: a service may only point the daemon at itself through a variable `docker/istota/render-config.sh` reads **and** `docker/docker-compose.yml` passes through (add one to both as a reviewed product change if it is missing — never side-load config from the fixture), and a stub bound to anything but loopback must be given a credential to expect. Both are enforced in `tests/test_testbed_services.py`. So when a new subsystem needs an end-to-end tier, extend `docker/docker-compose.test.yml`, write a service, and reuse these — don't build a second stack alongside them.
+
+`testbed/services/model_endpoint.py`'s wire format has its own tests in the default suite (`tests/test_model_endpoint.py`), pinned against the real provider over a real socket. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
 
 ### The upgrade tier's two anchors
 
@@ -168,5 +200,5 @@ For new features:
 3. Run tests to confirm they fail
 4. Implement the feature
 5. Run tests and iterate until all pass
-6. Run `ruff check --output-format concise src tests`, plus the `web/` checks above if the change touched the frontend
+6. Run `ruff check --output-format concise src tests testbed`, plus the `web/` checks above if the change touched the frontend
 7. Commit

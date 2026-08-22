@@ -2,7 +2,9 @@
 # Pre-commit hook: scan staged content for credentials and private data.
 #
 # Enabled by `git config core.hooksPath .githooks` (scripts/setup.sh does this).
-# Bypass in an emergency with `git commit --no-verify` — and then go clean up.
+# To get past a scanner that is broken rather than a finding that is real, use
+# PRECOMMIT_SCANS_REQUIRED=0 — `git commit --no-verify` drops both scans, which
+# is more than you meant if only one of them is the problem.
 
 set -uo pipefail
 
@@ -11,20 +13,96 @@ cd "$REPO_ROOT" || exit 1
 
 status=0
 
+# Whether a scanner that cannot run aborts the commit or merely warns.
+#
+# A human at a workstation gets the warning: refusing their commit because
+# something is missing from their laptop is how a hook ends up bypassed for
+# good. An unattended commit gets the refusal — nobody is there to read a
+# warning, and half a gate is not a gate.
+#
+# Three markers, because the daemon spawns unattended shells three ways and no
+# single variable covers all of them. ISTOTA_SANDBOXED is set for every task
+# the model runs; DEVELOPER_REPOS_DIR additionally covers a task authorized for
+# the developer skill; and the daemon sets PRECOMMIT_SCANS_REQUIRED=1 itself in
+# the stripped environment it gives cron `command` jobs and heartbeat shell
+# commands, which carry neither of the other two.
+scans_required=0
+if [ -n "${ISTOTA_SANDBOXED:-}" ] || [ -n "${DEVELOPER_REPOS_DIR:-}" ]; then
+  scans_required=1
+fi
+
+# The override, in both directions. An unrecognised value is the one mistake
+# that must not pass quietly: `PRECOMMIT_SCANS_REQUIRED=true` is somebody
+# opting *in* to the scans, and silently leaving it at the default would give
+# them the opposite of what they asked for.
+case "${PRECOMMIT_SCANS_REQUIRED:-}" in
+  "") ;;
+  1|true|yes|on) scans_required=1 ;;
+  0|false|no|off) scans_required=0 ;;
+  *)
+    echo "  WARNING: PRECOMMIT_SCANS_REQUIRED='$PRECOMMIT_SCANS_REQUIRED' is not"
+    echo "  one of 1/0/true/false/yes/no/on/off — demanding the scans, which is"
+    echo "  the safe reading of an unclear setting."
+    scans_required=1
+    ;;
+esac
+
 # --- 1. credentials ---------------------------------------------------------
 
 echo "Pre-commit: scanning staged files for secrets..."
 
+# Why the second check is a capability probe and not a version comparison:
+# `gitleaks git` replaced `detect`/`protect` in 8.19, and Debian 13 still ships
+# 8.16. On that binary the scan below exits nonzero for an unknown subcommand,
+# which is indistinguishable from a real finding to a hook reading only the exit
+# status — so `apt install gitleaks` would buy a hook that refuses every commit
+# and blames a secret that was never in the diff. Asking the binary whether it
+# has the subcommand answers the question directly, and does not care how a
+# distributor stamped its version string.
+gitleaks_problem=""
 if ! command -v gitleaks &>/dev/null; then
-  echo "  WARNING: gitleaks not installed, skipping secret scan"
-  echo "  Install: brew install gitleaks (macOS) or see https://github.com/gitleaks/gitleaks#installing"
+  gitleaks_problem="is not installed"
+elif ! gitleaks git --help >/dev/null 2>&1; then
+  gitleaks_problem="has no \`git\` subcommand, so it predates 8.19 and is too old"
+fi
+
+if [ -n "$gitleaks_problem" ]; then
+  if [ "$scans_required" -eq 1 ]; then
+    echo ""
+    # Deliberately no override hint here. This branch is reached only when
+    # nobody is watching, so the only reader is the automated committer the
+    # refusal is aimed at — printing its own way past it would make the gate
+    # advisory against exactly the actor it exists to bind. The operator, who
+    # is the one meant to act on this, finds the override in
+    # docs/development/secret-scanning.md.
+    echo "  ERROR: gitleaks $gitleaks_problem, so the credential scan did not run."
+    echo "  Refusing the commit rather than passing it on the private-data scan"
+    echo "  alone: that one matches patterns somebody wrote down, not secret shape."
+    echo "  This is a broken install on this host, not something to work around."
+    echo "  Stop and report it — see docs/development/secret-scanning.md."
+    echo ""
+    status=1
+  else
+    echo "  WARNING: gitleaks $gitleaks_problem, skipping secret scan"
+    echo "  Install: brew install gitleaks (macOS), or the release tarball from"
+    echo "  https://github.com/gitleaks/gitleaks/releases (Linux — not the Debian"
+    echo "  package, which predates the \`git\` subcommand this hook needs)."
+    echo "  PRECOMMIT_SCANS_REQUIRED=1 makes this abort the commit instead."
+  fi
 else
   # Output is suppressed on purpose: gitleaks prints the matched secret, and a
   # terminal is the wrong place for it. Re-run by hand to see details.
   if ! gitleaks git . --staged --no-banner -c .gitleaks.toml >/dev/null 2>&1; then
     echo ""
-    echo "  ERROR: secrets detected in staged files."
-    echo "  To see details (prints the secret — keep it out of chat logs):"
+    # gitleaks returns 1 both for a finding and for its own failure — a
+    # malformed .gitleaks.toml, an unreadable index — and the two are not
+    # distinguishable from the exit status alone. The probe above rules out the
+    # one cause that used to be common (a binary too old for `gitleaks git`),
+    # but not the class, so say what is actually known rather than asserting a
+    # secret nobody has seen.
+    echo "  ERROR: gitleaks exited nonzero — secrets in staged files, or"
+    echo "  gitleaks itself failed. Re-run to see which (prints the secret,"
+    echo "  so keep it out of chat logs):"
     echo "    gitleaks git . --staged -v -c .gitleaks.toml"
     echo "  See docs/development/secret-scanning.md"
     echo ""
@@ -42,6 +120,17 @@ if [ -x scripts/check-private-data.sh ]; then
   if ! scripts/check-private-data.sh --staged; then
     status=1
   fi
+elif [ "$scans_required" -eq 1 ]; then
+  # The same silence as a missing gitleaks, one scanner over. This one is
+  # committed and executable in a normal checkout, so reaching here means a
+  # lost mode bit or a truncated tree — either way, not a thing to shrug at
+  # when nobody is watching the output.
+  echo ""
+  echo "  ERROR: scripts/check-private-data.sh is missing or not executable,"
+  echo "  so the private-data scan did not run. Refusing the commit."
+  echo "  Stop and report it — see docs/development/secret-scanning.md."
+  echo ""
+  status=1
 else
   echo "  WARNING: scripts/check-private-data.sh missing or not executable, skipping"
 fi

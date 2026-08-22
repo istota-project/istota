@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import os
 import posixpath
 import re
@@ -184,45 +185,11 @@ class Finding:
 # The hardened git runner
 # --------------------------------------------------------------------------
 
-# Repo-local `.git/config` cannot be switched off by environment variable,
-# which is why these are `-c` overrides: a later `-c` beats the repository's
-# own value.
-#
-# Every entry here is a config key that either runs a command or reshapes
-# output this module parses. `core.fsmonitor`, `diff.external` and the `gpg.*`
-# programs are the run-a-command ones — `gpg.program` is reached from a plain
-# `git log` whenever `log.showSignature` is on, which is itself just a
-# repo-local boolean, and that pair was a working escape past the first three.
-# `color.ui` is not an execution route but is just as load-bearing: with colour
-# forced on, every diff header arrives wrapped in ANSI escapes, `_split_
-# sections` matches none of them, and the reviewer is handed an empty diff with
-# nothing anywhere reporting a loss.
-GIT_HARDENING = (
-    "-c",
-    "core.fsmonitor=",
-    "-c",
-    "diff.external=",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "log.showSignature=false",
-    "-c",
-    "gpg.program=/nonexistent",
-    "-c",
-    "gpg.openpgp.program=/nonexistent",
-    "-c",
-    "gpg.ssh.program=/nonexistent",
-    "-c",
-    "gpg.x509.program=/nonexistent",
-    "-c",
-    "color.ui=false",
-    "-c",
-    "diff.noprefix=false",
-    "-c",
-    "diff.mnemonicPrefix=false",
-    "-c",
-    "core.quotePath=false",
-)
+# The list lives in `istota.git_hardening` so `worktree_reaper` can have it
+# too: it runs `git status` inside the same model-writable checkouts, and it
+# cannot import from `istota.skills` (whose __init__ star-imports every skill).
+# Re-exported here because this module's call sites and tests use the name.
+from istota.git_hardening import GIT_HARDENING  # noqa: E402,F401 - re-export
 
 # Flags, because a flag is the only thing that covers the per-attribute route.
 # `-c diff.external=` clears the global external driver but does nothing about
@@ -1433,12 +1400,13 @@ _FOCUS = {CONFORMANCE: _CONFORMANCE_FOCUS, BUGHUNT: _BUGHUNT_FOCUS}
 _NEED_FILES_OFFER = """\
 If a file you were not given would settle a finding, you may ask for it — once.
 Add a "need_files" key to your JSON object naming up to {limit} paths, relative
-to the repository root, and you will be called again with those bodies added to
-this prompt.
+to the repository root. If the time budget has room for another round you will
+be called again with those bodies added to this prompt.
 
-There is no second request. Ask only for what would change a finding, and
-return the findings you already have in the same object: if a file cannot be
-served, what you return now is the whole review.
+There is no second request, and the round is not guaranteed. Ask only for what
+would change a finding, and return the findings you already have in the same
+object: if a file cannot be served, or answering this took most of the budget,
+what you return now is the whole review.
 """
 
 # The re-invocation's own closing instruction. The offer above is left out of
@@ -1489,10 +1457,14 @@ def build_prompt(
     ]
     if max_need_files > 0:
         # Only when there is a round to pay for it. The caller passes 0 when
-        # `max_need_files` is off *or* when the task's call budget has no room
-        # for a second round, so an offer in the prompt is a promise the CLI
-        # can keep rather than one it will refuse after the reviewer spent its
-        # answer on the request.
+        # `max_need_files` is off *or* when the task's *call* budget has no
+        # room for a second round, so the offer is never made where it is
+        # already known to be unaffordable.
+        #
+        # It is still not a promise, and the text says so. The other budget —
+        # wall time — cannot be checked here: whether a second round fits is
+        # decided by how long this reviewer takes to answer, which is not known
+        # until it has. `_round_trip` makes that call afterwards.
         sections.append(_NEED_FILES_OFFER.format(limit=max_need_files))
     sections += [
         "## Diff stat\n\n" + (bundle.stat or "(empty)"),
@@ -1676,6 +1648,21 @@ found nothing, return {"findings": []}.
 # there is not enough left for a round trip to be worth starting.
 MIN_RETRY_SECONDS = 15
 
+# What the `need_files` round trip is expected to cost, as a multiple of the
+# round that just ran. The second call is the same prompt plus the served file
+# bodies plus `_FINAL_ANSWER` — strictly the larger of the two — so the last
+# round's duration is a lower bound on the next one's, not an estimate of it,
+# and the margin is what turns it into one.
+#
+# This exists because a flat floor measures nothing relevant to the decision it
+# gates. `MIN_RETRY_SECONDS` is 15 for any budget of 30s or more, so a reviewer
+# that spent 78 of its 120 seconds was sent back out with 42, charged a call
+# against `max_calls_per_task`, and timed out — twice observed, on two
+# different budgets, never once successful. A first round that took most of the
+# budget is direct evidence that a bigger second round will not fit in the
+# rest (ISSUE-292).
+ROUND_TRIP_COST_MULTIPLIER = 1.5
+
 # Headroom on the join above each agent's own timeout. The timeout is enforced
 # inside the brain; this is the backstop for a brain that does not honour it.
 JOIN_SLACK_SECONDS = 10
@@ -1744,6 +1731,14 @@ class AgentOutcome:
     # *made* rather than that it helped — it is what the second model round is
     # charged on, and a re-invocation that failed still cost one.
     round_trip: bool = False
+    # Its complement: the reviewer asked for files and no second call was made,
+    # so nothing was charged. Kept as its own flag rather than derived from
+    # `round_trip`, which is false on the ordinary path where nothing was asked
+    # for either. A caller weighing an `unverified` finding needs to tell "the
+    # reviewer never asked" from "it asked and could not be given the round",
+    # and only the second one leaves a finding the CLI could have checked and
+    # did not.
+    round_trip_refused: bool = False
     served: list[str] = field(default_factory=list)
     refused: list[str] = field(default_factory=list)
     # Why a round trip did not improve the answer, when one was asked for and
@@ -1809,13 +1804,29 @@ def _attempt(agent: str, raw: str):
     return parsed
 
 
-def _remaining(started: float, timeout_seconds: int) -> tuple[int, int]:
+def _remaining(
+    started: float, timeout_seconds: int, *, estimated_cost: float = 0.0
+) -> tuple[int, int]:
     """`(seconds left, the floor below which a further call is not worth making)`.
 
     The floor scales with the configured budget: a hard 15s would report "no
     budget left" against a 10s timeout that had not been spent at all.
+
+    `estimated_cost` raises that floor to what the next call is actually
+    expected to take, when the caller has evidence for it. It never lowers it:
+    a cheap-looking estimate does not make a 3s call worth starting, so the
+    budget-scaled floor stays the lower bound.
+
+    A non-finite estimate is ignored rather than converted. `math.ceil(inf)`
+    raises `OverflowError`, and the first of the two `_round_trip` call sites
+    sits outside that function's exception guards — so an estimate that could
+    not be turned into a floor would take down a review already paid for, to
+    decide an optional extra round. Unreachable from `time.monotonic()`, which
+    is always finite; the guard is for a future caller or a test double.
     """
     floor = min(MIN_RETRY_SECONDS, max(1, timeout_seconds // 2))
+    if math.isfinite(estimated_cost) and estimated_cost > floor:
+        floor = math.ceil(estimated_cost)
     return int(timeout_seconds - (time.monotonic() - started)), floor
 
 
@@ -1829,6 +1840,7 @@ def _round_trip(
     invoke,
     started: float,
     timeout_seconds: int,
+    slowest_call_seconds: float,
 ) -> AgentOutcome:
     """The one `need_files` re-invocation, or the reason there wasn't one.
 
@@ -1851,16 +1863,27 @@ def _round_trip(
     no reviewer had answered. Losing a paid review to a failed optional extra is
     the exact inversion of this function's purpose.
     """
+    # Whatever happens below, the reviewer asked and has not been called again.
+    # Cleared at the point the second invocation is actually made.
+    outcome.round_trip_refused = True
+
+    # What the second call is expected to cost, from the calls this reviewer
+    # has already made rather than from a constant. See
+    # `ROUND_TRIP_COST_MULTIPLIER`.
+    estimate = slowest_call_seconds * ROUND_TRIP_COST_MULTIPLIER
+
     # Checked before the gather, not only after it. Serving runs `git_dir` plus
     # two `cat-file`s and a `show` per candidate, none of it charged against the
     # agent's clock — so a budget tested only afterwards lets a slow serve push
     # the thread past `run_review`'s join deadline and report a negative
     # remaining. An agent with no budget left has nothing to spend the files on.
-    remaining, floor = _remaining(started, timeout_seconds)
+    remaining, floor = _remaining(started, timeout_seconds, estimated_cost=estimate)
     if remaining < floor:
         outcome.note = (
             f"{agent} asked for files but only {max(0, remaining)}s of its "
-            f"{timeout_seconds}s budget remained, below the {floor}s floor"
+            f"{timeout_seconds}s budget remained, and its slowest call took "
+            f"{slowest_call_seconds:.0f}s, so a second one was not started "
+            f"({floor}s floor)"
         )
         return outcome
 
@@ -1884,12 +1907,28 @@ def _round_trip(
         return outcome
 
     # Again, because the gather itself took time off the same clock.
-    remaining, floor = _remaining(started, timeout_seconds)
+    remaining, floor = _remaining(started, timeout_seconds, estimated_cost=estimate)
     if remaining < floor:
         outcome.note = (
             f"{agent} asked for files and gathering them left only "
             f"{max(0, remaining)}s of its {timeout_seconds}s budget, below the "
             f"{floor}s floor"
+        )
+        return outcome
+
+    # Assembled before the charge rather than inside the invocation, so a raise
+    # here is not billed as a call. `build_final_prompt` is one of the two
+    # raisers this function's guards exist for (see the docstring) — it is a
+    # second pass over a diff that can run to `max_diff_chars` — and it does no
+    # model work, so charging for it would report a round trip that was never
+    # made and mark the outcome as one that cost something.
+    try:
+        final_prompt = "\n\n".join([build_final_prompt(), needed.text, _FINAL_ANSWER])
+    except Exception as exc:
+        outcome.note = (
+            f"{agent} asked for {len(needed.served)} file(s) and the second "
+            f"prompt could not be built ({type(exc).__name__}: {exc}); its "
+            "first answer stands"
         )
         return outcome
 
@@ -1899,12 +1938,9 @@ def _round_trip(
     # for every round it is charged.
     outcome.calls += 1
     outcome.round_trip = True
+    outcome.round_trip_refused = False
     try:
-        reply = invoke(
-            agent,
-            "\n\n".join([build_final_prompt(), needed.text, _FINAL_ANSWER]),
-            remaining,
-        )
+        reply = invoke(agent, final_prompt, remaining)
     except Exception as exc:
         outcome.note = (
             f"{agent} was re-invoked with {len(needed.served)} requested file(s) "
@@ -1976,7 +2012,21 @@ def _run_agent(
     and building it is a second pass over a diff that can run to `max_diff_chars`.
     """
     started = time.monotonic()
+    call_started = started
     reply = invoke(agent, prompt, timeout_seconds)
+    # The slowest single call this reviewer has made, which is what the round
+    # trip is sized against. Per call rather than "everything since `started`",
+    # because the malformed retry below makes those two different numbers and
+    # the question is what *one* call costs, not what two did.
+    #
+    # The slowest rather than the most recent, and that distinction is the whole
+    # guard: the retry sends the same prompt plus a nudge, so both calls are
+    # samples of the same size, and taking the later one throws away the larger
+    # sample. A reviewer that spent 100s of a 120s budget writing prose and 2s
+    # on the nudge would otherwise be estimated at 3s and admitted to a round
+    # trip with 18s left — the exact failure this is here to prevent, arriving
+    # by the one path that resets the measurement.
+    slowest_call_seconds = time.monotonic() - call_started
     if not reply.ok:
         return AgentOutcome(
             error=reply.error or f"{agent} call failed", reason="call_failed", calls=1
@@ -1988,6 +2038,12 @@ def _run_agent(
         # The retry runs against what is left of this agent's budget, never a
         # fresh one, so a reviewer cannot double the wall time by answering
         # badly.
+        #
+        # Deliberately still the flat floor, unlike the round trip below. The
+        # retry is the same prompt plus a nudge, and without it this reviewer
+        # has no usable answer at all — a poor chance beats a certain failure.
+        # The round trip is the other way round: the first answer already
+        # stands, so a round that cannot finish buys nothing and costs a call.
         remaining, floor = _remaining(started, timeout_seconds)
         if remaining < floor:
             return AgentOutcome(
@@ -1999,7 +2055,11 @@ def _run_agent(
                 reason="malformed",
                 calls=1,
             )
+        call_started = time.monotonic()
         retry = invoke(agent, f"{prompt}\n\n{_RETRY_NUDGE}", remaining)
+        slowest_call_seconds = max(
+            slowest_call_seconds, time.monotonic() - call_started
+        )
         calls = 2
         if not retry.ok:
             return AgentOutcome(
@@ -2017,7 +2077,20 @@ def _run_agent(
 
     findings, dropped, requested = attempt
     outcome = AgentOutcome(findings=findings, calls=calls, dropped=dropped)
-    if serve is None or not requested:
+    if not requested:
+        return outcome
+    if serve is None:
+        # It asked with the offer absent from its prompt. `serve` is None when
+        # `max_need_files` is off *or* when the task's call budget had no room
+        # for a second round — and the second of those is exactly the case the
+        # flag is most useful in, since a finding left `unverified` there went
+        # unchecked for want of a round the CLI could not buy. Reporting it as
+        # `round_trip_refused = False` would say the reviewer never asked.
+        outcome.round_trip_refused = True
+        outcome.note = (
+            f"{agent} asked for {len(requested)} file(s), but no round trip was "
+            "available on this run, so it was not called again"
+        )
         return outcome
     return _round_trip(
         agent,
@@ -2028,6 +2101,7 @@ def _run_agent(
         invoke=invoke,
         started=started,
         timeout_seconds=timeout_seconds,
+        slowest_call_seconds=slowest_call_seconds,
     )
 
 
@@ -2101,6 +2175,16 @@ def run_review(
         "files_served": [],
         "files_refused": [],
         "need_files_note": "",
+        # At least one reviewer asked for files and was not called again — so a
+        # finding it flagged `unverified` stayed that way for want of a round
+        # rather than because the reviewer chose not to check. Collapsed across
+        # agents like `files_served` and `need_files_note` beside it, so on a
+        # two-agent review it can be true while `rounds` is 2: one reviewer was
+        # refused and the other was served. The two fields answer different
+        # questions — `rounds` is what the run cost, this is whether a round
+        # somebody wanted went unbought — and `need_files_note` names which
+        # reviewer, since nothing else in the envelope carried it at all.
+        "round_trip_refused": False,
         "partial": False,
         "partial_reason": "",
         "empty": False,
@@ -2255,6 +2339,7 @@ def run_review(
         files_served=served,
         files_refused=refused,
         need_files_note=need_files_note,
+        round_trip_refused=any(outcomes[a].round_trip_refused for a in agents),
     )
 
     if not succeeded:

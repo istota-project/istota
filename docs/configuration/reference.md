@@ -115,6 +115,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `shared_file_check_interval` | `120` | Seconds between shared file checks |
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
+| `worktree_reap_interval` | `21600` | Seconds between developer-worktree reaping sweeps (ISSUE-288, 6h; 0 disables). Also gated by `[developer] worktree_reap_enabled`. Well under the 24h default retention, so nothing waits long after becoming eligible. A periodic job rather than a task setup hook: `setup_env` hooks run for every skill whatever the task selected, so a sweep there fired on every Talk reply and every heartbeat tick |
 | `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early. 0 disables |
 | `loop_stall_alert_seconds` | `180` | Defense-in-depth: a watchdog thread logs an ERROR and fires one operator alert if the single-threaded main dispatch loop hasn't ticked in this long (a slow call that slipped onto the loop thread, a wedged check), then re-arms when the loop recovers. Suspended around known multi-minute in-loop work (sleep cycles, DB-health sweep) to avoid false pages. 0 disables |
 
@@ -373,6 +374,8 @@ output = "talk"
 | `devbox_proxy_enabled` | `true` | Keep tokens host-side behind the devbox proxy |
 | `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
 | `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |
+| `worktree_reap_enabled` | `true` | Remove a task worktree under `repos_dir` once every commit on it is upstream, the checkout is clean and it has been idle for the retention window (ISSUE-288). The sweep runs on `[scheduler] worktree_reap_interval` |
+| `worktree_retention_hours` | `24.0` | Idle hours before a worktree is a reap candidate. This is what protects a task running right now, not just a stale checkout. Clamped to a one-hour floor — anything shorter reaps a worktree a task is still setting up |
 
 ### `[developer.review]`
 

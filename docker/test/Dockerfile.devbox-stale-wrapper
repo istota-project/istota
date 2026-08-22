@@ -1,0 +1,46 @@
+# Negative control 2 of 3: the devbox image whose vendored wrapper has drifted.
+#
+# `Dockerfile.devbox-no-forge` deletes the forge directory, which takes the
+# vendored wrapper with it — so the byte-identity assertion in
+# `TestTheWrapperCopyIsInSync` goes red there because `sha256sum` cannot find
+# the file, not because the two hashes differ. Those are different claims. A
+# comparison that always raised before reaching its `assert` would pass that
+# control and still be incapable of noticing a wrapper that had genuinely
+# drifted, which is the failure `scripts/sync-devbox-lib.sh` exists to prevent
+# and the one a stale copy actually produces in production: the devbox quietly
+# enforcing a different deny policy than the sandbox does.
+#
+# So this one perturbs the copy instead of removing it. The file is present,
+# readable, and still a working Python wrapper — only its bytes differ from
+# `src/istota/forge_cli.py`.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-stale-wrapper \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-stale-wrapper:local docker/test
+ARG BASE
+FROM ${BASE}
+
+# See Dockerfile.devbox-no-forge: the base ends as `dev` and this file is
+# root-owned. Dropped back to `dev` at the end.
+USER root
+
+# A trailing comment: one line, semantically inert, and it changes the hash.
+# Deliberately *not* a change that breaks the wrapper — an image where the
+# wrapper no longer runs would fail half the file for unrelated reasons and
+# tell us nothing about whether the hash comparison works. The wrapper must
+# still execute; only the bytes may differ.
+#
+# `printf '\n# …'` rather than `echo`: the source happens to end in a newline,
+# so `echo >>` lands the comment at column 0 — but if it ever stopped ending in
+# one, the comment would concatenate onto the last statement, `ast.parse` would
+# still pass (a trailing comment is valid there), and the control would be
+# quietly corrupting a line instead of appending one. The leading newline
+# removes the dependency on that.
+RUN printf '\n# drift introduced by Dockerfile.devbox-stale-wrapper\n' \
+        >> /usr/local/lib/istota_forge/istota_forge_cli.py \
+    && python3 -c "import ast,sys; ast.parse(open('/usr/local/lib/istota_forge/istota_forge_cli.py').read())" \
+    && echo "control: wrapper still parses, hash now differs"
+
+USER dev

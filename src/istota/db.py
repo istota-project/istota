@@ -3341,6 +3341,24 @@ def count_active_web_tasks(
     return int(row[0]) if row else 0
 
 
+def count_active_room_tasks(conn: sqlite3.Connection, token: str) -> int:
+    """Count non-terminal tasks targeting a room's token, **across every user**.
+
+    The token-scoped sibling of `count_active_web_tasks`, for a guard on state
+    that is room-global rather than per-user. A room's `CHANNEL.md` is one file
+    shared by every member, so any member's worker may be writing it — filtering
+    by the caller the way the delete guard does would refuse nothing in exactly
+    the shared-room case that needs the guard most. Delete is per-user because
+    it drops only the caller's own handle; this is not.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? "
+        "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
+        (token,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def delete_web_chat_room(
     conn: sqlite3.Connection, room_id: int, user_id: str,
 ) -> bool:
@@ -5874,6 +5892,33 @@ def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int) -> None:
     """Store the subprocess PID for a running task."""
     conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (pid, task_id))
     conn.commit()
+
+
+def get_running_task_pids(conn: sqlite3.Connection) -> list[tuple[int, int]]:
+    """``(task_id, worker_pid)`` for every running task with a pid recorded.
+
+    Read by the host-pressure snapshot, which uses the pids to reach into each
+    task's bwrap mount namespace and attribute the tmpfs the daemon's own mount
+    table cannot see (ISSUE-286).
+
+    ``worker_pid`` is cleared on every transition out of ``running``, so a pid
+    on a ``running`` row is a live attempt rather than a stale one from a
+    finished task. It can still exit between this read and the ``/proc`` read a
+    moment later; the caller renders that as an unavailable row.
+
+    **Every running task is returned, including one with no pid**, which is
+    reported as ``0``. Filtering those out would have printed ``sandbox
+    none-running`` on a host that was running work: ``NativeBrain`` never calls
+    ``on_pid`` at all, and neither does ``ClaudeCodeBrain``'s non-streaming
+    path, so on those deployments the column is legitimately NULL while a task
+    is running. The caller renders a ``0`` as "no worker pid recorded" — which
+    is the true answer, and unlike an omission it does not read as an
+    idle host.
+    """
+    cursor = conn.execute(
+        "SELECT id, worker_pid FROM tasks WHERE status = 'running'"
+    )
+    return [(int(row["id"]), int(row["worker_pid"] or 0)) for row in cursor.fetchall()]
 
 
 def set_task_model_used(conn: sqlite3.Connection, task_id: int, model: str) -> None:

@@ -1584,12 +1584,14 @@ class TestForgeTransport:
         assert run_checks(config, only=("developer.forge_transport",))[0].status == SKIP
 
     def test_a_plain_http_github_url_warns_too(self, make_config, tmp_path):
-        """Both forges, even though gh cannot reach a non-443 host.
+        """Both forges, and for gh the scheme is the whole problem.
 
-        gh drops the port, so it would reach `https://the-host:443` rather than
-        the plaintext one — but the scheme is still what the operator wrote,
-        and a check that stayed quiet about it would be reporting on the
-        deployment it wished it had.
+        gh refuses a scheme inside `GH_HOST`, so a plain-HTTP `github_url`
+        cannot connect however it is spelled — the token never leaves, but the
+        operator still wrote `http://` and a check that stayed quiet about it
+        would be reporting on the deployment it wished it had. The port is a
+        separate matter and is no longer broken (`forge_cli._gh_host`,
+        ISSUE-279).
         """
         config = _dev_config(
             make_config,

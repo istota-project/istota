@@ -1002,6 +1002,13 @@ def _release_task_cgroup(task_id: int, path: Path) -> None:
     reported as an opaque killed child with nothing anywhere mentioning a cap —
     a task told it was killed, and an operator with no way to find out why.
 
+    Both limits that can end a task are named, not just memory. A task that
+    hits ``pids.max`` gets ``fork: Resource temporarily unavailable`` out of
+    whatever it was running, which mentions no cgroup and reads like a broken
+    toolchain; ``pids.events``'s ``max`` counter is the only place that says
+    otherwise. Neither counter moved before placement worked (ISSUE-285) — the
+    cgroup held one sleeping process, so nothing in it ever reached a limit.
+
     Never raises: this runs from an ``ExitStack`` callback on the task's exit
     path, where an exception would replace the task's real result with this
     one's.
@@ -1014,6 +1021,14 @@ def _release_task_cgroup(task_id: int, path: Path) -> None:
                 "(scheduler.task_memory_max_mb) — the task exceeded its memory "
                 "cap; the rest of the host was unaffected",
                 task_id, events["oom_kill"],
+            )
+        pids_events = task_cgroup.read_events(path, "pids.events")
+        if pids_events.get("max"):
+            logger.warning(
+                "task %d: %d fork(s) refused by the task's own cgroup "
+                "(scheduler.task_pids_max) — the task hit its process limit and "
+                "will have reported it as a fork failure",
+                task_id, pids_events["max"],
             )
         task_cgroup.destroy(path)
     except Exception:  # noqa: BLE001
@@ -1255,11 +1270,22 @@ def build_stripped_env() -> dict[str, str]:
     Fernet key (``ISTOTA_SECRET_KEY``) is no longer preserved here. Skill
     subprocesses that need per-user encrypted secrets get them
     pre-resolved via the manifest ``env:`` blocks.
+
+    ``PRECOMMIT_SCANS_REQUIRED`` is added rather than filtered (ISSUE-291).
+    The repository's pre-commit hook refuses a commit whose secret scan could
+    not run, but only where it can tell nobody is watching, and the markers it
+    reads for that — ``ISTOTA_SANDBOXED``, ``DEVELOPER_REPOS_DIR`` — are built
+    per task by ``build_claude_env``. This env is the daemon's own, so a cron
+    ``command`` job or a heartbeat shell command carries neither and would be
+    read as a human at a terminal. It is as unattended as any of them, so it
+    says so.
     """
-    return {
+    env = {
         k: v for k, v in os.environ.items()
         if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
     }
+    env["PRECOMMIT_SCANS_REQUIRED"] = "1"
+    return env
 
 
 # Defense-in-depth: instance-wide credentials that must never be returned
@@ -3957,12 +3983,19 @@ def execute_task(
 
         # Devbox: the agent's persistent dev container. Skill CLI shells
         # into ``devbox-<user_id>`` via the host docker socket.
+        #
+        # ``config.devbox.docker_socket`` is deliberately not exported here
+        # (ISSUE-284). Nothing read it — the CLI invokes ``docker`` and lets
+        # the client resolve its own socket — and the field carries two
+        # meanings: the real root-equivalent socket ``docker_proxy`` connects
+        # to upstream, and the in-sandbox mount point ``build_bwrap_cmd`` binds
+        # the allowlist proxy at. Putting that name in the model's own
+        # environment invites a later reader to treat it as a socket it may use.
         if config.devbox.enabled:
             env["ISTOTA_DEVBOX_CONTAINER"] = (
                 f"{config.devbox.container_prefix}{task.user_id}"
             )
             env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
-            env["ISTOTA_DEVBOX_DOCKER_SOCKET"] = config.devbox.docker_socket
             env["ISTOTA_DEVBOX_EXEC_TIMEOUT"] = str(
                 config.devbox.exec_timeout_seconds
             )
@@ -4454,6 +4487,15 @@ def execute_task(
             # Placement first, DB second. `update_task_pid` can block on the
             # SQLite write lock, and the whole value of the cgroup is in the
             # window before the child's own work starts.
+            #
+            # This is the after-the-fact form, and it only reaches the pid's own
+            # thread group — not the children it already forked (ISSUE-285). The
+            # brains that spawn their own subprocess place it from `preexec_fn`
+            # instead, off `req.task_cgroup`, and by the time they call back
+            # here the pid is already a member and this write is a no-op. What
+            # it is still load-bearing for is TmuxClaudeBrain, which reports a
+            # pane pid the tmux server spawned: there is no `preexec_fn` to
+            # reach, so containing the group leader is all that path can do.
             if _task_cg is not None:
                 task_cgroup.place(pid, _task_cg)
             try:

@@ -497,6 +497,19 @@ class TestBuildInvocation:
         assert env["GH_TOKEN"] == SENTINEL
         assert "GH_ENTERPRISE_TOKEN" not in env
 
+    def test_the_ghe_dot_com_apex_is_enterprise_unlike_its_subdomains(self):
+        """A *subdomain* of ghe.com, not the apex — the sentence above, read
+        exactly. Measured with `gh auth token` on 2.98.0: `tenant.ghe.com`
+        resolves GH_TOKEN, a bare `ghe.com` resolves GH_ENTERPRISE_TOKEN.
+
+        The apex was listed alongside the subdomains here until ISSUE-279, so a
+        forge configured at `https://ghe.com` got the variable gh does not read.
+        """
+        _, _, env = self._call(url="https://ghe.com")
+        assert env["GH_HOST"] == "ghe.com"
+        assert env["GH_ENTERPRISE_TOKEN"] == SENTINEL
+        assert "GH_TOKEN" not in env
+
     def test_state_dir_kept_out_of_the_read_only_config_dir(self):
         """gh writes a device id under $XDG_STATE_HOME on every run. Left to
         default it lands in $HOME/.local/state, which may not be writable."""
@@ -541,12 +554,12 @@ class TestGhPreflight:
 
     `tests/smoke/test_forge_e2e.py` drives glab through the whole chain against
     a stub. gh cannot be driven the same way and the reason is a product
-    finding rather than a test-harness limitation: `forge_cli._hostname` returns
-    `urlsplit(url).hostname`, which discards the scheme and the port *by
-    construction* — the docstring says so, because the GH_TOKEN /
-    GH_ENTERPRISE_TOKEN split keys off the bare hostname. So a recorder at
-    `http://127.0.0.1:54321` yields `GH_HOST=127.0.0.1` and gh attempts
-    `https://127.0.0.1:443`. No arrangement on the test's side fixes that.
+    finding rather than a test-harness limitation — though a narrower one than
+    it used to be. The port now survives (`_gh_host`, ISSUE-279), so a recorder
+    on `:54321` is addressable; the *scheme* is not, because gh refuses one
+    inside `GH_HOST` ("error connecting to http") and speaks https regardless.
+    So a stub would have to terminate TLS on a port gh was told about, and no
+    arrangement on the test's side removes the certificate.
 
     (`gh pr create` would also need a GraphQL stub — it resolves repo metadata
     through `/api/graphql` before posting — and those queries are an
@@ -617,21 +630,43 @@ class TestGhPreflight:
         assert "GH_TOKEN" not in env
         assert "GH_ENTERPRISE_TOKEN" not in env
 
-    def test_a_non_443_port_is_dropped_and_that_is_the_product_finding(self):
-        """gh cannot address a forge on a non-standard port. Pinned, not fixed.
+    def test_a_non_443_port_reaches_gh(self):
+        """A self-hosted forge on `:8443` is addressable (ISSUE-279).
 
-        `_hostname` drops the port deliberately, so a self-hosted GitHub
-        Enterprise on `:8443` is unreachable: gh is told the bare host and goes
-        to 443. This is not this spec's to fix — it is asserted here so the
-        limitation is written down where someone debugging it will find it, and
-        so a later change to `_hostname` cannot alter the behaviour silently.
+        gh honours a port inside `GH_HOST` — measured against gh 2.98.0, which
+        builds `https://ghe.example.com:8443/api/v3/` from this value. The
+        wrapper used to hand it `_hostname`'s answer, which strips the port by
+        construction, so every call went to 443 on a host the operator did
+        configure and a port they did not.
 
-        The glab branch does not share it: `GITLAB_HOST` carries the whole URL.
+        The token still keys off the *bare* hostname, which is the whole reason
+        the two derivations are separate functions.
         """
         _, _, _, env = self._preflight(["pr", "list"], url="https://ghe.example.com:8443")
 
-        assert env["GH_HOST"] == "ghe.example.com"
-        assert "8443" not in env["GH_HOST"]
+        assert env["GH_HOST"] == "ghe.example.com:8443"
+        assert env["GH_ENTERPRISE_TOKEN"] == SENTINEL
+        assert "GH_TOKEN" not in env
+
+    def test_a_ported_github_com_takes_the_enterprise_variable(self):
+        """A port moves github.com onto GH_ENTERPRISE_TOKEN, because gh does.
+
+        Measured with `gh auth token` on 2.98.0: `GH_HOST=github.com` resolves
+        GH_TOKEN, `GH_HOST=github.com:8443` resolves GH_ENTERPRISE_TOKEN and
+        reports "no oauth token found" when only GH_TOKEN is set. gh runs one
+        classification for both the API endpoint and the token variable, and it
+        does not strip the port for either.
+
+        So the wrapper must decide the token from the same string it puts in
+        GH_HOST. Deciding it from the bare hostname reads naturally and sets
+        the variable gh will not look at, which fails as a 401 — indisting-
+        uishable from a token whose scopes are wrong.
+        """
+        _, _, _, env = self._preflight(["pr", "list"], url="https://github.com:8443")
+
+        assert env["GH_HOST"] == "github.com:8443"
+        assert env["GH_ENTERPRISE_TOKEN"] == SENTINEL
+        assert "GH_TOKEN" not in env
 
     def test_the_ambient_token_cannot_survive_into_the_child(self):
         """The isolation the smoke tier asserts for glab, for gh.
@@ -788,3 +823,119 @@ class TestHostname:
         assert env["GH_HOST"] == "github.com"
         assert env["GH_TOKEN"] == SENTINEL
         assert "GH_ENTERPRISE_TOKEN" not in env
+
+
+class TestGhHost:
+    """`_gh_host` — the whole of what gh is told: host, and a non-default port.
+
+    Every expectation below was measured against gh 2.98.0 rather than inferred
+    from the variable's name; the shapes gh accepts are narrower than they look.
+    """
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://github.com", "github.com"),
+        ("https://ghe.example.com", "ghe.example.com"),
+        # The fix: the port survives.
+        ("https://ghe.example.com:8443", "ghe.example.com:8443"),
+        # Parsed here, but not reachable from a sandboxed task: the network
+        # allowlist reads the raw config value with `urlparse`, which takes
+        # `ghe.example.com` for the *scheme* and yields no host, so no entry is
+        # added and the CONNECT proxy refuses the call (executor.py:1348-1354).
+        # Fails closed, and it predates ISSUE-279. Configure a scheme.
+        ("ghe.example.com:8443", "ghe.example.com:8443"),      # no scheme
+        ("https://ghe.example.com:8443/", "ghe.example.com:8443"),
+        # An explicit default port is dropped. Measured: `GH_HOST=github.com:443`
+        # takes gh off api.github.com and onto `https://github.com:443/api/v3`,
+        # which 404s. Only a *non*-default port may reach gh.
+        ("https://github.com:443", "github.com"),
+        ("http://forge.internal:80", "forge.internal"),
+        ("http://forge.internal:8080", "forge.internal:8080"),
+        # IPv6 goes back in its brackets. gh dials `https://[::1]:8443/api/v3/`
+        # from this; unbracketed it is not a parseable authority.
+        ("https://[::1]:8443", "[::1]:8443"),
+        ("https://[::1]", "[::1]"),
+        # Userinfo never travels: GH_HOST is a destination, not a credential.
+        ("https://user:pw@ghe.example.com:8443", "ghe.example.com:8443"),
+        ("HTTPS://GHE.EXAMPLE.COM:8443", "ghe.example.com:8443"),  # lowercased
+        # Unparseable port degrades to the bare host rather than raising in a
+        # setup path or handing gh an authority it would reject outright.
+        ("https://ghe.example.com:notaport", "ghe.example.com"),
+        ("https://ghe.example.com:99999", "ghe.example.com"),
+        ("https://ghe.example.com:8443 ", "ghe.example.com"),   # trailing space
+        # Port 0 parses and addresses nothing, so it is dropped too.
+        ("https://ghe.example.com:0", "ghe.example.com"),
+        # 443 is the default for *any* scheme, because gh speaks https whatever
+        # the URL said. Keyed on the scheme alone, `_DEFAULT_PORTS.get` returns
+        # None for anything outside http/https and an explicit `:443` would
+        # then read as a port — making a ported host, and moving it onto
+        # GH_ENTERPRISE_TOKEN.
+        ("git+https://ghe.example.com:443", "ghe.example.com"),
+        # A port that really is non-default survives even on a scheme gh cannot
+        # use. `github_url` is an API base URL and an ssh one is already a
+        # misconfiguration; passing on what the operator wrote fails visibly,
+        # where quietly rewriting it to 443 is the class of bug ISSUE-279 was.
+        ("ssh://git@ghe.example.com:22", "ghe.example.com:22"),
+        ("https://", ""),
+        ("", ""),
+    ])
+    def test_gh_host(self, url, expected):
+        from istota.forge_cli import _gh_host
+        assert _gh_host(url) == expected
+
+    def test_a_scheme_is_dropped_while_the_port_is_kept(self):
+        """gh refuses a scheme in GH_HOST outright ("error connecting to http"),
+        so plain HTTP stays unreachable for gh however this is spelled — a
+        separate limitation from the port, and the one
+        `doctor.check_forge_transport` reports.
+
+        Asserted as concrete values: `"://" not in` would hold for any hostname
+        and so would pass against the pre-fix code.
+        """
+        from istota.forge_cli import _gh_host
+        assert _gh_host("http://forge.internal:8080") == "forge.internal:8080"
+        assert _gh_host("https://forge.internal:8443") == "forge.internal:8443"
+
+    @pytest.mark.parametrize("url", [
+        "https://ghe.example.com.:8443",
+        "https://user:pw@evil.example:8443",
+        "https://github.com@evil.example:8443",
+        "https://github.com:8443@evil.example",
+        "https://[fe80::1%25eth0]:8443",
+        "https://[::ffff:127.0.0.1]:8443",
+        "https://GHE.EXAMPLE.COM:8443",
+        "https://ghe.example.com:notaport",
+        "ghe.example.com:8443",
+        "//ghe.example.com:8443",
+        "https://ghé.example.com:8443",
+        "https://",
+        "",
+    ])
+    def test_the_token_is_chosen_for_the_host_it_is_sent_to(self, url):
+        """The security invariant behind the single derivation.
+
+        `GH_HOST` decides where a credential-bearing request goes, and
+        `_is_github_com` decides which variable carries the credential. If the
+        host inside `_gh_host`'s answer could ever differ from `_hostname`'s,
+        a URL could route a token by one host and send it to another. It cannot
+        — `_gh_host` is built on `_hostname` — and this pins that rather than
+        leaving it to coincidence.
+        """
+        from istota.forge_cli import _gh_host, _hostname
+        gh = _gh_host(url)
+        bare = gh
+        if bare.startswith("["):
+            bare = bare[1:].split("]")[0]
+        elif ":" in bare:
+            bare = bare.rsplit(":", 1)[0]
+        assert bare == _hostname(url)
+
+    def test_a_non_string_url_cannot_raise_on_the_way_to_exec(self):
+        """`url` comes from a JSON policy file, so its type is not guaranteed.
+
+        `"://" in 42` is a TypeError, which no `except ValueError` catches, in a
+        process that is holding a forge token one call before `execve`.
+        """
+        from istota.forge_cli import _gh_host, _hostname
+        for bad in (42, None, ["https://ghe.example.com"], {"url": "x"}):
+            assert _hostname(bad) == ""
+            assert _gh_host(bad) == ""

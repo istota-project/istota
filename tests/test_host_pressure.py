@@ -15,7 +15,9 @@ figures that made the outage legible.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1642,3 +1644,452 @@ class TestBreadcrumbMemoryEvents:
         root = build_proc(tmp_path / "proc", mounts="")
         sample = host_pressure.read_sample(root)
         assert "memory_events_high=?" in host_pressure.breadcrumb(sample, [])
+
+
+# ---------------------------------------------------------------------------
+# Task sandbox attribution (ISSUE-286)
+# ---------------------------------------------------------------------------
+
+
+DAEMON_NS = "mnt:[4026531840]"
+SANDBOX_NS = "mnt:[4026532517]"
+
+
+def add_pid(
+    root: Path,
+    pid: int,
+    *,
+    namespace: str | None = None,
+    children: Sequence[int] = (),
+    mounts: str | None = None,
+) -> Path:
+    """One entry in a fixture ``/proc``: a mount namespace, children, a table.
+
+    ``namespace`` is a symlink because that is what ``/proc/<pid>/ns/mnt`` is
+    and ``os.readlink`` is what reads it. ``children`` lands where the kernel
+    puts it, at ``task/<pid>/children``.
+    """
+    d = root / str(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    if namespace is not None:
+        ns = d / "ns"
+        ns.mkdir(exist_ok=True)
+        os.symlink(namespace, ns / "mnt")
+    task = d / "task" / str(pid)
+    task.mkdir(parents=True, exist_ok=True)
+    (task / "children").write_text(" ".join(str(c) for c in children) + "\n")
+    if mounts is not None:
+        (d / "mounts").write_text(mounts)
+    return d
+
+
+def add_daemon_namespace(root: Path, namespace: str = DAEMON_NS) -> None:
+    """``/proc/self/ns/mnt`` — the identity every candidate is compared against."""
+    ns = root / "self" / "ns"
+    ns.mkdir(parents=True, exist_ok=True)
+    # Idempotent: a fixture with two running tasks calls add_sandbox twice.
+    if not (ns / "mnt").is_symlink():
+        os.symlink(namespace, ns / "mnt")
+
+
+def add_sandbox(root: Path, outer_pid: int, mounts: str, *, inner_pid: int | None = None) -> int:
+    """A running task as the host sees it, in the two processes it really is.
+
+    ``tasks.worker_pid`` is the pid ``Popen`` returned, which is the *outer*
+    ``bwrap`` — the privileged monitor that stays in the daemon's own mount
+    namespace. bwrap forks during namespace setup, and the child is what holds
+    the private ``/`` and ``/tmp``. Modelling only one process is what let the
+    first version of this fix read the daemon's mount table and call it the
+    task's, so the fixture insists on both.
+
+    Returns the inner pid, which is the one whose mounts these are.
+    """
+    inner = outer_pid + 1 if inner_pid is None else inner_pid
+    add_daemon_namespace(root)
+    add_pid(root, outer_pid, namespace=DAEMON_NS, children=[inner])
+    add_pid(root, inner, namespace=SANDBOX_NS, children=[], mounts=mounts)
+    return inner
+
+
+def sandbox_statvfs(by_suffix: dict[str, tuple[int, int]]):
+    """``statvfs`` stand-in keyed by the tail of the path.
+
+    A sandbox mount is reached at ``/proc/<pid>/root/<mount>``, built from a
+    ``tmp_path`` that differs every run. Matching on the suffix keeps the
+    fixture about the mount under test rather than about path assembly.
+    """
+    frsize = 4096
+
+    class _Result:
+        def __init__(self, blocks: int, bfree: int) -> None:
+            self.f_frsize = frsize
+            self.f_bsize = frsize
+            self.f_blocks = blocks
+            self.f_bfree = bfree
+            self.f_bavail = bfree
+
+    def _statvfs(path):
+        key = str(path)
+        for suffix, (size, used) in by_suffix.items():
+            if key.endswith(suffix):
+                blocks = size // frsize
+                return _Result(blocks, blocks - used // frsize)
+        raise OSError(2, "No such file or directory", key)
+
+    return _statvfs
+
+
+# The 2026-08-22 observation: the whole residue was one bwrap ``/tmp`` holding
+# pytest's temp tree from the suite the task was running. ``/`` is a tmpfs of
+# its own in a bwrap sandbox, and the bound host path is not — both are here so
+# the reader has to pick out the tmpfs lines rather than count mounts.
+SANDBOX_MOUNTS = (
+    "tmpfs / tmpfs rw,nosuid,nodev 0 0\n"
+    "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n"
+    "/dev/sda1 /srv ext4 ro,relatime 0 0\n"
+)
+
+
+class TestFindSandboxedPid:
+    """``worker_pid`` is the outer ``bwrap``, which stays in the daemon's own
+    mount namespace. Reading *its* mount table returns the daemon's, and the
+    rows would restate the host tmpfs already listed above them under a
+    ``sandbox task=`` label — worse than no rows, because it double-counts and
+    blames a task for host memory. This is the descent that avoids it."""
+
+    def test_descends_to_the_child_in_its_own_namespace(self, tmp_path):
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[101])
+        add_pid(proc, 101, namespace=SANDBOX_NS, children=[])
+
+        assert host_pressure.find_sandboxed_pid(100, DAEMON_NS, proc_root=proc) == 101
+
+    def test_finds_it_two_levels_down(self, tmp_path):
+        """bwrap's exact fork depth is not a contract, so the walk does not
+        assume one."""
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[101])
+        add_pid(proc, 101, namespace=DAEMON_NS, children=[102])
+        add_pid(proc, 102, namespace=SANDBOX_NS, children=[])
+
+        assert host_pressure.find_sandboxed_pid(100, DAEMON_NS, proc_root=proc) == 102
+
+    def test_none_when_no_descendant_is_sandboxed(self, tmp_path):
+        """An uncontained deployment. Returning the pid itself here is what
+        would produce the host's own mounts labelled as a task's."""
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[101])
+        add_pid(proc, 101, namespace=DAEMON_NS, children=[])
+
+        assert host_pressure.find_sandboxed_pid(100, DAEMON_NS, proc_root=proc) is None
+
+    def test_none_for_a_pid_with_no_children(self, tmp_path):
+        assert (
+            host_pressure.find_sandboxed_pid(999999, DAEMON_NS, proc_root=tmp_path / "proc")
+            is None
+        )
+
+    def test_prefers_the_shallowest_answer(self, tmp_path):
+        """Breadth-first, so a busy task's deep process tree is never walked."""
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[101, 102])
+        add_pid(proc, 101, namespace=DAEMON_NS, children=[103])
+        add_pid(proc, 102, namespace=SANDBOX_NS, children=[])
+        add_pid(proc, 103, namespace="mnt:[4026532999]", children=[])
+
+        assert host_pressure.find_sandboxed_pid(100, DAEMON_NS, proc_root=proc) == 102
+
+    def test_a_cycle_in_the_tree_terminates(self, tmp_path):
+        """``children`` is kernel-supplied and cannot really cycle, but the walk
+        must not depend on that to halt."""
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[101])
+        add_pid(proc, 101, namespace=DAEMON_NS, children=[100, 101])
+
+        assert host_pressure.find_sandboxed_pid(100, DAEMON_NS, proc_root=proc) is None
+
+    def test_a_wide_tree_is_bounded(self, tmp_path):
+        """A task running `pytest -n auto` has hundreds of descendants. The walk
+        gives up rather than spending the snapshot enumerating them."""
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=list(range(200, 600)))
+        for child in range(200, 600):
+            add_pid(proc, child, namespace=DAEMON_NS, children=[])
+
+        assert host_pressure.find_sandboxed_pid(100, DAEMON_NS, proc_root=proc) is None
+
+
+class TestReadSandboxShm:
+    def test_names_the_task_and_its_tmpfs_usage(self, tmp_path):
+        """The gap ISSUE-286 is about: 2.7 GB of sandbox ``/tmp`` that no host
+        mount table can see, charged to the residue and attributed to nothing."""
+        proc = tmp_path / "proc"
+        inner = add_sandbox(proc, 533787, SANDBOX_MOUNTS)
+        statvfs = sandbox_statvfs(
+            {
+                f"/{inner}/root/tmp": (4 * 1024**3, 2700 * 1024**2),
+                f"/{inner}/root": (4 * 1024**3, 8 * 1024**2),
+            }
+        )
+
+        rows = host_pressure.read_sandbox_shm(
+            [(309264, 533787)], proc_root=proc, statvfs=statvfs
+        )
+
+        by_mount = {r.mount_point: r for r in rows}
+        assert by_mount["/tmp"].available is True
+        assert by_mount["/tmp"].name == "309264"
+        assert by_mount["/tmp"].used_bytes == 2700 * 1024**2
+        # The ext4 line is not shmem and must not be counted as any.
+        assert "/srv" not in by_mount
+
+    def test_the_host_mount_table_is_never_reported_as_a_sandbox(self, tmp_path):
+        """The regression this section exists for. An unsandboxed task's
+        ``worker_pid`` sits in the daemon's namespace, so reading it would hand
+        back the host's own tmpfs — already listed in the ``tmpfs`` section —
+        as that task's usage."""
+        proc = tmp_path / "proc"
+        add_daemon_namespace(proc)
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[], mounts=SANDBOX_MOUNTS)
+        statvfs = sandbox_statvfs({"/root/tmp": (4 * 1024**3, 2700 * 1024**2)})
+
+        rows = host_pressure.read_sandbox_shm(
+            [(5, 100)], proc_root=proc, statvfs=statvfs
+        )
+
+        assert len(rows) == 1
+        assert rows[0].available is False
+        assert "own mount namespace" in rows[0].detail
+        assert rows[0].used_bytes == 0
+
+    def test_several_running_tasks_are_each_labelled(self, tmp_path):
+        proc = tmp_path / "proc"
+        a = add_sandbox(proc, 111, "tmpfs /tmp tmpfs rw 0 0\n")
+        b = add_sandbox(proc, 222, "tmpfs /tmp tmpfs rw 0 0\n")
+        statvfs = sandbox_statvfs(
+            {
+                f"/{a}/root/tmp": (1024**3, 100 * 1024**2),
+                f"/{b}/root/tmp": (1024**3, 200 * 1024**2),
+            }
+        )
+
+        rows = host_pressure.read_sandbox_shm(
+            [(1, 111), (2, 222)], proc_root=proc, statvfs=statvfs
+        )
+
+        assert {(r.name, r.used_bytes) for r in rows} == {
+            ("1", 100 * 1024**2),
+            ("2", 200 * 1024**2),
+        }
+
+    def test_no_running_tasks_yields_no_rows(self, tmp_path):
+        proc = tmp_path / "proc"
+        add_daemon_namespace(proc)
+        assert host_pressure.read_sandbox_shm([], proc_root=proc) == []
+
+    def test_a_task_whose_pid_is_gone_is_recorded_not_dropped(self, tmp_path):
+        """A task that finished between the DB read and the ``/proc`` read.
+        Named rather than dropped: a missing row and a zero row read alike."""
+        proc = tmp_path / "proc"
+        add_daemon_namespace(proc)
+
+        rows = host_pressure.read_sandbox_shm([(309264, 999999)], proc_root=proc)
+
+        assert len(rows) == 1
+        assert rows[0].name == "309264"
+        assert rows[0].available is False
+        assert rows[0].detail
+
+    def test_a_task_with_no_pid_recorded_says_so(self, tmp_path):
+        """Reachable in production: NativeBrain never calls ``on_pid``."""
+        proc = tmp_path / "proc"
+        add_daemon_namespace(proc)
+
+        rows = host_pressure.read_sandbox_shm([(7, 0)], proc_root=proc)
+
+        assert len(rows) == 1
+        assert rows[0].available is False
+        assert "no worker pid" in rows[0].detail
+        # Not the container vocabulary: a task is not a container, and the row
+        # this replaces would have said "container not running".
+        assert "container" not in rows[0].detail
+
+    def test_an_unreadable_own_namespace_reports_rather_than_guesses(self, tmp_path):
+        """With nothing to compare against, no pid can be shown to be
+        sandboxed — so no pid's mounts may be printed as one."""
+        proc = tmp_path / "proc"
+        add_pid(proc, 100, namespace=DAEMON_NS, children=[101])
+        add_pid(proc, 101, namespace=SANDBOX_NS, children=[], mounts=SANDBOX_MOUNTS)
+
+        rows = host_pressure.read_sandbox_shm([(3, 100)], proc_root=proc)
+
+        assert len(rows) == 1
+        assert rows[0].available is False
+        assert "mount namespace is unreadable" in rows[0].detail
+
+    def test_never_raises_on_a_statvfs_that_fails_oddly(self, tmp_path):
+        """The snapshot path is instrumentation. It must not take the daemon
+        down because a pid exited between the mount table and the statvfs."""
+        proc = tmp_path / "proc"
+        add_sandbox(proc, 111, "tmpfs /tmp tmpfs rw 0 0\n")
+
+        def exploding_statvfs(path):
+            raise OSError(5, "Input/output error", str(path))
+
+        rows = host_pressure.read_sandbox_shm(
+            [(1, 111)], proc_root=proc, statvfs=exploding_statvfs
+        )
+
+        assert len(rows) == 1
+        assert rows[0].available is False
+
+
+@pytest.mark.requires_dac
+class TestUnreadableMountsDetail:
+    """The second half of ISSUE-286. ``unreadable`` invited the reader to treat
+    a permanent condition as a race, and an investigation went after the wrong
+    suspect on the strength of it.
+
+    **What this proves and what it does not.** It drives the errno dispatch with
+    a real ``EACCES`` from a chmod'd file, so the mapping from errno to wording
+    is under test. It says nothing about which errno ``/proc/<pid>/mounts``
+    actually returns on the production host — that observation does not exist,
+    which is why the rendered strings name the errno and stop short of
+    asserting a cause.
+    """
+
+    def test_permission_denied_says_so_and_says_it_is_permanent(self, tmp_path):
+        proc = tmp_path / "proc"
+        (proc / "9001").mkdir(parents=True)
+        denied = proc / "9001" / "mounts"
+        denied.write_text("tmpfs /dev/shm tmpfs rw 0 0\n")
+        denied.chmod(0o000)
+        try:
+            rows = host_pressure.container_shm_for_pid(
+                "istota-browser", 9001, proc_root=proc
+            )
+        finally:
+            denied.chmod(0o644)  # so tmp_path teardown can remove it
+
+        assert len(rows) == 1
+        assert rows[0].available is False
+        assert "EACCES" in rows[0].detail
+        assert "permanent" in rows[0].detail
+
+
+class TestVanishedPidDetail:
+    def test_a_vanished_pid_names_the_errno_not_a_bare_unreadable(self, tmp_path):
+        rows = host_pressure.container_shm_for_pid(
+            "devbox-alice", 9002, proc_root=tmp_path / "proc"
+        )
+
+        assert rows[0].available is False
+        assert "ENOENT" in rows[0].detail
+        # Both readings are offered, because the recorded evidence does not
+        # settle which one produced the production line.
+        assert "exited" in rows[0].detail
+        assert "not visible to this reader" in rows[0].detail
+
+    def test_a_task_mid_exit_is_not_reported_as_a_code_bug(self, tmp_path):
+        """EINVAL is what the kernel returns for a task with no ``nsproxy``.
+        In the generic arm it renders as "Invalid argument", which reads as a
+        defect in this module rather than as a process on its way out."""
+        proc = tmp_path / "proc"
+        (proc / "9003").mkdir(parents=True)
+
+        def exploding_read(path):
+            raise OSError(22, "Invalid argument", str(path))
+
+        with patch.object(Path, "read_text", exploding_read):
+            rows = host_pressure.container_shm_for_pid("devbox-bob", 9003, proc_root=proc)
+
+        assert "EINVAL" in rows[0].detail
+        assert "exiting" in rows[0].detail
+
+
+class TestSnapshotSandboxRows:
+    def test_the_snapshot_names_the_task_holding_the_residue(self, tmp_path):
+        proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
+        sandboxes = [
+            host_pressure.ContainerShmUsage(
+                name="309264",
+                mount_point="/tmp",
+                size_bytes=4 * 1024**3,
+                used_bytes=2700 * 1024**2,
+                available=True,
+            )
+        ]
+
+        text = host_pressure.snapshot(proc, tmpfs=[], containers=[], sandboxes=sandboxes)
+
+        assert "sandbox task=309264 mount=/tmp used_kb=2764800" in text
+
+    def test_an_unavailable_sandbox_row_is_printed_not_dropped(self, tmp_path):
+        proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
+        sandboxes = [
+            host_pressure.ContainerShmUsage(
+                name="7", mount_point="?", size_bytes=0, used_bytes=0,
+                available=False, detail="no worker pid recorded",
+            )
+        ]
+
+        text = host_pressure.snapshot(proc, tmpfs=[], containers=[], sandboxes=sandboxes)
+
+        assert "sandbox task=7 mount=? used_kb=unavailable" in text
+        assert "no worker pid recorded" in text
+
+    def test_no_running_tasks_and_not_asked_are_different_lines(self, tmp_path):
+        """The module's own rule, applied to the new section: an absent reading
+        and a zero reading must not render alike. A caller with no database —
+        ``python -m istota.host_pressure --snapshot`` — has not established
+        that no task is running."""
+        proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
+
+        none_running = host_pressure.snapshot(proc, tmpfs=[], containers=[], task_pids=[])
+        not_asked = host_pressure.snapshot(proc, tmpfs=[], containers=[])
+
+        assert "sandbox none-running" in none_running
+        assert "sandbox not-queried" in not_asked
+        assert "sandbox none-running" not in not_asked
+
+    def test_pids_supplied_but_no_rows_is_not_reported_as_an_idle_host(self, tmp_path):
+        """A caller contradicting itself. Forwarding that as `none-running`
+        would turn a caller bug into a finding about the host."""
+        proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
+
+        text = host_pressure.snapshot(
+            proc, tmpfs=[], containers=[], sandboxes=[], task_pids=[(1, 999)]
+        )
+
+        assert "sandbox none-running" not in text
+        assert "sandbox inconsistent-input" in text
+
+    def test_task_pids_are_read_through_proc_when_no_rows_are_passed(self, tmp_path):
+        proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
+        inner = add_sandbox(proc, 4242, "tmpfs /tmp tmpfs rw 0 0\n")
+        statvfs = sandbox_statvfs({f"/{inner}/root/tmp": (1024**3, 512 * 1024**2)})
+
+        text = host_pressure.snapshot(
+            proc, tmpfs=[], containers=[], task_pids=[(88, 4242)], statvfs=statvfs
+        )
+
+        assert "sandbox task=88 mount=/tmp used_kb=524288" in text
+
+    def test_a_mount_point_with_a_space_does_not_break_the_line(self, tmp_path):
+        proc = build_proc(tmp_path / "proc", mounts=MOUNTS)
+        sandboxes = [
+            host_pressure.ContainerShmUsage(
+                name="1", mount_point="/tmp/a b", size_bytes=0, used_bytes=1024,
+                available=True,
+            )
+        ]
+
+        text = host_pressure.snapshot(proc, tmpfs=[], containers=[], sandboxes=sandboxes)
+
+        line = [ln for ln in text.splitlines() if ln.strip().startswith("sandbox ")][0]
+        assert "mount=/tmp/a\\040b" in line
+        # One label plus four key=value fields. A bare space in the mount point
+        # would split into six and silently break every reader downstream.
+        assert line.split() == [
+            "sandbox", "task=1", "mount=/tmp/a\\040b", "used_kb=1", "size_kb=0",
+        ]

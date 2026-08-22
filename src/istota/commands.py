@@ -670,7 +670,7 @@ async def cmd_steer(ctx: CommandContext):
     if ctx.surface in ("talk", "web"):
         try:
             if db.get_room(conn, room_token) is not None:
-                db.add_message(
+                msg_id = db.add_message(
                     conn, room_token, role="user", body=text,
                     origin_surface=ctx.surface, task_id=None,
                     # A steer is a `task_id IS NULL` row like a confirmation
@@ -679,6 +679,19 @@ async def cmd_steer(ctx: CommandContext):
                     author_user_id=user_id,
                 )
                 conn.commit()
+                # The id rides back for the same reason `!confirm`'s does: the
+                # web client has already drawn its own row for what was typed,
+                # and this stored row echoes over the room stream carrying no
+                # task id — so `msg_id` is the only dedup key `appendStreamedRow`
+                # has, and without the stamp the steer appears twice. The body
+                # goes with it because the two differ: the client drew the whole
+                # `!steer <note>` line, while what is stored (and what a reload
+                # shows) is the note alone.
+                ctx.result_data = {
+                    "kind": "steer_recorded",
+                    "user_msg_id": msg_id,
+                    "body": text,
+                }
         except Exception:
             logger.debug("steer transcript write failed", exc_info=True)
 

@@ -14,17 +14,66 @@ Both run in the same pre-commit hook.
 ## Setup
 
 ```bash
-brew install gitleaks          # macOS; see the gitleaks README for other platforms
+brew install gitleaks          # macOS
 ./scripts/setup.sh             # sets core.hooksPath to .githooks
 cp .private-data-local.example .private-data-local   # then fill it in
 ```
 
+On Linux, take the release tarball from
+<https://github.com/gitleaks/gitleaks/releases> and put the binary on your PATH.
+**Not the distribution package**: Debian 13 ships 8.16, and the hook calls
+`gitleaks git --staged`, a subcommand that arrived in 8.19 when it replaced
+`detect` and `protect`. The Ansible role installs the pinned upstream release on
+any host with the developer skill enabled, for the same reason.
+
 `scripts/setup.sh` is what enables the hook — a checked-in hook does nothing
 until `core.hooksPath` points at it, and that is per-clone local config. Run it
-once per checkout.
+once per checkout. It probes `gitleaks git --help` rather than just looking for
+the binary, so a too-old install is reported as such instead of passing here and
+failing at your first commit.
 
-Without gitleaks installed the hook warns and skips the credential half; the
-private-data half is pure bash and always runs.
+## When a scanner cannot run
+
+The hook has to decide whether a scan it could not run is a warning or a refusal,
+and the answer differs by who is committing.
+
+A human at a workstation gets the warning and the commit goes through. Refusing
+someone's commit because something is missing from their laptop is how a hook
+ends up bypassed for good, and they can read the warning and act on it.
+
+An unattended commit gets the refusal. Nobody is there to read a warning, and
+half a gate is not a gate — the private-data scan matches patterns somebody wrote
+down, not secret shape. This is what ISSUE-291 was about: the deployment ran for
+weeks with the credential half inactive, and the only trace was a line of hook
+output nobody saw.
+
+The hook reads three markers, because the daemon spawns unattended shells three
+ways and no single variable covers all of them:
+
+| Marker | Set for |
+|---|---|
+| `ISTOTA_SANDBOXED` | every task the model runs |
+| `DEVELOPER_REPOS_DIR` | a task additionally authorized for the developer skill |
+| `PRECOMMIT_SCANS_REQUIRED=1` | cron `command` jobs and heartbeat shell commands, via `build_stripped_env` — they carry neither of the above |
+
+`PRECOMMIT_SCANS_REQUIRED` is also the manual override, in both directions:
+`1`/`true`/`yes`/`on` demands the scans, `0`/`false`/`no`/`off` releases them.
+Any other value warns and demands them, since an unclear setting must not resolve
+to the permissive reading in silence. Prefer this to `--no-verify`, which drops
+both scans rather than the one that is broken.
+
+The refusal message deliberately does not mention the override. That branch is
+reached only when nobody is watching, so its only reader is the automated
+committer being refused — printing its own way past the gate there would make the
+gate advisory against exactly the actor it exists to bind. A refusal means a
+broken install on that host; fix the install.
+
+Both halves follow the same rule, so a `check-private-data.sh` that has lost its
+executable bit refuses an unattended commit too.
+
+The hook only runs where `core.hooksPath` points at it. The developer skill's
+clone recipe sets it on each bare clone it creates; a clone made before that step
+existed needs `git config core.hooksPath .githooks` applied once by hand.
 
 ## What the hook does
 
@@ -44,7 +93,9 @@ To see gitleaks' detail yourself:
 gitleaks git . --staged -v -c .gitleaks.toml     # prints the secret
 ```
 
-Bypass with `git commit --no-verify` only when you are certain, and then go fix
+If the problem is a scanner that cannot run rather than a finding, use
+`PRECOMMIT_SCANS_REQUIRED=0` — it releases only that check. Reach for
+`git commit --no-verify` only when you are certain, and then go fix
 whatever made it necessary.
 
 ## The three pattern sources

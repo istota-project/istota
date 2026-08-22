@@ -77,6 +77,8 @@ Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Tal
 - **No network proxy**: Docker's network isolation replaces the CONNECT proxy
 - **Sandbox + skill proxy**: enabled by default, work inside the container
 - **All extras installed**: every optional dependency included in the image
+- **No devbox credential proxy**: this shape runs no host-side credential daemon, so `gh`, `glab` and `git push` do not work inside the devbox container. That is deliberate — the proxy is a host process rather than a service in the stack. The Ansible deployment runs one per user and has the capability; here, do forge work outside the box. See ISSUE-282.
+- **No devbox network filtering**: the DOCKER-USER rules that drop RFC1918 and cloud metadata for the devbox are added by the Ansible role and are not present here
 
 ## Key env vars
 

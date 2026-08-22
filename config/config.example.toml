@@ -830,6 +830,23 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # # Author credit appended to every commit message the bot writes. This is the
 # # only trailer the `commit` skill permits; nothing else is ever appended.
 # author_credit = "Co-Authored-By: Bot <bot@example.invalid>"
+#
+# # Worktree reaping. Nothing used to remove a task's worktree, so `repos_dir`
+# # grew gigabyte checkouts with no owner. A scheduler job (see
+# # `[scheduler] worktree_reap_interval`) removes only a worktree that is clean
+# # (untracked and gitignored files included), unlocked, idle for the window
+# # below, and carrying no commit that is not already upstream — squash- and
+# # rebase-merged branches included. Everything else is kept and counted.
+# #
+# # The window is what protects a task running *right now*: the sweep is
+# # periodic and knows nothing about the worker pool, so recent activity is the
+# # only evidence available that a checkout is in use. It is clamped to a
+# # one-hour floor, because a worktree seconds old is clean and carries nothing
+# # that is not upstream — the reapable state — so a shorter window would take
+# # the checkout of a task still setting it up. To pin one indefinitely, use
+# # `git worktree lock` rather than turning the sweep off.
+# worktree_reap_enabled = true
+# worktree_retention_hours = 24.0
 
 # ----------------------------------------------------------------------------
 # Code review (`istota-skill code_review run`)
