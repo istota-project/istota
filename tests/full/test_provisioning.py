@@ -20,12 +20,18 @@ between "provisioned" and "silently empty".
 
 **One cold boot, not one per assertion.** The module-scoped `provisioned`
 fixture takes a private stack (`fresh=True`) and every test in the file shares
-it, because the boot is minutes and the assertions are seconds. The tests are
-still order-independent: the one that restarts the stack asserts against a
-"before" it captures itself, and nothing it does changes what the others read —
-`provision-nc.sh` does not re-run on an installed instance, so the users, apps,
-mounts and OAuth2 row are fixed from the first boot onwards, and the rooms are
-recovered by name rather than recreated.
+it, because the boot is a minute and the assertions are seconds.
+
+That means these tests do **not** use the `stack` fixture, so `Stack.reset` does
+not run between them and the isolation the rest of the testbed relies on is not
+in play here. What holds instead, stated so it is checkable rather than assumed:
+the step that genuinely depends on order — the restart — captures its own
+"before" rather than trusting an earlier test's, and nothing else in the file
+reads task rows or endpoint state. `provision-nc.sh` does not re-run on an
+installed instance, so the users, apps, mounts and OAuth2 row are fixed from the
+first boot onwards, and the rooms are recovered by name rather than recreated.
+A test added here that asserts on a task or on the scripted endpoint breaks that
+and needs a per-test reset.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from __future__ import annotations
 import pytest
 
 from testbed import profiles
+from testbed import stack as compose_support
 
 pytestmark = pytest.mark.full
 
@@ -56,12 +63,14 @@ ROOM_TYPE_ONE_TO_ONE = 1
 ROOM_TYPE_GROUP = 2
 
 #: The three variables that would carry a real model credential if the overlay
-#: interpolated them instead of hardcoding them.
-BRAIN_CREDENTIAL_VARS = (
-    "ANTHROPIC_API_KEY",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ISTOTA_BRAIN_NATIVE_API_KEY",
-)
+#: interpolated them instead of hardcoding them, mapped to the literal it sets.
+#: `docker-compose.yml` passes all three to this container and `entrypoint.sh`
+#: writes the OAuth one into `~/.claude/.credentials.json`.
+BRAIN_CREDENTIALS = {
+    "ANTHROPIC_API_KEY": "",
+    "CLAUDE_CODE_OAUTH_TOKEN": "",
+    "ISTOTA_BRAIN_NATIVE_API_KEY": "unused-by-the-scripted-endpoint",
+}
 
 
 @pytest.fixture(scope="module")
@@ -273,6 +282,39 @@ class TestReprovisioningIsIdempotent:
         )
 
 
+class TestTheReadinessProbeItself:
+    """The probe every assertion in this file is downstream of.
+
+    `wait_healthy` waits for the compose health check *and* for pid 1 to be the
+    scheduler, because the health check looks for the `tasks` table and the
+    database survives a restart — so on its own it passes within seconds while
+    the entrypoint is still re-provisioning, and the idempotence assertions
+    would read pre-restart state and pass for the wrong reason.
+
+    The first version of the second condition scanned `/proc/[0-9]*/cmdline` and
+    matched the shell running it, so it answered "yes" for any container. That
+    is a probe that cannot fail, which is worse than no probe, and it is what
+    this pair is here to keep from coming back.
+    """
+
+    def test_the_probe_cannot_see_its_own_shell(self, provisioned):
+        """The negative half. Run the real probe with a string that exists
+        nowhere, in the real container: if it still says yes, it is matching
+        itself."""
+        impossible = compose_support._SCHEDULER_RUNNING.replace(
+            "istota-scheduler", "zzz-no-process-has-this-name"
+        )
+
+        assert provisioned.exec(["sh", "-c", impossible]).returncode != 0
+
+    def test_the_probe_does_find_the_running_scheduler(self, provisioned):
+        """The positive half, so the pair does not pass by being broken the
+        other way."""
+        assert provisioned.exec(
+            ["sh", "-c", compose_support._SCHEDULER_RUNNING]
+        ).returncode == 0
+
+
 class TestTheDaemonTheDeploymentActuallyStarts:
     """Two properties of the booted container, both cheap and neither doctorable."""
 
@@ -346,12 +388,8 @@ class TestTheDaemonTheDeploymentActuallyStarts:
             if "=" in line
         )
 
-        assert seen.get("ANTHROPIC_API_KEY", "") == ""
-        assert seen.get("CLAUDE_CODE_OAUTH_TOKEN", "") == ""
-        assert (
-            seen.get("ISTOTA_BRAIN_NATIVE_API_KEY")
-            == "unused-by-the-scripted-endpoint"
-        )
+        for variable, expected in BRAIN_CREDENTIALS.items():
+            assert seen.get(variable, "") == expected, variable
         # The credentials file `entrypoint.sh:690-700` writes when the OAuth
         # token is non-empty. Its absence is the second half of the claim: a
         # marker value rather than the empty string would have had the boot
@@ -370,15 +408,24 @@ def _oauth_names(nextcloud) -> list[str]:
 
 
 def _tokens_of(flag_body: str) -> dict[str, str]:
-    """The `*_TOKEN` lines out of `.api-provisioned`.
+    """The room-token lines out of `.api-provisioned`.
 
     Only the token lines. That file also carries `APP_PASSWORD`, which is a
     credential and has no business in a comparison whose failure message prints
     both sides.
+
+    `LOCATION_INGEST_TOKEN` comes back with the rest and is empty on this
+    profile, because `FULL_MODULE_SWITCHES` leaves `ISTOTA_LOCATION_ENABLED`
+    false and `entrypoint.sh` only generates the value when it is true. An
+    earlier version filtered it out, which was inert and hid something real:
+    with location on, deleting `.api-provisioned` regenerates that token, but
+    the config render is gated on `config.toml` not existing — so `config.toml`
+    keeps the old value and the flag records one nothing reads. Noted rather
+    than fixed; it is a defect in `entrypoint.sh`, not in this comparison.
     """
     values = {}
     for line in flag_body.splitlines():
         key, _, value = line.partition("=")
-        if key.endswith("_TOKEN") and not key.startswith("LOCATION"):
+        if key.endswith("_TOKEN"):
             values[key] = value
     return values

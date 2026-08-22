@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -54,6 +55,10 @@ CONTAINER_URL = "http://nextcloud"
 #: Nextcloud is still warming its opcache and the alternative to a slow answer
 #: is a flake.
 TIMEOUT = 30
+
+#: How long a *connection* to the stack's nginx may keep failing before a read
+#: gives up. Not the request timeout: this covers nginx not being up yet.
+CONNECT_RETRY_SECONDS = 60
 
 #: The user ids the full shape provisions, and the defaults `attach` uses.
 #: They mirror `stack.FULL_IDENTITY`, which is what compose is actually given;
@@ -217,16 +222,39 @@ class NextcloudService:
         request = Request(f"{url}{separator}format=json", method=method)
         request.add_header("OCS-APIRequest", "true")
         _add_basic_auth(request, actor, self._passwords[actor])
-        try:
-            with urlopen(request, timeout=TIMEOUT) as response:
-                payload = json.loads(response.read() or b"{}")
-        except HTTPError as exc:
-            raise NextcloudError(
-                f"{method} {path} answered HTTP {exc.code}: "
-                f"{exc.read()[:400].decode('utf-8', 'replace')}"
-            ) from None
-        except (URLError, ValueError) as exc:
-            raise NextcloudError(f"{method} {path} failed: {exc}") from None
+
+        # Retried on a *connection* error only, and only for a bounded window.
+        # These calls do not reach Nextcloud directly — they go through the
+        # stack's nginx, which is not in the tier's readiness set because it
+        # legitimately restarts while its `web` upstream is coming up. So the
+        # first call after a boot can land on a moment when nothing is listening
+        # on the published port, and an unretried failure arrives as whichever
+        # assertion happened to run first, saying "connection refused" about
+        # Nextcloud. An `HTTPError` is *not* retried: that is Nextcloud
+        # answering, and answering wrongly is what the caller wants told.
+        deadline = time.monotonic() + CONNECT_RETRY_SECONDS
+        while True:
+            try:
+                with urlopen(request, timeout=TIMEOUT) as response:
+                    payload = json.loads(response.read() or b"{}")
+                break
+            except HTTPError as exc:
+                raise NextcloudError(
+                    f"{method} {path} answered HTTP {exc.code}: "
+                    f"{exc.read()[:400].decode('utf-8', 'replace')}"
+                ) from None
+            except URLError as exc:
+                if time.monotonic() >= deadline:
+                    raise NextcloudError(
+                        f"{method} {path} never connected within "
+                        f"{CONNECT_RETRY_SECONDS}s (the stack's nginx, on "
+                        f"{self.base_url}): {exc}"
+                    ) from None
+                time.sleep(1.0)
+            except ValueError as exc:
+                raise NextcloudError(
+                    f"{method} {path} did not answer JSON: {exc}"
+                ) from None
 
         meta = (payload.get("ocs") or {}).get("meta") or {}
         return OcsResponse(

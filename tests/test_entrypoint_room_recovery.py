@@ -186,26 +186,74 @@ class TestFindRoomByName:
         assert "rc=0" in result.stdout, result.stdout + result.stderr
 
 
+#: Every shell script in the image that opens a here-document program. The
+#: pattern is easy to copy, and the file it is most likely to be copied *into*
+#: is the one next door — so all three are scanned rather than only the one that
+#: had the bug.
+DOCKER_SHELL_SCRIPTS = (
+    ENTRYPOINT,
+    REPO / "docker" / "istota" / "render-config.sh",
+    REPO / "docker" / "istota" / "provision-nc.sh",
+)
+
+#: A here-document opener followed, on the same line, by an input redirect.
+#: The redirect wins, so the interpreter reads the redirected file as its
+#: program instead of the here-document. `>` and `>>` are output and are fine,
+#: which is why the character class excludes them.
+_HEREDOC_THEN_STDIN = re.compile(r"<<-?\s*['\"]?\w+['\"]?\s.*(?<![<>0-9])<[^<>]")
+
+
 class TestTheRedirectionBugItself:
-    def test_no_helper_feeds_a_file_into_a_heredoc_program(self):
-        """A positive control on the shape, not on the behaviour.
+    def test_no_docker_script_feeds_a_file_into_a_heredoc_program(self):
+        """A structural control, not a behavioural one.
 
         The behaviour tests above would catch a regression in these two
-        functions. This catches the *next* one: `entrypoint.sh` has four
-        `python3 - … <<'PY'` blocks and the pattern is easy to copy. A trailing
-        `< "$file"` on that line makes python read the file as its program, and
-        because a JSON body is valid Python the failure is silent and exits 0.
+        functions. This catches the *next* one: a trailing `< file` on a
+        here-document opener makes the interpreter read that file as its
+        program, and because a JSON body is valid Python the failure is silent
+        and exits 0.
         """
-        offenders = [
-            line
-            for line in ENTRYPOINT.read_text().splitlines()
-            if "python3 -" in line and "<<" in line and re.search(r"<\s*\"\$", line)
-        ]
+        offenders = []
+        for path in DOCKER_SHELL_SCRIPTS:
+            offenders += [
+                f"{path.name}:{number}: {line.strip()}"
+                for number, line in enumerate(path.read_text().splitlines(), 1)
+                # Comments are skipped, because the fix's own comment quotes the
+                # broken form to explain it. That is a real cost of quoting a
+                # pattern a scanner looks for, and the alternative — not
+                # explaining it — is worse.
+                if not line.lstrip().startswith("#")
+                and _HEREDOC_THEN_STDIN.search(line)
+            ]
 
         assert not offenders, offenders
 
-    def test_the_detector_would_fire_on_the_old_form(self):
-        """Because a scanner whose regex quietly stops matching reports clean."""
-        old = """    candidates=$(python3 - "$room_name" <<'PY' < "$body_file" """
+    @pytest.mark.parametrize(
+        "line",
+        [
+            """    candidates=$(python3 - "$room_name" <<'PY' < "$body_file" """,
+            """    found=$(python3 - "$user" <<PY < $body_file""",
+            """    x=$(python3 - <<'PY' < /tmp/body.json""",
+        ],
+    )
+    def test_the_detector_fires_on_every_spelling_of_the_old_form(self, line):
+        """Because a scanner whose regex quietly stops matching reports clean.
 
-        assert "python3 -" in old and "<<" in old and re.search(r"<\s*\"\$", old)
+        Three spellings, because the first version of this detector required the
+        redirect target to be a quoted variable and would have missed the other
+        two.
+        """
+        assert _HEREDOC_THEN_STDIN.search(line), line
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            """    python3 - "$a" "$b" <<'PY'""",
+            """    python3 - "$CONFIG_FILE" <<'PY' >> "$out" """,
+            """    php <<'PHP' 2>&1 || true""",
+        ],
+    )
+    def test_the_detector_does_not_fire_on_a_correct_form(self, line):
+        """The other direction, which would make the guard unusable: an *output*
+        redirect on the same line is fine, and `render-config.sh` has one."""
+        assert not _HEREDOC_THEN_STDIN.search(line), line

@@ -2,7 +2,7 @@
 
 Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 13,900 tests across ~414 files; the frontend has its own vitest suite under `web/`.
 
-Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The four discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
+Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The five discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
 
 ## Running tests
 
@@ -37,7 +37,7 @@ A seventh marker, `requires_dac`, is not deselected: it skips itself when the pr
 
 ## Deployment tiers
 
-Four discretionary tiers, none of them automatic, each answering "does the artifact match what the code assumes?" rather than "does the code do the right thing?".
+Five discretionary tiers, none of them automatic, each answering "does the artifact match what the code assumes?" rather than "does the code do the right thing?".
 
 ```bash
 scripts/test-linux.sh                        # the suite + the linux tests, on a real kernel
