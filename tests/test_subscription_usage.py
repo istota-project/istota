@@ -1620,3 +1620,549 @@ class TestTokenSource:
         )
         assert snap.token_source == "env"
         assert token not in repr(snap)
+
+
+# ---------------------------------------------------------------------------
+# the failure timer
+# ---------------------------------------------------------------------------
+
+
+def _timer(tmp_path: Path) -> Path:
+    return su.failure_path(tmp_path)
+
+
+class TestFailureTimerFile:
+    """The timer file itself, read and written directly.
+
+    It is a file on disk in a shared data dir, so everything that comes back out
+    of it is input — the same discipline the reading cache gets. A corrupt,
+    truncated, hand-edited or hostile timer means *no backoff*, never a raise:
+    failing open costs one extra request, failing closed would suppress the
+    reading indefinitely on a deployment where nothing is actually wrong.
+    """
+
+    def test_failure_path(self, tmp_path):
+        assert su.failure_path(tmp_path) == tmp_path / "subscription_usage.failure.json"
+        assert su.failure_path(tmp_path) != su.cache_path(tmp_path)
+
+    def test_round_trip_within_ttl(self, tmp_path):
+        p = _timer(tmp_path)
+        su.write_failure(
+            p, now_ts=NOW, error="the usage endpoint returned HTTP 403", token_source="env"
+        )
+        recorded = su.read_failure(p, 300, now_ts=NOW + 10)
+        assert recorded is not None
+        assert recorded.error == "the usage endpoint returned HTTP 403"
+        assert recorded.token_source == "env"
+        assert recorded.source == "none"
+        assert recorded.windows == ()
+        assert recorded.fetched_at == 0.0
+        assert not recorded.ok
+        assert not recorded.has_data
+
+    def test_the_timer_expires_at_the_ttl(self, tmp_path):
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error="boom", token_source="env")
+        assert su.read_failure(p, 300, now_ts=NOW + 299) is not None
+        assert su.read_failure(p, 300, now_ts=NOW + 300) is None
+        assert su.read_failure(p, 300, now_ts=NOW + 3600) is None
+
+    def test_a_timer_from_the_future_is_no_backoff(self, tmp_path):
+        """The clock moved backwards, or the file was hand-edited.
+
+        Same direction as ``read_cache``: a negative age is not "fresh forever".
+        A timer nobody can wait out would suppress the reading until somebody
+        deleted the file by hand.
+        """
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW + 5000, error="boom", token_source="env")
+        assert su.read_failure(p, 300, now_ts=NOW) is None
+
+    def test_a_missing_timer_is_no_backoff(self, tmp_path):
+        assert su.read_failure(_timer(tmp_path), 300, now_ts=NOW) is None
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "not json at all",
+            "[1, 2, 3]",
+            '"a string"',
+            "{}",
+            '{"failed_at": null, "error": "boom"}',
+            '{"failed_at": "yesterday", "error": "boom"}',
+            '{"failed_at": true, "error": "boom"}',
+            '{"failed_at": 1e400, "error": "boom"}',
+            '{"failed_at": 99999999999999999999999999999999999999, "error": "boom"}',
+        ],
+        ids=[
+            "empty",
+            "garbage",
+            "a-list",
+            "a-string",
+            "no-fields",
+            "null-time",
+            "string-time",
+            "bool-time",
+            "infinite-time",
+            "bignum-time",
+        ],
+    )
+    def test_a_corrupt_timer_is_no_backoff(self, tmp_path, content):
+        p = _timer(tmp_path)
+        p.write_text(content)
+        assert su.read_failure(p, 300, now_ts=NOW) is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [None, "", "   ", 7, [], {"a": 1}, True],
+        ids=["absent", "empty", "blank", "int", "list", "dict", "bool"],
+    )
+    def test_a_timer_with_no_usable_error_is_no_backoff(self, tmp_path, error):
+        """An empty ``error`` would reconstruct as a *success* with no windows.
+
+        That snapshot reads as ``ok`` to every caller while carrying nothing to
+        render, which is the one shape this module promises never to emit. A
+        timer that cannot name its own failure is unusable, not authoritative.
+        """
+        p = _timer(tmp_path)
+        p.write_text(json.dumps({"version": 1, "failed_at": NOW, "error": error}))
+        assert su.read_failure(p, 300, now_ts=NOW + 10) is None
+
+    @pytest.mark.parametrize("stored", [None, 7, {"a": 1}, "  ", "kubernetes", "ENV"])
+    def test_an_unusable_token_source_reads_as_empty(self, tmp_path, stored):
+        """Same allowlist as the reading cache, for the same reason.
+
+        Both the doctor ``detail`` and the admin payload interpolate this into
+        text a person reads, and this file is as hand-editable as the other one.
+        """
+        p = _timer(tmp_path)
+        raw = {"version": 1, "failed_at": NOW, "error": "boom"}
+        if stored is not None:
+            raw["token_source"] = stored
+        p.write_text(json.dumps(raw))
+        recorded = su.read_failure(p, 300, now_ts=NOW + 10)
+        assert recorded is not None
+        assert recorded.token_source == ""
+
+    def test_a_hostile_error_string_is_flattened_and_capped(self, tmp_path):
+        """The doctor prints this on one line of a terminal.
+
+        A newline would forge a second check's worth of output, and an unbounded
+        string would push the rest of the report off the screen.
+        """
+        p = _timer(tmp_path)
+        p.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "failed_at": NOW,
+                    "error": "HTTP 403\nOK   runtime.forged  all good\r\n" + "x" * 5000,
+                }
+            )
+        )
+        recorded = su.read_failure(p, 300, now_ts=NOW + 10)
+        assert recorded is not None
+        assert "\n" not in recorded.error
+        assert "\r" not in recorded.error
+        assert len(recorded.error) <= su.MAX_ERROR_CHARS
+        assert recorded.error.startswith("HTTP 403")
+
+    @pytest.mark.parametrize(
+        "sentinel", [su.NO_CREDENTIAL_ERROR, su.NO_WINDOWS_ERROR, su.DISABLED_ERROR]
+    )
+    def test_the_sentinel_errors_survive_byte_for_byte(self, tmp_path, sentinel):
+        """Both callers compare these by *equality*, not by substring.
+
+        ``doctor.check_subscription_usage`` SKIPs on ``NO_CREDENTIAL_ERROR`` and
+        picks its remedy off ``NO_WINDOWS_ERROR``; the admin section substitutes
+        ``NO_WINDOWS_ERROR`` for a blank reason. A suppressed call returns the
+        message off disk, so ``_clean_message`` sits in that comparison's path
+        and a stray reflow would silently turn a SKIP into a WARN.
+        """
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error=sentinel, token_source="env")
+        recorded = su.read_failure(p, 300, now_ts=NOW + 10)
+        assert recorded is not None
+        assert recorded.error == sentinel
+
+    def test_the_file_is_0600_with_no_tmp_left_behind(self, tmp_path):
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error="boom", token_source="env")
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
+        assert list(tmp_path.glob("*.tmp")) == []
+        assert list(tmp_path.glob(".*.tmp")) == []
+        assert sorted(x.name for x in tmp_path.iterdir()) == [
+            "subscription_usage.failure.json"
+        ]
+
+    def test_the_temp_file_is_scoped_to_this_writer(self, tmp_path, monkeypatch):
+        """Two writers must not share one temp inode — see ``write_cache``.
+
+        The scheduler and the web unit are separate processes, and the admin
+        doctor endpoint runs its shallow phase through ``asyncio.to_thread``, so
+        the second writer is sometimes another thread of this one.
+        """
+        names = []
+        real_open = su.os.open
+
+        def spy(path, *a, **k):
+            names.append(Path(path).name)
+            return real_open(path, *a, **k)
+
+        monkeypatch.setattr(su.os, "open", spy)
+        su.write_failure(_timer(tmp_path), now_ts=NOW, error="boom", token_source="env")
+        assert names
+        assert str(os.getpid()) in names[0]
+        assert names[0] != "subscription_usage.failure.json.tmp"
+
+    def test_a_write_with_no_error_records_nothing(self, tmp_path):
+        """Symmetric with ``write_cache`` refusing to store a failed snapshot."""
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error="", token_source="env")
+        assert not p.exists()
+
+    def test_clear_removes_it_and_is_idempotent(self, tmp_path):
+        p = _timer(tmp_path)
+        su.write_failure(p, now_ts=NOW, error="boom", token_source="env")
+        su.clear_failure(p)
+        assert not p.exists()
+        su.clear_failure(p)  # nothing there; still no raise
+
+    def test_a_directory_where_the_file_belongs_does_not_raise(self, tmp_path):
+        p = _timer(tmp_path)
+        p.mkdir()
+        assert su.read_failure(p, 300, now_ts=NOW) is None
+        su.write_failure(p, now_ts=NOW, error="boom", token_source="env")
+        su.clear_failure(p)
+        assert p.is_dir()
+
+    @pytest.mark.requires_dac
+    def test_an_unwritable_directory_does_not_raise(self, tmp_path):
+        target = tmp_path / "ro"
+        target.mkdir()
+        os.chmod(target, 0o500)
+        try:
+            su.write_failure(su.failure_path(target), now_ts=NOW, error="boom")
+            assert su.read_failure(su.failure_path(target), 300, now_ts=NOW) is None
+            assert list(target.iterdir()) == []
+        finally:
+            os.chmod(target, 0o700)
+
+
+class TestFailureBackoff:
+    """A failed reading is retried once per TTL, not once per caller.
+
+    The admin dashboard polls ``GET /istota/api/admin/stats`` every 60 seconds.
+    Without the timer a rejected credential is roughly 1,440 live 403s a day
+    against api.anthropic.com per open dashboard, and a missing one is that many
+    ``security`` subprocesses on macOS — because a failed snapshot is never
+    written to the *reading* cache, so nothing was bounding the retry. The spec's
+    own edge case already promised "never retried in a loop — the TTL is the
+    retry interval"; this is what makes it true.
+
+    Every test here counts fetches, resolver runs or subprocesses. Asserting on
+    the returned value alone would pass just as well against the unbounded code.
+    """
+
+    def test_repeated_calls_after_a_rejection_issue_one_fetch(self, tmp_path):
+        calls: list = []
+        transport = _stub_transport(403, b"denied", calls=calls)
+        seen = []
+        for offset in (0, 60, 120, 180, 240, 299):
+            seen.append(
+                su.get_snapshot(
+                    _config(tmp_path),
+                    now_ts=NOW + offset,
+                    transport=transport,
+                    env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+                    home=tmp_path,
+                )
+            )
+        assert len(calls) == 1
+        # And every caller still gets the answer it would have got by asking.
+        for snap in seen:
+            assert snap.source == "none"
+            assert snap.error == "the usage endpoint returned HTTP 403"
+            assert snap.token_source == "env"
+
+    def test_the_backoff_expires_with_the_ttl(self, tmp_path):
+        calls: list = []
+        transport = _stub_transport(403, b"denied", calls=calls)
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        su.get_snapshot(
+            config, now_ts=NOW + 299, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+        su.get_snapshot(
+            config, now_ts=NOW + 300, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 2
+
+    def test_recovery_is_not_delayed_past_the_ttl(self, tmp_path):
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        su.get_snapshot(
+            config,
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env=env,
+            home=tmp_path,
+        )
+        good = su.get_snapshot(
+            config, now_ts=NOW + 300, transport=_stub_transport(), env=env, home=tmp_path
+        )
+        assert good.ok
+        assert good.source == "fetch"
+
+    def test_a_success_clears_the_timer(self, tmp_path):
+        """Constraint 2: recovery must never be delayed by a stale timer."""
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        su.get_snapshot(
+            config,
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env=env,
+            home=tmp_path,
+        )
+        assert _timer(tmp_path).exists()
+
+        su.get_snapshot(
+            config, now_ts=NOW + 400, transport=_stub_transport(), env=env, home=tmp_path
+        )
+        assert not _timer(tmp_path).exists()
+
+        # And the cleared timer does not suppress the *next* failure's fetch: the
+        # reading cache has expired by now, so this is a real attempt.
+        calls: list = []
+        again = su.get_snapshot(
+            config,
+            now_ts=NOW + 900,
+            transport=_stub_transport(500, b"oops", calls=calls),
+            env=env,
+            home=tmp_path,
+        )
+        assert len(calls) == 1
+        assert "500" in again.error
+
+    def test_the_no_credential_branch_runs_the_resolver_once(self, tmp_path, monkeypatch):
+        """Constraint 1. "Cheap to re-check" is true of an env var, not a keychain."""
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        real = su.resolve_token
+        runs: list = []
+
+        def spy(env, home):
+            runs.append((env, home))
+            return real(env, home)
+
+        monkeypatch.setattr(su, "resolve_token", spy)
+        config = _config(tmp_path)
+        for offset in (0, 60, 120, 180):
+            snap = su.get_snapshot(
+                config,
+                now_ts=NOW + offset,
+                transport=_stub_transport(),
+                env={},
+                home=tmp_path,
+            )
+            assert snap.source == "none"
+            assert snap.error == su.NO_CREDENTIAL_ERROR
+            assert snap.token_source == ""
+        assert len(runs) == 1
+        # The absent credential is still not in the *reading* cache.
+        assert not su.cache_path(tmp_path).exists()
+
+    def test_the_keychain_subprocess_is_spawned_once(self, tmp_path, monkeypatch):
+        """The cost the timer actually exists to bound on a developer's laptop."""
+        monkeypatch.setattr(su.platform, "system", lambda: "Darwin")
+        spawns: list = []
+
+        def fake_run(argv, **kwargs):
+            spawns.append(argv)
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not found")
+
+        monkeypatch.setattr(su.subprocess, "run", fake_run)
+        config = _config(tmp_path)
+        for offset in (0, 60, 120):
+            su.get_snapshot(
+                config,
+                now_ts=NOW + offset,
+                transport=_stub_transport(),
+                env={"USER": "someone"},
+                home=tmp_path,
+            )
+        assert len(spawns) == 1
+
+    def test_a_credential_appearing_later_is_picked_up_within_one_ttl(
+        self, tmp_path, monkeypatch
+    ):
+        """The trade the amendment accepts: one TTL of delay, not indefinite."""
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+        config = _config(tmp_path)
+        snap = su.get_snapshot(
+            config, now_ts=NOW, transport=_stub_transport(), env={}, home=tmp_path
+        )
+        assert snap.error == su.NO_CREDENTIAL_ERROR
+        snap = su.get_snapshot(
+            config,
+            now_ts=NOW + 300,
+            transport=_stub_transport(),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert snap.ok
+        assert snap.token_source == "env"
+
+    def test_a_stale_cache_is_still_served_during_the_backoff(self, tmp_path):
+        """Constraint 3: an old real reading outranks a fresh failure."""
+        su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        calls: list = []
+        transport = _stub_transport(403, b"denied", calls=calls)
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+
+        first = su.get_snapshot(
+            config, now_ts=NOW + 400, transport=transport, env=env, home=tmp_path
+        )
+        second = su.get_snapshot(
+            config, now_ts=NOW + 420, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+        for snap, offset in ((first, 400), (second, 420)):
+            assert snap.source == "stale-cache"
+            assert snap.error == "the usage endpoint returned HTTP 403"
+            assert snap.token_source == "env"
+            assert [w.key for w in snap.windows] == [
+                "session",
+                "weekly_all",
+                "weekly_scoped:fable",
+            ]
+            assert snap.fetched_at == NOW
+            # The countdown is against *this* caller's clock, not the failed
+            # fetch's: the suppressed call still goes through the stale reader.
+            assert snap.windows[0].resets_in_seconds == max(
+                0, FIVE_HOUR_RESETS_IN - offset
+            )
+
+    def test_a_corrupt_timer_does_not_suppress_the_retry(self, tmp_path):
+        """Constraint 4: fail open. One extra request beats a silent blackout."""
+        _timer(tmp_path).write_text("{not json")
+        calls: list = []
+        transport = _stub_transport(403, b"denied", calls=calls)
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        for offset in (0, 60):
+            snap = su.get_snapshot(
+                config, now_ts=NOW + offset, transport=transport, env=env, home=tmp_path
+            )
+            assert "403" in snap.error
+        # The first call replaced the unusable timer, so only it was unsuppressed.
+        assert len(calls) == 1
+
+    def test_an_unreadable_timer_does_not_raise(self, tmp_path):
+        _timer(tmp_path).mkdir()  # a directory where the file belongs
+        snap = su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert "403" in snap.error
+        assert _timer(tmp_path).is_dir()
+
+    def test_a_fresh_reading_outranks_the_timer(self, tmp_path):
+        """Order matters: a usable reading is never withheld by a failure record."""
+        su.write_cache(su.cache_path(tmp_path), _good_snapshot())
+        su.write_failure(_timer(tmp_path), now_ts=NOW, error="boom", token_source="env")
+        snap = su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW + 40,
+            transport=_stub_transport(),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert snap.source == "cache"
+        assert snap.ok
+
+    def test_a_shape_change_is_rate_limited_too(self, tmp_path):
+        calls: list = []
+        transport = _stub_transport(200, {"limits": []}, calls=calls)
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        for offset in (0, 60, 120):
+            snap = su.get_snapshot(
+                config, now_ts=NOW + offset, transport=transport, env=env, home=tmp_path
+            )
+            assert snap.error == su.NO_WINDOWS_ERROR
+        assert len(calls) == 1
+
+    def test_a_disabled_config_records_nothing(self, tmp_path):
+        su.get_snapshot(
+            _config(tmp_path, subscription_usage=False),
+            now_ts=NOW,
+            transport=_stub_transport(),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+            home=tmp_path,
+        )
+        assert not _timer(tmp_path).exists()
+
+    def test_a_config_with_no_db_path_has_nowhere_to_record(self, tmp_path):
+        """No data dir means no cache and no timer — and still no raise."""
+        config = SimpleNamespace(db_path=None, brain=SimpleNamespace())
+        calls: list = []
+        transport = _stub_transport(403, b"denied", calls=calls)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        for offset in (0, 60):
+            snap = su.get_snapshot(
+                config, now_ts=NOW + offset, transport=transport, env=env, home=tmp_path
+            )
+            assert "403" in snap.error
+        assert len(calls) == 2
+
+    def test_a_nonsense_ttl_bounds_the_backoff_by_the_documented_default(self, tmp_path):
+        calls: list = []
+        transport = _stub_transport(403, b"denied", calls=calls)
+        config = _config(tmp_path, subscription_usage_cache_ttl_seconds="nope")
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        su.get_snapshot(config, now_ts=NOW, transport=transport, env=env, home=tmp_path)
+        su.get_snapshot(
+            config, now_ts=NOW + 299, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 1
+        su.get_snapshot(
+            config, now_ts=NOW + 300, transport=transport, env=env, home=tmp_path
+        )
+        assert len(calls) == 2
+
+    def test_the_token_never_reaches_the_timer_file(self, tmp_path):
+        token = "sk-ant-oat-SENTINEL-TOKEN"
+        su.get_snapshot(
+            _config(tmp_path),
+            now_ts=NOW,
+            transport=_stub_transport(403, b"denied"),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": token},
+            home=tmp_path,
+        )
+        text = _timer(tmp_path).read_text()
+        assert token not in text
+        assert "env" in text
+
+    def test_a_transport_exception_is_rate_limited_too(self, tmp_path):
+        calls: list = []
+
+        def transport(url, headers, timeout):
+            calls.append(url)
+            raise urllib.error.URLError("no route to host")
+
+        config = _config(tmp_path)
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+        for offset in (0, 60, 120):
+            snap = su.get_snapshot(
+                config, now_ts=NOW + offset, transport=transport, env=env, home=tmp_path
+            )
+            assert "could not reach api.anthropic.com" in snap.error
+        assert len(calls) == 1

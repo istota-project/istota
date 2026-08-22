@@ -8,6 +8,11 @@ a disk cache with a TTL and a stale-fallback read. Three surfaces (the doctor
 check, the admin card, ``!usage``) read it; none of them grows its own fetch or
 its own parse.
 
+A *failure* is recorded beside the cache rather than in it, and suppresses the
+next TTL's worth of attempts — see the failure-timer section below. Without it a
+rejected credential would be re-tried on every dashboard poll, because a failed
+reading is never cached and there is nothing else to bound the retry.
+
 **Nothing here raises.** Every entry point returns a ``UsageSnapshot``, and a
 failure is a snapshot carrying a non-empty ``error``. Both callers reach it from
 a diagnostic path — one of them is the daemon's boot sequence — where an
@@ -57,6 +62,16 @@ USAGE_PATH = "/api/oauth/usage"
 BETA_HEADER = "oauth-2025-04-20"
 USER_AGENT = f"istota/{__version__}"
 _CACHE_FILENAME = "subscription_usage.json"
+# The failure timer, beside the reading cache. Separate file rather than a field
+# of the cache: the cache holds successful readings only, and a failure that
+# shared the file would have to be skipped by every reader that measures
+# freshness — one condition, in four places, that a sibling avoids entirely.
+_FAILURE_FILENAME = "subscription_usage.failure.json"
+
+# Ceiling on an error string read back out of the timer file. The doctor prints
+# it on one line of a terminal and the admin card renders it into a note, so an
+# unbounded string off disk would push the rest of a report off the screen.
+MAX_ERROR_CHARS = 300
 
 # Bound on the macOS Keychain probe. Short: it is a local lookup, and a hung
 # `security` call would stall a doctor run or a dashboard refresh. Named for what
@@ -923,12 +938,13 @@ def _spend_from_json(raw: Any) -> Spend | None:
 
 
 def _read_raw(path: Path) -> dict | None:
+    """A JSON object off disk, or ``None``. Shared by the cache and the timer."""
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except Exception:  # noqa: BLE001 — corrupt / truncated / permissions
-        logger.debug("subscription usage cache read failed: %s", path, exc_info=True)
+        logger.debug("subscription usage read failed: %s", path, exc_info=True)
         return None
     return raw if isinstance(raw, dict) else None
 
@@ -993,7 +1009,19 @@ def read_cache_any_age(path: Path, *, now_ts: float | None = None) -> UsageSnaps
 def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     """Persist a successful reading. Best-effort; never raises.
 
-    Two processes read and write this file — ``istota-scheduler`` and
+    A snapshot carrying an ``error`` is never written — the cache holds
+    successful readings only. A *failure* is recorded separately, by
+    :func:`write_failure`, which is what bounds the retry.
+    """
+    if snapshot.error or not snapshot.windows:
+        return
+    _write_json(path, _snapshot_to_json(snapshot))
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    """Publish a JSON file atomically at ``0600``. Best-effort; never raises.
+
+    Two processes read and write these files — ``istota-scheduler`` and
     ``istota-web`` are separate units — so the write goes to a temp file scoped
     to the **writer**, not to a fixed name, and is ``os.replace``d into place.
     That scoping is what makes the claim true: ``os.replace`` is atomic with
@@ -1006,30 +1034,131 @@ def write_cache(path: Path, snapshot: UsageSnapshot) -> None:
     process. Racing the *fetch* is still fine — one redundant request, last writer
     wins, both readings are equally true — so there is no lock.
 
-    ``0600``: the payload is not a credential, but it is account data and the
-    data dir is shared. A snapshot carrying an ``error`` is never written — the
-    cache holds successful readings only.
+    ``0600``: neither file is a credential, but the reading is account data and
+    the timer names which credential was refused, and the data dir is shared.
     """
-    if snapshot.error or not snapshot.windows:
-        return
     path = Path(path)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
+        text = json.dumps(payload)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(_snapshot_to_json(snapshot))
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
-    except Exception:  # noqa: BLE001 — a cache write is best-effort
-        logger.debug("subscription usage cache write failed: %s", path, exc_info=True)
+    except Exception:  # noqa: BLE001 — writing either file is best-effort
+        logger.debug("subscription usage write failed: %s", path, exc_info=True)
         try:
             tmp.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001 — nothing left to do about it
             pass
+
+
+# ---------------------------------------------------------------------------
+# the failure timer
+# ---------------------------------------------------------------------------
+#
+# A failed reading is never written to the cache above, so before this existed
+# nothing bounded the retry: with no prior success every caller re-fetched. The
+# admin dashboard polls every 60 seconds, which on a rejected credential is
+# roughly 1,440 live 403s a day against api.anthropic.com per open dashboard,
+# and on a missing one that many `security` subprocesses on macOS. Recording the
+# failure separately makes the TTL the retry interval, which is what the
+# rejected-credential case was always specified to do.
+#
+# Everything read back out of this file is input — it sits in a shared data dir
+# and both callers interpolate its `error` into text a person reads — so it gets
+# the same treatment as the reading cache: an allowlisted `token_source`, a
+# flattened and capped message, and *no backoff* for anything unusable. Failing
+# open costs one extra request; failing closed would suppress the reading
+# indefinitely on a deployment where nothing is wrong.
+
+
+def failure_path(data_dir: Path) -> Path:
+    return Path(data_dir) / _FAILURE_FILENAME
+
+
+def _clean_message(value: Any) -> str:
+    """An error string off disk, safe to print on one line. May be empty.
+
+    Non-printables become spaces rather than being dropped, so a newline cannot
+    splice two fragments into a plausible-looking third; runs collapse; the
+    result is capped. The strings this module writes are built from literals and
+    a status code and need none of this — the file is what needs it.
+    """
+    text = _str(value)
+    if not text:
+        return ""
+    flattened = "".join(ch if ch.isprintable() else " " for ch in text)
+    return re.sub(r"\s+", " ", flattened).strip()[:MAX_ERROR_CHARS]
+
+
+def read_failure(path: Path, ttl_seconds: float, *, now_ts: float) -> UsageSnapshot | None:
+    """The recorded failure if it is still inside the backoff, else ``None``.
+
+    ``None`` means "no backoff": the file is absent, expired, corrupt, or claims
+    a time in the future — a clock that moved backwards must not produce a timer
+    nobody can wait out. The returned snapshot is indistinguishable from the one
+    the suppressed attempt would have produced, which is the point: a caller
+    cannot tell a bounded retry from a real one, and none of them has to.
+    """
+    raw = _read_raw(path)
+    if raw is None:
+        return None
+    try:
+        failed_at = _number(raw.get("failed_at"))
+        if failed_at is None:
+            return None
+        age = now_ts - failed_at
+        if age < 0 or age >= ttl_seconds:
+            return None
+        error = _clean_message(raw.get("error"))
+        if not error:
+            # A timer that cannot name its own failure is unusable, not
+            # authoritative: an empty `error` would rebuild as a snapshot that
+            # reads as `ok` to every caller while carrying nothing to render,
+            # which is the one shape this module promises never to emit.
+            return None
+        return _failed(error, _token_source(raw.get("token_source")))
+    except Exception:  # noqa: BLE001 — a timer is never repaired, only ignored
+        logger.debug("subscription usage failure timer unusable", exc_info=True)
+        return None
+
+
+def write_failure(path: Path, *, now_ts: float, error: str, token_source: str = "") -> None:
+    """Record a failed reading so the next TTL's worth of callers reuse it.
+
+    ``error`` is the reason to hand the suppressed callers; a blank one records
+    nothing, symmetrically with ``write_cache`` refusing a failed snapshot.
+    ``token_source`` is the resolver's branch *name*, never the credential — it
+    is what lets the doctor say which one was refused without re-resolving.
+    """
+    if not error:
+        return
+    _write_json(
+        path,
+        {
+            "version": 1,
+            "failed_at": now_ts,
+            "error": error[:MAX_ERROR_CHARS],
+            "token_source": token_source,
+        },
+    )
+
+
+def clear_failure(path: Path) -> None:
+    """Drop the timer. Best-effort, idempotent, never raises.
+
+    Called on every success, so recovery is never delayed by a record of a
+    failure that is over.
+    """
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — a leftover timer costs one TTL, not a boot
+        logger.debug("subscription usage failure timer clear failed: %s", path, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1096,12 +1225,22 @@ def get_snapshot(
 
     1. Disabled by config → ``source="none"``, ``error="disabled by config"``.
     2. Fresh cache within TTL → return it, ``source="cache"``. No request.
-    3. No credential → an error snapshot, **not cached**: absence of a credential
-       is cheap to re-check and caching it would outlive the fix.
-    4. Fetch. On success, write the cache and return ``source="fetch"``.
-    5. On failure, fall back to a cache of any age: ``source="stale-cache"`` with
-       the fetch error preserved, so the caller can decide what an old-but-real
-       reading is worth. No cache to fall back on → the fetch failure.
+    3. A failure recorded less than one TTL ago → return that failure, without
+       resolving a credential and without a request. The TTL is the retry
+       interval, which is what the rejected-credential case has always promised.
+    4. No credential → an error snapshot. Still **not** written to the reading
+       cache — that holds readings — but the failure timer does bound it: "cheap
+       to re-check" is true of an environment variable and false of a
+       ``security`` subprocess, and one TTL of delay in noticing a credential
+       that appeared five minutes ago is the trade that buys it.
+    5. Fetch. On success, write the cache, clear the timer and return
+       ``source="fetch"``. Clearing immediately is what keeps recovery from
+       waiting on a record of a failure that is over.
+    6. On failure, record it, then fall back to a cache of any age:
+       ``source="stale-cache"`` with the fetch error preserved, so the caller can
+       decide what an old-but-real reading is worth. No cache to fall back on →
+       the fetch failure. A suppressed call at step 3 takes this same fallback,
+       so an old real reading outranks a fresh failure either way.
 
     ``env`` and ``home`` default to this process's own and are parameters only so
     a test never reads the real ones.
@@ -1132,17 +1271,28 @@ def _get_snapshot(
 
     data_dir = _data_dir(config)
     path = cache_path(data_dir) if data_dir is not None else None
+    timer = failure_path(data_dir) if data_dir is not None else None
 
     if path is not None:
         cached = read_cache(path, ttl, now_ts=now_ts)
         if cached is not None:
             return cached
 
+    # After the cache and before the resolver, deliberately on both counts: a
+    # usable reading is never withheld by a record of a failure, and the
+    # keychain subprocess the timer exists to bound is inside `resolve_token`.
+    if timer is not None:
+        recorded = read_failure(timer, ttl, now_ts=now_ts)
+        if recorded is not None:
+            return _with_stale_fallback(recorded, path, now_ts)
+
     resolved = resolve_token(
         os.environ if env is None else env,
         _home_dir() if home is None else home,
     )
     if resolved is None:
+        if timer is not None:
+            write_failure(timer, now_ts=now_ts, error=NO_CREDENTIAL_ERROR)
         return _failed(NO_CREDENTIAL_ERROR)
 
     token, token_source = resolved
@@ -1152,17 +1302,38 @@ def _get_snapshot(
     if not snapshot.error:
         if path is not None:
             write_cache(path, snapshot)
+        if timer is not None:
+            clear_failure(timer)
         return snapshot
 
-    stale = read_cache_any_age(path, now_ts=now_ts) if path is not None else None
-    if stale is not None:
-        # The windows are the cache's; the ``token_source`` is the one that was
-        # *just* refused, which is what makes the pair legible — the reading is
-        # old precisely because that credential stopped working.
-        return replace(
-            stale, source="stale-cache", token_source=token_source, error=snapshot.error
+    if timer is not None:
+        write_failure(
+            timer, now_ts=now_ts, error=snapshot.error, token_source=token_source
         )
-    return snapshot
+    return _with_stale_fallback(snapshot, path, now_ts)
+
+
+def _with_stale_fallback(
+    failure: UsageSnapshot, cache: Path | None, now_ts: float
+) -> UsageSnapshot:
+    """An old real reading if there is one, else the failure itself.
+
+    Reached from both failure paths — the fetch that just failed and the one
+    suppressed by the timer — so a backoff never costs a caller the stale
+    reading it would otherwise have been served.
+    """
+    stale = read_cache_any_age(cache, now_ts=now_ts) if cache is not None else None
+    if stale is None:
+        return failure
+    # The windows are the cache's; the ``token_source`` is the one that was
+    # refused, which is what makes the pair legible — the reading is old
+    # precisely because that credential stopped working.
+    return replace(
+        stale,
+        source="stale-cache",
+        token_source=failure.token_source,
+        error=failure.error,
+    )
 
 
 def _home_dir() -> Path | None:
