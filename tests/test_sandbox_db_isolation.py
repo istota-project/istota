@@ -691,6 +691,51 @@ class TestBwrapAvailabilityProbe:
             assert executor._bwrap_available() is False
         assert recorded == []
 
+    def test_the_probe_performs_the_mounts_the_real_argv_performs(
+        self, iso_config, iso_task
+    ):
+        """A probe that answers for less than the command it gates is not one.
+
+        The original probe was `--ro-bind / / -- true`, which asks only whether
+        the kernel will hand out a mount namespace. A container can answer yes
+        to that and still refuse `mount("proc")` inside it — Docker's masked
+        `/proc` entries and read-only `/proc/sys` make the container's procfs
+        not "fully visible", and the kernel then blocks a fresh procfs in a
+        nested user namespace. Measured on the shipped image with
+        `seccomp:unconfined` alone: `bwrap --unshare-user --ro-bind / / -- true`
+        exits 0, and the same command carrying these mounts exits 1 at "Can't
+        mount proc on /newroot/proc".
+
+        The consequence of getting this wrong is worse than the bug it would
+        replace. `_bwrap_available` gates `ISTOTA_SANDBOXED`, the prompt's
+        "the databases are not on your filesystem" rule and `build_bwrap_cmd`
+        itself, so a False positive reports a working sandbox and then fails
+        every task — where the narrow-probe *negative* merely ran unconfined.
+        """
+        from istota import executor
+
+        argv = _bwrap(iso_config, iso_task, True)
+
+        # Pairwise rather than by set membership: `--proc /proc` and
+        # `--tmpfs /tmp` are (flag, path) pairs, and a check that only looked
+        # for the flags would pass on a probe mounting a procfs somewhere else.
+        probe = executor._BWRAP_PROBE_MOUNTS
+        for index, token in enumerate(probe):
+            if not token.startswith("--"):
+                continue
+            operand = probe[index + 1] if index + 1 < len(probe) else None
+            positions = [i for i, real in enumerate(argv) if real == token]
+            assert positions, (
+                f"the availability probe performs {token}, which "
+                f"build_bwrap_cmd does not — the probe is answering a "
+                "different question than the command it gates"
+            )
+            if operand is not None and not operand.startswith("--"):
+                assert any(argv[i + 1] == operand for i in positions), (
+                    f"the probe performs `{token} {operand}` and the real argv "
+                    f"never does"
+                )
+
 
 class TestUnshareUserReachesTheRealArgv:
     """The probe and the command it gates have to agree.
@@ -721,8 +766,9 @@ class TestUnshareUserReachesTheRealArgv:
 
         assert "--unshare-user" in argv
         assert argv.index("--unshare-user") < argv.index("--")
-        # Alone: `--disable-userns` needs a writable /proc/sys, which no
-        # container has, and passing an unsupported flag fails every task.
+        # Alone, because this branch is the one where the other probe said no —
+        # passing an unsupported flag makes bwrap exit before it runs anything,
+        # which would fail every task on the host the branch exists for.
         assert "--disable-userns" not in argv
 
     def test_it_is_not_emitted_where_bwrap_unshares_on_its_own(

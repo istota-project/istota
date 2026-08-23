@@ -63,7 +63,11 @@ env
 echo '--- proc ---'
 cat /proc/*/environ 2>/dev/null | tr '\\0' '\\n'
 echo '--- config ---'
-cat {CONTAINER_CONFIG} 2>&1
+if cat {CONTAINER_CONFIG} 2>/dev/null; then
+  echo "config_read=readable"
+else
+  echo "config_read=unreadable"
+fi
 echo SECRET_PROBE_END
 """
 
@@ -147,6 +151,19 @@ class TestNoCredentialReachesTheModel:
             "never split out of its environment and the assertions below "
             f"would pass on a deployment with no isolation at all\n{observed[:2000]}"
         )
+        # And the developer skill has to have been *authorized*, or
+        # `GITLAB_TOKEN` was never in this task's environment for the split to
+        # remove — which would make the scenario below assert the absence of
+        # something nothing put there. `DEVELOPER_REPOS_DIR` is the marker
+        # because it comes from the same `env` manifest and is the one entry
+        # there that is not `sensitive`, so it survives the split that the
+        # token does not.
+        assert "DEVELOPER_REPOS_DIR=" in observed, (
+            "the developer skill was not authorized for this task, so no forge "
+            "credential was ever resolved into its environment and the "
+            "assertions below are vacuous. The prompt has to carry the skill's "
+            f"own triggers — see PROMPT.\n{observed[:2000]}"
+        )
 
     @pytest.mark.script(SECRET_SCRIPT)
     def test_no_configured_credential_appears_anywhere_in_the_transcript(
@@ -196,6 +213,15 @@ class TestNoCredentialReachesTheModel:
 
         observed = _probe_output(stack)
 
+        # First, that there was something to withhold. A task that never
+        # authorized the developer skill has no `GITLAB_TOKEN` in its
+        # environment for the split to remove, and the two assertions below
+        # would then be true of nothing. Stated here as well as in the control
+        # above, because this is the assertion someone will read on its own.
+        assert "DEVELOPER_REPOS_DIR=" in observed, (
+            "the developer skill was not authorized for this task, so nothing "
+            "resolved a forge credential and this scenario asserts nothing"
+        )
         assert "GITLAB_TOKEN=" not in observed, (
             "GITLAB_TOKEN is in the environment the model can read. The skill "
             "proxy is what removes it (`_split_credential_env`), so either it "
@@ -227,7 +253,12 @@ class TestNoCredentialReachesTheModel:
             f"{CONTAINER_CONFIG} is readable from inside the task, and it "
             "holds the forge token in plaintext"
         )
-        assert "No such file or directory" in config_read, (
-            f"reading {CONTAINER_CONFIG} did not fail with ENOENT, so it is "
-            f"reachable in some form from inside the sandbox\n{config_read[:1000]}"
+        # A marker the probe writes from `cat`'s exit status, not `cat`'s error
+        # message. `passthrough_env_vars` defaults to carrying `LANG` into the
+        # sandbox, so coreutils localizes its strerror — and this is the
+        # negative control for the whole file, which makes it the last
+        # assertion that should be able to fail for a reason of its own.
+        assert "config_read=unreadable" in config_read, (
+            f"reading {CONTAINER_CONFIG} succeeded, so it is reachable in some "
+            f"form from inside the sandbox\n{config_read[:1000]}"
         )

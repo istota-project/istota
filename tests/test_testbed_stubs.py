@@ -141,6 +141,31 @@ class TestTheNtfyStub:
         assert push_server.pushes() == []
         assert len(push_server.calls) == 1
 
+    def test_a_malformed_length_is_recorded_rather_than_dropped(
+        self, push_server
+    ):
+        """`handle_error` is silenced, so an exception here is a dropped
+        connection with no record — and the scenario would then report a task
+        that never reached the stub, which is the wrong diagnosis for a request
+        that arrived."""
+        import http.client
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", push_server.port, timeout=5
+        )
+        try:
+            connection.putrequest("POST", f"/{push_server.topic}")
+            connection.putheader("Content-Length", "not-a-number")
+            connection.putheader("Authorization", f"Bearer {ntfy.NTFY_TOKEN}")
+            connection.endheaders()
+            response = connection.getresponse()
+            response.read()
+        finally:
+            connection.close()
+
+        assert len(push_server.pushes()) == 1
+        assert push_server.pushes()[0].body == b""
+
     def test_it_configures_nothing_through_the_generator(self, push_server):
         """ntfy lives in the secrets store, not in `config.toml`. Asserted so
         that adding a variable here has to be a deliberate change rather than
@@ -235,6 +260,31 @@ class TestTheFeedsStub:
         assert status == 200
         assert body == b"<rss>two</rss>"
         assert headers["ETag"] == '"v2"'
+
+    def test_replace_clears_a_validator_it_is_not_given(self, documents):
+        """The trap that makes the previous test insufficient on its own.
+
+        `_matches` answers 304 on *either* validator and the poller sends both
+        when it has both, so a `replace` that set a new `ETag` and left the old
+        `Last-Modified` in place would 304 a client asking correctly about a
+        document that had changed — and the scenario would read as a poller
+        that ignores new entries.
+        """
+        documents.add(
+            "/feed.xml",
+            "<rss>one</rss>",
+            etag='"v1"',
+            last_modified="Wed, 01 Jan 2025 00:00:00 GMT",
+        )
+        documents.replace("/feed.xml", "<rss>two</rss>", etag='"v2"')
+
+        status, _, body = _request(
+            f"{documents.url}/feed.xml",
+            headers={"If-Modified-Since": "Wed, 01 Jan 2025 00:00:00 GMT"},
+        )
+
+        assert status == 200
+        assert body == b"<rss>two</rss>"
 
     def test_replacing_a_path_nobody_registered_says_so(self, documents):
         with pytest.raises(KeyError, match="never registered"):

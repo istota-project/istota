@@ -663,9 +663,10 @@ class TestTheOverlayIsAddressable:
         a procfs inside one, because Docker's masked `/proc` entries and
         read-only `/proc/sys` make the container's procfs not "fully visible"
         to the kernel. `build_bwrap_cmd` emits `--proc /proc`, so without this
-        every sandbox fails at "Can't mount proc on /newroot/proc" — and the
-        daemon answers a bwrap it cannot run by disabling the sandbox and
-        carrying on, so the loss is silent rather than red.
+        no sandbox can start — and `_bwrap_available` performs the same mounts,
+        so the daemon answers by disabling the sandbox and carrying on. The
+        loss is therefore silent rather than red, which is what makes a guard
+        on a compose line worth having.
         """
         config = _compose_config(tmp_path)
 

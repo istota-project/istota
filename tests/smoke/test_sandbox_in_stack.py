@@ -177,11 +177,15 @@ class TestTheDatabaseMasks:
     difference between "the code would emit `--tmpfs`" and "the model cannot
     see the database".
 
-    Nothing here asserts anything about *nested* user namespaces:
-    `--disable-userns` needs a writable `/proc/sys`, which no container has, so
-    `executor._bwrap_supports_disable_userns` omits it on both shapes. The mask
-    can be lifted from a nested userns here and that is out of scope by the
-    spec's own decision, not an oversight.
+    Nothing here asserts anything about *nested* user namespaces, and the
+    reason changed under this file rather than going away. `--disable-userns`
+    needs a writable `/proc/sys`, which a container does not have by default —
+    but both shapes now grant `systempaths=unconfined`, without which bwrap
+    cannot mount a procfs inside its own user namespace at all, and that grant
+    makes `/proc/sys` writable as a side effect. So
+    `executor._bwrap_supports_disable_userns` finds the flag supported here and
+    it does reach the real argv. Nothing asserts on it either way: that is the
+    spec's decision about scope, not a statement about what the argv contains.
     """
 
     @pytest.mark.script(MASK_SCRIPT)

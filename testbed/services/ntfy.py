@@ -148,11 +148,20 @@ def serve(
             self.wfile.write(body)
 
         def do_POST(self) -> None:
-            length = int(self.headers.get("content-length") or 0)
+            # Both the parse and the read are guarded, and the guard is not
+            # theoretical. `handle_error` is silenced above, so an exception
+            # here produces no record, no response and a dropped connection —
+            # and the scenario then reports "nothing was POSTed to the ntfy
+            # stub … a task that never reached it", which is the wrong
+            # diagnosis for a request that arrived and was mis-parsed.
+            try:
+                length = int(self.headers.get("content-length") or 0)
+            except ValueError:
+                length = 0
             try:
                 body = self.rfile.read(length)
             except OSError:
-                return
+                body = b""
 
             # Recorded *before* the credential check, so a push that arrived
             # with the wrong token is visible to a scenario rather than being

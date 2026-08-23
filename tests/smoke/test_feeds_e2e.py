@@ -34,8 +34,6 @@ pytestmark = pytest.mark.smoke
 #: bare `pytest.mark.smoke` because `tests/test_smoke_tier.py` greps for it.
 FEEDS = pytest.mark.profile("feeds")
 
-CONTAINER_CONFIG = "/data/config/config.toml"
-
 ETAG = '"v1-testbed"'
 
 
@@ -109,6 +107,29 @@ _FEED_ID = (
     "[\"feeds\"] if f[\"url\"] == sys.argv[1]))' \"$URL\""
 )
 
+#: Reduce one `run-scheduled` payload to a marker naming *this* feed's outcome.
+#:
+#: Two problems, one line. A bare `'"not_modified": true' in transcript` is a
+#: substring scan over both polls and every feed in each of them, and a
+#: `run-scheduled` reports one record per feed plus a rolled-up envelope — so
+#: an unrelated row could satisfy an assertion whose message names the second
+#: poll. And a poll whose summary does not mention this feed at all is the
+#: shape the retry below exists for, which the scan cannot distinguish from a
+#: poll that found it unchanged.
+#:
+#: Exits non-zero when the feed is absent from the summary, which is what makes
+#: it usable as the loop condition.
+_POLL_MARKER = (
+    "python3 -c "
+    "'import json,sys;"
+    " d=json.load(sys.stdin);"
+    ' f=[x for x in d.get("feeds", []) if x["url"] == sys.argv[1]];'
+    " sys.exit(1) if not f else"
+    ' print("POLLED", json.dumps({"not_modified": f[0]["not_modified"],'
+    ' "new_entries": f[0]["new_entries"], "error": f[0]["error"]}))\''
+    ' "$URL"'
+)
+
 
 @FEEDS
 class TestThePollerReachesARealServer:
@@ -164,6 +185,17 @@ class TestThePollerReachesARealServer:
         from the absence of new rows, because those are different claims — a
         server that answered 200 with the same body also writes no new rows,
         and it is the 304 path that this exists to witness.
+
+        **The second poll is retried, and that is a race rather than caution.**
+        With the module on, the scheduler runs `_module.feeds.run_scheduled` on
+        its own `*/5` cron for the whole session. If that fires between this
+        task's `refresh` and its `run-scheduled` it takes the 304 itself and
+        advances `next_poll_at`, so the task's own poll finds nothing due and
+        the transcript never carries the outcome — a cron job's stdout does not
+        reach the model. The fetch assertions would still pass and only the
+        outcome ones fail, reading as a poller defect. Looping on "did *this*
+        feed appear in the summary" closes it, and the marker is what makes
+        that question answerable.
         """
         service = stack.service("feeds")
         path = _unique_path()
@@ -176,8 +208,11 @@ class TestThePollerReachesARealServer:
                 'istota-skill feeds add --url "$URL"\n'
                 "istota-skill feeds run-scheduled\n"
                 f"ID=$({_FEED_ID})\n"
-                'istota-skill feeds refresh --id "$ID"\n'
-                "istota-skill feeds run-scheduled\n"
+                "for attempt in 1 2 3; do\n"
+                '  istota-skill feeds refresh --id "$ID" > /dev/null\n'
+                f"  istota-skill feeds run-scheduled | {_POLL_MARKER} && break\n"
+                "  sleep 2\n"
+                "done\n"
             )
         )
 
@@ -207,13 +242,20 @@ class TestThePollerReachesARealServer:
             f"no later fetch carried If-None-Match: {ETAG} — the ETag the "
             f"server sent was not stored or not sent back. Saw {validators!r}"
         )
-        assert '"not_modified": true' in transcript, (
-            "no poll reported `not_modified`, so the 304 was not honoured — "
-            "the poller either did not send the validator or parsed the empty "
-            "response as a feed that lost its entries\n"
-            f"--- transcript ---\n{transcript[-4000:]}"
+        # One marker line, rendered by the reducer from *this* feed's record in
+        # the second poll's summary — not a substring scan over a transcript
+        # holding both polls and every feed in each. The three fields are
+        # asserted together because the interesting failures separate them: a
+        # 200 that returned the same body also writes no entries, and an error
+        # writes none either.
+        expected = (
+            'POLLED {"not_modified": true, "new_entries": 0, "error": null}'
         )
-        assert '"new_entries": 0' in transcript, (
-            "the second poll wrote entries; a 304 carries no body and must "
-            f"produce none\n--- transcript ---\n{transcript[-4000:]}"
+        assert expected in transcript, (
+            "the second poll did not report this feed as unmodified with no "
+            "new entries. Either the 304 was not honoured — the poller did not "
+            "send the validator, or parsed the empty response as a feed that "
+            "lost its entries — or the poll never saw this feed at all, which "
+            "the retry loop was supposed to rule out.\n"
+            f"--- transcript ---\n{transcript[-4000:]}"
         )

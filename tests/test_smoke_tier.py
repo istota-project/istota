@@ -388,16 +388,17 @@ class TestTheSeccompGrantStaysInTheTestFile:
     def test_the_test_compose_also_unmasks_the_system_paths(self):
         """The other half, and the one whose loss is quiet rather than loud.
 
-        Without `seccomp:unconfined` bwrap cannot create the user namespace and
-        every task fails visibly. Without `systempaths=unconfined` it creates
-        the namespace and then cannot mount a procfs inside it, because
-        Docker's masked `/proc` entries and read-only `/proc/sys` make the
-        container's procfs not "fully visible" to the kernel — `build_bwrap_cmd`
-        emits `--proc /proc`, so the sandbox dies at "Can't mount proc on
-        /newroot/proc". The daemon's response to a bwrap it cannot run is to
-        disable the sandbox for the process and carry on, so losing this line
-        does not fail the tier: it silently runs every scenario unconfined,
-        which is the state `TestTheDatabaseMasks` was written to catch.
+        Without `systempaths=unconfined` bwrap creates the user namespace and
+        then cannot mount a procfs inside it: Docker's masked `/proc` entries
+        and read-only `/proc/sys` make the container's procfs not "fully
+        visible" to the kernel, and `build_bwrap_cmd` emits `--proc /proc`.
+
+        The daemon's response to a bwrap it cannot run is to disable the
+        sandbox for the process and carry on — `_bwrap_available` performs
+        those same mounts, so it answers no here — which means losing this line
+        does not fail the tier. It silently runs every scenario unconfined,
+        which is the state `TestTheDatabaseMasks` was written to catch and the
+        reason this guard is worth its three lines.
         """
         body = (REPO / "docker" / "docker-compose.test.yml").read_text()
 

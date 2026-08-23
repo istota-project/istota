@@ -133,11 +133,25 @@ class FeedsService(HttpStub):
             self._documents[path] = document
         return f"{self.container_url}{path}"
 
-    def replace(self, path: str, body: bytes | str, *, etag: str = "") -> None:
+    def replace(
+        self,
+        path: str,
+        body: bytes | str,
+        *,
+        etag: str = "",
+        last_modified: str = "",
+    ) -> None:
         """Change what an already-registered path serves.
 
         For the second half of a conditional-GET scenario: the same feed, a new
-        `ETag`, and a body carrying an entry the first poll did not see.
+        body carrying an entry the first poll did not see, and new validators.
+
+        **Both** validators are assigned, and defaulting either to `""` clears
+        it rather than leaving the old one. `_matches` answers 304 on *either*,
+        and `_poll_rss` sends both when the row has both — so a `replace` that
+        set a new `ETag` and left a stale `Last-Modified` would 304 a client
+        that was correctly asking about a document that had changed. The
+        scenario would then read as a poller that ignores new entries.
         """
         if not path.startswith("/"):
             path = "/" + path
@@ -147,6 +161,7 @@ class FeedsService(HttpStub):
                 raise KeyError(f"{path!r} was never registered")
             document.body = body.encode() if isinstance(body, str) else body
             document.etag = etag
+            document.last_modified = last_modified
 
     def fetches(self, path: str = "") -> list[ServiceCall]:
         """Recorded GETs, optionally for one exact path, oldest first."""

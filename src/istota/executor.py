@@ -999,6 +999,38 @@ _bwrap_checked: bool | None = None
 #: probe already succeeds is left exactly as it was.
 _bwrap_needs_unshare_user: bool = False
 
+#: The mount operations the availability probe performs, which are the ones
+#: ``build_bwrap_cmd`` performs unconditionally on every sandbox it builds.
+#:
+#: **A probe that answers for less than the command it gates is not a probe.**
+#: This used to be `--ro-bind / /` alone, which asks only whether the kernel
+#: will hand out a mount namespace — and a container can answer yes to that and
+#: still refuse `mount("proc")` inside it, because Docker's masked `/proc`
+#: entries and read-only `/proc/sys` make the container's procfs not "fully
+#: visible" and the kernel then blocks a fresh procfs in a nested user
+#: namespace. Measured on the shipped image: with `seccomp:unconfined` alone,
+#: `bwrap --unshare-user --ro-bind / / -- true` exits 0 and the same command
+#: with these mounts exits 1 at "Can't mount proc on /newroot/proc". A daemon
+#: that trusted the narrow probe there would report a working sandbox, set
+#: ``ISTOTA_SANDBOXED``, and then fail every task — which is worse than the
+#: silent fallback it replaced.
+#:
+#: `tests/test_sandbox_db_isolation.py` holds this against the real argv, so a
+#: mount added to `build_bwrap_cmd`'s unconditional set and not to this one
+#: fails in the default suite rather than on somebody's host.
+_BWRAP_PROBE_MOUNTS = [
+    "--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+]
+
+#: The whole probe argv: something to be a root, plus the mounts above.
+#:
+#: The root bind is the probe's own scaffolding and is deliberately *not* in
+#: the list above. `build_bwrap_cmd` binds selectively — `/usr`, a handful of
+#: `/etc` entries, the task's own workspace — and never `--ro-bind / /`, so a
+#: guard that required the real argv to contain the probe's root would be
+#: asserting the sandbox is broader than it is.
+_BWRAP_PROBE_ARGS = ["--ro-bind", "/", "/", *_BWRAP_PROBE_MOUNTS]
+
 
 def _release_task_cgroup(task_id: int, path: Path) -> None:
     """Give a task's cgroup back, naming an OOM kill on the way out (A6).
@@ -1065,6 +1097,11 @@ def _bwrap_available() -> bool:
     tested. Order matters: the plain probe runs first, so a host where the
     sandbox already worked is answered by exactly the command it was answered
     by before and nothing about it changes.
+
+    Both probes carry `_BWRAP_PROBE_ARGS`, which performs the unconditional
+    mount set `build_bwrap_cmd` emits rather than the bare root bind this
+    used to ask about. See `_BWRAP_PROBE_MOUNTS` for why the narrower
+    question has a wrong answer on a container.
     """
     global _bwrap_checked, _bwrap_needs_unshare_user
     if _bwrap_checked is not None:
@@ -1086,13 +1123,13 @@ def _bwrap_available() -> bool:
         return subprocess.run(argv, capture_output=True, timeout=5)
 
     try:
-        plain = _probe(["bwrap", "--ro-bind", "/", "/", "--", "true"])
+        plain = _probe(["bwrap", *_BWRAP_PROBE_ARGS, "--", "true"])
         if plain.returncode == 0:
             _bwrap_checked = True
             return True
 
         explicit = _probe(
-            ["bwrap", "--unshare-user", "--ro-bind", "/", "/", "--", "true"]
+            ["bwrap", "--unshare-user", *_BWRAP_PROBE_ARGS, "--", "true"]
         )
         if explicit.returncode == 0:
             _bwrap_needs_unshare_user = True
@@ -1155,10 +1192,14 @@ def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
     ``--unshare-user`` is prepended where `_bwrap_available` found the host
     needs it, for the same reason that function retries with it: without the
     flag *every* probe here fails at namespace creation rather than at the flag
-    under test, so a supported flag reports unsupported. That is not
-    hypothetical — it is what silently dropped ``--remount-ro`` from every
-    sandbox in a Docker deployment, leaving the database masks writable, which
-    is precisely the failure the read-only mask exists to prevent.
+    under test, so a supported flag reports unsupported. Fixing
+    `_bwrap_available` alone would have left that true — the sandbox would have
+    started and ``--remount-ro`` would have reported unsupported, leaving the
+    database masks writable, which is the one thing the read-only mask exists
+    to prevent.
+
+    Through `_bwrap_requires_unshare_user` rather than the global, so the two
+    places that have to agree about this flag agree through one accessor.
     """
     with _bwrap_probe_lock:
         cached = _bwrap_flag_support.get(flag)
@@ -1168,7 +1209,7 @@ def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
             _bwrap_flag_support[flag] = False
             return False
 
-        if _bwrap_needs_unshare_user and "--unshare-user" not in probe_args:
+        if _bwrap_requires_unshare_user() and "--unshare-user" not in probe_args:
             probe_args = ["--unshare-user", *probe_args]
 
         supported = False
