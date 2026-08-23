@@ -1556,7 +1556,12 @@ class TestTmpfsMountList:
 
     def test_the_runtime_mounts_are_not_declared_by_any_compose_file(self):
         """If one ever is, it belongs in the compose half and the pin should be
-        what says so — carrying it in both lists means neither pin means much."""
+        what says so — carrying it in both lists means neither pin means much.
+
+        `docker/docker-compose.yml` declares no tmpfs at all now that it ships
+        no devbox, so that half is vacuous by construction. It stays as a
+        standing guard: a devbox coming back there with a tmpfs of its own is
+        exactly the case this would need to catch."""
         for name in ("deploy/ansible/templates/docker-compose.devbox.yml.j2",
                      "docker/docker-compose.yml"):
             declared = self._tmpfs_destinations(

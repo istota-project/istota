@@ -41,7 +41,7 @@ istota-skill devbox reset --yes    # wipe /home/dev, restart the container (dest
 
 ## What works inside the devbox
 
-The devbox exists on the Ansible deployment only. The `docker compose` stack ships no devbox at all, so if you are on that shape this skill is not selectable and nothing here applies — the operator's route is the Ansible deployment, and that is what to say if a task needs one.
+This skill appears only where an operator has configured a devbox container for you. The `docker compose` stack ships no devbox at all, so it never appears there; the Ansible deployment runs one per user, and that is what you are talking to when it does.
 
 Everything in this section that needs a forge token depends on a host-side credential proxy, which the Ansible deployment runs per user. Where one is missing, `gh` and `glab` exit 4 and `git push` fails through its credential helper instead, exiting 1 and naming the shape in its message. Either way the answer is the same: don't retry, don't hunt for a workaround inside the container, say what happened and do the forge work outside it. Everything else in the box is unaffected.
 

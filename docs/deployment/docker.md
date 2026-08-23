@@ -100,12 +100,17 @@ This stack ships no devbox service, and the `devbox` skill cannot be used on it.
 
 Earlier releases did ship a `devbox` profile here. Nothing could reach it, and its only working consequence was that every change to the Ansible devbox had to be mirrored into a service nobody could use — which is how it drifted into having no credential socket in the first place. Devbox work goes through the Ansible deployment, which renders one container per user from the same `docker/devbox/Dockerfile`.
 
-**Upgrading from a release that had the profile:** removing the service does not remove anything you are running. An existing `devbox-$USER_NAME` container keeps running until you stop it, and its `devbox_home` volume is retained; compose stops managing both. Check the volume for anything you left in `/home/dev` before removing it.
+**Upgrading from a release that had the profile:** the service going away does not itself remove the container, but the next `./rebuild.sh` will. That script runs `docker compose down --remove-orphans`, and a container whose service is no longer in the file is precisely what that removes. Everything the box accumulated — installed packages, build output, anything outside `/home/dev` — is in its writable layer rather than in the volume, so it goes too. Copy out or `docker commit` whatever you want to keep before the next rebuild.
+
+The volume and the network outlive the change either way, including `down --volumes`, because compose no longer declares them. Remove all three by hand when you are done with them:
 
 ```bash
 docker rm -f devbox-$USER_NAME
 docker volume rm docker_devbox_home     # after checking what is in it
+docker network rm docker_devbox-net
 ```
+
+The `docker_` prefix on those two is the compose project name, which defaults to the directory the compose file sits in. If you set `COMPOSE_PROJECT_NAME`, use yours.
 
 If you want the workbench itself, build and run it by hand — the image is not istota-specific:
 

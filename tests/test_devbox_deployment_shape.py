@@ -27,6 +27,7 @@ handful of properties whose violation is silent.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -140,14 +141,24 @@ class TestTheSkillBodyMatchesTheDeployedShapes:
         return (REPO / "src" / "istota" / "skills" / "devbox" / "skill.md").read_text()
 
     def test_it_says_the_compose_shape_has_no_devbox(self, body):
-        lowered = body.lower()
-        assert "docker compose" in lowered
-        assert "no devbox" in lowered, (
-            "skill.md no longer tells the model that the docker compose "
-            "deployment ships no devbox. It used to say the box was there and "
-            "only the forge commands failed, which is the wrong shape of wrong: "
-            "a model reading that will try to use it"
+        """One sentence has to carry both halves. Two whole-document searches
+        pass on a page that says "docker compose" in one paragraph and "no
+        devbox" about something else in another, which is the weakness the
+        class this replaced also had."""
+        sentences = [s.strip().lower() for s in re.split(r"(?<=[.!?])\s+", body)]
+        assert any("docker compose" in s and "no devbox" in s for s in sentences), (
+            "no single sentence in skill.md tells the model that the docker "
+            "compose deployment ships no devbox. It used to say the box was "
+            "there and only the forge commands failed, which is the wrong shape "
+            "of wrong: a model reading that will try to use it"
         )
+
+    def test_it_still_explains_the_credential_free_case(self, body):
+        """Not made moot by the removal: `istota_devbox_proxy_enabled` is an
+        Ansible variable and the template gates the socket mount on it, so a
+        devbox with no credentials is still reachable — and skill.md is the only
+        place the model is told what the wrapper's exit 4 means."""
+        assert "credential" in body.lower()
 
     def test_it_tells_the_model_what_exit_4_means(self, body):
         assert "exit 4" in body.lower()
@@ -172,7 +183,6 @@ class TestTheWrapperRefusalNamesTheShape:
         with pytest.raises(NoProxyError) as excinfo:
             fetch_forge_credentials("gitlab", {}, {})
         assert not str(excinfo.value).startswith("/")
-
 
 
 class TestTheAnsibleVolumeMountsAreHeldInLine:
@@ -240,6 +250,67 @@ class TestTheAnsibleVolumeMountsAreHeldInLine:
                 entry.get("source", "")
             assert source != forbidden, (
                 f"the Ansible devbox binds {forbidden} into the container"
+            )
+
+
+class TestTheAnsibleServiceKeepsItsContainment:
+    """The presence half of what the parity comparison used to check.
+
+    `MUST_MATCH` held nine keys equal across the two shapes, and its first act
+    was `assert key in ansible_service` — a presence check on the rendered
+    template that never needed a second shape to mean anything. Deleting the
+    comparison took that with it, and only `tmpfs` is caught elsewhere
+    (`tests/test_skills_devbox.py::TestTmpfsMountList`). Without this class the
+    template can lose its memory cap, its pid cap or its capability grant with
+    the whole suite green.
+
+    `networks` is the sharp one. Drop that key and compose puts the container on
+    the project's default network, outside `istota_devbox_network_subnet` — at
+    which point every DOCKER-USER rule the role installs is scoped to a subnet
+    no container uses and drops nothing, while `doctor.check_devbox_netfilter`
+    reads the chain, finds the rules well formed and reports ok.
+    `tests/test_ansible_devbox_iptables.py` writes that failure mode down and
+    holds the network's *definition*; this holds the service's membership of it.
+    """
+
+    #: Key -> the value the deployment expects, or None where the value is a
+    #: configurable and only its presence is the property.
+    REQUIRED = {
+        "image": None,
+        "restart": "unless-stopped",
+        "command": ["sleep", "infinity"],
+        "cap_add": ["NET_RAW"],
+        "networks": ["devbox-net"],
+        "mem_limit": None,
+        "cpus": None,
+        "pids_limit": None,
+    }
+
+    @pytest.mark.parametrize("key", sorted(REQUIRED))
+    def test_the_key_is_present(self, key, ansible_service):
+        assert key in ansible_service, (
+            f"the Ansible devbox template no longer declares {key!r}. Every key "
+            f"here changes what the container can do or reach — if dropping it "
+            f"is deliberate, take it out of REQUIRED and say why in the commit"
+        )
+
+    @pytest.mark.parametrize(
+        "key", sorted(k for k, v in REQUIRED.items() if v is not None)
+    )
+    def test_the_value_is_the_one_the_deployment_needs(self, key, ansible_service):
+        assert ansible_service[key] == self.REQUIRED[key], (
+            f"the Ansible devbox declares {key}={ansible_service[key]!r}, not "
+            f"{self.REQUIRED[key]!r}"
+        )
+
+    def test_the_limits_are_set_to_something(self, ansible_service):
+        """The three that are role variables rather than literals. Their values
+        belong to the operator; that they are set at all does not."""
+        for key in ("mem_limit", "cpus", "pids_limit"):
+            value = ansible_service.get(key)
+            assert value not in (None, "", 0), (
+                f"the Ansible devbox renders {key}={value!r}, so the container "
+                f"runs with no {key} at all"
             )
 
 
@@ -347,10 +418,28 @@ class TestTheComposeShapeShipsNoDevbox:
             f"still creates them for nothing"
         )
 
-    def test_the_istota_service_mounts_no_docker_socket(self, compose):
-        mounts = [str(v) for v in compose["services"]["istota"].get("volumes", [])]
+    #: Naming the socket alone is not enough: bind its *directory* and the
+    #: container has the socket. Same list the Ansible side is held to.
+    FORBIDDEN_PATHS = frozenset(
+        {"/var/run/docker.sock", "/run/docker.sock", "/var/run", "/run", "/"}
+    )
+
+    def test_the_istota_service_mounts_no_route_to_the_host_daemon(self, compose):
+        mounts = compose["services"]["istota"].get("volumes", [])
         assert mounts, "the istota service lost its volumes; this test is asserting nothing"
-        offending = [m for m in mounts if "docker.sock" in m]
+        offending = []
+        for entry in mounts:
+            if isinstance(entry, dict):
+                source, target = str(entry.get("source", "")), str(entry.get("target", ""))
+            else:
+                parts = str(entry).split(":")
+                source, target = parts[0], (parts[1] if len(parts) > 1 else "")
+            if (
+                "docker.sock" in str(entry)
+                or source in self.FORBIDDEN_PATHS
+                or target in self.FORBIDDEN_PATHS
+            ):
+                offending.append(entry)
         assert not offending, (
             f"the istota service now mounts {offending}. That is a route to the "
             f"host's Docker, in a shape whose tasks run unsandboxed — if it is "
@@ -358,17 +447,37 @@ class TestTheComposeShapeShipsNoDevbox:
             f"docs/deployment/docker.md, which tells operators there is none"
         )
 
+    #: How a docker client could arrive. The package names are the obvious
+    #: route and the only one the first cut of this test checked, which a
+    #: control showed was not enough: `docker/istota/Dockerfile` installs `gh`
+    #: and `glab` from pinned release tarballs into /usr/local/bin, and
+    #: `.claude/rules/deployment.md` records that as the house style over apt.
+    #: So a tarball or a `COPY --from` was the likely reintroduction and the
+    #: one the test could not see.
+    DOCKER_CLIENT_MARKERS = (
+        "docker-ce-cli",
+        "docker.io",
+        "docker-cli",
+        "docker-compose-plugin",
+        "copy --from=docker",
+        "download.docker.com",
+        "/usr/local/bin/docker",
+        "/usr/bin/docker",
+    )
+
     def test_the_istota_image_installs_no_docker_client(self):
         """The other half of "the daemon has no way in": the skill CLI resolves
         its binary with `shutil.which("docker")`, so a client in the image is
         half the route even with no socket mounted."""
-        dockerfile = self.ISTOTA_DOCKERFILE.read_text().lower()
-        installed = [
-            package for package in ("docker-ce-cli", "docker.io", "docker-cli", "docker-compose-plugin")
-            if package in dockerfile
-        ]
-        assert not installed, (
-            f"docker/istota/Dockerfile now installs {installed}; "
+        dockerfile = self.ISTOTA_DOCKERFILE.read_text()
+        assert "FROM " in dockerfile, (
+            "docker/istota/Dockerfile does not look like a Dockerfile, so this "
+            "test is reading the wrong thing and asserting nothing"
+        )
+        lowered = dockerfile.lower()
+        found = [marker for marker in self.DOCKER_CLIENT_MARKERS if marker in lowered]
+        assert not found, (
+            f"docker/istota/Dockerfile now carries {found}; "
             f"docs/deployment/docker.md says the image has no docker client"
         )
 
@@ -382,9 +491,9 @@ class TestTheComposeShapeShipsNoDevbox:
         )
 
     def test_the_docs_carry_the_heading_the_links_point_at(self):
-        """Pinned on the heading rather than the sentence: two links in that
-        page target the slug this heading generates, and demoting it to body
-        text would leave the prose intact and both links broken."""
+        """Pinned on the heading rather than the sentence: a link further down
+        that page targets the slug this heading generates, and demoting it to
+        body text would leave the prose intact and the link broken."""
         doc = self.DOC.read_text()
         assert self.HEADING in doc, (
             f"docs/deployment/docker.md no longer carries {self.HEADING!r}, the "
