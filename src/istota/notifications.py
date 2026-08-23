@@ -385,6 +385,42 @@ def _canonical_room_token(config: "Config", token: str) -> str:
         return token
 
 
+def strip_leading_title(message: str, title: str | None) -> str:
+    """Drop a leading copy of ``title`` from a message body.
+
+    :func:`istota.notification_store._delivery_text` composes the delivered text
+    as the title, a blank line, then the body, and it has to: Talk takes no title
+    argument, so the first line of the message is the only place a Talk reader
+    ever sees the label. Every *other* surface in :func:`_dispatch` takes ``title``
+    of its own — an email subject, an ntfy header, the ``messages.title`` column
+    the web transcript renders above the body — so the composed string reaches
+    them with the label twice, once as a heading and once as the opening line
+    (ISSUE-311).
+
+    Anchored on the whole title followed by the blank line, so a body that merely
+    opens with similar words is left alone. The message is returned unchanged
+    when what is left would be empty or blank — ``_delivery_text`` returns the
+    bare title when the body is empty, and an empty notification is worse than a
+    repeated label.
+
+    **Two prefix spellings, and deliberately only two.** Producers that compose
+    their own delivery text rather than going through ``_delivery_text`` bold the
+    label for Talk, which renders markdown — ``heartbeat.send_heartbeat_alert``
+    is the one in the tree. Its alert fires on a schedule, so missing it would
+    leave the highest-volume producer showing the defect this function exists to
+    remove. This is a closed list of exact comparisons, not markdown parsing: if
+    a third spelling ever appears, add it here rather than reaching for a regex,
+    and prefer changing the producer to compose the plain form.
+    """
+    if not title or not message:
+        return message
+    for prefix in (f"{title}\n\n", f"**{title}**\n\n"):
+        if message.startswith(prefix):
+            remainder = message[len(prefix):]
+            return remainder if remainder.strip() else message
+    return message
+
+
 def mirror_talk_to_room(
     config: "Config", token: str, message: str,
     *, title: str | None = None, talk_message_id: int | None = None,
@@ -541,6 +577,10 @@ def _dispatch(
         )
         if t
     }
+    # `message` keeps the title prefix for Talk, which has no title field of its
+    # own; `body` is the same text for the surfaces that render `title`
+    # separately and would otherwise print the label twice (ISSUE-311).
+    body = strip_leading_title(message, title)
     for dest in dests:
         if dest.surface == "talk":
             # Resolved here, not left to `_send_talk`, because the mirror needs
@@ -555,20 +595,23 @@ def _dispatch(
                 if talk_message_id is None:
                     talk_message_id = msg_id
                 if token and _canonical_room_token(config, token) not in web_rooms:
+                    # The mirror writes `title` into its own column, so it takes
+                    # the body — even though what it is mirroring is the Talk
+                    # message, which kept the prefix.
                     mirror_talk_to_room(
-                        config, token, message,
+                        config, token, body,
                         title=title, talk_message_id=msg_id,
                     )
         elif dest.surface == "email":
-            if _send_email(config, user_id, title or "Notification", message):
+            if _send_email(config, user_id, title or "Notification", body):
                 sent = True
         elif dest.surface == "ntfy":
-            if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
+            if _send_ntfy(config, user_id, body, title=title, priority=priority, tags=tags):
                 sent = True
         elif dest.surface == "web":
             # A bare `web` route carries no channel; the explicit conversation_token
             # override only applies to bare `talk`, so pass the descriptor channel.
-            if _send_web(config, user_id, message, dest.channel, title=title):
+            if _send_web(config, user_id, body, dest.channel, title=title):
                 sent = True
         else:
             logger.warning(

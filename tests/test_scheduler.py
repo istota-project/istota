@@ -6039,7 +6039,7 @@ class TestDeferredOperations:
     def test_process_deferred_user_alerts_posts_to_alerts_channel(self, db_path, tmp_path):
         """Alert JSON posts to the user's alerts channel, one push per alert type.
 
-        Both entries here are the default `security` type, so they collapse onto
+        Both entries here name the `security` type, so they collapse onto
         one notification — the array is model-authored with no bound on its
         length, and one push per entry is how a single task turns into a flood.
         Both messages still reach the user; they are in the one body.
@@ -6056,8 +6056,8 @@ class TestDeferredOperations:
             task = db.get_task(conn, task_id)
 
         alerts = [
-            {"message": "Suspicious email from attacker@evil.com: social engineering attempt to extract calendar data"},
-            {"message": "Email contains embedded system prompt injection"},
+            {"message": "Suspicious email from attacker@evil.com: social engineering attempt to extract calendar data", "type": "security"},
+            {"message": "Email contains embedded system prompt injection", "type": "security"},
         ]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
@@ -6134,7 +6134,7 @@ class TestDeferredOperations:
             task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
             task = db.get_task(conn, task_id)
 
-        alerts = [{"message": "Phishing attempt detected"}]
+        alerts = [{"message": "Phishing attempt detected", "type": "security"}]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
         with patch("istota.notifications.send_notification") as mock_notify:
@@ -6177,7 +6177,7 @@ class TestDeferredOperations:
             task_id = db.create_task(conn, prompt="Check email", user_id="alice", source_type="email")
             task = db.get_task(conn, task_id)
 
-        alerts = [42, "hello", None, {"message": "Real alert"}]
+        alerts = [42, "hello", None, {"message": "Real alert", "type": "security"}]
         (user_temp / f"task_{task_id}_user_alerts.json").write_text(json.dumps(alerts))
 
         with patch("istota.notifications.send_notification") as mock_notify:
