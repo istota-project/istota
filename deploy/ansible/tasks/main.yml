@@ -168,30 +168,188 @@
 # src/istota/forge_cli.py. The sandbox binds / read-only, so a binary here is
 # visible inside it with no extra mount.
 #
-# From the Debian archive rather than the vendors' own apt repos: trixie ships
-# gh 2.46 and glab 1.53, both above the floors the skill's verbs need, so the
-# vendor repos would add two supply-chain sources and two GPG keys to buy
-# nothing the deployment uses. The floors are asserted below rather than
-# assumed, because a distro that ships something older would otherwise fail
-# later and less legibly — as a forge command that exits nonzero mid-task.
-- name: Install forge CLIs for the developer skill
-  apt:
-    name:
-      - gh                  # GitHub CLI, floor 2.40 (pr checks, run view --log-failed)
-      - glab                # GitLab CLI, floor 1.36 (ci trace)
-    state: present
-    update_cache: yes
-    cache_valid_time: 3600
+# From the vendors' own releases, pinned and sha256-verified, rather than from
+# the Debian archive. The archive's versions clear the floors below, so nothing
+# failed — but trixie ships gh 2.46 and glab 1.53 while both Dockerfiles pin
+# 2.98.0 and 1.114.0, and `forge_cli.GH_KNOWN_GOOD` / `GLAB_KNOWN_GOOD` name
+# those as the versions the skill's verbs have actually been exercised against.
+# A bare-metal host therefore ran ~50 gh releases behind the container it is
+# meant to be interchangeable with, and `istota doctor` WARNed about it on every
+# play. `tests/test_ansible_forge_cli_install.py` now holds the pins here equal
+# to both images' and to the known-good marks.
+#
+# Not the vendors' apt repos either, which would add two more update sources and
+# two GPG keys and still track whatever those repos moved to overnight. The
+# release .deb at a pinned digest is one artifact this repository can name.
+#
+# `dpkg-deb -x` rather than `dpkg -i`: installing the package would put the
+# binary back under /usr/bin as an apt-owned file, fighting the archive's own
+# package on the next upgrade. Extracting the binary and copying it into
+# /usr/local/bin puts it in the half of the filesystem the distro leaves alone,
+# ahead of /usr/bin on PATH — so it also shadows an apt-installed `gh` an
+# earlier run of this role left behind, which is why nothing here removes that
+# package. (The images go further and put the real binaries off PATH entirely at
+# /usr/local/lib/istota_forge, so the only `gh` resolvable by name is the
+# wrapper. That is not reproduced here: on a host the apt package may still be
+# present and name-resolvable anyway, so moving ours out of the way would buy
+# the property for nobody while breaking `gh` for an operator on the box. The
+# real boundary is the skill proxy, which keeps the token out of the model's
+# environment; a direct exec gets an unauthenticated CLI either way.)
+#
+# By absolute path, not through PATH, and the same path the rendered config
+# names: this asks "is the binary this role installs already the pinned one",
+# which is a different question from the floor assert further down. That one
+# resolves through PATH on purpose, because it asks what the *wrapper's* exec
+# and an operator's shell will find.
+- name: Read the forge CLI version already installed
+  ansible.builtin.command: "{{ item }} --version"
+  register: istota_forge_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop:
+    - "{{ istota_developer_gh_bin_path }}"
+    - "{{ istota_developer_glab_bin_path }}"
   when: >
     not istota_update_only and not istota_web_only
     and istota_developer_enabled
   tags: [developer]
 
+# A string compare, not `is version(…)`, and deliberately so: this asks whether
+# the installed binary is *the pinned one*, not whether it is new enough. An
+# ordering test would leave a host that somehow has something newer than the pin
+# reporting up to date, which is the opposite of a reproducible install. The
+# floor assert further down is where an ordering comparison belongs.
+#
+# `default('', true)` makes the no-match case a value rather than the None
+# `regex_search` returns — the second argument matters, because a bare
+# `default('')` only substitutes for an *undefined* value and would let None
+# through into the comparison. A binary that is absent, or that failed to run
+# at all, therefore reads as stale and gets installed.
+- name: Decide whether the pinned forge CLIs need installing
+  ansible.builtin.set_fact:
+    istota_forge_cli_stale: >-
+      {{ (istota_forge_installed.results[0].stdout | default('') | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('', true)) != istota_developer_gh_version
+         or (istota_forge_installed.results[1].stdout | default('') | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('', true)) != istota_developer_glab_version }}
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+- name: Install the forge CLIs from the vendors' releases
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+    and istota_forge_cli_stale | bool
+  tags: [developer]
+  block:
+    - name: Determine the dpkg architecture for the forge CLI releases
+      ansible.builtin.command: dpkg --print-architecture
+      register: istota_forge_arch
+      changed_when: false
+      check_mode: false
+
+    - name: Assert a forge CLI digest is pinned for this architecture
+      ansible.builtin.assert:
+        that:
+          - (istota_forge_arch.stdout | default('')) in istota_developer_gh_checksums
+          - (istota_forge_arch.stdout | default('')) in istota_developer_glab_checksums
+        fail_msg: >-
+          No forge CLI digest is pinned for
+          {{ istota_forge_arch.stdout | default('an undetermined architecture') }}.
+          Add one to istota_developer_gh_checksums and
+          istota_developer_glab_checksums rather than dropping the pin — these
+          binaries publish this deployment's code to a forge, so an unverified
+          download is the wrong trade.
+
+    # A private directory rather than /tmp, for the reason the gitleaks install
+    # below spells out: this runs as root on a host with a real unprivileged bot
+    # account, and the digest authenticates the payload, not the path it lands in.
+    - name: Create a private directory for the forge CLI downloads
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: istota-forge.
+      register: istota_forge_tmp
+
+    - name: Fetch, verify and install the forge CLI releases
+      vars:
+        istota_forge_arch_name: "{{ istota_forge_arch.stdout }}"
+        # Both binaries are installed whenever *either* is stale. Splitting that
+        # per binary would mean carrying a per-item skip condition through four
+        # tasks to save one ~10 MB download on a version bump, which happens by
+        # hand a few times a year.
+        istota_forge_releases:
+          - name: gh
+            version: "{{ istota_developer_gh_version }}"
+            sha256: "{{ istota_developer_gh_checksums[istota_forge_arch_name] }}"
+            url: "https://github.com/cli/cli/releases/download/v{{ istota_developer_gh_version }}/gh_{{ istota_developer_gh_version }}_linux_{{ istota_forge_arch_name }}.deb"
+            # The destination is the path config.toml.j2 renders, not a
+            # directory stated a second time here. The two cannot drift, so a
+            # deployment that repoints `gh_bin_path` gets the binary installed
+            # where it said rather than somewhere the wrapper will not look.
+            bin: "{{ istota_developer_gh_bin_path }}"
+          - name: glab
+            version: "{{ istota_developer_glab_version }}"
+            sha256: "{{ istota_developer_glab_checksums[istota_forge_arch_name] }}"
+            url: "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/{{ istota_developer_glab_version }}/glab_{{ istota_developer_glab_version }}_linux_{{ istota_forge_arch_name }}.deb"
+            bin: "{{ istota_developer_glab_bin_path }}"
+      block:
+        - name: Download the forge CLI release packages
+          ansible.builtin.get_url:
+            url: "{{ item.url }}"
+            dest: "{{ istota_forge_tmp.path }}/{{ item.name }}.deb"
+            checksum: "sha256:{{ item.sha256 }}"
+            mode: '0600'
+          loop: "{{ istota_forge_releases }}"
+          loop_control:
+            label: "{{ item.name }} {{ item.version }}"
+
+        - name: Unpack the forge CLI packages
+          ansible.builtin.command:
+            cmd: >-
+              dpkg-deb -x {{ istota_forge_tmp.path }}/{{ item.name }}.deb
+              {{ istota_forge_tmp.path }}/{{ item.name }}-root
+            creates: "{{ istota_forge_tmp.path }}/{{ item.name }}-root/usr/bin/{{ item.name }}"
+          loop: "{{ istota_forge_releases }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Install the forge CLI binaries
+          ansible.builtin.copy:
+            src: "{{ istota_forge_tmp.path }}/{{ item.name }}-root/usr/bin/{{ item.name }}"
+            dest: "{{ item.bin }}"
+            remote_src: yes
+            owner: root
+            group: root
+            mode: '0755'
+          loop: "{{ istota_forge_releases }}"
+          loop_control:
+            label: "{{ item.name }}"
+      always:
+        # In `always`, so a failed download or unpack does not leave the
+        # directory behind on every subsequent run.
+        - name: Remove the forge CLI download directory
+          ansible.builtin.file:
+            path: "{{ istota_forge_tmp.path }}"
+            state: absent
+
+# Through PATH, deliberately, unlike the idempotence read above. That one asks
+# whether the binary this role installs is already the pinned one; this one asks
+# what the wrapper's exec and an operator's shell actually find — so an
+# apt-installed gh still sitting in /usr/bin and shadowing ours is exactly the
+# thing worth catching here.
+#
+# `check_mode: false` because `command` is otherwise skipped under `--check` and
+# the assert below reads the registered result. It survives today only via
+# `| default([])`, which turns the whole floor check into a silent no-op rather
+# than a crash — a check that cannot fail under --check is worse than one that
+# does, since a --check run is where an operator looks for exactly this.
 - name: Read installed forge CLI versions
   ansible.builtin.command: "{{ item }} --version"
   register: istota_forge_cli_versions
   changed_when: false
   failed_when: false
+  check_mode: false
   loop:
     - gh
     - glab
@@ -200,8 +358,8 @@
     and istota_developer_enabled
   tags: [developer]
 
-# `gh version 2.46.0 (…)` and `glab 1.53.0 (…)` — take the first dotted triple
-# and compare it as a version, not as a string ("2.9" > "2.46" lexically).
+# `gh version 2.98.0 (…)` and `glab 1.114.0 (…)` — take the first dotted triple
+# and compare it as a version, not as a string ("2.9" > "2.98" lexically).
 #
 # Deliberately not the capture-group form, `regex_search(RE, '\\1')`: on
 # ansible-core 2.21 that raises "'NoneType' object has no attribute 'group'"
@@ -237,18 +395,19 @@
 # (ISSUE-291). The hook now refuses instead when nobody is watching, so this
 # install is what keeps agent commits working.
 #
-# Not from the Debian archive, unlike gh and glab: trixie ships 8.16, and
-# `gitleaks git` — the invocation the hook uses — only exists from 8.19, where
-# it replaced `detect` and `protect`. An apt install would put a binary here
-# that the hook's capability probe rejects, which reads as the fix being broken
-# rather than as the package being old.
+# Not from the Debian archive, for the same reason gh and glab above are not,
+# but with a sharper edge: trixie ships 8.16, and `gitleaks git` — the
+# invocation the hook uses — only exists from 8.19, where it replaced `detect`
+# and `protect`. An apt install would put a binary here that the hook's
+# capability probe rejects, which reads as the fix being broken rather than as
+# the package being old. The forge CLIs merely ran old; this one would not run.
 #
 # /usr/local/bin, ahead of /usr/bin on the default PATH, so this binary wins
-# over a distro package somebody installs later. It reaches the sandbox for two
-# separate reasons, both worth writing down because a move to /opt would break
-# it silently: `build_bwrap_cmd` binds /usr read-only (not /, as the gh/glab
-# note nearby might suggest), and the scheduler unit's Environment=PATH lists
-# /usr/local/bin.
+# over a distro package somebody installs later — the same placement and the
+# same reasoning as the forge CLIs. It reaches the sandbox for two separate
+# reasons, both worth writing down because a move to /opt would break it
+# silently: `build_bwrap_cmd` binds /usr read-only, and the scheduler unit's
+# Environment=PATH lists /usr/local/bin.
 - name: Read the gitleaks version already installed
   ansible.builtin.command: /usr/local/bin/gitleaks version
   register: istota_gitleaks_installed

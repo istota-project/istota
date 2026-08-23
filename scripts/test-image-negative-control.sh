@@ -16,12 +16,13 @@
 # It covers both halves of the tier:
 #
 #   * the istota image, via docker/test/Dockerfile.no-forge;
-#   * the devbox image, via three controls, because that file asserts three
+#   * the devbox image, via four controls, because that file asserts four
 #     separable things and no single broken image reaches all of them. The
-#     forge-less image leaves four of its thirteen assertions green, since
+#     forge-less image alone left four of its thirteen assertions green, since
 #     /usr/local/bin/gh is a *copy* of the wrapper rather than a symlink into
-#     the directory being removed. See the three docker/test/Dockerfile.devbox-*
-#     files for what each one breaks and why.
+#     the directory being removed — the fourth control is what closes those.
+#     See the four docker/test/Dockerfile.devbox-* files for what each one
+#     breaks and why.
 #
 #   scripts/test-image-negative-control.sh [amd64]
 #

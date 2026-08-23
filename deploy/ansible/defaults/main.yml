@@ -1101,7 +1101,10 @@ istota_developer_repos_dir: ""                    # Base directory for repo clon
 istota_developer_author_credit: ""                # Appended to every commit (e.g., "Co-Authored-By: Name <email>")
 # Minimum forge CLI versions the skill's documented verbs need. Asserted after
 # install rather than assumed: below these, a command fails mid-task instead of
-# at deploy time. Debian 13 ships gh 2.46 and glab 1.53, both clear.
+# at deploy time. The pins below clear them by a wide margin, so what this
+# floor really catches now is a pin edited down, and — because the check
+# resolves the binary through PATH rather than by absolute path — something
+# older shadowing the install.
 #   gh 2.40  — `pr checks`, `run view --log-failed`
 #   glab 1.36 — `ci trace`
 # Raise these if the skill document starts depending on a newer verb.
@@ -1110,14 +1113,40 @@ istota_developer_cli_floors:
   gh: "2.40.0"
   glab: "1.36.0"
   gitleaks: "8.19.0"
+# The forge CLIs the developer skill drives, from the vendors' own releases.
+#
+# Not from the Debian archive, which is where these came from until the host
+# and the images were brought into line: trixie ships gh 2.46 and glab 1.53.
+# Both clear the floors above, so nothing failed — but docker/istota/Dockerfile
+# and docker/devbox/Dockerfile pin the versions below, and
+# `forge_cli.GH_KNOWN_GOOD` / `GLAB_KNOWN_GOOD` name them as the ones the
+# skill's verbs have actually been exercised against. A bare-metal deployment
+# ran ~50 gh releases behind the container it is meant to be interchangeable
+# with, and `istota doctor` said so on every play.
+#
+# So these four values are a parity contract, not a local choice:
+# `tests/test_ansible_forge_cli_install.py` holds them equal to both
+# Dockerfiles' ARGs and to the known-good marks. Bump all of them together.
+#
+# The digests are literals here rather than a checksums file fetched from the
+# same host, so that a changed artifact shows up as a diff in this repository.
+istota_developer_gh_version: "2.98.0"
+istota_developer_gh_checksums:
+  amd64: "f65a3fa2fa0eb2e97c445ee3f5e087a40aae03b64847f45a8f13805e504535d6"
+  arm64: "bbc4ac7964c2a091fd555cd1758d10a7cfcfdc472e405f0b0fb958f05d535cb6"
+istota_developer_glab_version: "1.114.0"
+istota_developer_glab_checksums:
+  amd64: "6df680f88a2a45700d1dd6a08a44a74838473ef3dcc5cb1ad243f4d1fd704ad0"
+  arm64: "c2bcb44cc10d849cccb879e687f3b9e102a3415c3d02f0cecfd9ce1442519350"
 # gitleaks is the credential half of this repository's pre-commit hook, and the
 # hook refuses an unattended agent commit when it cannot run — so on a host that
 # makes agent commits this install is load-bearing, not optional.
 #
-# Pinned and fetched from the upstream release rather than taken from apt like
-# gh and glab: trixie ships 8.16, below the floor above. The digests are
-# literals here rather than a checksums file fetched from the same host, so that
-# a changed artifact shows up as a diff in this repository.
+# Pinned and fetched from the upstream release, the same way gh and glab are
+# above and for a sharper reason: trixie ships 8.16, below the floor above, so
+# an apt install would put a binary here that the hook's own probe rejects. The
+# digests are literals here rather than a checksums file fetched from the same
+# host, so that a changed artifact shows up as a diff in this repository.
 istota_developer_gitleaks_version: "8.30.1"
 istota_developer_gitleaks_checksums:
   amd64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
@@ -1152,12 +1181,26 @@ istota_developer_github_reviewer: ""              # GitHub username to request a
 istota_developer_forge_cli_extra_denied: []       # Additional verbs to refuse
 istota_developer_forge_cli_permit: []             # Baseline entries to turn off — each one removes a guard
 
-# Where the wrapper execs the real binaries. The Debian archive installs both
-# under /usr/bin, which is what the apt task above produces; the code default
-# is /usr/local/bin, for the non-Ansible install shapes. Repoint these if you
-# install gh or glab from the vendors' own repos or by hand.
-istota_developer_gh_bin_path: "/usr/bin/gh"
-istota_developer_glab_bin_path: "/usr/bin/glab"
+# Where the wrapper execs the real binaries. The role extracts both from the
+# vendors' release .debs into /usr/local/bin, which is also the code default —
+# so an Ansible host and a by-hand install now agree, where they used to differ
+# because the archive put its packages under /usr/bin.
+#
+# /usr/local/bin is deliberate rather than incidental. It sits ahead of /usr/bin
+# on the default PATH, so this binary wins over an apt-installed `gh` an earlier
+# run of this same role left behind — which is why the section does not remove
+# the package, and why the floor assert (which resolves through PATH) is worth
+# keeping. It also reaches the sandbox: `build_bwrap_cmd` binds /usr read-only,
+# and the scheduler unit's Environment=PATH lists /usr/local/bin.
+#
+# Repoint these to install somewhere else: the task file takes its install
+# destination from these same two values rather than naming a directory a second
+# time, so the binary always lands where the wrapper is told to look. One
+# consequence worth knowing before reaching for it — pointing either at a
+# dpkg-owned path such as /usr/bin/gh overwrites that package's file, which apt
+# will fight on its next upgrade. The default deliberately does not.
+istota_developer_gh_bin_path: "/usr/local/bin/gh"
+istota_developer_glab_bin_path: "/usr/local/bin/glab"
 
 # Worktree reaping (ISSUE-288). Nothing removed a task's worktree, so
 # `repos_dir` accumulated gigabyte checkouts with no owner and no stated
