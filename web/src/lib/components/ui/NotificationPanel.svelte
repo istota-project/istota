@@ -5,9 +5,11 @@
    *
    * A bits-ui `Popover` with a `Portal`, `align="end"` and `sideOffset={4}`,
    * following `HintPopover` for the trigger-as-`child` shape and `KebabMenu` for
-   * the anchoring. Below 768px it stops being an anchored popover and becomes a
-   * full-width fixed sheet — at panel width a phone would get a column narrower
-   * than the titles it holds.
+   * the anchoring. Below 768px it widens to the viewport less a gutter each
+   * side, centred between them — at panel width a phone would get a column
+   * narrower than the titles it holds. It stays an anchored popover throughout;
+   * see the phone rule in the stylesheet for why that is the only thing that
+   * works here.
    *
    * **It defaults to "All", and that is load-bearing rather than a default.** A
    * fire-and-forget row — a task failed, an alert the model raised — has no
@@ -52,6 +54,23 @@
 
   let { trigger }: Props = $props();
 
+  /**
+   * The gap the panel keeps from both viewport edges, in px.
+   *
+   * It is a number rather than a `--space-*` token because it has to be the
+   * same value in two places that cannot share one: floating-ui's
+   * `collisionPadding` is a px number, and the phone width below is derived
+   * from it. It is passed as `collisionPadding` and comes back out as
+   * `--bits-popover-content-available-width`, which is what the phone rule
+   * uses, so the two cannot drift.
+   *
+   * 12px is `--space-3` at the unscaled root size — the gutter `ShellHeader`
+   * and `.app-shell` already use on a phone, so the sheet lines up with the
+   * bar it hangs off. Not scaled by the text-size preference on purpose: this
+   * is a distance to the edge of the screen, not to a piece of text.
+   */
+  const VIEWPORT_GUTTER = 12;
+
   let open = $state(false);
   let filter = $state<NotificationFilter>('all');
   let detailItem = $state<ResolvedNotification | null>(null);
@@ -89,8 +108,8 @@
     detailItem = item;
     // Close the panel behind it. Two reasons, and the second is the hard one:
     // a list and a detail of one of its rows are the same thing twice, and on
-    // a phone the panel is a full-width fixed sheet that the modal would have
-    // to sit on top of -- but `--z-popover` (100) is deliberately *above*
+    // a phone the panel spans nearly the whole viewport, so the modal would
+    // have to sit on top of it -- but `--z-popover` (100) is deliberately *above*
     // `--z-modal` (50), because a Select opened inside a dialog has to clear
     // the dialog. So the modal renders under the panel, and no z-index on the
     // modal can fix it without breaking that rule for every other dialog.
@@ -116,7 +135,12 @@
     {/snippet}
   </Popover.Trigger>
   <Popover.Portal>
-    <Popover.Content class="ui-notification-panel" align="end" sideOffset={4}>
+    <Popover.Content
+      class="ui-notification-panel"
+      align="end"
+      sideOffset={4}
+      collisionPadding={VIEWPORT_GUTTER}
+    >
       <div class="panel-head">
         <span class="micro-label">Notifications</span>
         <div class="panel-filters">
@@ -196,20 +220,39 @@
     outline: none;
   }
 
-  /* Only the height changes on a phone. This used to re-position the panel --
-     `position: fixed` with left/right insets, to stop being anchored -- and it
-     never worked: bits-ui positions `Popover.Content` through floating-ui,
-     which writes `position`, `left` and `transform` as *inline* styles, and an
-     inline style beats a stylesheet rule. The insets were ignored, the width
-     collapsed, and the panel rendered as a ~40px vertical sliver under the
-     bell on every screen below 768px.
+  /* On a phone the panel spans the viewport less one `VIEWPORT_GUTTER` each
+     side, centred between them.
 
-     Nothing needs to replace them. The base rule is already responsive --
-     `width: 24rem` capped by `max-width: calc(100vw - var(--space-4))` -- so a
-     narrow viewport gets a panel just inside its edges, and floating-ui's
-     collision handling, which is on by default, keeps it there. */
+     The centring is done by the shift, not by a rule. Do not reach for
+     `position: fixed` with left/right insets to force it -- that was here
+     once and never worked, because bits-ui positions `Popover.Content`
+     through floating-ui, which writes `position`, `left` and `transform` as
+     *inline* styles, and an inline style beats a stylesheet rule. The insets
+     were ignored, the width collapsed, and the panel rendered as a ~40px
+     vertical sliver under the bell on every screen below 768px.
+
+     What works instead is to leave the panel anchored and make the only
+     position that fits the centred one. `collisionPadding` bounds the shift
+     to `[gutter, 100vw - gutter]`, and this width is the whole of that span,
+     so the clamp has exactly one solution however far off-centre the bell
+     sits -- and it sits well off-centre, since the header collapses to an icon
+     row on a phone and the bell is not the last thing in it. `align="end"`
+     alone left the panel flush against the left edge with the gutter stranded
+     on the right, which is the bug this rule fixes.
+
+     The width is read back from floating-ui rather than restated as
+     `calc(100vw - 24px)`: `--bits-popover-content-available-width` *is*
+     viewport-minus-collision-padding, measured by the same middleware that
+     does the clamping, so it cannot disagree with the bound. It also excludes
+     a classic scrollbar, which `100vw` counts and floating-ui does not -- two
+     different widths that would put the panel a scrollbar off-centre on a
+     narrow desktop window. The fallback is only for the frame before
+     floating-ui has measured. */
   @media (max-width: 768px) {
     :global(.ui-notification-panel) {
+      /* design-lint-allow: a bits-ui runtime measurement, not a design token —
+         floating-ui writes it onto this element on every reposition. */
+      width: var(--bits-popover-content-available-width, 100vw);
       max-height: 60dvh;
     }
   }

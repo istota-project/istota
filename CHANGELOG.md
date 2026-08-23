@@ -111,6 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The notification panel behind the bell now sits centred on a phone, with an even margin down each side, instead of pressing against the left edge of the screen with all of the gap stranded on the right. It was sized to the width of the screen less a single margin and then pushed as far left as it would go, so the margin it did keep only ever appeared on one side.
+
 - A command run in the dev container now reports a failure that happened anywhere in a pipeline, not just in its last stage. The shell it ran under started with that behaviour switched off, so `pytest … | tail -3` came back as a success whenever `tail` succeeded — and since the container caps how much output it will return, piping into `tail` is exactly what the bot was being pushed toward. A failing test suite could therefore be reported as green, which is the one wrong answer this surface exists to prevent.
 
 - **Upgrade note:** two kinds of command that used to report success may now report a failure. One ends in `| head` or `| grep -q`, which closes the pipe early and comes back as status 141; the result now carries a note saying that is what happened. The other puts a command that exits non-zero to *report* something in the middle of a pipeline — `grep` finding no match, `diff` finding a difference — which now colours the whole pipeline and looks like any other failure. Scripts run with `exec-file` are unaffected, and so is a pipeline inside a `Makefile` or a nested shell: those set their own options, so put `set -euo pipefail` at the top of any whose status you rely on.

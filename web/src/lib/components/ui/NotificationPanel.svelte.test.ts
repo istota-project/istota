@@ -10,6 +10,8 @@
  * implements; the keyboard path is equivalent and fully supported here, which is
  * the same route `KebabMenu.svelte.test.ts` takes.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
@@ -322,7 +324,7 @@ describe('actions', () => {
 
   it('closes the panel behind the modal', async () => {
     // A list and the detail of one of its rows are the same thing twice, and on
-    // a phone the panel is a full-width fixed sheet -- with `--z-popover` (100)
+    // a phone it spans nearly the whole viewport -- with `--z-popover` (100)
     // deliberately above `--z-modal` (50) so a Select inside a dialog clears the
     // dialog, the modal rendered *under* the panel there. Closing the panel
     // removes the overlap rather than re-ordering the z-scale for everyone.
@@ -345,5 +347,49 @@ describe('actions', () => {
     await fireEvent.click(await screen.findByLabelText('Open notification: Question 1'));
     await fireEvent.click(await screen.findByText('Dismiss'));
     expect(dismissNotification).toHaveBeenCalledWith(1);
+  });
+});
+
+describe('the phone sheet', () => {
+  // These two assertions read the component source, which is not how anything
+  // else here is tested, and the reason is a limit of the runner rather than a
+  // preference: jsdom drops `@media` blocks from the cascade entirely -- a rule
+  // behind a query that *matches* is still not applied -- and floating-ui does
+  // no layout in it either. There is no arrangement of this suite in which the
+  // panel has a measurable position.
+  //
+  // What is left to guard is the coupling, and the coupling is the whole trick:
+  // the collision padding bounds the shift to `[gutter, 100vw - gutter]` and the
+  // phone width is that entire span, so the clamp has exactly one solution and
+  // the sheet centres itself wherever the bell happens to sit. Drop either half
+  // and it goes back to resting against one edge with the gutter stranded on the
+  // other -- which is what it did before, and what nothing in a jsdom suite can
+  // see. Verified by hand in the browser at 318 / 388 / 498 / 598 / 765 px and
+  // at both text-scale settings: 12px each side at every one.
+  // `process.cwd()`-relative, matching `lib/styles/cascade.ts` -- vitest runs
+  // from `web/`, and `import.meta.url` is not a file URL under vite.
+  const source = readFileSync(
+    join(process.cwd(), 'src/lib/components/ui/NotificationPanel.svelte'),
+    'utf-8',
+  );
+
+  it('bounds the shift with the same constant the phone width is derived from', () => {
+    expect(source).toMatch(/const VIEWPORT_GUTTER = \d+;/);
+    expect(source).toMatch(/collisionPadding=\{VIEWPORT_GUTTER\}/);
+  });
+
+  it('takes the phone width from floating-ui rather than restating it', () => {
+    // `--bits-popover-content-available-width` *is* viewport-minus-collision-
+    // padding, measured by the middleware that does the clamping. A hand-written
+    // `calc(100vw - 24px)` would be a second spelling of the bound that can
+    // disagree with it -- over a scrollbar, which `100vw` counts and floating-ui
+    // does not, and over anyone who edits one number and not the other.
+    //
+    // Scoped to the phone block rather than to the file: the base rule's
+    // `max-width: calc(100vw - var(--space-4))` is a legitimate outer guard and
+    // ends in the same six characters, so a file-wide negative match flags it.
+    const phoneRule = source.slice(source.indexOf('@media (max-width: 768px)'));
+    expect(phoneRule).toMatch(/[\s;{]width:\s*var\(--bits-popover-content-available-width/);
+    expect(phoneRule).not.toMatch(/[\s;{]width:\s*calc\(/);
   });
 });
