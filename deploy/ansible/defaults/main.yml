@@ -1099,34 +1099,16 @@ istota_nodejs_enabled: false
 istota_developer_enabled: false
 istota_developer_repos_dir: ""                    # Base directory for repo clones/worktrees
 istota_developer_author_credit: ""                # Appended to every commit (e.g., "Co-Authored-By: Name <email>")
-# Minimum forge CLI versions the skill's documented verbs need. Asserted after
-# install rather than assumed: below these, a command fails mid-task instead of
-# at deploy time. The pins below clear them by a wide margin, so what this
-# floor really catches now is a pin edited down, and — because the check
-# resolves the binary through PATH rather than by absolute path — something
-# older shadowing the install.
-#   gh 2.40  — `pr checks`, `run view --log-failed`
-#   glab 1.36 — `ci trace`
-# Raise these if the skill document starts depending on a newer verb.
-#   gitleaks 8.19 — `gitleaks git --staged`, which replaced `detect`/`protect`
-istota_developer_cli_floors:
-  gh: "2.40.0"
-  glab: "1.36.0"
-  gitleaks: "8.19.0"
-# The forge CLIs the developer skill drives, from the vendors' own releases.
+# The forge CLIs the developer skill drives, from the vendors' own releases
+# rather than the Debian archive: trixie ships gh 2.46 and glab 1.53, roughly
+# fifty releases behind what both images pin, and a bare-metal host is meant to
+# be interchangeable with the container.
 #
-# Not from the Debian archive, which is where these came from until the host
-# and the images were brought into line: trixie ships gh 2.46 and glab 1.53.
-# Both clear the floors above, so nothing failed — but docker/istota/Dockerfile
-# and docker/devbox/Dockerfile pin the versions below, and
-# `forge_cli.GH_KNOWN_GOOD` / `GLAB_KNOWN_GOOD` name them as the ones the
-# skill's verbs have actually been exercised against. A bare-metal deployment
-# ran ~50 gh releases behind the container it is meant to be interchangeable
-# with, and `istota doctor` said so on every play.
-#
-# So these four values are a parity contract, not a local choice:
-# `tests/test_ansible_forge_cli_install.py` holds them equal to both
-# Dockerfiles' ARGs and to the known-good marks. Bump all of them together.
+# The same version has to be named in three places — here,
+# docker/istota/Dockerfile and docker/devbox/Dockerfile. Nothing can share a
+# literal across an Ansible role and two Docker builds, so
+# `tests/test_ansible_forge_cli_install.py` holds the three equal instead.
+# Bump them together.
 #
 # The digests are literals here rather than a checksums file fetched from the
 # same host, so that a changed artifact shows up as a diff in this repository.
@@ -1143,10 +1125,10 @@ istota_developer_glab_checksums:
 # makes agent commits this install is load-bearing, not optional.
 #
 # Pinned and fetched from the upstream release, the same way gh and glab are
-# above and for a sharper reason: trixie ships 8.16, below the floor above, so
-# an apt install would put a binary here that the hook's own probe rejects. The
-# digests are literals here rather than a checksums file fetched from the same
-# host, so that a changed artifact shows up as a diff in this repository.
+# above and for a sharper reason: trixie ships 8.16, below the minimum below,
+# so an apt install would put a binary here that the hook's own probe rejects.
+# The digests are literals here rather than a checksums file fetched from the
+# same host, so that a changed artifact shows up as a diff in this repository.
 istota_developer_gitleaks_version: "8.30.1"
 istota_developer_gitleaks_checksums:
   amd64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
@@ -1155,6 +1137,17 @@ istota_developer_gitleaks_checksums:
 istota_developer_gitleaks_release_arch:
   amd64: "x64"
   arm64: "arm64"
+
+# `gitleaks git --staged` replaced `detect` / `protect` in 8.19, and the hook
+# calls the new spelling — so below this the scan does not merely run old, it
+# does not run at all, and `.githooks/pre-commit` refuses every unattended
+# commit on the host (ISSUE-291). Asserted post-install through PATH rather
+# than by absolute path, because the hook resolves `command -v gitleaks`: an
+# apt-installed 8.16 shadowing /usr/local/bin is the case worth catching, and
+# trixie ships exactly that. gh and glab carry no equivalent, deliberately —
+# any floor low enough to be true of the verbs the skill uses is also cleared
+# by the archive versions it would be meant to catch.
+istota_developer_gitleaks_min_version: "8.19.0"
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
 istota_developer_gitlab_token: ""                 # API token (api + write_repository scope — glab needs api, not read_api)

@@ -51,11 +51,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 #
 # Not from apt: this is bookworm, whose gh is 2.23 — far behind the 2.98 these
 # verbs have actually been exercised against — and which ships no glab at all.
-# No floor has ever been derived from the verbs the skill uses, so 2.98/1.114
-# is a known-good mark rather than a minimum; `istota doctor` WARNs below it
-# and names both numbers (forge_cli.GH_KNOWN_GOOD / GLAB_KNOWN_GOOD, which must
-# be bumped with these pins). Same reasoning and the same versions as
-# docker/devbox/Dockerfile; a test asserts the two stay in step.
+# Same versions as docker/devbox/Dockerfile and the Ansible role's
+# istota_developer_gh_version / _glab_version; nothing can share a literal
+# across a Docker build and an Ansible role, so
+# tests/test_ansible_forge_cli_install.py holds the three equal instead. Bump
+# them together.
 #
 # This builds on arm64 as well as amd64, so the asset is chosen per
 # architecture and each has its own pinned checksum. The devbox image does the

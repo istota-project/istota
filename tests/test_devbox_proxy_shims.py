@@ -435,17 +435,6 @@ class TestImageStaticContent:
                 f"{name} is not a sha256 hex digest: {digest!r}"
             )
 
-    def test_dockerfile_forge_versions_clear_the_documented_floors(self):
-        """The skill document's verbs need gh >= 2.40 and glab >= 1.36. The
-        host install asserts this in Ansible; the image has no equivalent
-        runtime assert, so it is pinned here."""
-        dockerfile = DOCKERFILE.read_text()
-        floors = {"GH_VERSION": (2, 40), "GLAB_VERSION": (1, 36)}
-        for name, floor in floors.items():
-            line = next(ln for ln in dockerfile.splitlines() if f"ARG {name}=" in ln)
-            version = tuple(int(p) for p in line.split("=", 1)[1].strip().split("."))
-            assert version >= floor, f"{name} {version} is below the floor {floor}"
-
     def test_dockerfile_drops_the_retired_env_vars(self):
         dockerfile = DOCKERFILE.read_text()
         for gone in ("GITLAB_API_CMD", "GITHUB_API_CMD", "GH_PATH=", "GLAB_PATH="):

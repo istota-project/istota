@@ -1,24 +1,20 @@
 """The host and the two images have to ship the *same* `gh` and `glab`.
 
 The role took both from the Debian archive, which on trixie means gh 2.46 and
-glab 1.53. Both clear the floors in `istota_developer_cli_floors`, so nothing
-failed — but `docker/istota/Dockerfile` and `docker/devbox/Dockerfile` pin
-2.98.0 and 1.114.0, and `forge_cli.GH_KNOWN_GOOD` / `GLAB_KNOWN_GOOD` say those
-are the versions the developer skill's verbs have actually been exercised
-against. A bare-metal deployment therefore ran ~50 gh releases behind the
-container it is meant to be interchangeable with, and `istota doctor` WARNed
-about it on every host the role had ever touched.
+glab 1.53, while `docker/istota/Dockerfile` and `docker/devbox/Dockerfile` pin
+2.98.0 and 1.114.0 — so a bare-metal deployment ran ~50 gh releases behind the
+container it is meant to be interchangeable with.
 
 Two properties, and the second is the one a version bump breaks quietly:
 
   * the binaries come from the vendors' own releases, pinned and
     sha256-verified, rather than from apt; and
-  * the pinned versions are the *same* ones both Dockerfiles pin and the same
-    ones the known-good marks name.
+  * the pinned version and digests are the *same* ones both Dockerfiles pin.
 
-The second is why this file reads all four sources rather than only the role.
-A bump that moves the Dockerfiles and forgets the role puts the drift straight
-back, and the symptom is a doctor WARN on one deployment shape only.
+The second is why this file reads all three sources rather than only the role.
+Nothing can share a literal across an Ansible role and two Docker builds, so a
+bump that moves the Dockerfiles and forgets the role puts the drift straight
+back — and the symptom is a wrong binary on one deployment shape only.
 """
 
 from __future__ import annotations
@@ -88,7 +84,7 @@ def _forge_section(tasks: str) -> str:
         if "Forge CLIs" in title:
             # The last task in the section. Without this the negative
             # assertions below would pass against a slice that ended early.
-            assert "clear their version floors" in body, (
+            assert "Remove the forge CLI download directory" in body, (
                 "the forge CLI section slice is truncated; the assertions "
                 "against it would not mean what they say"
             )
@@ -243,16 +239,10 @@ class TestTheInstallIsGatedAndIdempotent:
                 "attribute"
             )
 
-    def test_the_version_floors_are_still_asserted_after_install(self, block):
-        """The pin says what is fetched; the floor says what the skill needs.
-        Keeping both is what catches a pin edited down, and — because the floor
-        read resolves through PATH — an apt-installed binary shadowing ours."""
-        assert "istota_developer_cli_floors" in block
-
 
 class TestThePinsMatchEverywhereElse:
-    """The parity contract. Four sources name these two versions, and a bump
-    that moves some of them is the drift this whole change removes."""
+    """The parity contract. Three files name these two versions — this role and
+    the two Dockerfiles — and a bump that moves some of them is the drift."""
 
     @pytest.mark.parametrize(
         "role_var,docker_arg",
@@ -288,41 +278,6 @@ class TestThePinsMatchEverywhereElse:
             assert mine[arch] == theirs[f"{docker_prefix}_{arch.upper()}"], (
                 f"{role_var}[{arch}] differs from the image's pinned digest"
             )
-
-    @pytest.mark.parametrize(
-        "role_var,constant",
-        [
-            ("istota_developer_gh_version", "GH_KNOWN_GOOD"),
-            ("istota_developer_glab_version", "GLAB_KNOWN_GOOD"),
-        ],
-    )
-    def test_the_role_installs_a_version_doctor_calls_known_good(
-        self, defaults, role_var, constant
-    ):
-        """`check_forge_versions` WARNs below the known-good mark. A role that
-        installs something older makes that WARN the permanent state of every
-        bare-metal deployment, which is the state this change is fixing."""
-        from istota import forge_cli
-
-        pinned = tuple(int(p) for p in _default(role_var, defaults).split("."))
-        assert pinned[:2] >= getattr(forge_cli, constant), (
-            f"the role pins {role_var} below forge_cli.{constant}, so "
-            "`istota doctor` WARNs on every host this role deploys"
-        )
-
-    @pytest.mark.parametrize(
-        "role_var,name",
-        [("istota_developer_gh_version", "gh"), ("istota_developer_glab_version", "glab")],
-    )
-    def test_the_pinned_version_clears_the_deploy_time_floor(
-        self, defaults, role_var, name
-    ):
-        pinned = tuple(int(p) for p in _default(role_var, defaults).split("."))
-        floor = tuple(int(p) for p in _default(f"  {name}", defaults).split("."))
-        assert pinned >= floor, (
-            f"the role pins {name} {pinned} below its own floor {floor}; the "
-            "post-install assert would fail the play it just ran"
-        )
 
     @pytest.mark.parametrize(
         "role_var",

@@ -136,10 +136,13 @@ class TestThePinnedVersionClearsTheFloor:
         )
 
     def test_the_floor_is_asserted_at_deploy_time(self, defaults):
-        """Same mechanism the forge CLIs use: a floor stated in the defaults and
-        checked against the installed binary, rather than assumed from the
-        version this file happens to pin today."""
-        floor = _default("  gitleaks", defaults)
+        """A floor stated in the defaults and checked against the binary the
+        hook will actually resolve, rather than assumed from the version this
+        file happens to pin today. gh and glab carry no equivalent: any floor
+        low enough to be true of the verbs the developer skill uses is also
+        cleared by the archive versions it would be meant to catch. Below this
+        one, `gitleaks git` does not exist and the hook cannot run at all."""
+        floor = _default("istota_developer_gitleaks_min_version", defaults)
         parts = tuple(int(p) for p in floor.split("."))
         assert parts >= GIT_SUBCOMMAND_FLOOR
 

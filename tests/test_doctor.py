@@ -1155,7 +1155,6 @@ class TestForgeGating:
         results = _by_name(run_checks(config, only=("developer.",)))
         assert results["developer.forge_binaries.gh"].status == SKIP
         assert results["developer.forge_config_drift.gh"].status == SKIP
-        assert results["developer.forge_versions.gh"].status == SKIP
 
     def test_policy_check_runs_without_a_token(self, make_config, tmp_path):
         """`forge_cli_permit` validation is about the config file, not about
@@ -1248,80 +1247,6 @@ class TestForgeConfigDrift:
         config = _dev_config(make_config, tmp_path)
         for r in run_checks(config, only=("developer.forge_config_drift",)):
             assert r.status != FAIL
-
-
-class TestForgeVersions:
-    def test_at_known_good_is_ok(self, make_config, tmp_path):
-        _fake_bin(tmp_path / "bin" / "gh", "gh version 2.98.0 (2026-01-01)")
-        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_versions",)))
-        assert results["developer.forge_versions.gh"].status == OK
-        assert results["developer.forge_versions.glab"].status == OK
-
-    def test_above_known_good_is_ok(self, make_config, tmp_path):
-        _fake_bin(tmp_path / "bin" / "gh", "gh version 3.4.0 (2026-01-01)")
-        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_versions",)))
-        assert results["developer.forge_versions.gh"].status == OK
-
-    def test_below_known_good_warns_naming_both_numbers(self, make_config, tmp_path):
-        """bookworm ships gh 2.23; the exercised version is 2.98."""
-        _fake_bin(tmp_path / "bin" / "gh", "gh version 2.23.0 (2023-01-01)")
-        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_versions",)))
-        gh = results["developer.forge_versions.gh"]
-        assert gh.status == WARN
-        assert "2.23" in gh.detail
-        assert "2.98" in gh.detail
-
-    def test_unparseable_version_warns_rather_than_crashing(self, make_config, tmp_path):
-        _fake_bin(tmp_path / "bin" / "gh", "some entirely unexpected banner")
-        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_versions",)))
-        assert results["developer.forge_versions.gh"].status == WARN
-
-    def test_never_fails(self, make_config, tmp_path):
-        config = _dev_config(make_config, tmp_path)
-        for r in run_checks(config, only=("developer.forge_versions",)):
-            assert r.status != FAIL
-
-    def test_skips_without_probe(self, make_config, tmp_path):
-        _fake_bin(tmp_path / "bin" / "gh", "gh version 2.98.0 (2026-01-01)")
-        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
-        config = _dev_config(make_config, tmp_path)
-        results = _by_name(run_checks(config, only=("developer.forge_versions",), probe=False))
-        assert results["developer.forge_versions.gh"].status == SKIP
-
-
-class TestVersionParsing:
-    """The real output shapes, pinned."""
-
-    @pytest.mark.parametrize(
-        "text,expected",
-        [
-            ("gh version 2.98.0 (2026-01-01)", (2, 98, 0)),
-            ("gh version 2.23.0 (2023-05-05)\nhttps://github.com/cli/cli", (2, 23, 0)),
-            ("glab 1.114.0", (1, 114, 0)),
-            ("glab version 1.114.0 (2026-01-01)", (1, 114, 0)),
-            ("v2.98.0", (2, 98, 0)),
-        ],
-    )
-    def test_parses_the_real_shapes(self, text, expected):
-        assert doctor.parse_version(text) == expected
-
-    @pytest.mark.parametrize("text", ["", "unexpected banner", "gh version x.y.z", None])
-    def test_unparseable_returns_none(self, text):
-        assert doctor.parse_version(text or "") is None
-
-    def test_known_good_constants_live_in_forge_cli(self):
-        from istota.forge_cli import GH_KNOWN_GOOD, GLAB_KNOWN_GOOD
-
-        assert GH_KNOWN_GOOD == (2, 98)
-        assert GLAB_KNOWN_GOOD == (1, 114)
 
 
 class TestWrapperShadowing:

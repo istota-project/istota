@@ -169,14 +169,11 @@
 # visible inside it with no extra mount.
 #
 # From the vendors' own releases, pinned and sha256-verified, rather than from
-# the Debian archive. The archive's versions clear the floors below, so nothing
-# failed — but trixie ships gh 2.46 and glab 1.53 while both Dockerfiles pin
-# 2.98.0 and 1.114.0, and `forge_cli.GH_KNOWN_GOOD` / `GLAB_KNOWN_GOOD` name
-# those as the versions the skill's verbs have actually been exercised against.
-# A bare-metal host therefore ran ~50 gh releases behind the container it is
-# meant to be interchangeable with, and `istota doctor` WARNed about it on every
-# play. `tests/test_ansible_forge_cli_install.py` now holds the pins here equal
-# to both images' and to the known-good marks.
+# the Debian archive: trixie ships gh 2.46 and glab 1.53 while both Dockerfiles
+# pin 2.98.0 and 1.114.0, so a bare-metal host ran ~50 gh releases behind the
+# container it is meant to be interchangeable with.
+# `tests/test_ansible_forge_cli_install.py` holds the pins here equal to both
+# images'.
 #
 # Not the vendors' apt repos either, which would add two more update sources and
 # two GPG keys and still track whatever those repos moved to overnight. The
@@ -197,10 +194,10 @@
 # environment; a direct exec gets an unauthenticated CLI either way.)
 #
 # By absolute path, not through PATH, and the same path the rendered config
-# names: this asks "is the binary this role installs already the pinned one",
-# which is a different question from the floor assert further down. That one
-# resolves through PATH on purpose, because it asks what the *wrapper's* exec
-# and an operator's shell will find.
+# names: this asks "is the binary this role installs already the pinned one".
+# There is deliberately no post-install floor assert to pair with it — see
+# istota_developer_gitleaks_min_version in defaults for why gitleaks keeps one
+# and these two do not.
 - name: Read the forge CLI version already installed
   ansible.builtin.command: "{{ item }} --version"
   register: istota_forge_installed
@@ -333,57 +330,6 @@
             path: "{{ istota_forge_tmp.path }}"
             state: absent
 
-# Through PATH, deliberately, unlike the idempotence read above. That one asks
-# whether the binary this role installs is already the pinned one; this one asks
-# what the wrapper's exec and an operator's shell actually find — so an
-# apt-installed gh still sitting in /usr/bin and shadowing ours is exactly the
-# thing worth catching here.
-#
-# `check_mode: false` because `command` is otherwise skipped under `--check` and
-# the assert below reads the registered result. It survives today only via
-# `| default([])`, which turns the whole floor check into a silent no-op rather
-# than a crash — a check that cannot fail under --check is worse than one that
-# does, since a --check run is where an operator looks for exactly this.
-- name: Read installed forge CLI versions
-  ansible.builtin.command: "{{ item }} --version"
-  register: istota_forge_cli_versions
-  changed_when: false
-  failed_when: false
-  check_mode: false
-  loop:
-    - gh
-    - glab
-  when: >
-    not istota_update_only and not istota_web_only
-    and istota_developer_enabled
-  tags: [developer]
-
-# `gh version 2.98.0 (…)` and `glab 1.114.0 (…)` — take the first dotted triple
-# and compare it as a version, not as a string ("2.9" > "2.98" lexically).
-#
-# Deliberately not the capture-group form, `regex_search(RE, '\\1')`: on
-# ansible-core 2.21 that raises "'NoneType' object has no attribute 'group'"
-# even where the bare form matches cleanly. The whole match is the version
-# anyway, so the group buys nothing and costs portability across the ansible
-# versions a deployment might run.
-- name: Assert the forge CLIs clear their version floors
-  ansible.builtin.assert:
-    that:
-      - "(item.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+')) is version(istota_developer_cli_floors[item.item], '>=')"
-    fail_msg: >-
-      {{ item.item }} is below the floor this deployment needs
-      ({{ istota_developer_cli_floors[item.item] }}). Installed:
-      {{ item.stdout_lines[0] | default('not installed') }}.
-      The developer skill's documented verbs will fail at runtime.
-    success_msg: "{{ item.stdout_lines[0] | default('') }}"
-  loop: "{{ istota_forge_cli_versions.results | default([]) }}"
-  loop_control:
-    label: "{{ item.item }}"
-  when: >
-    not istota_update_only and not istota_web_only
-    and istota_developer_enabled
-  tags: [developer]
-
 # ============================================================
 # gitleaks (pre-commit credential scan)
 # ============================================================
@@ -512,10 +458,10 @@
 - name: Assert gitleaks clears the floor the pre-commit hook needs
   ansible.builtin.assert:
     that:
-      - "(istota_gitleaks_version_check.stdout | default('') | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') | default('0.0.0', true)) is version(istota_developer_cli_floors['gitleaks'], '>=')"
+      - "(istota_gitleaks_version_check.stdout | default('') | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') | default('0.0.0', true)) is version(istota_developer_gitleaks_min_version, '>=')"
     fail_msg: >-
       gitleaks is missing or below the floor the pre-commit hook needs
-      ({{ istota_developer_cli_floors['gitleaks'] }}). Installed:
+      ({{ istota_developer_gitleaks_min_version }}). Installed:
       {{ istota_gitleaks_version_check.stdout | default('') | trim | default('not installed', true) }}.
       Every unattended commit on this host will be refused until this is fixed.
     success_msg: "gitleaks {{ istota_gitleaks_version_check.stdout | default('') | trim }}"
