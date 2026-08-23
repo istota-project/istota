@@ -2917,26 +2917,22 @@ function mockAdminConfig() {
 /**
  * The subscription section, in whichever of its four states was asked for.
  *
- * `VITE_MOCK_SUBSCRIPTION=unavailable | stale | nospend`, defaulting to the
- * populated reading above. The card has four states and a working deployment
- * produces three of them rarely and on nobody's schedule, so without a switch
- * the only way to look at them is to edit this file — which is exactly the
- * check nobody performs. The component test asserts all four; this is for
- * looking at them.
+ * `VITE_MOCK_SUBSCRIPTION=absent | stale | nospend`, defaulting to the
+ * populated reading above. A working deployment produces the non-populated
+ * states rarely and on nobody's schedule, so without a switch the only way to
+ * look at them is to edit this file — which is exactly the check nobody
+ * performs. The component test asserts them; this is for looking at them.
+ *
+ * `absent` renders no card at all, which is the whole of that state and is
+ * easy to mistake for a broken dev server. It replaced an `unavailable` case
+ * that built `available: false` with a reason on it: the card used to draw
+ * that reason, and now the server omits the key instead.
  */
 function mockSubscriptionState() {
   const base = mockAdminStats.subscription;
   switch (process.env.VITE_MOCK_SUBSCRIPTION) {
-    case 'unavailable':
-      return {
-        ...base,
-        available: false,
-        windows: [],
-        spend: null,
-        fetched_at: null,
-        token_source: '',
-        error: 'no Claude Code OAuth credential found',
-      };
+    case 'absent':
+      return undefined;
     case 'stale':
       // Real numbers from an earlier fetch, plus the failure that made them old.
       return {
