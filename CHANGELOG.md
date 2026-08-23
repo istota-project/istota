@@ -111,6 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Asking to see a task's prompt without running it no longer runs it. `istota task --dry-run` created the task row first and consulted the flag only on the path that executes immediately, so on a live deployment the scheduler picked the row up within seconds — the flag whose whole promise is that nothing happens was the one that queued a real, billed model call and delivered its answer. It now prints the assembled prompt and leaves nothing behind.
+
 - The notification panel behind the bell now sits centred on a phone, with an even margin down each side, instead of pressing against the left edge of the screen with all of the gap stranded on the right. It was sized to the width of the screen less a single margin and then pushed as far left as it would go, so the margin it did keep only ever appeared on one side.
 
 - The same pipeline blindness is fixed in the three other places a command's exit status is treated as the answer: the shell the bot runs commands in when it is working on its own, scheduled jobs defined as a `command:` in `CRON.md`, and heartbeat checks defined as a shell command. All three ran under a shell that reports only the last stage of a pipeline, so a job whose real work failed was recorded as healthy — indefinitely, since nothing else looks. Scheduled jobs and heartbeat checks now run under `bash` where it is available and fall back to the previous shell where it is not.
