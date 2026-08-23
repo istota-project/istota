@@ -72,8 +72,10 @@ Both halves follow the same rule, so a `check-private-data.sh` that has lost its
 executable bit refuses an unattended commit too.
 
 The hook only runs where `core.hooksPath` points at it. The developer skill's
-clone recipe sets it on each bare clone it creates; a clone made before that step
-existed needs `git config core.hooksPath .githooks` applied once by hand.
+clone recipe sets it on every pass rather than only at clone time, so a bare
+clone made before that step existed repairs itself the next time the skill runs
+against it. Your own checkout is the one that needs it applied by hand:
+`scripts/setup.sh`, or `git config core.hooksPath .githooks`.
 
 ## What the hook does
 
