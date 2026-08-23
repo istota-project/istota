@@ -24,6 +24,16 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
 
     The NC app reads ``config/status.json`` from the bot user's file tree
     (via ``IRootFolder::getUserFolder``), so we PUT it there directly.
+
+    ``config`` here is a path at the *storage root*, alongside ``Users/`` and
+    ``Channels/``, so ``[nextcloud] dav_prefix`` applies to it like any other.
+    On the rclone-mount deploy the storage root and the account's file tree are
+    the same directory and the two readings coincide. Where they do not — a
+    deployment whose storage root is an external-storage mount — this lands on
+    the mount rather than at the account root, and an NC app resolving the path
+    through ``getUserFolder`` would not find it. Stated rather than special-cased:
+    no such deployment installs that app today, and the alternative is a second
+    path vocabulary in the one place that would need it.
     """
     nc = config.nextcloud
     if not nc.url or not nc.username:

@@ -127,6 +127,29 @@ class TestTheRenderedConfigLoads:
         path = render(tmp_path, **REQUIRED)
         tomllib.loads(path.read_text())
 
+    def test_the_two_nextcloud_path_keys_default_to_bare_metal(self, tmp_path):
+        """`dav_prefix` and `auto_share_bot_dir` exist for the Docker shape,
+        where the daemon's storage root is a `files_external` mount rather than
+        the bot's own file tree. An operator who sets neither must get exactly
+        what every deployment got before they existed."""
+        config = load_config(render(tmp_path, **REQUIRED))
+
+        assert config.nextcloud.dav_prefix == ""
+        assert config.nextcloud.auto_share_bot_dir is True
+
+    def test_the_two_nextcloud_path_keys_are_honoured_when_given(self, tmp_path):
+        config = load_config(
+            render(
+                tmp_path,
+                **REQUIRED,
+                ISTOTA_NEXTCLOUD_DAV_PREFIX="Shared Files",
+                ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR="false",
+            )
+        )
+
+        assert config.nextcloud.dav_prefix == "Shared Files"
+        assert config.nextcloud.auto_share_bot_dir is False
+
     def test_user_display_name_and_timezone_default_from_the_user_name(self, tmp_path):
         config = load_config(render(tmp_path, **REQUIRED))
         profile = config.users["testuser"]
@@ -576,7 +599,9 @@ class TestTheEntrypointStillOwnsWhatItKept:
             "boot while every test in this file still passes."
         )
 
-    @pytest.mark.parametrize("prefix", ["ISTOTA_DEVELOPER_", "ISTOTA_EMAIL_"])
+    @pytest.mark.parametrize(
+        "prefix", ["ISTOTA_DEVELOPER_", "ISTOTA_EMAIL_", "ISTOTA_NEXTCLOUD_"]
+    )
     def test_every_var_the_render_reads_is_passed_by_compose(self, prefix):
         """The other half of the hand-off, which nothing checked.
 
@@ -592,7 +617,8 @@ class TestTheEntrypointStillOwnsWhatItKept:
         the entrypoint itself computes (``LOCATION_INGEST_TOKEN`` and friends)
         would fail a blanket scan for the wrong reason.
 
-        Both prefixes are here because both have been out of step, months apart.
+        Two of the three prefixes are here because both have been out of step,
+        months apart.
         ISSUE-289 was the reviewer setting, present in the Ansible role and the
         render and absent from compose, which cost nothing until an MR opened
         with nobody on it. The email pair was ``ISTOTA_EMAIL_AUTHSERV_ID`` and
@@ -600,6 +626,13 @@ class TestTheEntrypointStillOwnsWhatItKept:
         ``docker/.env.example`` and read by the render — so an operator asking
         for ``confirm_sender_match = "gate"`` on a Docker deploy silently got
         ``off``, which is the gate switched off rather than a setting ignored.
+
+        ``ISTOTA_NEXTCLOUD_`` joined them with ``dav_prefix`` and
+        ``auto_share_bot_dir``. Both are wholly operator-set in the same sense —
+        the render is the only thing that reads them — and both fail the same
+        silent way: the daemon addresses a Nextcloud path that does not exist on
+        the Docker shape, and every share and every ``files`` verb 404s while
+        the suite stays green.
         """
         code = "\n".join(
             line

@@ -50,7 +50,20 @@ def _config_from_env() -> Config:
     if not url or not user or not password:
         print(json.dumps({"error": "NC_URL, NC_USER, NC_PASS env vars required"}), file=sys.stderr)
         sys.exit(1)
-    config = Config(nextcloud=NextcloudConfig(url=url, username=user, app_password=password))
+    # NC_DAV_PREFIX is where the daemon's storage root sits inside the bot's
+    # own Nextcloud file tree; empty on bare metal, where they coincide. The
+    # CLI is a subprocess with a manifest-built environment rather than the
+    # daemon's Config, so a key missing here is a key the skill does not have —
+    # which is how `files` and `share` 404 on a deployment whose storage root
+    # is a `files_external` mount.
+    config = Config(
+        nextcloud=NextcloudConfig(
+            url=url,
+            username=user,
+            app_password=password,
+            dav_prefix=os.environ.get("NC_DAV_PREFIX", ""),
+        )
+    )
     # Path scoping consults Config.is_admin, whose "empty file means everyone"
     # back-compat rule is the same one the sandbox and skill gates use.
     try:

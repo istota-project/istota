@@ -22,6 +22,7 @@ from ._http import (
     DAV_TIMEOUT,
     OcsError,
     dav_files_url,
+    dav_prefix,
     dav_request,
     nc_base_url,
     nc_configured,
@@ -92,14 +93,27 @@ def uploads_url(config: Config, upload_id: str, part: str = "") -> str:
     return f"{base}/{quote(part, safe='')}" if part else base
 
 
+def _prefix_tail(config: Config) -> str:
+    """``/<dav_prefix>`` when one is configured, otherwise nothing.
+
+    Both callers below name the root of the bot's *logical* storage, which is
+    the account's own file tree plus the mount the storage root sits in. So
+    both take the prefix, and `href_to_path` strips it back off for free —
+    which is what keeps a listing in the logical `/Users/{uid}` vocabulary the
+    skill and `resolve_scoped_path` speak.
+    """
+    prefix = dav_prefix(config)
+    return f"/{prefix}" if prefix else ""
+
+
 def _files_prefix(config: Config) -> str:
     """Absolute path prefix of the bot's file tree, as it appears in a href."""
-    return f"/remote.php/dav/files/{config.nextcloud.username}"
+    return f"/remote.php/dav/files/{config.nextcloud.username}{_prefix_tail(config)}"
 
 
 def _dav_scope_prefix(config: Config) -> str:
     """The same tree, relative to the DAV root — what a SEARCH scope wants."""
-    return f"/files/{config.nextcloud.username}"
+    return f"/files/{config.nextcloud.username}{_prefix_tail(config)}"
 
 
 def href_to_path(config: Config, href: str) -> str:

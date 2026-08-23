@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1063,6 +1064,55 @@ class TestTheProvisioningSuiteRefusesAKeptVolumeSet:
         body = (REPO / "tests" / "full" / "conftest.py").read_text()
         assert "ISTOTA_TESTBED_KEEP" in body
         assert "pytest.skip" in body
+
+
+class TestTheSharedMountName:
+    """One value, three files that have to agree on it.
+
+    `provision-nc.sh` creates the bot's `files_external` mount, and the mount
+    point it chooses *is* the prefix the daemon has to put in front of every
+    logical path before it becomes a DAV or OCS path — `/Users/alice` on the
+    volume is `/Shared Files/Users/alice` in the bot's Nextcloud tree. Written
+    twice, the two drift and the symptom is a 404 from a client that looks
+    correct in isolation, so compose owns the value and hands it to both
+    containers.
+    """
+
+    def test_both_containers_are_given_the_same_value(self, tmp_path):
+        model = _compose_config(tmp_path)
+        services = model["services"]
+
+        mount_name = services["nextcloud"]["environment"]["ISTOTA_NC_SHARED_MOUNT_NAME"]
+        prefix = services["istota"]["environment"]["ISTOTA_NEXTCLOUD_DAV_PREFIX"]
+
+        assert mount_name == nextcloud_service.BOT_MOUNT_POINT
+        assert prefix == mount_name
+
+    def test_the_scripts_own_fallback_agrees_with_it(self, tmp_path):
+        """`provision-nc.sh` carries a `:-` default so it still provisions if
+        run outside compose, and that default is the only other copy."""
+        model = _compose_config(tmp_path)
+        mount_name = model["services"]["nextcloud"]["environment"][
+            "ISTOTA_NC_SHARED_MOUNT_NAME"
+        ]
+        script = (REPO / "docker" / "istota" / "provision-nc.sh").read_text()
+
+        fallback = re.search(r"\$\{ISTOTA_NC_SHARED_MOUNT_NAME:-([^}]*)\}", script)
+
+        assert fallback is not None, "the script no longer reads the compose value"
+        assert fallback.group(1) == mount_name
+
+    def test_the_auto_share_is_switched_off_as_a_literal(self, tmp_path):
+        """Not `${…:-false}`. This shape always creates the user's own mount
+        over the bot workspace, so it always wants the OCS share-back off, and
+        an exported variable in the operator's shell must not outrank that —
+        the trap the credential variables already documented."""
+        model = _compose_config(tmp_path)
+        istota = model["services"]["istota"]["environment"]
+        compose = FULL_COMPOSE.read_text()
+
+        assert istota["ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR"] == "false"
+        assert "ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR: ${" not in compose
 
 
 def _pool(tmp_path, *, keep: bool = False) -> compose_support.StackPool:

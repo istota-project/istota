@@ -238,6 +238,15 @@ enabled = false
 url = "${NC_URL}"
 username = "${BOT_USER:-istota}"
 app_password = "${APP_PASSWORD}"
+# Where /mnt/shared sits inside the bot's own Nextcloud file tree. On this shape
+# it is a files_external mount, so a logical /Users/x is /<mount>/Users/x over
+# DAV and OCS; compose passes the mount point provision-nc.sh created. Empty is
+# the bare-metal shape, where the rclone mount *is* the bot's tree.
+dav_prefix = "${ISTOTA_NEXTCLOUD_DAV_PREFIX:-}"
+# The boot-time OCS share of the bot workspace back to the user. Off on this
+# shape: provision-nc.sh already mounts that directory into the user's tree, so
+# the share would hand them a second copy of it.
+auto_share_bot_dir = ${ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR:-true}
 
 [talk]
 enabled = ${ISTOTA_TALK_ENABLED:-true}

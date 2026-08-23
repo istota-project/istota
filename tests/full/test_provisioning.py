@@ -144,6 +144,80 @@ class TestFirstInstallProvisioning:
         assert user_mount is not None, f"no {user_path} mount among {sorted(by_path)}"
         assert user_mount.get("applicable_users") == ["testuser"], user_mount
 
+    def test_both_external_mounts_permit_sharing(self, provisioned):
+        """`enable_sharing` defaults to *false* on a `files_external` mount.
+
+        Left at the default it refuses every share of everything under
+        `/mnt/shared`, which is the bot's entire workspace: the bot cannot hand
+        anyone a file it produced and the `nextcloud` skill's `share link` verb
+        answers "You are not allowed to share". So `provision-nc.sh` turns it on
+        for both mounts it creates — the bot's, so the bot can share its own
+        output, and the user's, so the user can share out of their own view of
+        the workspace.
+
+        Read off `occ files_external:list` rather than inferred from a
+        successful share: this is the setting, and a share that happens to work
+        for another reason would report the setting as present.
+        """
+        mounts = _nextcloud(provisioned).external_mounts()
+        by_path = {mount.get("configuration", {}).get("datadir", ""): mount
+                   for mount in mounts}
+
+        for path in ("/mnt/shared", "/mnt/shared/Users/testuser/istota"):
+            mount = by_path.get(path)
+            assert mount is not None, f"no {path} mount among {sorted(by_path)}"
+            options = mount.get("options") or {}
+            assert "enable_sharing" in options, (
+                f"occ reports no enable_sharing option for {path}; the whole "
+                f"mount row is {mount}"
+            )
+            assert options["enable_sharing"] is True, (path, options)
+
+    def test_the_boot_does_not_try_to_share_the_bot_dir_back(self, provisioned):
+        """`[nextcloud] auto_share_bot_dir = false`, witnessed on a real boot.
+
+        `ensure_user_directories_v2` shares the bot workspace back to the user
+        over OCS every time the daemon starts, and on bare metal that share is
+        how the user gets the directory at all. This shape does not need it:
+        `provision-nc.sh:74` already mounts the very same directory into the
+        user's tree at first provisioning. Before the guard the call failed on
+        every boot and logged a warning; with sharing now enabled on the mount
+        it would instead succeed and hand the user a second copy of their
+        workspace, under the received-share name rather than the mount name.
+
+        Both halves are asserted because either alone is satisfiable the wrong
+        way: a silent log with the share still made, or a suppressed share on a
+        boot that never reached that code.
+        """
+        daemon_log = provisioned.logs(4000)
+        assert "Failed to share folder" not in daemon_log, (
+            "the boot still attempts the OCS share-back:\n"
+            + "\n".join(
+                line for line in daemon_log.splitlines()
+                if "share folder" in line
+            )
+        )
+
+        nextcloud = _nextcloud(provisioned)
+        received = [
+            row for row in nextcloud.shares(user="testuser", shared_with_me=True)
+            if (row.get("file_target") or "").strip("/").lower().startswith("istota")
+        ]
+        assert received == [], (
+            "the bot workspace arrived as a received share as well as a mount: "
+            f"{[row.get('file_target') for row in received]}"
+        )
+
+        user_tree = nextcloud.files("", user="testuser", depth="1")
+        workspace = [
+            entry for entry in user_tree
+            if entry.strip("/").lower().replace("_", " ") == "istota"
+        ]
+        assert len(workspace) == 1, (
+            f"the bot workspace appears {len(workspace)} times in the user's "
+            f"file list: {user_tree}"
+        )
+
     def test_the_directory_structure_is_present(self, provisioned):
         """`Channels/` and the pre-created bot workspace directory.
 

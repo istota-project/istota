@@ -136,11 +136,19 @@ url = "https://nextcloud.example.com"
 username = "istota"
 app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 share_default_expire_days = 14   # 0 = no default expiry on `share link`
+dav_prefix = ""                  # mount point of the storage root in the bot's own tree
+auto_share_bot_dir = true        # share the bot workspace back to the user at boot
 ```
 
 Ansible: `istota_nextcloud_share_default_expire_days`.
 
-Credentials reach the skill as `NC_URL` / `NC_USER` / `NC_PASS`. Only `NC_PASS` is `sensitive`, so it is stripped from the model's environment and injected server-side by the skill proxy. With the proxy off, the Nextcloud host is added to the CONNECT allowlist when the skill is authorized.
+`dav_prefix` exists because the bot's storage root and the root of its Nextcloud file tree are not always the same directory. On the rclone-mount deploy they are, so it stays empty. On the Docker stack `/mnt/shared` is a volume Nextcloud serves through a `files_external` mount, so `/Users/alice` on disk is `/Shared Files/Users/alice` over DAV and OCS; the value is set to that mount point and the request layer puts it in front of every path on the way out and strips it on the way back. Paths on disk, and the paths the skill takes and returns, are unaffected — they stay logical.
+
+`auto_share_bot_dir` controls the OCS share of the bot workspace back to the user that runs on every boot. Leave it true unless the deployment already puts that directory in the user's file tree some other way; the Docker stack mounts it there at provisioning and sets this false, so the user is not handed the same folder twice.
+
+**Sharing off a `files_external` mount needs the mount to allow it.** Nextcloud defaults `enable_sharing` to false there, and every share of anything under the mount is then refused with "You are not allowed to share". The Docker stack's `provision-nc.sh` turns it on for both mounts it creates; a hand-built deployment on external storage needs `occ files_external:option <mount_id> enable_sharing true`.
+
+Credentials reach the skill as `NC_URL` / `NC_USER` / `NC_PASS`, and `dav_prefix` as `NC_DAV_PREFIX`. Only `NC_PASS` is `sensitive`, so it is stripped from the model's environment and injected server-side by the skill proxy. With the proxy off, the Nextcloud host is added to the CONNECT allowlist when the skill is authorized.
 
 ## Client internals
 

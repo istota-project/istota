@@ -298,9 +298,46 @@ def ocs_delete(
 # --- WebDAV ---
 
 
+def dav_prefix(config: Config) -> str:
+    """``[nextcloud] dav_prefix``, normalized to a bare path segment.
+
+    Empty means the daemon's storage root and the bot's Nextcloud file tree are
+    the same directory, which is the bare-metal shape. Anything else is where
+    that storage root is mounted inside the bot's tree — ``Shared Files`` on the
+    Docker shape, from the ``files_external`` mount ``provision-nc.sh`` creates.
+
+    Surrounding slashes are stripped rather than trusted: an operator writing
+    ``/Shared Files`` means the same mount, and left alone it renders
+    ``//Shared%20Files//Users/…``, which Sabre answers 404 for.
+    """
+    return (getattr(config.nextcloud, "dav_prefix", "") or "").strip().strip("/")
+
+
+def to_remote_path(config: Config, path: str) -> str:
+    """A logical path as the bot account's own storage sees it.
+
+    The single mapping. Everything that hands Nextcloud a *file* path — the
+    WebDAV URL builder below, the SEARCH scope href, the OCS share ``path``
+    field — goes through here, and ``dav.href_to_path`` is the inverse.
+    """
+    prefix = dav_prefix(config)
+    if not prefix:
+        return path
+    clean = (path or "").strip().strip("/")
+    return f"/{prefix}/{clean}" if clean else f"/{prefix}"
+
+
 def dav_files_url(config: Config, path: str = "", *, username: str | None = None) -> str:
-    """Absolute WebDAV URL for a path in the bot account's file tree."""
-    user = username or config.nextcloud.username
+    """Absolute WebDAV URL for a path in the bot account's file tree.
+
+    ``username`` addresses somebody else's tree, where the bot's own mount
+    point does not exist, so the prefix applies only to the bot's.
+    """
+    if not username:
+        user = config.nextcloud.username
+        path = to_remote_path(config, path)
+    else:
+        user = username
     clean = (path or "").strip().lstrip("/")
     encoded = quote(clean, safe="/")
     base = f"{nc_base_url(config)}/remote.php/dav/files/{quote(user, safe='')}"

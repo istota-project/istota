@@ -14,7 +14,15 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from ..config import Config
-from ._http import DEFAULT_TIMEOUT, OcsError, ocs_get, ocs_post, ocs_put, ocs_request
+from ._http import (
+    DEFAULT_TIMEOUT,
+    OcsError,
+    ocs_get,
+    ocs_post,
+    ocs_put,
+    ocs_request,
+    to_remote_path,
+)
 
 SHARES_PATH = "/apps/files_sharing/api/v1/shares"
 
@@ -49,7 +57,9 @@ def list_shares(
 ) -> list[dict]:
     params: dict[str, str] = {}
     if path is not None:
-        params["path"] = path
+        # OCS names a file by a path relative to the sharer's own root, so the
+        # logical path needs the same mapping a DAV URL gets.
+        params["path"] = to_remote_path(config, path)
     if reshares:
         params["reshares"] = "true"
     if subfiles:
@@ -86,7 +96,7 @@ def create_share(
     attributes: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict:
-    data: dict[str, Any] = {"path": path, "shareType": share_type}
+    data: dict[str, Any] = {"path": to_remote_path(config, path), "shareType": share_type}
     if share_with is not None:
         data["shareWith"] = share_with
     if permissions is not None:

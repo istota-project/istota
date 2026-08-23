@@ -238,6 +238,17 @@ app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 # Default expiry applied by `nextcloud share link`. A handed-out link that never
 # expires is the thing worth avoiding; 0 opts out of a default entirely.
 share_default_expire_days = 14
+# Where the bot's storage root sits inside its own Nextcloud file tree. Leave
+# empty for the rclone-mount deploy, where they are the same directory. Set it
+# to the mount point when the storage root reaches Nextcloud as an external
+# storage mount (the Docker stack sets "Shared Files"): every DAV and OCS path
+# the bot sends is prefixed with it, while paths on disk are unaffected.
+dav_prefix = ""
+# Share the bot workspace back to the user over OCS on every boot. Leave true
+# unless something else already puts that directory in the user's file tree —
+# the Docker stack mounts it there at provisioning and sets this false, so the
+# user is not handed the same directory twice.
+auto_share_bot_dir = true
 
 [talk]
 # Enable Talk polling (requires istota user to be added to conversations)

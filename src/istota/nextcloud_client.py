@@ -37,6 +37,7 @@ from .nextcloud._http import (
     nc_base_url as _nc_base_url,
     nc_configured as _nc_configured,
     ocs_headers as _ocs_headers,
+    to_remote_path as _to_remote_path,
 )
 
 logger = logging.getLogger("istota.nextcloud_client")
@@ -150,7 +151,10 @@ def ocs_list_shares(
     """List shares, optionally filtered by path. None on error."""
     params: dict[str, str] = {}
     if path is not None:
-        params["path"] = path
+        # Same mapping the raising counterpart applies: OCS names a file by a
+        # path relative to the sharer's own root. `ocs_share_folder` below is
+        # the one call the Docker shape makes on every boot.
+        params["path"] = _to_remote_path(config, path)
     if reshares:
         params["reshares"] = "true"
     return ocs_get(config, _SHARES_PATH, params=params, timeout=timeout)
@@ -172,7 +176,7 @@ def ocs_create_share(
     share_type: 0=user, 1=group, 3=public link, 4=email, 6=federated, 10=Talk.
     permissions: bitmask (1=read, 2=update, 4=create, 8=delete, 16=share, 31=all).
     """
-    data: dict[str, Any] = {"path": path, "shareType": share_type}
+    data: dict[str, Any] = {"path": _to_remote_path(config, path), "shareType": share_type}
     if share_with is not None:
         data["shareWith"] = share_with
     if permissions is not None:

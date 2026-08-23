@@ -31,6 +31,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `username` | `""` | Bot's Nextcloud username |
 | `app_password` | `""` | Nextcloud app password |
 | `share_default_expire_days` | `14` | Default expiry on links the bot creates |
+| `dav_prefix` | `""` | Where the storage root sits in the bot's Nextcloud tree; prefixed onto every DAV/OCS path. Empty for the rclone mount, `"Shared Files"` for the Docker stack's external-storage mount |
+| `auto_share_bot_dir` | `true` | Share the bot workspace back to the user over OCS at boot. False where the deployment already mounts it into the user's tree |
 
 ## `[talk]`
 

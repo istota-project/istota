@@ -13,6 +13,7 @@ from ._http import (
     OcsResult,
     PathScopeError,
     dav_files_url,
+    dav_prefix,
     dav_request,
     dav_root_url,
     describe_ocs_status,
@@ -28,6 +29,7 @@ from ._http import (
     ocs_request,
     ocs_request_full,
     resolve_scoped_path,
+    to_remote_path,
     workspace_root,
 )
 
@@ -38,6 +40,7 @@ __all__ = [
     "OcsResult",
     "PathScopeError",
     "dav_files_url",
+    "dav_prefix",
     "dav_request",
     "dav_root_url",
     "describe_ocs_status",
@@ -53,5 +56,6 @@ __all__ = [
     "ocs_request",
     "ocs_request_full",
     "resolve_scoped_path",
+    "to_remote_path",
     "workspace_root",
 ]

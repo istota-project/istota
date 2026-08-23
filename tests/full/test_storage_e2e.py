@@ -18,8 +18,16 @@ and only the bot workspace directory to the human user, at the bot's name. So
 the round trip this file asserts is **filesystem in, WebDAV out**, and the path
 changes on the way: `/Users/testuser/inbox/x` on disk is
 `Shared Files/Users/testuser/inbox/x` to the bot and is not in the human user's
-tree at all. Measured here rather than assumed, because nothing else in the repo
-states it and the mount points are chosen in a shell script nothing executes.
+tree at all.
+
+That difference is now something the daemon knows rather than something only
+this file measured. `[nextcloud] dav_prefix` carries the mount point, compose
+hands the same value to Nextcloud and to the daemon, and the request layer puts
+it in front of a logical path on the way out and takes it off on the way back —
+so the client's vocabulary stays `/Users/{uid}` and its HTTP stays correct. The
+assertions below are what holds that: they use the logical path everywhere the
+daemon or the skill is the caller, and `BOT_MOUNT_POINT` only where the fixture
+is talking to Nextcloud directly.
 
 **Why so much runs through `stack.exec` into the container.** The code under
 test is a client, and what makes it worth testing is the pair — the client and
@@ -158,23 +166,42 @@ class TestASharedFile:
     def test_it_reaches_the_intended_user_and_nobody_else(self, stack):
         """`nextcloud/shares.py`, against the server rather than against a mock.
 
-        The file is uploaded into the bot's **own** Nextcloud home rather than
-        onto the shared volume, and that is forced rather than chosen: a file on
-        a `files_external` mount is refused with "You are not allowed to share",
-        measured while this was written. It is the same constraint that makes
-        `storage.share_folder_with_user` fail on every boot of this shape — see
-        the stage notes; that is a product question this stage does not settle
-        and deliberately does not encode as an expectation.
+        The file goes onto the **shared volume**, which is what makes this worth
+        running here. Two things had to be true before it could:
+
+        * `[nextcloud] dav_prefix` puts `Shared Files/` in front of the logical
+          path on its way to becoming a DAV or OCS path, so `/{name}` — a path
+          at the daemon's storage root — reaches the volume rather than the
+          bot's own Nextcloud home, which is a different directory on this
+          shape and one nothing else in the deployment writes to.
+        * `provision-nc.sh` sets `enable_sharing` on the mount. A
+          `files_external` mount refuses every share at its default, which is
+          what "You are not allowed to share" was.
+
+        So the upload asserts *where* the bytes landed before the share asserts
+        anything: without the first check a bot home that quietly worked would
+        pass this test while the capability an operator cares about — sharing
+        something out of the workspace — stayed broken.
         """
         nextcloud = stack.service("nextcloud")
         name = _unique("shared") + ".txt"
+        body = "a file the bot owns"
 
         _run(stack, (
             "from istota.nextcloud import dav;"
             f"p = pathlib.Path('/tmp/{name}');"
-            "p.write_text('a file the bot owns');"
+            f"p.write_text({body!r});"
             f"print('UPLOAD', json.dumps(dav.upload(c, p, '/{name}')))"
         ))
+
+        on_volume = stack.exec(["test", "-f", f"/mnt/shared/{name}"])
+        assert on_volume.returncode == 0, (
+            f"{name} was uploaded through the DAV client but is not on the "
+            "shared volume, so dav_prefix did not reach the request layer: "
+            + stack.exec(["ls", "-la", "/mnt/shared"]).stdout
+        )
+        assert nextcloud.read_file(f"{BOT_MOUNT_POINT}/{name}").decode() == body
+
         share = json.loads(_tagged(_run(stack, (
             "from istota.nextcloud import shares;"
             "print('SHARE', json.dumps(shares.create_share("
@@ -184,19 +211,70 @@ class TestASharedFile:
 
         assert share["share_with"] == nextcloud.test_user, share
         assert share["uid_owner"] == nextcloud.bot_user, share
+        assert share["path"] == f"/{BOT_MOUNT_POINT}/{name}", (
+            "the share was created somewhere other than the shared volume", share
+        )
 
         received = {
-            row.get("path") for row in
+            row.get("file_target") for row in
             nextcloud.shares(user=nextcloud.test_user, shared_with_me=True)
         }
         assert f"/{name}" in received, received
         others = {
-            row.get("path") for row in
+            row.get("file_target") for row in
             nextcloud.shares(user=nextcloud.admin_user, shared_with_me=True)
         }
         assert f"/{name}" not in others, others
         assert name in nextcloud.files("", user=nextcloud.test_user), (
             "the share exists but the file is not in the recipient's tree"
+        )
+
+    def test_the_skill_addresses_a_workspace_path_the_way_it_documents(self, stack):
+        """The other half of the same defect, and the half a user would hit.
+
+        The `nextcloud` skill speaks logical `/Users/{uid}` paths —
+        `resolve_scoped_path` is what confines a caller to their own workspace,
+        and it deliberately knows nothing about where that workspace sits in the
+        bot's Nextcloud tree. On this shape every one of its `files` and `share`
+        verbs answered 404 for exactly that reason.
+
+        Driven through the CLI's own environment rather than through
+        `dav.stat(c, …)`, because the skill runs as a subprocess with a
+        manifest-built environment and no Config: a prefix the daemon knows and
+        the manifest does not is the same 404 with a longer diagnosis.
+        """
+        name = _unique("skillfile") + ".txt"
+
+        _run(stack, (
+            "from istota import storage;"
+            f"p = pathlib.Path('/tmp/{name}');"
+            "p.write_text('written for the skill to find');"
+            "print('REMOTE', storage.upload_file_to_inbox_v2(c, 'testuser', p))"
+        ))
+
+        answer = json.loads(_tagged(_run(stack, (
+            "import os, subprocess;"
+            "env = dict(os.environ,"
+            " NC_URL=c.nextcloud.url, NC_USER=c.nextcloud.username,"
+            " NC_PASS=c.nextcloud.app_password,"
+            " NC_DAV_PREFIX=c.nextcloud.dav_prefix,"
+            " ISTOTA_USER_ID='testuser');"
+            "env.pop('ISTOTA_SANDBOXED', None);"
+            "out = subprocess.run(['uv', 'run', 'python', '-m',"
+            " 'istota.skills.nextcloud', 'files', 'list',"
+            " '/Users/testuser/inbox'], capture_output=True, text=True, env=env);"
+            "print('LIST', json.dumps({'code': out.returncode,"
+            " 'stdout': out.stdout, 'stderr': out.stderr}))"
+        )), "LIST"))
+
+        assert answer["code"] == 0, answer
+        listing = json.loads(answer["stdout"])
+        assert listing["path"] == "/Users/testuser/inbox", listing
+        assert [
+            entry["path"] for entry in listing["entries"] if entry["name"] == name
+        ] == [f"/Users/testuser/inbox/{name}"], (
+            "the skill did not find the file at its logical path, or answered "
+            f"with a prefixed one: {listing}"
         )
 
 

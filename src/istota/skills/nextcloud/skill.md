@@ -5,7 +5,7 @@ description: Nextcloud control plane — capabilities probe, user/group lookup, 
 cli: true
 requires_capability: [nextcloud]
 companion_skills: [untrusted_input, sensitive_actions]
-env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true},{"var":"NC_SHARE_DEFAULT_EXPIRE_DAYS","from":"config","config_path":"nextcloud.share_default_expire_days"}]
+env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true},{"var":"NC_SHARE_DEFAULT_EXPIRE_DAYS","from":"config","config_path":"nextcloud.share_default_expire_days"}, {"var":"NC_DAV_PREFIX","from":"config","config_path":"nextcloud.dav_prefix"}]
 ---
 Nextcloud's control plane: what the server supports, who is on it, and what is
 shared with whom. Every command outputs JSON.
