@@ -38,9 +38,12 @@ control_tag="istota-test/no-forge:control"
 # second copy of a rule that already exists, and it would drift.
 base_tag="$(
     ISTOTA_TEST_PLATFORM="$platform" uv run python -c '
-import os, sys
-sys.path.insert(0, "tests")
-from image.conftest import _tag_for, ISTOTA_DOCKERFILE, resolve_platform
+import sys
+# The repo root, not `tests/`: `tests.image.conftest` reads `resolve_platform`
+# from the rootdir conftest by relative import, and a flat `image.conftest`
+# would be a top-level package with nothing above it to import from.
+sys.path.insert(0, ".")
+from tests.image.conftest import _tag_for, ISTOTA_DOCKERFILE, resolve_platform
 
 
 class _Config:

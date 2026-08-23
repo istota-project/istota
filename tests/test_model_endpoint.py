@@ -1,6 +1,6 @@
 """The scripted model endpoint, driven through the real SSE parser.
 
-`tests/support/model_endpoint.py` exists because the lean compose stack runs the
+`testbed/services/model_endpoint.py` exists because the lean compose stack runs the
 daemon in a container and the test on the host, so the injection point has to be
 `base_url` rather than a provider object (see the spec's Stage 6 decision). That
 buys a config-level seam and costs a real HTTP surface emitting real SSE bytes —
@@ -22,12 +22,12 @@ from istota.llm.openai_compat import OpenAICompatibleProvider
 from istota.llm.provider import StreamDone, StreamError
 from istota.llm.types import TextContent, UserMessage
 
-from .support.model_endpoint import serve_script
+from testbed.services.model_endpoint import serve_script
 
 
 async def _drive(endpoint, prompt: str = "hello") -> list:
     """Run one turn through the real provider and collect its events."""
-    provider = OpenAICompatibleProvider(api_key="unused", base_url=endpoint.base_url)
+    provider = OpenAICompatibleProvider(api_key="unused", base_url=endpoint.url)
     try:
         return [
             event
@@ -178,7 +178,7 @@ class TestTheEndpointIsAddressableFromAnotherProcess:
         """
         with serve_script([{"text": "ok"}]) as endpoint:
             assert endpoint.port > 0
-            assert endpoint.base_url.endswith(f":{endpoint.port}/v1")
+            assert endpoint.url.endswith(f":{endpoint.port}/v1")
             assert endpoint.host_bound == "127.0.0.1"
 
     def test_the_bind_address_is_read_off_the_socket_not_the_argument(self):
@@ -191,7 +191,9 @@ class TestTheEndpointIsAddressableFromAnotherProcess:
         class exists to prevent, so the field is now populated from
         `server_address` and cross-checked here.
         """
-        with serve_script([{"text": "ok"}], host="0.0.0.0") as endpoint:
+        with serve_script(
+            [{"text": "ok"}], host="0.0.0.0", credential="a-credential-to-expect"
+        ) as endpoint:
             assert endpoint.host_bound == "0.0.0.0"
             assert endpoint._server.server_address[0] == "0.0.0.0"
             assert endpoint._server.server_address[1] == endpoint.port

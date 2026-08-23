@@ -5,6 +5,10 @@ __pycache__
 *.pyc
 .pytest_cache
 tests/
+# Both compose files build with `context: ..`, so anything under the
+# repo root reaches every image the tiers build. The testbed has no
+# business in the image, and Stage 6 generates a TLS key under it.
+testbed/
 deploy/
 data/
 *.egg-info

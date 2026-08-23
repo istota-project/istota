@@ -169,6 +169,7 @@ _SECTION_FLAT_KEYS = {
         "enabled": "istota_browser_enabled",
         "api_port": "istota_browser_api_port",
         "vnc_port": "istota_browser_vnc_port",
+        "vnc_bind_address": "istota_browser_vnc_bind_address",
         "vnc_password": "istota_browser_vnc_password",
         "vnc_external_url": "istota_browser_vnc_external_url",
         "max_sessions": "istota_browser_max_sessions",

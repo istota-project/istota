@@ -11,6 +11,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -1233,7 +1234,13 @@ def _gather_admin_stats() -> dict:
     """
     from . import __version__, db
 
-    db_path = _config.db_path
+    # Read the global once. `_reload_config` rebinds it wholesale on SIGHUP, and
+    # the subscription section below takes the deployment's own config: whether
+    # the poll is enabled at all, and which directory the shared cache file
+    # lives in. A payload built against two configs is the hazard the doctor
+    # route snapshots against for the same reason.
+    config = _config
+    db_path = config.db_path
     now = datetime.now(timezone.utc)
 
     payload: dict = {
@@ -1270,6 +1277,27 @@ def _gather_admin_stats() -> dict:
     payload["runtime"] = _admin_runtime_section()
     payload["models"] = _admin_models_section()
     payload["brain_status"] = _admin_brain_status_section()
+    # Best-effort like every other section, and with more reason than most: this
+    # one can make a network request. A failure is an error string in the
+    # payload, not a 500 on the whole dashboard. It is off the event loop only
+    # because the endpoint dispatches `_gather_admin_stats` through
+    # `asyncio.to_thread` — without that, a slow fetch would stall every other
+    # request in the process. Note what that does *not* buy: the thread comes
+    # from the loop's shared default executor, and `subscription_usage`'s
+    # timeout is urllib's per-socket-operation one rather than a deadline on the
+    # request, so a server dripping bytes holds a pool thread for longer than
+    # the configured seconds.
+    try:
+        # Omitted entirely rather than sent as null when there is no card to
+        # draw — Claude Code is not in play here, or the reading could not be
+        # obtained. The frontend's `{#if stats.subscription}` is the only gate
+        # it needs, and an absent key cannot be mistaken for a failed one.
+        section = _admin_subscription_section(config, now)
+        if section is not None:
+            payload["subscription"] = section
+    except Exception as exc:  # noqa: BLE001 — never fail the stats payload
+        logger.exception("admin subscription section failed")
+        payload["subscription"] = {"error": str(exc)}
     return payload
 
 
@@ -1327,6 +1355,199 @@ def _admin_brain_status_section() -> dict:
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin brain status section failed")
         return {"error": str(exc)}
+
+
+def _claude_code_is_in_play(config) -> bool:
+    """Whether this deployment can spend a Claude Code subscription at all.
+
+    Not ``brain.kind == "claude_code"``. A deployment running ``kind =
+    "native"`` with ``fallback = "claude_code"`` burns the plan on every
+    failover — that is the motivating case for reporting the windows in the
+    first place — so gating on the primary alone would hide a working reading
+    on exactly the shape that most needs it. The fallback counts.
+
+    Read defensively: a config predating either field behaves as "not in play",
+    which errs toward hiding a card rather than drawing an empty one.
+    """
+    brain = getattr(config, "brain", None)
+    if brain is None:
+        return False
+    for field in ("kind", "fallback"):
+        try:
+            if str(getattr(brain, field, "") or "").strip().lower() == "claude_code":
+                return True
+        except Exception:  # noqa: BLE001 — a stats section never raises on config shape
+            continue
+    return False
+
+
+def _admin_subscription_section(config, now: datetime) -> dict | None:
+    """Claude Code plan utilization for the admin dashboard.
+
+    On a subscription deployment the Token usage card's cost column is
+    deliberately blank — a plan-equivalent list price is not spend — so these
+    rate-limit windows are the only budget there is, and the deployment
+    otherwise learns it is out of plan headroom at the moment a task fails over.
+
+    Everything here comes from ``subscription_usage.get_snapshot``, which holds
+    the credential resolution, the fetch, the parse and the deployment-wide disk
+    cache. This function renders; it knows nothing about the endpoint's shape.
+    The doctor check reads the same snapshot, and the two agree on both words
+    that matter: *available* means there are windows to draw, and *stale* means
+    the numbers are real but came from an earlier fetch than the one that just
+    failed. They part company on the *verdict*: doctor weighs the age against
+    ``subscription_usage_stale_after_seconds`` to decide whether a stale reading
+    is worth a status of its own, and that threshold is not on the wire — the
+    card says how old the reading is and lets the operator judge, while `istota
+    doctor` and the Health pane are where a status is reached.
+
+    ``warn_percent`` and ``high_percent`` *are* on the wire, because the card
+    tints each tile by them. The alternatives were both worse: literals in the
+    TypeScript would ignore a configured threshold without saying so, and a
+    second endpoint would let the tint and the number it tints come from two
+    different reads. They are configuration rather than credentials, and the
+    only person who sees this dashboard is the one who set them.
+
+    ``available: false`` is a rendering state, not an absence — it always
+    carries an ``error``, so the card can say why instead of vanishing. Disabled,
+    no credential, a refused credential and a shape change all land here, and an
+    operator who expects the reading and does not get it has to learn the
+    reason. That is enforced below rather than taken on trust.
+
+    ``token_source`` is the resolver's branch name (``env`` / ``file`` /
+    ``keychain``) and never the token. Nothing downstream would catch a leak:
+    this credential is not in the config, so the redaction pass that covers
+    configured secrets has never seen it.
+    """
+    from . import subscription_usage
+
+    if not _claude_code_is_in_play(config):
+        return None
+
+    settings = getattr(getattr(config, "brain", None), "claude_code", None)
+
+    # The payload's own clock, not a fresh reading of the wall clock: the
+    # countdowns and the cache age have to be measured against the same moment
+    # as every other timestamp on this dashboard.
+    snapshot = subscription_usage.get_snapshot(config, now_ts=now.timestamp())
+
+    # No windows, no card. This section used to emit `available: false` with a
+    # reason so an operator who expected the reading learned why it was absent,
+    # and that was right while a missing reading meant something was wrong. It
+    # is not right now: the endpoint does not serve the long-lived setup-token
+    # credential that both server shapes deploy, so on those deployments the
+    # note was permanent and told the operator nothing they could act on. A
+    # reading that cannot be obtained is reported by `runtime.subscription_usage`
+    # as a SKIP, which is where a diagnostic belongs.
+    if not snapshot.has_data:
+        return None
+
+    # Windows *and* an error is the stale-cache branch and the only way to be
+    # stale — an old real reading, plus the failure that made it old. Doctor
+    # renders the same pair off the same condition. A stale reading still draws
+    # the card: an old real number outranks no card at all.
+    stale = bool(snapshot.error) and snapshot.has_data
+    error = snapshot.error
+
+    return {
+        # Always true where the key is present at all — kept so the shape does
+        # not change under a client that still reads it.
+        "available": True,
+        "windows": [
+            {
+                "key": window.key,
+                "label": window.label,
+                "percent": window.percent,
+                "resets_at": _iso_utc(window.resets_at),
+                "resets_in_seconds": window.resets_in_seconds,
+                "severity": window.severity,
+                "is_active": window.is_active,
+            }
+            for window in snapshot.windows
+        ],
+        "spend": _admin_subscription_spend(snapshot.spend),
+        "fetched_at": _iso_utc_from_epoch(snapshot.fetched_at),
+        "stale": stale,
+        "token_source": snapshot.token_source,
+        "warn_percent": _subscription_threshold(
+            settings, "subscription_usage_warn_percent", 80.0
+        ),
+        "high_percent": _subscription_threshold(
+            settings, "subscription_usage_high_percent", 95.0
+        ),
+        "error": error,
+    }
+
+
+def _subscription_threshold(settings, field: str, default: float) -> float:
+    """A percentage threshold for the card, or `default` for a non-number.
+
+    Second line behind the loader, which clamps these to ``[0, 100]`` and
+    corrects an inverted pair. A value arriving past the loader — a config built
+    in code, an older TOML — must not reach the wire as a `null` the card would
+    have to invent a literal for. ``bool`` is excluded explicitly: it is an
+    ``int``, and ``True`` would tint every tile amber at 1%.
+
+    Doctor's ``_setting_float`` is the same rule for the same fields, restated
+    rather than imported — that module is imported from inside every
+    ``load_config``, and the web app has no business dragging it in for four
+    lines. **The same rule to the letter, including not clamping**, which is the
+    part that is easy to get wrong here: a clamp looks like tightening and is
+    the one edit that would make the two surfaces disagree. An unclamped ``150``
+    reaching both means doctor never warns (its threshold is ``min(warn, high)``
+    = 150) and the card never tints, which is one wrong answer rather than two
+    different ones; clamped to 100 here, the card would paint a full window red
+    while doctor still called it OK. The loader is where a nonsense threshold is
+    corrected, and correcting it in one of two readers is worse than nowhere.
+    """
+    value = getattr(settings, field, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    as_float = float(value)
+    if not math.isfinite(as_float):
+        return default
+    return as_float
+
+
+def _admin_subscription_spend(spend) -> dict | None:
+    """Pay-as-you-go credits, or ``None`` when the payload carried none.
+
+    This is real money the account has committed, reported in minor units with
+    an explicit currency — not a token count priced at list — so it does not
+    contradict the rule that keeps a dollar figure off the Token usage card on a
+    subscription deployment.
+    """
+    if spend is None:
+        return None
+    return {
+        "enabled": spend.enabled,
+        "used_minor": spend.used_minor,
+        "limit_minor": spend.limit_minor,
+        "currency": spend.currency,
+        "exponent": spend.exponent,
+        "percent": spend.percent,
+    }
+
+
+def _iso_utc_from_epoch(ts: float) -> str | None:
+    """Epoch seconds as ISO 8601 UTC, or ``None`` when there is no such moment.
+
+    A snapshot carrying no data has ``fetched_at = 0.0``, and rendering that as
+    1970 would put a timestamp on a card that has nothing to timestamp. The
+    guard is wider than that one case on purpose: this number comes back out of
+    a JSON file on disk that two processes write, and ``fromtimestamp`` raises
+    on a NaN, an infinity and anything past the year 9999. The magnitude arm is
+    load-bearing rather than belt-and-braces — the module's coercer bounds an
+    integer from that file but not a float, so ``1e300`` reaches here intact.
+    ``bool`` is excluded because ``True`` is an ``int`` that would otherwise
+    render as one second past the epoch.
+    """
+    try:
+        if isinstance(ts, bool) or not ts or ts <= 0:
+            return None
+        return _iso_utc(datetime.fromtimestamp(ts, tz=timezone.utc).isoformat())
+    except (OverflowError, OSError, ValueError, TypeError):
+        return None
 
 
 def _admin_models_section() -> dict:
@@ -3361,9 +3582,11 @@ async def admin_doctor(deep: int = 0, _: dict = Depends(_require_admin)):
     def _run(**kwargs):
         return doctor.redact(doctor.run_checks(config, **kwargs), config)
 
-    # Every probing check bounds its own subprocess (`doctor.PROBE_TIMEOUT`), so
-    # the shallow phase needs no outer timer — only to be off the event loop,
-    # which it would otherwise stall for a dozen `--version` spawns.
+    # Every probing check bounds its own probe — `doctor.PROBE_TIMEOUT` for the
+    # ones that spawn a subprocess, and its own configured fetch timeout for
+    # `runtime.subscription_usage`, the one that makes a network request — so the
+    # shallow phase needs no outer timer, only to be off the event loop, which it
+    # would otherwise stall for a dozen `--version` spawns.
     results = await asyncio.to_thread(_run, deep=False)
 
     if deep:

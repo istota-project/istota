@@ -6,8 +6,22 @@ from pathlib import Path
 import pytest
 
 
+from .support.env_isolation import (
+    NO_PROXY_NAMES,
+    NO_PROXY_VALUE,
+    NO_SCRUB_FLAG,
+    SUITE_ENV_DEFAULTS,
+    scrubbed_env_names,
+)
+
+
 def _load_dotenv():
-    """Load .env file from project root into os.environ (simple key=value parser)."""
+    """Load .env file from project root into os.environ (simple key=value parser).
+
+    Runs at import, i.e. before collection, and is therefore *not* undone by
+    the `_scrub_ambient_env` fixture below — see that fixture for which of the
+    two wins where they overlap.
+    """
     env_file = Path(__file__).parent.parent / ".env"
     if not env_file.exists():
         return
@@ -26,20 +40,71 @@ def _load_dotenv():
 
 _load_dotenv()
 
-# Default-off in tests: most feeds tests expect an empty DB. The seed
-# tests in test_feeds_migrate.py monkeypatch this var off explicitly.
-os.environ.setdefault("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", "1")
-# Same pattern for the money default-ledger seed: most money tests
-# expect a clean ledgers/ dir. The seed tests in test_migrate.py
-# monkeypatch this var off explicitly.
-os.environ.setdefault("ISTOTA_MONEY_SKIP_DEFAULT_SEED", "1")
-# web_app's session middleware fails closed without a signing secret
-# (ISSUE-124). Tests don't configure one, so opt into the random per-process
-# dev secret. Tests that assert the fail-closed behaviour clear this explicitly.
-os.environ.setdefault("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
+# Set at import as well as by `_scrub_ambient_env`, because module-scope code
+# in a test file runs during collection, before any fixture. Each is documented
+# in `tests/support/env_isolation.py`.
+for _name, _value in SUITE_ENV_DEFAULTS.items():
+    os.environ.setdefault(_name, _value)
 
 from istota import db
 from istota.config import Config, UserConfig
+
+
+@pytest.fixture(autouse=True)
+def _scrub_ambient_env(monkeypatch):
+    """Take the ambient shell's istota config out of every test (ISSUE-301).
+
+    The suite reset every process global it knew about and no part of the
+    environment, so a shell carrying real config changed its answers: thirty of
+    the thirty-two failures on the deployment host were this, and none of them
+    was about the code. The list of what goes, what is forced to a fixed value,
+    and the reasoning behind each rule, is in `tests/support/env_isolation.py`.
+
+    **Where this and `_load_dotenv` disagree, this wins, and that is a decision
+    rather than an accident of ordering.** `_load_dotenv` runs at import and
+    copies the repo-root `.env` into `os.environ`; this fixture runs per test
+    and deletes the scrubbed names, so for anything on the scrub list the
+    dotenv load has no effect on a test body. That is the right way round: a
+    developer's `.env` is their *deployment* config, and a suite whose result
+    depends on it is the bug being fixed here — `.env` on this machine sets
+    `BROWSER_HOST`, and it is exactly the kind of value a test asserting on a
+    default must not see.
+
+    `_load_dotenv` is not thereby pointless, and is deliberately left alone.
+    It still feeds every name off the scrub list, and it still feeds the
+    scrubbed ones to module-scope code, which runs at collection before any
+    fixture: `tests/test_browse_integration.py` reads `BROWSER_HOST` at import
+    to decide whether to skip, and that is the intended way to consume one of
+    these. What changes is that a *test body* can no longer be reached by one.
+
+    Uses `monkeypatch` rather than mutating `os.environ` so the shell is put
+    back between tests. That matters for the higher-scoped fixtures created
+    lazily part-way through a session — `tests/image/test_upgrade.py` reaches
+    one through `request.getfixturevalue`, and the compose boot in `stack`
+    snapshots `os.environ` for its child processes.
+
+    One hole worth knowing about: `monkeypatch` is a single per-test object
+    shared with the test body, so a test calling `monkeypatch.undo()` reverses
+    this fixture's work along with its own. Use `monkeypatch.context()` or a
+    local `pytest.MonkeyPatch()` instead of `undo()`.
+    """
+    if os.environ.get(NO_SCRUB_FLAG) == "1":
+        # The one caller is the negative control in `tests/test_env_isolation.py`,
+        # which has to watch the reported tests actually go red — a test that
+        # asserts against the behaviour of a separately-configured process
+        # tells you nothing about whether it can fail. Nothing else should set
+        # this: it restores the state ISSUE-301 was filed about.
+        return
+    for name in sorted(scrubbed_env_names(os.environ)):
+        monkeypatch.delenv(name, raising=False)
+    # After the scrub, not before: these match the `ISTOTA_` prefix and are
+    # meant to. The suite's own value beats the shell's.
+    for name, value in SUITE_ENV_DEFAULTS.items():
+        monkeypatch.setenv(name, value)
+    # Forced, not scrubbed — see `env_isolation.NO_PROXY_VALUE` for why the
+    # proxy variables themselves are left alone.
+    for name in NO_PROXY_NAMES:
+        monkeypatch.setenv(name, NO_PROXY_VALUE)
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +147,49 @@ def _no_network_symbol_lookups(monkeypatch):
     monkeypatch.setattr(
         portfolio_autoclass, "fetch_symbol_info", lambda symbol, **kwargs: None
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_subscription_usage_lookups(monkeypatch):
+    """The plan-utilization poll reads a real credential and makes a real request.
+
+    ``doctor.run_checks`` runs ``runtime.subscription_usage`` with
+    ``probe=True``, and several tests sweep the whole registry. Left alone, on a
+    developer's macOS laptop that reads the real keychain credential through a
+    ``security find-generic-password`` subprocess and then issues a live GET to
+    api.anthropic.com, once per sweeping test. In CI nothing resolves and the
+    check SKIPs, so the sweep would also mean two different things on two
+    machines. (Whether the keychain lookup answers silently or asks the operator
+    for authorization depends on that item's ACL, which is another reason not to
+    find out from inside a test run.)
+
+    Same shape as ``_no_network_symbol_lookups`` above, and the same escape
+    hatch: ``tests/test_subscription_usage.py`` exercises the module itself and
+    reinstates the functions it captured at import time, and
+    ``TestSubscriptionUsage`` in ``tests/test_doctor.py`` reinstates
+    ``get_snapshot`` behind a wrapper that injects a stub transport.
+
+    Both the entry point *and* the network leaf are neutralized: a test that
+    reinstates one and forgets the other still cannot reach the endpoint.
+    """
+    try:
+        from istota import subscription_usage
+    except Exception:
+        # Broad on purpose: this runs before every test in the suite, so
+        # anything it raises fails thousands of unrelated tests with a
+        # traceback pointing at the wrong place.
+        return
+
+    def _no_credential(config, **kwargs):
+        return subscription_usage.UsageSnapshot(
+            fetched_at=0.0, source="none", error=subscription_usage.NO_CREDENTIAL_ERROR
+        )
+
+    def _refuse(url, headers, timeout):
+        raise AssertionError("a test reached the real usage endpoint; inject a transport")
+
+    monkeypatch.setattr(subscription_usage, "get_snapshot", _no_credential)
+    monkeypatch.setattr(subscription_usage, "_urllib_transport", _refuse)
 
 
 @pytest.fixture
@@ -245,3 +353,322 @@ def pytest_addoption(parser):
             "Defaults to native, or to $ISTOTA_TEST_PLATFORM."
         ),
     )
+
+
+def resolve_platform(config) -> str:
+    """`--platform`, else `$ISTOTA_TEST_PLATFORM`, else native.
+
+    A bare architecture is accepted and normalized — `amd64` is what a person
+    types and `linux/amd64` is what Docker wants, and getting that wrong builds
+    natively while the tag claims otherwise.
+
+    Here rather than in ``tests/image/conftest.py`` because three Docker tiers
+    now read it. The smoke tier used to import it across package boundaries
+    (``from ..image.conftest import resolve_platform``), which meant one tier's
+    fixtures depended on another's conftest for a five-line pure function; the
+    option it reads is declared just above, so this is where it belongs.
+    """
+    raw = config.getoption("--platform") or os.environ.get("ISTOTA_TEST_PLATFORM") or ""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    return raw if "/" in raw else f"linux/{raw}"
+
+
+# --- Deployment tiers: the stack fixtures both shapes share ----------------
+#
+# Hoisted here from `tests/smoke/conftest.py` in Stage 3 of the
+# deployment-testbed spec, at the point the reason for hoisting appeared:
+# `tests/full/` needs the same `stacks` / `stack` pair, and a fixture defined in
+# a sibling package's conftest is invisible to another. What stays down in
+# `tests/smoke/conftest.py` is what is specific to the *lean* shape — its image
+# tag and the negative control's image.
+#
+# **Nothing here is autouse**, and that is the constraint that shaped it. The
+# sweep and the exec measurement were autouse session fixtures while they lived
+# under `tests/smoke/`, where they only ever applied to that directory. At the
+# rootdir an autouse session fixture runs on *every* `uv run pytest`, and the
+# sweep shells out to `docker info`. They are requested by `stacks` instead, so
+# they still run exactly once and only when a stack is actually asked for.
+
+import hashlib  # noqa: E402 - this file's imports are split by section, above
+import time  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from testbed import probe as probe_support  # noqa: E402
+from testbed import profiles  # noqa: E402
+from testbed import stack as stack_support  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[1]
+LEAN_COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
+RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
+LEAN_PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
+FULL_COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
+TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+
+LEAN_READY_TIMEOUT = 120
+
+#: The tiers that must run `-n0`, and therefore the ones the guard below covers.
+SERIAL_TIER_MARKERS = ("smoke", "full")
+
+#: Every compose project these tiers create starts with it, which is what makes
+#: the session-start sweep able to find leftovers without touching anything else
+#: — a developer's own demo or red-team stack is never named this.
+PROJECT_PREFIX = "istota-testbed-"
+
+#: The prefix the smoke tier used before Stage 3 gave both shapes one pool.
+#: Swept as well as the current one, so a stack left behind by a run from before
+#: the rename is still reclaimed rather than surviving forever.
+LEGACY_PROJECT_PREFIXES = ("istota-smoke-",)
+
+_XDIST_MESSAGE = (
+    "the smoke and full tiers must run with -n0. Session-scoped fixtures are "
+    "per-worker, so N workers would each build the image and bring up their own "
+    "stacks under one project prefix, race the same daemon, and sweep each "
+    "other's projects."
+)
+
+# What a test gets when it declares no `script` marker. One plain answer, which
+# is enough for any scenario that only needs a task to complete —
+# `test_lean_stack.py` asserts on this exact string.
+DEFAULT_SCRIPT = [{"text": "the scripted answer"}]
+
+
+def lean_image_tag() -> str:
+    """One image tag per checkout, shared by every lean stack in the session.
+
+    Compose names a built image after the project, and the project is unique per
+    stack so an interrupted run's containers are never adopted by the next
+    session. Images are not reclaimed by `down --volumes`, so that left one
+    permanent tag per stack. A single tag collapses them.
+
+    Scoped by checkout path rather than fixed, because work in this repo runs in
+    parallel git worktrees: two of them sharing a tag means the second
+    `up --build` moves it out from under the first run's containers, mid-run.
+    Same reasoning as `tests/image/conftest._tag_for`.
+
+    The full shape needs no equivalent. Its `build:` blocks name no `image:`, so
+    compose tags them `<project>-<service>` and each stack gets its own.
+    """
+    digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
+    return f"istota-test/lean:{digest}"
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Fail early when a serial tier is selected under xdist.
+
+    `trylast` matters because this hook is also where `-m` deselection happens —
+    without it the unfiltered item list is what arrives, and an ordinary
+    `uv run pytest` fails with a usage error about a tier it had already
+    deselected.
+
+    **It cannot see a real parallel run**, which is the actual scenario. Under
+    `-n 2` the controller never calls this (it holds no items) and xdist clears
+    `numprocesses` in the workers so they do not re-fan-out. `_require_no_xdist`
+    is the check that binds.
+    """
+    if not any(
+        item.get_closest_marker(marker)
+        for item in items
+        for marker in SERIAL_TIER_MARKERS
+    ):
+        return
+
+    workers = getattr(config.option, "numprocesses", None)
+    distribution = config.getoption("dist", "no")
+    if workers or distribution not in ("no", None):
+        raise pytest.UsageError(
+            f"{_XDIST_MESSAGE} (saw -n {workers}, --dist {distribution})"
+        )
+
+
+def _require_no_xdist(config) -> None:
+    """Refuse inside an xdist worker.
+
+    `workerinput` is set by xdist on the worker's config and absent in a
+    single-process run — the only signal that survives into the place where the
+    damage would be done.
+    """
+    if hasattr(config, "workerinput"):
+        worker = config.workerinput.get("workerid", "?")
+        pytest.fail(
+            f"{_XDIST_MESSAGE} (running in xdist worker {worker})", pytrace=False
+        )
+
+
+def require_docker() -> None:
+    if not stack_support.docker_available():
+        pytest.skip("no Docker daemon available")
+
+
+@pytest.fixture(scope="session")
+def _sweep_leftover_stacks():
+    """Reclaim stacks an earlier run was killed before tearing down.
+
+    A unique project name per stack stops one run from adopting another's
+    containers mid-flight, but it also means nothing ever reclaims them: a killed
+    session leaves a container and a named volume behind for good. One sweep at
+    the first stack request closes that, scoped by prefix so it can never touch a
+    developer's own stack.
+    """
+    if stack_support.docker_available():
+        for prefix in (PROJECT_PREFIX, *LEGACY_PROJECT_PREFIXES):
+            stack_support.sweep_projects(prefix)
+    yield
+
+
+@pytest.fixture(scope="session")
+def _measure_probe_exec(request):
+    """Report what the tier spent inside `docker compose exec`.
+
+    Open question 4 in the deployment-testbed spec asks whether a `Probe` query
+    per poll is fast enough once one stack serves a whole session, and answers it
+    with a measurement rather than a long-lived reader process nobody has shown
+    is needed. This is that measurement, and it stays because the answer changes
+    as the tier grows — a number printed on every run is what makes a regression
+    visible before it is a complaint. Stage 2 measured 31% for the lean shape;
+    the full shape has a longer session and the same counters.
+
+    The span opens at the first stack request and closes at session teardown, so
+    a `-m smoke` or `-m full` run reports a fraction of the thing that was
+    actually running.
+    """
+    probe_support.reset_exec_stats()
+    started = time.monotonic()
+    yield
+    stats = probe_support.exec_stats()
+    elapsed = time.monotonic() - started
+    if not stats.calls or elapsed <= 0:
+        return
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - only under a custom -p
+        return
+    reporter.write_line(
+        f"probe: {stats.calls} `docker compose exec` call(s), "
+        f"{stats.seconds:.1f}s of {elapsed:.1f}s "
+        f"({stats.seconds / elapsed:.0%} of the tier), "
+        f"{stats.seconds / stats.calls * 1000:.0f}ms each"
+    )
+
+
+def _keep_scope() -> str:
+    """One kept credential set per checkout, matching the kept project name.
+
+    `StackPool._compose_args_full` derives the project from the compose file's
+    resolved path for the same reason: two worktrees sharing a kept volume set
+    would each boot the other's half-provisioned Nextcloud.
+    """
+    return hashlib.sha256(str(FULL_COMPOSE_FILE.resolve()).encode()).hexdigest()[:8]
+
+
+def _report_boot_times(config, pool) -> None:
+    """Print where a cold boot went, once, at session end.
+
+    Open question 2 asks whether the provisioned volume set needs snapshotting,
+    and says it should be settled against Stage 3's measurement rather than
+    against the "roughly ten minutes" a comment remembers. A number nobody has to
+    instrument for is what makes that possible later.
+    """
+    if not pool.boot_times:
+        return
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - only under a custom -p
+        return
+    for profile, service, seconds in pool.boot_times:
+        reporter.write_line(f"boot: {profile} waited {seconds:.0f}s on {service}")
+
+
+@pytest.fixture(scope="session")
+def stacks(pytestconfig, tmp_path_factory, _sweep_leftover_stacks, _measure_probe_exec):
+    """Lazily-started, session-scoped stacks, keyed by profile name.
+
+    Nothing is booted here. The pool starts a stack the first time a test
+    declares its profile, so a run selecting only the forge scenarios never pays
+    for a `base` stack, and one selecting only lean scenarios never pays the full
+    shape's cold boot — and `close_all` tears down whatever ended up running.
+
+    One pool for both shapes rather than one per tier, so a session that happened
+    to select from both sweeps once and tears down once.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+
+    keep = bool(os.environ.get("ISTOTA_TESTBED_KEEP"))
+    pool = stack_support.StackPool(
+        workdir=tmp_path_factory.mktemp("testbed"),
+        lean=stack_support.LeanShape(
+            compose_file=LEAN_COMPOSE_FILE,
+            render_script=RENDER_CONFIG,
+            image=lean_image_tag(),
+            prebuilt_overlay=LEAN_PREBUILT_OVERLAY,
+            ready_timeout=LEAN_READY_TIMEOUT,
+        ),
+        full=stack_support.FullShape(
+            compose_file=FULL_COMPOSE_FILE,
+            overlay=TESTBED_OVERLAY,
+            keep=keep,
+            # Outside the checkout, with the other machine-wide test state:
+            # these are real generated passwords, and the repo's pre-commit hook
+            # exists because credentials end up in trees.
+            keep_dir=Path.home() / ".cache" / "istota-testbed" / _keep_scope(),
+        ),
+        platform=resolve_platform(pytestconfig),
+        project_prefix=PROJECT_PREFIX,
+    )
+    try:
+        yield pool
+    finally:
+        pool.close_all()
+        _report_boot_times(pytestconfig, pool)
+
+
+@pytest.fixture
+def stack(request, stacks):
+    """The stack for the profile this test declared, reset and quiescent.
+
+    `reset` runs *before* the test rather than after, so a failed test's state is
+    still there to inspect and the next test is still clean.
+
+    `no-forge` is the one profile whose image cannot be written down: it is
+    derived from whichever image the session actually built. The tag is filled in
+    here, and `getfixturevalue` rather than a fixture argument so a run with no
+    negative control in it never builds the second image — and so this fixture,
+    which now lives at the rootdir, does not have to see a lean-only fixture that
+    still lives under `tests/smoke/`.
+
+    The reset's watermark is stashed as `stack.mark`, because the instant it is
+    taken is the one that matters: after this test's reset and before anything it
+    does. A scenario taking its own would take it after `submit`, which is too
+    late for the row it wants to prove was never written.
+    """
+    marker = request.node.get_closest_marker("profile")
+    name = marker.args[0] if marker and marker.args else profiles.BASE.name
+    fresh = bool(marker.kwargs.get("fresh")) if marker else False
+
+    profile = profiles.by_name(name)
+    if profile.name == profiles.NO_FORGE.name:
+        profile = replace(profile, image=request.getfixturevalue("no_forge_image"))
+
+    running = stacks.get(profile, fresh=fresh)
+    script_marker = request.node.get_closest_marker("script")
+    turns = (
+        list(script_marker.args[0])
+        if script_marker and script_marker.args
+        else list(DEFAULT_SCRIPT)
+    )
+    try:
+        try:
+            # `pytrace=False`, because a reset that could not quiesce is a
+            # harness condition rather than a code defect, and a traceback through
+            # three fixture frames buries the one line that says which task ids
+            # were still in flight. `testbed` raises rather than calling
+            # `pytest.fail` itself — it is an installable package two repos
+            # outside this one consume — so the translation happens here.
+            running.mark = running.reset(turns)
+        except (TimeoutError, stack_support.StackError) as exc:
+            pytest.fail(str(exc), pytrace=False)
+        yield running
+    finally:
+        if fresh:
+            stacks.release(running)

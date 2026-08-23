@@ -7,9 +7,10 @@
  * figure appears. A dashboard that quietly invents an invoice is worse than one
  * that declines to guess, so the rule is worth testing directly.
  *
- * The CLI applies the same rule in `cli._render_cost`. The two are deliberately
- * separate implementations of one stated rule rather than a shared artifact —
- * they render into different media — but they must not disagree about *when* a
+ * Python applies the same rule in `usage_render.render_cost`, which the CLI and
+ * the `!usage` chat command both import. The two are deliberately separate
+ * implementations of one stated rule rather than a shared artifact — they
+ * render into different media — but they must not disagree about *when* a
  * dollar sign appears, or about what follows it.
  */
 
@@ -50,8 +51,9 @@ export function formatCost(byBasis: Record<string, number> | undefined): string 
  *
  * A 24h per-user figure is routinely sub-cent, and at two decimals it renders
  * `$0.00` — indistinguishable from a genuine zero, which is the one thing a
- * cost column must not be ambiguous about. `cli._fmt_money` states the same
- * rule; the two are separate implementations of one rule and must not disagree.
+ * cost column must not be ambiguous about. `usage_render.fmt_money` states the
+ * same rule; the two are separate implementations of one rule and must not
+ * disagree.
  */
 function formatMoney(value: number): string {
   if (value !== 0 && Math.abs(value) < 0.01) return value.toFixed(4);
@@ -65,6 +67,74 @@ export function formatContext(n: number | null | undefined): string {
 
 export function formatPercent(n: number | null | undefined): string {
   return n === null || n === undefined ? COST_PLACEHOLDER : `${(n * 100).toFixed(1)}%`;
+}
+
+/**
+ * A plan window's utilization, as a whole number where it is one.
+ *
+ * Distinct from `formatPercent` above, which takes a 0–1 rate and always shows a
+ * decimal: this takes the 0–100 figure the usage endpoint reports, where a
+ * tenth of a percent of a weekly quota is noise on a glanceable tile but `40.5`
+ * still has to render as itself rather than as `41`.
+ *
+ * Clamped by default rather than trusted. The server clamps a plan window too,
+ * but this figure comes off an external endpoint and is written into a tile that
+ * is also *tinted* by it — a `-5` would read as healthy green and a `140` would
+ * be a red tile claiming more than a full quota. Anything that is not a real
+ * number is the placeholder, never a zero: a fabricated 0% on an exhausted plan
+ * is the worst error here.
+ *
+ * **`clamp: false` for pay-as-you-go credits, and only those.** A plan window's
+ * ceiling is the plan, so above 100 is nonsense there; a spend percentage above
+ * 100 is real money already committed, and `subscription_usage._unclamped_percent`
+ * exists on the Python side to keep it — so clamping it back here would hide an
+ * overage on the one figure in this card that is not a token count.
+ *
+ * No Python counterpart is pinned to this. Two render the same number and both
+ * differ deliberately: `doctor._usage_window` uses `:g` (`40.55` where this
+ * gives `40.6`) and `commands.cmd_usage` uses `:.0f` for a compact chat line
+ * (`40%` where this gives `40.5%`). Each is sized for its own medium, and the
+ * spec says these helpers need no parity test for exactly that reason.
+ */
+export function formatUtilization(
+  percent: number | null | undefined,
+  options: { clamp?: boolean } = {},
+): string {
+  if (percent === null || percent === undefined || !Number.isFinite(percent)) {
+    return COST_PLACEHOLDER;
+  }
+  const clamp = options.clamp ?? true;
+  const bounded = clamp ? Math.min(100, Math.max(0, percent)) : Math.max(0, percent);
+  // `Number()` drops a trailing `.0`, so 40 renders as `40%` and 40.5 as
+  // `40.5%` — one rule rather than a branch on whether the value is an integer.
+  return `${Number(bounded.toFixed(1))}%`;
+}
+
+/**
+ * When a plan window resets, as the tile's sub-line.
+ *
+ * Two units at most, matching `doctor._duration` — `6d 2h`, `1h 04m`, `12m`,
+ * `45s`. Seconds of precision six hours out is noise, and the reader is
+ * deciding whether to wait rather than timing anything.
+ *
+ * `null` is a window with no scheduled reset (or one whose timestamp the parser
+ * could not read), and it says so rather than rendering an empty line: a tile
+ * showing a percentage and nothing under it reads as a missing value.
+ */
+export function formatResetIn(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) {
+    return 'no reset scheduled';
+  }
+  if (seconds <= 0) return 'resetting now';
+  const total = Math.floor(seconds);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (days) return `resets in ${days}d ${hours}h`;
+  if (hours) return `resets in ${hours}h ${String(minutes).padStart(2, '0')}m`;
+  if (minutes) return `resets in ${minutes}m`;
+  return `resets in ${secs}s`;
 }
 
 /**

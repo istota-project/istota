@@ -250,7 +250,7 @@ class _NextcloudHandler(BaseHTTPRequestHandler):
     with empty room tokens. That config would still be usable, but the wait is
     paid on every cache miss and the log reads like a hang.
 
-    Anything else is a 501 naming the path, as `tests/smoke/fake_gitlab.py`
+    Anything else is a 501 naming the path, as `testbed/services/gitlab.py`
     does — a newer release wanting more provisioning than this should say so
     rather than stall.
     """
@@ -265,7 +265,7 @@ class _NextcloudHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _route(self) -> None:
-        # The body is read before *any* response goes out. `fake_gitlab` was
+        # The body is read before *any* response goes out. The forge stub was
         # bitten by the other order: a reply sent before the body is consumed
         # leaves it in the connection buffer to be parsed as the next request
         # line, and the following request is answered out of the first one's
@@ -331,7 +331,7 @@ def serve_nextcloud_stub(host: str = "127.0.0.1") -> StubServer:
     """Start the stub on an ephemeral port.
 
     Loopback by default, so an ordinary `uv run pytest` of the unit tests below
-    opens nothing on the network — the opt-in `tests/support/model_endpoint.py`
+    opens nothing on the network — the opt-in `testbed/services/model_endpoint.py`
     settled on after binding `0.0.0.0` on every run.
 
     `capture_config` does pass `0.0.0.0`, and has to: the container reaches the

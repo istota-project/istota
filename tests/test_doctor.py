@@ -16,11 +16,13 @@ spawning nothing, and a raising check reported rather than propagated.
 import json
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from istota import doctor
+from istota import doctor, subscription_usage
 from istota.doctor import (
     CHECKS,
     DEEP_CHECKS,
@@ -580,6 +582,509 @@ class TestMountLiveness:
         config = self._nextcloud_backed(make_config)
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == OK
+
+
+# The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
+# suite, so the doctor sweep on a developer's macOS laptop cannot read the real
+# keychain or issue a live request. This file drives the real function on
+# purpose, so it captures it at import time — the same technique the money
+# fixture's docstring names.
+_REAL_GET_SNAPSHOT = subscription_usage.get_snapshot
+
+# The credential a leak test looks for. Long enough that doctor's own `redact()`
+# would catch it if it were a configured secret — it is not one, which is the
+# point: the check must keep it out of the report on its own.
+_TOKEN_SENTINEL = "sk-ant-oat01-" + "z" * 40
+
+
+class _UsageTransport:
+    """A stub `subscription_usage` transport that records every call.
+
+    Recording rather than raising: `run_checks` turns an exception from a check
+    into a FAIL result, so a transport that asserted by raising would be
+    swallowed and the test would pass whatever the check did.
+    """
+
+    def __init__(self, status=200, body=b"{}", response_headers=None):
+        self.status = status
+        self.body = body
+        self.response_headers = dict(response_headers or {})
+        self.calls = []
+
+    def __call__(self, url, headers, timeout):
+        self.calls.append((url, headers, timeout))
+        return self.status, self.body, dict(self.response_headers)
+
+
+# A reset far enough from a minute boundary that the rendered countdown cannot
+# tick over between building the payload and reading the result: 1h 04m 30s, so
+# the assertion holds for any delay under 30 seconds.
+_RESETS_IN = 3870
+
+
+def _usage_body(*percents, resets_in=_RESETS_IN):
+    """A `limits[]` payload with one window per percentage, resetting soon.
+
+    `resets_at` is built from the wall clock rather than a frozen constant
+    because the check passes its own `time.time()` all the way through — to the
+    fetch, to the countdown, and to the staleness age — and a fixed timestamp
+    would drift into the past as the year goes on.
+    """
+    kinds = ["session", "weekly_all"]
+    resets_at = datetime.fromtimestamp(time.time() + resets_in, tz=timezone.utc).isoformat()
+    return json.dumps(
+        {
+            "limits": [
+                {
+                    "kind": kinds[i] if i < len(kinds) else f"other_{i}",
+                    "group": "weekly",
+                    "percent": percent,
+                    "severity": "normal",
+                    "resets_at": resets_at,
+                    "scope": None,
+                    "is_active": True,
+                }
+                for i, percent in enumerate(percents)
+            ]
+        }
+    ).encode()
+
+
+def _usage_config(make_config, **fields):
+    from istota.config import BrainConfig, ClaudeCodeBrainConfig
+
+    return make_config(brain=BrainConfig(claude_code=ClaudeCodeBrainConfig(**fields)))
+
+
+# Never the running developer's real home. `get_snapshot(home=None)` means "use
+# `Path.home()`", not "there is no home", so a helper defaulting to None would
+# read `~/.claude/.credentials.json` on the machine running the suite.
+_NO_HOME = Path("/nonexistent/istota-test-home")
+
+
+def _drive_usage(
+    monkeypatch, *, transport=None, env=None, home=_NO_HOME, darwin_blob=None
+):
+    """Reinstate the real `get_snapshot` with only the host substituted.
+
+    The check calls `get_snapshot(config, now_ts=...)` and has nowhere to pass a
+    transport, an environment or a home — right for production, useless for a
+    test, because the resolver would then read the developer's own keychain and
+    the fetch would be a live request. Supplying those three behind a wrapper
+    runs the whole real policy (resolution, TTL, cache, fetch, stale fallback)
+    against a stub host.
+
+    `now_ts` is passed through rather than frozen: the check computes the
+    staleness age against the same clock it hands the module, and overriding one
+    half of that pair would make every reading look hours old.
+    """
+    from istota import subscription_usage as su
+
+    if darwin_blob is not None:
+        monkeypatch.setattr(su.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            su.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, darwin_blob, ""),
+        )
+    else:
+        monkeypatch.setattr(su.platform, "system", lambda: "Linux")
+
+    calls = []
+
+    def _wrapper(config, *, now_ts, **kwargs):
+        calls.append(now_ts)
+        return _REAL_GET_SNAPSHOT(
+            config,
+            now_ts=now_ts,
+            transport=transport,
+            env={} if env is None else env,
+            home=home,
+        )
+
+    monkeypatch.setattr(su, "get_snapshot", _wrapper)
+    return calls
+
+
+def _credential_file(tmp_path, token):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": token}})
+    )
+    return home
+
+
+class TestSubscriptionUsage:
+    """`runtime.subscription_usage` — the plan's own budget.
+
+    On a subscription deployment the dashboard's cost column is deliberately
+    blank, so the rate-limit windows are the only budget there is. Every test
+    here asserts the check did not SKIP before asserting anything else: the
+    module docstring's warning applies with full force to a check whose natural
+    resting state on an unconfigured host is exactly SKIP.
+    """
+
+    def _result(self, config, **kwargs):
+        results = run_checks(config, only=("runtime.subscription_usage",), **kwargs)
+        assert len(results) == 1
+        return results[0]
+
+    def test_it_is_registered_as_a_deployment_check_and_is_not_deep(self):
+        """It reads a network endpoint, not the image, and spawns no namespace."""
+        assert doctor.CHECK_SCOPES["runtime.subscription_usage"] == DEPLOYMENT
+        assert "runtime.subscription_usage" not in DEEP_CHECKS
+
+    def test_doctor_does_not_import_the_module_at_module_scope(self):
+        """The import is lazy, so `doctor` stays cheap for the config-load path.
+
+        `_validate_forge_clis` imports `doctor` inside every `load_config`, which
+        runs in every CLI invocation and every host-side skill CLI the proxy
+        spawns per call. Same technique as `TestConfigLoadPathStaysCheap`.
+        """
+        code = "import json, sys\nimport istota.doctor\nprint(json.dumps(sorted(sys.modules)))"
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+        assert "istota.subscription_usage" not in set(json.loads(out.stdout))
+
+    def test_disabled_by_config_skips(self, make_config, monkeypatch):
+        transport = _UsageTransport(body=_usage_body(40))
+        _drive_usage(monkeypatch, transport=transport)
+        r = self._result(_usage_config(make_config, subscription_usage=False))
+        assert r.status == SKIP
+        assert "disabled" in r.detail
+        assert transport.calls == []
+
+    def test_probe_false_skips_without_a_network_call(self, make_config, monkeypatch):
+        """`TestRegistry` already proves no check spawns a process under
+        probe=False. This one must clear the network bar too, and a check that
+        merely skipped *rendering* while still fetching would pass that test."""
+        transport = _UsageTransport(body=_usage_body(40))
+        snapshots = _drive_usage(
+            monkeypatch,
+            transport=transport,
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config), probe=False)
+        assert r.status == SKIP
+        assert "probe disabled" in r.detail
+        assert transport.calls == []
+        assert snapshots == [], "probe=False must not even ask for a snapshot"
+
+    def test_no_credential_skips(self, make_config, tmp_path, monkeypatch):
+        transport = _UsageTransport(body=_usage_body(40))
+        _drive_usage(monkeypatch, transport=transport, env={}, home=tmp_path / "nowhere")
+        r = self._result(_usage_config(make_config))
+        assert r.status == SKIP
+        assert "no Claude Code OAuth credential found" in r.detail
+        assert transport.calls == [], "nothing to authenticate with, so nothing to send"
+
+    def test_a_healthy_plan_is_ok_and_names_every_window(self, make_config, monkeypatch):
+        """Worst first, and *all* of them.
+
+        "5-hour at 12%, weekly at 94%" and "5-hour at 94%, weekly at 12%" call
+        for different operator responses, and this one line is the whole of what
+        a terminal reader sees.
+        """
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(12, 40)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == OK
+        assert "5-hour at 12%" in r.detail
+        assert "Weekly (all models) at 40%" in r.detail
+        assert r.detail.index("Weekly (all models)") < r.detail.index("5-hour")
+        assert "resets in 1h 04m" in r.detail
+
+    @pytest.mark.parametrize(
+        "percent,expect_warn",
+        [(0, False), (79.9, False), (80, True), (94.9, True), (95, True), (100, True)],
+    )
+    def test_the_thresholds(self, make_config, monkeypatch, percent, expect_warn):
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(percent)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == (WARN if expect_warn else OK)
+        if expect_warn:
+            assert r.remedy, "a WARN an operator cannot act on is a log line"
+
+    @pytest.mark.parametrize("percent,expect_warn", [(45, False), (55, True)])
+    def test_the_configured_thresholds_are_the_ones_that_are_read(
+        self, make_config, monkeypatch, percent, expect_warn
+    ):
+        """Every other threshold case sets the value the dataclass already has.
+
+        A check that ignored `[brain.claude_code]` entirely and used its own
+        hardcoded 80/95 would pass all of them. This is the case that fails on
+        such a check: 55% is a WARN only if the configured 50 was read, and 45%
+        is an OK only if the hardcoded 80 was not.
+        """
+        config = _usage_config(
+            make_config,
+            subscription_usage_warn_percent=50.0,
+            subscription_usage_high_percent=60.0,
+        )
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(percent)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == (WARN if expect_warn else OK)
+
+    def test_an_inverted_threshold_pair_still_warns_in_the_gap(
+        self, make_config, monkeypatch
+    ):
+        """`warn` above `high` would otherwise make the band unreachable.
+
+        The loader corrects the pair, so this is the second line: a config that
+        reached the dataclass some other way must not silently stop warning.
+
+        75% is chosen to sit below the *default* warn of 80 as well, so a check
+        that ignored the configured pair entirely would answer OK here.
+        """
+        config = _usage_config(
+            make_config,
+            subscription_usage_warn_percent=90.0,
+            subscription_usage_high_percent=70.0,
+        )
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(75)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        assert self._result(config).status == WARN
+
+    @pytest.mark.parametrize("percent", [0, 79.9, 80, 94.9, 95, 100, 150])
+    def test_no_utilization_ever_fails(self, make_config, monkeypatch, percent):
+        """A plan at 97% is a fact about the plan, not a defect in the host.
+
+        `doctor.exit_code` returns 1 on any FAIL and `scheduler._alert_doctor_failures`
+        messages every admin on the transition into failure. Neither is a
+        reasonable response to a busy week.
+        """
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=_usage_body(percent)),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status != FAIL
+        assert r.status != SKIP, "a SKIP here would pass this test on a broken check"
+
+    @pytest.mark.parametrize("source", ["env", "file", "keychain"])
+    def test_a_rejected_credential_skips_naming_which_one(
+        self, make_config, tmp_path, monkeypatch, source
+    ):
+        """Three credential sources resolve, and only the source name is fit to print.
+
+        Which one the endpoint refused is the whole diagnostic: a setup token in
+        the environment and an interactive login in the keychain fail for
+        completely different reasons and have different repairs.
+
+        SKIP rather than WARN, and no remedy. The endpoint does not serve the
+        long-lived setup-token credential both server shapes deploy, so on those
+        hosts this row was a permanent warning naming no action anyone could
+        take. The reason is still carried; only the severity changed.
+        """
+        transport = _UsageTransport(status=403, body=b'{"error":"forbidden"}')
+        _drive_usage(monkeypatch, transport=transport, **self._sources(tmp_path, source))
+        r = self._result(_usage_config(make_config))
+        assert r.status == SKIP
+        assert "403" in r.detail
+        assert source in r.detail
+        assert not r.remedy, "a SKIP names no repair"
+        assert transport.calls, "a resolvable credential should have been tried"
+
+    @pytest.mark.parametrize("source", ["env", "file", "keychain"])
+    @pytest.mark.parametrize("status", [200, 403])
+    def test_the_token_value_is_never_in_the_report(
+        self, make_config, tmp_path, monkeypatch, source, status
+    ):
+        """Doctor's `redact()` is a backstop, not the plan.
+
+        It scans against `config_secrets`, and this credential is not in the
+        config at all — it comes from the environment, a file in `~/.claude`, or
+        the keychain. Nothing downstream would catch a leak here.
+        """
+        transport = _UsageTransport(status=status, body=_usage_body(40))
+        _drive_usage(monkeypatch, transport=transport, **self._sources(tmp_path, source))
+        r = self._result(_usage_config(make_config))
+        # Not `status != SKIP` any more: a refused credential is a legitimate
+        # SKIP now. The guard that check-level tests must not pass on a check
+        # that never ran still holds, so it is spelled against evidence the
+        # check reached the endpoint and reported what came back.
+        assert transport.calls, "the check never issued a request"
+        assert ("403" in r.detail) if status == 403 else ("40" in r.detail)
+        assert _TOKEN_SENTINEL not in r.detail + r.remedy
+        assert "sk-ant" not in r.detail + r.remedy
+        sent = transport.calls[0][1]["Authorization"]
+        assert _TOKEN_SENTINEL in sent, "the token belongs in the header and nowhere else"
+
+    @staticmethod
+    def _sources(tmp_path, source):
+        """Resolver inputs that make exactly `source` the winning branch."""
+        blob = json.dumps({"claudeAiOauth": {"accessToken": _TOKEN_SENTINEL}})
+        if source == "env":
+            return {"env": {"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL}, "home": tmp_path / "no"}
+        if source == "file":
+            return {"env": {}, "home": _credential_file(tmp_path, _TOKEN_SENTINEL)}
+        return {"env": {"USER": "someone"}, "home": tmp_path / "no", "darwin_blob": blob}
+
+    def test_an_unreachable_endpoint_with_no_cache_skips(self, make_config, monkeypatch):
+        transport = _UsageTransport(status=500, body=b"")
+        _drive_usage(
+            monkeypatch,
+            transport=transport,
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == SKIP
+        assert "500" in r.detail
+        assert not r.remedy
+
+    def test_an_endpoint_with_no_recognizable_windows_skips(self, make_config, monkeypatch):
+        """A shipped shape change reads as "nothing to check", not as 0%.
+
+        It reported WARN with a "the parser needs updating" remedy until the
+        whole no-data family became SKIP. The distinction that remedy drew — the
+        request succeeded, so do not go hunting for an egress fault — is worth
+        keeping, and it survives in the detail, which still says the endpoint
+        named no window this reader understands.
+        """
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(body=b'{"limits": [], "quince": null}'),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == SKIP
+        assert "no recognizable rate-limit windows" in r.detail
+        assert not r.remedy
+
+    def test_a_windowless_success_skips_rather_than_raising(
+        self, make_config, monkeypatch
+    ):
+        """The guard behind the never-FAIL promise, driven directly.
+
+        `get_snapshot` cannot return this today — an error-free snapshot always
+        carries windows — so the only way to exercise the guard is to hand the
+        check one. It is worth exercising because the failure mode is an
+        IndexError, and `run_checks` converts a raising check into the one status
+        this check must never produce.
+        """
+        from istota import subscription_usage as su
+
+        monkeypatch.setattr(
+            su,
+            "get_snapshot",
+            lambda config, **kwargs: su.UsageSnapshot(fetched_at=time.time()),
+        )
+        r = self._result(_usage_config(make_config))
+        assert r.status == SKIP
+        assert r.detail, "a SKIP still has to say why"
+
+    def _seed_cache(self, config, age_seconds, percent=40):
+        """Write a good cache entry `age_seconds` old, as a fetch would have."""
+        from istota import subscription_usage as su
+
+        now = time.time()
+        windows, spend = su.parse_usage(json.loads(_usage_body(percent)), now_ts=now)
+        assert windows, "the fixture must really parse, or the test proves nothing"
+        su.write_cache(
+            su.cache_path(config.db_path.parent),
+            su.UsageSnapshot(fetched_at=now - age_seconds, windows=windows, spend=spend),
+        )
+
+    def test_a_stale_reading_within_the_window_still_reports_its_numbers(
+        self, make_config, monkeypatch
+    ):
+        """An old-but-real reading is worth more than nothing — but say it is old.
+
+        The status stays OK below `stale_after`; that threshold is the whole
+        point of the setting. What must not happen is an hour-long outage reading
+        as a plain OK, because the countdown beside the percentage is recomputed
+        against the current clock while the percentage is not, and that pair is
+        the most misleading line this check could print.
+        """
+        # TTL pinned below the seeded age for the same reason as the test below:
+        # at the shipping 1800s default a 900s reading is fresh, no fetch fires,
+        # and the stale branch this test exists for is never reached.
+        config = _usage_config(
+            make_config,
+            subscription_usage_stale_after_seconds=3600,
+            subscription_usage_cache_ttl_seconds=300,
+        )
+        self._seed_cache(config, age_seconds=900)
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(status=500, body=b""),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == OK
+        assert "5-hour at 40%" in r.detail
+        assert "last successful reading is 15m old" in r.detail
+        assert "500" in r.detail
+
+    def test_the_configured_stale_window_is_the_one_that_is_read(
+        self, make_config, monkeypatch
+    ):
+        """The same 900s reading, against a 60s window instead of the default."""
+        # The cache TTL is pinned below the seeded age: at the shipping default
+        # of 1800 a 900s reading is still *fresh*, so nothing would fetch and
+        # there would be no stale branch under test at all.
+        config = _usage_config(
+            make_config,
+            subscription_usage_stale_after_seconds=60,
+            subscription_usage_cache_ttl_seconds=300,
+        )
+        self._seed_cache(config, age_seconds=900)
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(status=500, body=b""),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == SKIP
+        assert "5-hour at 40%" not in r.detail, "past the window it is not a reading"
+
+    def test_a_reading_older_than_stale_after_skips_with_its_age(
+        self, make_config, monkeypatch
+    ):
+        config = _usage_config(make_config, subscription_usage_stale_after_seconds=3600)
+        self._seed_cache(config, age_seconds=7300)
+        _drive_usage(
+            monkeypatch,
+            transport=_UsageTransport(status=500, body=b""),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == SKIP
+        assert "last successful reading is 2h 01m old" in r.detail
+        assert "500" in r.detail
+        assert not r.remedy
+
+    def test_a_fresh_cache_is_served_without_a_request(self, make_config, monkeypatch):
+        """The TTL is deployment-wide: doctor, the dashboard and `!usage` share it."""
+        config = _usage_config(make_config, subscription_usage_cache_ttl_seconds=300)
+        self._seed_cache(config, age_seconds=40, percent=90)
+        transport = _UsageTransport(body=_usage_body(1))
+        _drive_usage(
+            monkeypatch,
+            transport=transport,
+            env={"CLAUDE_CODE_OAUTH_TOKEN": _TOKEN_SENTINEL},
+        )
+        r = self._result(config)
+        assert r.status == WARN
+        assert "5-hour at 90%" in r.detail
+        assert transport.calls == []
 
 
 class TestSkillProxy:

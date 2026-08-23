@@ -79,6 +79,18 @@ export interface ConfirmationAnsweredData {
   system_msg_id: number | null;
 }
 
+// `!steer`'s payload (ISSUE-300), durable for the same reason and needing the
+// same stamp: `cmd_steer` records the note as a `task_id IS NULL` user row, so
+// the room stream echoes it back with `msg_id` as the only available dedup key.
+// `body` is the note as stored — the client drew the whole `!steer <note>` line
+// it was given, and adopting the stored body is what keeps the live transcript
+// and a reloaded one showing the same bubble.
+export interface SteerRecordedData {
+  kind: 'steer_recorded';
+  user_msg_id: number | null;
+  body: string;
+}
+
 /**
  * The POST body a Retry replays.
  *

@@ -274,7 +274,7 @@ fi
 # no test carries is harmless. tests/test_linux_runner.py fails if this set
 # ever falls behind addopts — which is the direction that would silently start
 # running a marker meant to be off by default.
-default_markers='linux or (not integration and not live and not image and not smoke and not ml)'
+default_markers='linux or (not integration and not live and not image and not smoke and not full and not ml)'
 pytest_args=(-m "$default_markers" "$@")
 
 # pytest writes its cache beside the rootdir, and the rootdir is the read-only
@@ -290,5 +290,5 @@ pytest_args=(-o cache_dir=/tmp/pytest_cache "${pytest_args[@]}")
 # Docker that cannot delegate cgroups is a limitation of the machine, and the
 # tests skip themselves there rather than taking the whole tier down with them.
 run_in_container sh -c '. /src/scripts/dev/linux-tier-cgroup.sh
-ruff check --output-format concise src tests && exec pytest "$@"' \
+ruff check --output-format concise src tests testbed && exec pytest "$@"' \
     -- "${pytest_args[@]}"

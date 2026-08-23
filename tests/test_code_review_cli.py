@@ -255,6 +255,12 @@ def developer_config(tmp_path, monkeypatch):
         )
         cfg.developer = DeveloperConfig(
             enabled=True,
+            # Read back from the environment on purpose: the `worktree` fixture
+            # (line 87) sets `DEVELOPER_REPOS_DIR` to the tmp root it built, and
+            # `_make` has no other way to reach it. Not an ambient read despite
+            # appearances — `test_repos_root_missing_from_the_environment_is_skipped`
+            # clears it deliberately, and the ISSUE-301 scrub runs before the
+            # `worktree` fixture, so what lands here is always the test's own.
             repos_dir=str(os.environ.get("DEVELOPER_REPOS_DIR", "")),
             review=ReviewConfig(**review_overrides),
         )

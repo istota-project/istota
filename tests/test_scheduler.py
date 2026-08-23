@@ -3956,6 +3956,10 @@ class TestExecuteCommandTask:
         assert str(config.config_path) in result
 
     def test_config_path_absent_when_unset(self, db_path, tmp_path):
+        # Same reading as the CalDAV pair above: the assertion is about what
+        # the scheduler adds. An ambient ISTOTA_CONFIG_PATH would reach the
+        # child through `build_stripped_env`, which is why this failed on the
+        # deployment host until conftest started scrubbing it (ISSUE-301).
         config = self._make_config(db_path, tmp_path)
         # config.config_path defaults to None
         task = self._make_task(command="echo path=[$ISTOTA_CONFIG_PATH]")
@@ -4159,7 +4163,17 @@ class TestExecuteCommandTask:
     def test_caldav_env_omitted_when_no_calendars_discovered(self, db_path, tmp_path):
         """Gap 3 regression: ``gate_has_discovered_calendars`` on the
         calendar manifest must drop CALDAV_* when the user owns no
-        calendars. NC_* is ungated and remains."""
+        calendars. NC_* is ungated and remains.
+
+        What this proves is what the scheduler *adds*, which is narrower than
+        "the child cannot see a CALDAV_URL" (ISSUE-301). ``_execute_command_task``
+        starts from ``build_stripped_env()``, i.e. the daemon's own environment
+        minus the credential-shaped names, so a daemon host that exports
+        ``CALDAV_URL`` hands it to the child by inheritance and the gate drops
+        nothing. ``CALDAV_PASSWORD`` is the one that matters and is stripped by
+        pattern either way. The suite reads the gate rather than the
+        inheritance only because ``conftest.py`` now scrubs the ambient value;
+        before that this test failed on any host with a real config."""
         config = Config(
             db_path=db_path,
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),

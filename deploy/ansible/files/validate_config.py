@@ -52,12 +52,15 @@ def main() -> int:
         return 1
 
     # Allowlist for the [brain] table. Update when BrainConfig grows
-    # legitimate fields (see .claude/rules/brain.md). "native", "tmux", and
-    # "source_type_overrides" are legitimate sub-tables ([brain.native],
-    # [brain.tmux], [brain.source_type_overrides]); without them the
-    # native/tmux brain config would trip the leaked-keys guard.
+    # legitimate fields (see .claude/rules/brain.md). "native", "tmux",
+    # "claude_code" and "source_type_overrides" are legitimate sub-tables
+    # ([brain.native], [brain.tmux], [brain.claude_code],
+    # [brain.source_type_overrides]); without them the corresponding brain
+    # config would trip the leaked-keys guard. The template renders no
+    # [brain.claude_code] today — every field of it is defaulted — but an
+    # operator or a later template change that adds one must not fail the play.
     brain_allowlist = {
-        "kind", "native", "tmux", "source_type_overrides",
+        "kind", "native", "tmux", "claude_code", "source_type_overrides",
         "fallback", "fallback_on_transient", "fallback_cooldown_seconds",
     }
     brain = raw.get("brain", {})
