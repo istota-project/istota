@@ -1496,8 +1496,10 @@ class TestRuntimeTmpfsMounts:
 
 class TestTmpfsMountList:
     """`_COMPOSE_TMPFS_MOUNTS` is a hand-maintained mirror of the `tmpfs:` keys
-    in the devbox compose files. A mount added there and not here is a path
-    `docker cp` will silently swallow again, so pin the two together.
+    in the devbox compose file. A mount added there and not here is a path
+    `docker cp` will silently swallow again, so pin the two together. There is
+    one such file now — the Ansible template — since `docker/docker-compose.yml`
+    ships no devbox; the compose half of this pin went with that service.
 
     The pin is against the *compose* half alone. ISSUE-312 is what separated
     the two: the runtime's own tmpfs appear in no compose file, so a complete
@@ -1529,18 +1531,6 @@ class TestTmpfsMountList:
     def test_ansible_template_declares_nothing_unlisted(self):
         path = self.REPO_ROOT / "deploy/ansible/templates/docker-compose.devbox.yml.j2"
         declared = self._tmpfs_destinations(path.read_text().splitlines())
-        assert declared == set(devbox._COMPOSE_TMPFS_MOUNTS)
-
-    def test_compose_devbox_service_declares_nothing_unlisted(self):
-        path = self.REPO_ROOT / "docker/docker-compose.yml"
-        lines = path.read_text().splitlines()
-        start = next(i for i, ln in enumerate(lines) if ln.rstrip() == "  devbox:")
-        end = next(
-            (i for i in range(start + 1, len(lines))
-             if lines[i][:3].strip() and not lines[i].startswith("   ")),
-            len(lines),
-        )
-        declared = self._tmpfs_destinations(lines[start:end])
         assert declared == set(devbox._COMPOSE_TMPFS_MOUNTS)
 
     def test_the_compose_pin_is_a_subset_of_what_is_refused(self):

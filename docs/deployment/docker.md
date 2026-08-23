@@ -18,7 +18,6 @@
 | `nginx` | Reverse proxy (single entry port) |
 | `browser` (profile) | Chrome + VNC container for web browsing |
 | `webhooks` (profile) | GPS webhook receiver |
-| `devbox` (profile) | Per-user development container for the developer skill |
 
 ## Configuration
 
@@ -86,11 +85,33 @@ Restart `istota` afterwards. This only changes behaviour if you pointed a role a
 ```bash
 docker compose --profile browser up -d              # Web browsing
 docker compose --profile location up -d             # GPS tracking
-docker compose --profile devbox up -d               # Developer skill container
 docker compose --profile browser --profile location up -d  # Combine as needed
 ```
 
 The browser container requires x86-64 (Chrome has no ARM packages).
+
+### The devbox is Ansible-only
+
+This stack ships no devbox service, and the `devbox` skill cannot be used on it. That is a decision rather than a gap. Three separate reasons, any one of which is enough on its own:
+
+- **The skill cannot be switched on.** `devbox.enabled` defaults to false and `render-config.sh` writes no `[devbox]` section, so the generated config always has it off.
+- **The daemon has no way in.** The skill CLI shells in with `docker exec`, and it runs inside the `istota` container, which installs no docker client and mounts no docker socket. Mounting the host socket there is not the fix: the filesystem sandbox does not run in this shape (see below), so it would hand every task control of the host's Docker.
+- **No credential proxy.** Even given a way in, `gh`, `glab` and `git push` would fail inside the container, because the credential daemon is a host process rather than a service in the stack. See ISSUE-282.
+
+Earlier releases did ship a `devbox` profile here. Nothing could reach it, and its only working consequence was that every change to the Ansible devbox had to be mirrored into a service nobody could use — which is how it drifted into having no credential socket in the first place. Devbox work goes through the Ansible deployment, which renders one container per user from the same `docker/devbox/Dockerfile`.
+
+**Upgrading from a release that had the profile:** removing the service does not remove anything you are running. An existing `devbox-$USER_NAME` container keeps running until you stop it, and its `devbox_home` volume is retained; compose stops managing both. Check the volume for anything you left in `/home/dev` before removing it.
+
+```bash
+docker rm -f devbox-$USER_NAME
+docker volume rm docker_devbox_home     # after checking what is in it
+```
+
+If you want the workbench itself, build and run it by hand — the image is not istota-specific:
+
+```bash
+docker build -t istota-devbox:latest docker/devbox
+```
 
 ## Volumes
 
@@ -103,7 +124,6 @@ The browser container requires x86-64 (Chrome has no ARM packages).
 | `postgres_data` | PostgreSQL data |
 | `redis_data` | Redis data |
 | `browser_profile` | Chrome profile for the browser container (logged-in sessions) |
-| `devbox_home` | Home directory for the devbox container |
 
 Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Talk attachment fallback.
 
@@ -113,8 +133,7 @@ Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Tal
 - **The filesystem sandbox does not run here**, though the config says it is on. Every task runs unconfined, with the framework database, every user's module databases, `config.toml` and `.secret_key` in view. See below
 - **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment, and with the sandbox off it is the only thing doing so
 - **All extras installed**: every optional dependency included in the image
-- **No devbox credential proxy**: this shape runs no host-side credential daemon, so `gh`, `glab` and `git push` do not work inside the devbox container. That is deliberate — the proxy is a host process rather than a service in the stack. The Ansible deployment runs one per user and has the capability; here, do forge work outside the box. See ISSUE-282.
-- **No devbox network filtering**: the DOCKER-USER rules that drop RFC1918 and cloud metadata for the devbox are added by the Ansible role and are not present here
+- **No devbox**: this stack ships no devbox service and the skill cannot be enabled on it. [Details above](#the-devbox-is-ansible-only)
 
 ### Running tasks sandboxed
 

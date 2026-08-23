@@ -11,7 +11,7 @@
 #                     wipes Postgres, Nextcloud, istota data, etc.).
 #   -c, --no-cache    Build with no layer cache (full clean rebuild).
 #   -p, --profile P   Enable a compose profile (repeatable: browser,
-#                     location, devbox). Passed to both down and up.
+#                     location). Passed to both down and up.
 #   -f, --follow      Follow logs after starting (foreground) instead of
 #                     detaching.
 #       --no-pull     Skip pulling newer base images before building.

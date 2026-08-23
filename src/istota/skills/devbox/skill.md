@@ -41,7 +41,9 @@ istota-skill devbox reset --yes    # wipe /home/dev, restart the container (dest
 
 ## What works inside the devbox
 
-Everything in this section that needs a forge token depends on a host-side credential proxy, and only the Ansible deployment runs one. Under plain `docker compose` the devbox has no credential socket by design. `gh` and `glab` exit 4 there; `git push` fails through its credential helper instead, which exits 1 and names the shape in its message. Either way the answer is the same: don't retry, don't hunt for a workaround inside the container, say what happened and do the forge work outside it. Everything else in the box is unaffected.
+The devbox exists on the Ansible deployment only. The `docker compose` stack ships no devbox at all, so if you are on that shape this skill is not selectable and nothing here applies — the operator's route is the Ansible deployment, and that is what to say if a task needs one.
+
+Everything in this section that needs a forge token depends on a host-side credential proxy, which the Ansible deployment runs per user. Where one is missing, `gh` and `glab` exit 4 and `git push` fails through its credential helper instead, exiting 1 and naming the shape in its message. Either way the answer is the same: don't retry, don't hunt for a workaround inside the container, say what happened and do the forge work outside it. Everything else in the box is unaffected.
 
 - **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to a host-side daemon over `/run/istota-cred/sock`. The daemon answers with `username=x-access-token` + `password=<token>` for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
 - **`gh` and `glab`** — the real CLIs, in full. They run behind a wrapper that fetches the token from the proxy, checks the argv against a policy, and execs the real binary; everything after that is the real CLI, so any subcommand and any flag works. Use them exactly as the developer skill documents them.

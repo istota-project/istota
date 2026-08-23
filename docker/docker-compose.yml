@@ -571,58 +571,21 @@ services:
     command: []
     restart: unless-stopped
 
-  # Devbox — persistent dev container for the docker-compose user
-  # (single-user standalone deploy). Production / multi-user deploys go
-  # through Ansible, which renders one service per user from the same
-  # Dockerfile + template — keep this entry in sync with
-  # deploy/ansible/templates/docker-compose.devbox.yml.j2.
-  #
-  # That sentence used to be the whole mechanism, and the two drifted:
-  # this shape has no credential socket, so every forge command in the
-  # box failed at a path that does not exist while the skill body
-  # promised the capability (ISSUE-282). tests/test_devbox_compose_parity.py
-  # now holds the pair together, with an allowlist naming each difference
-  # that is deliberate — including that one, which is.
-  #
-  # Skill CLI shells in via the host docker socket. Not brought up by
-  # default — enable the ``devbox`` profile:
-  #   docker compose --profile devbox up -d devbox
-  # and set ISTOTA_DEVBOX_ENABLED=true in the istota service env.
-  devbox:
-    profiles:
-      - devbox
-    build:
-      # The context is docker/devbox, not the repo root: every COPY in that
-      # Dockerfile is relative to it (`lib/`, `scripts/`, `etc/`), and none of
-      # those paths exists at the root, so the root-context form could not
-      # build at all. Same shape as the browser service above, and it matches
-      # what the Ansible template does.
-      context: devbox/
-      dockerfile: Dockerfile
-    image: istota-devbox:latest
-    container_name: devbox-${USER_NAME}
-    hostname: devbox-${USER_NAME}
-    restart: unless-stopped
-    labels:
-      com.istota.user_id: "${USER_NAME}"
-    cap_add:
-      - NET_RAW          # ping, traceroute, mtr, tcpdump
-    volumes:
-      - devbox_home:/home/dev
-    tmpfs:
-      - /workspace:size=1g,mode=1777
-    networks:
-      - devbox-net
-    mem_limit: 2g
-    cpus: 2
-    pids_limit: 512
-    # Real network access — no shared bridge with the istota stack. The
-    # devbox cannot reach postgres/nextcloud/redis on the default network.
-    # Cloud-metadata / RFC1918 filtering is not in this compose file (the
-    # Docker-compose path doesn't have a place to manage host iptables);
-    # for production isolation use the Ansible role, which adds DOCKER-USER
-    # rules and the bridge-nf sysctl.
-    command: ["sleep", "infinity"]
+  # No devbox service here, deliberately. The bot could never reach one in
+  # this shape: the skill CLI shells in with `docker exec` and runs inside
+  # the istota container, which installs no docker client and mounts no
+  # docker socket, and render-config.sh writes no [devbox] section so
+  # devbox.enabled is always false. Mounting the host socket into istota is
+  # not the repair — the filesystem sandbox does not run here, so it would
+  # hand every task control of the host's Docker. What shipped instead was a
+  # container nothing could use, whose only working consequence was that
+  # every Ansible-side devbox change had to be mirrored into it. Devbox work
+  # goes through the Ansible deployment, which renders one service per user
+  # from docker/devbox/Dockerfile via
+  # deploy/ansible/templates/docker-compose.devbox.yml.j2. See
+  # docs/deployment/docker.md, and TestTheComposeShapeShipsNoDevbox in
+  # tests/test_devbox_deployment_shape.py, which fails if one comes back
+  # without that page following.
 
 volumes:
   postgres_data:
@@ -632,13 +595,3 @@ volumes:
   shared_files:
   istota_data:
   browser_profile:
-  devbox_home:
-
-networks:
-  # Dedicated network for the devbox. ``internal: false`` keeps public
-  # internet access; the absence from other services keeps internal
-  # services unreachable. Host LAN / cloud metadata filtering is layered
-  # on at the iptables level by Ansible (out of scope for compose).
-  devbox-net:
-    driver: bridge
-    internal: false

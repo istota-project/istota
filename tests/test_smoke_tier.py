@@ -355,17 +355,15 @@ class TestTheSeccompGrantStaysInTheTestFile:
             if setting not in line or line.strip().startswith("#"):
                 continue
             # The key and the list under it, because a YAML sequence puts the
-            # value on the *following* lines — `cap_add:` alone says nothing
-            # about what is being added, and a line-at-a-time check reads the
-            # devbox's deliberate NET_RAW as an unexplained grant.
+            # value on the *following* lines and `cap_add:` alone says nothing
+            # about what is being added.
             block = " ".join(part.strip() for part in lines[number - 1 : number + 3])
             offenders.append(f"{number}: {block}")
 
-        # `cap_add: NET_RAW` on the devbox is pre-existing and deliberate — it
-        # is what lets that container run ping and traceroute, and it is not a
-        # sandbox grant. Excluded by name rather than by dropping the setting
-        # from the sweep, so a *second* cap_add anywhere still fails this.
-        offenders = [line for line in offenders if "NET_RAW" not in line]
+        # This used to exempt the devbox's `cap_add: NET_RAW`, which was there
+        # for ping and traceroute rather than as a sandbox grant. That service
+        # is gone, so the sweep is unqualified again: no capability, seccomp or
+        # systempaths grant belongs in this file at all.
 
         assert not offenders, (
             f"docker/docker-compose.yml grants {setting!r}: {offenders}. The "
