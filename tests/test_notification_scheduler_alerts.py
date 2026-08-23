@@ -178,9 +178,13 @@ class TestTheUndeliverableResultNotice:
         assert row["state"] == "open"
         assert row["last_delivered_at"] is None
         # The body is the flattened record; the full answer stays in
-        # `tasks.result` and in the send, which is unchanged.
-        for char in "[]()*":
+        # `tasks.result` and in the send, which is unchanged. "Flattened" here
+        # means the link, code, HTML and table characters are gone — emphasis
+        # survives, because deleting it in a body rewrites paths and identifiers
+        # for no security gain.
+        for char in "[]()`<>|":
             assert char not in row["body"]
+        assert "evil.example" in row["body"]
 
     def test_it_never_raises_into_the_task(self, config, caplog):
         with db.get_db(config.db_path) as conn:

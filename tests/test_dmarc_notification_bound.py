@@ -144,7 +144,7 @@ class TestFiftyForgedSendersProduceOneRow:
         # and the stored value is stable across occurrences rather than churning
         # on every forged message.
         assert senders == FORGED[: task_alert.MAX_PARAM_ENTRIES]
-        assert params["senders_omitted"] == 50 - task_alert.MAX_PARAM_ENTRIES
+        assert params["senders_dropped"] == 50 - task_alert.MAX_PARAM_ENTRIES
 
     def test_a_repeated_sender_does_not_grow_the_list(self, config):
         with patch("istota.notifications.send_notification", return_value=True):
@@ -154,7 +154,27 @@ class TestFiftyForgedSendersProduceOneRow:
 
         params = _params(config, _rows(config)[0]["id"])
         assert params["senders"] == FORGED[:1]
-        assert "senders_omitted" not in params
+        assert "senders_dropped" not in params
+
+    def test_the_drop_counter_counts_events_not_distinct_senders(self, config):
+        """Named `_dropped` rather than `_omitted` because that is what it is.
+
+        Deduplicating the count would mean carrying the dropped values as well,
+        which is exactly the unbounded list the cap refuses. So the counter is
+        honest about being a tally of drop events: three bursts of the same
+        fifty senders is ninety drops, not thirty.
+        """
+        with patch("istota.notifications.send_notification", return_value=True):
+            for _ in range(3):
+                inbound_module._reset_dmarc_alert_dedup()
+                inbound_module._deliver_dmarc_alerts(config, _alerts(FORGED))
+
+        params = _params(config, _rows(config)[0]["id"])
+        over = 50 - task_alert.MAX_PARAM_ENTRIES
+        assert params["senders_dropped"] == over * 3
+        # The kept sample is unchanged across the bursts, which is the whole
+        # reason the *first* entries are the ones retained.
+        assert params["senders"] == FORGED[: task_alert.MAX_PARAM_ENTRIES]
 
     def test_a_different_verdict_is_a_different_row(self, config):
         with patch("istota.notifications.send_notification", return_value=True):

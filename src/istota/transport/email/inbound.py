@@ -925,10 +925,16 @@ def _deliver_dmarc_alerts(config: Config, alerts: "dict[tuple[str, str, str], _D
     # The durable row first, and whether or not the send below succeeds. That is
     # the point of the row: `send_notification` returns False when the user has
     # no alert destination configured, and this used to log a warning and leave
-    # nothing behind at all. The window stays the delivery gate — an occurrence
-    # it already suppressed never reaches this function, so it neither sends nor
-    # bumps, which keeps the row's `occurrences` a count of alerts raised rather
-    # than of messages seen.
+    # nothing behind at all.
+    #
+    # The window stays the delivery gate on both paths, but it sits on opposite
+    # sides of the row write and the two therefore count differently. Here it is
+    # *upstream*: `_check_dmarc_canary` drops a suppressed alert before it ever
+    # reaches this dict, so a suppressed occurrence neither sends nor bumps and
+    # `occurrences` counts alerts raised. `_deliver_throttle_notices` writes its
+    # rows first and checks the window after, deliberately, so there a
+    # suppressed occurrence still bumps and `occurrences` counts polls. Neither
+    # is wrong; they are not the same number.
     row_ids = _write_dmarc_rows(config, alerts)
 
     stamp: list[int] = []
@@ -1283,13 +1289,19 @@ def _deliver_throttle_notices(
     from ...notifications import send_notification
 
     now = time.time()
-    # The durable rows first, for every notice this poll produced — including the
-    # ones the window is about to suppress. The window is the *delivery* gate and
-    # stays exactly as it was; the row is the record, so a suppressed occurrence
-    # bumps the row the user can still see rather than vanishing into a log line.
-    row_ids = _write_throttle_rows(config, notices, window_seconds)
 
-    stamp: list[int] = []
+    # The window is applied *before* the row is written, not after, and that
+    # ordering is load-bearing rather than tidy. A poll runs about once a minute
+    # and the window is an hour, so writing a row per poll would reopen the
+    # entry roughly sixty times per notice: the user reads it, `mark_seen`
+    # resolves it, and the next poll reopens it — an entry that cannot be
+    # cleared while the flood lasts, with no push to explain why it came back.
+    # It would also move `updated_at` every poll, which loses `mark_seen`'s
+    # version check against a live throttle and stops `sweep_expired_alerts`
+    # ever ageing the row out. Deciding first means one row and one bump per
+    # notice actually raised, matching the DMARC canary, whose own window sits
+    # upstream of its row for the same reason.
+    due: "list[tuple[_ThrottleNotice, str]]" = []
     for notice in notices.values():
         for kind in notice.kinds():
             key = (notice.user_id, kind)
@@ -1304,27 +1316,40 @@ def _deliver_throttle_notices(
                     kind, notice.user_id, notice.filed, notice.held,
                 )
                 continue
-            try:
-                delivered = send_notification(
-                    config, notice.user_id, notice.message(window_seconds, kind),
-                    purpose="alert",
-                )
-            except Exception as e:
-                logger.warning("Throttle notice could not be delivered: %s", e)
-                continue
-            if delivered:
-                # Stamped only on a delivered notice, for the reason the DMARC
-                # dedup is: one failed send must not swallow the next window's.
-                _throttle_alerted[key] = now
-                notification_id = row_ids.get(key)
-                if notification_id is not None:
-                    stamp.append(notification_id)
-            else:
-                logger.warning(
-                    "The %s notice for user %s reached no destination; %d "
-                    "message(s) filed, %d held. The notification row stands.",
-                    kind, notice.user_id, notice.filed, notice.held,
-                )
+            due.append((notice, kind))
+
+    if not due:
+        return
+
+    # The row stands whether or not the send below reaches anybody — that is the
+    # point of it. `send_notification` returns False with no destination
+    # configured, and this used to be a log line and nothing else.
+    row_ids = _write_throttle_rows(config, due, window_seconds)
+
+    stamp: list[int] = []
+    for notice, kind in due:
+        key = (notice.user_id, kind)
+        try:
+            delivered = send_notification(
+                config, notice.user_id, notice.message(window_seconds, kind),
+                purpose="alert",
+            )
+        except Exception as e:
+            logger.warning("Throttle notice could not be delivered: %s", e)
+            continue
+        if delivered:
+            # Stamped only on a delivered notice, for the reason the DMARC
+            # dedup is: one failed send must not swallow the next window's.
+            _throttle_alerted[key] = now
+            notification_id = row_ids.get(key)
+            if notification_id is not None:
+                stamp.append(notification_id)
+        else:
+            logger.warning(
+                "The %s notice for user %s reached no destination; %d "
+                "message(s) filed, %d held. The notification row stands.",
+                kind, notice.user_id, notice.filed, notice.held,
+            )
 
     if stamp:
         try:
@@ -1345,44 +1370,56 @@ _THROTTLE_TITLES = {
 
 def _write_throttle_rows(
     config: Config,
-    notices: "dict[str, _ThrottleNotice]",
+    due: "list[tuple[_ThrottleNotice, str]]",
     window_seconds: int,
 ) -> "dict[tuple[str, str], int]":
     """One inbox row per (user, notice kind), keyed the way the window is.
 
-    Its own connection, which is safe for the reason the sends below are:
+    Takes the notices the window has *already* cleared for delivery, not every
+    notice the poll produced — see the ordering note in the caller.
+
+    Its own connection, which is safe for the reason the sends beside it are:
     `poll_emails` calls this from its `finally`, after every per-message
     transaction has closed.
     """
     out: dict[tuple[str, str], int] = {}
     try:
         with db.get_db(config.db_path) as conn:
-            for notice in notices.values():
-                for kind in notice.kinds():
-                    senders = (
-                        notice.held_senders if kind == "held" else notice.filed_senders
+            for notice, kind in due:
+                senders = (
+                    notice.held_senders if kind == "held" else notice.filed_senders
+                )
+                # Loudest first, and truncated the same way the delivered notice
+                # truncates its own listing. Sorting the addresses alphabetically
+                # instead would name a different, arbitrary set in the row than in
+                # the push beside it — and `_ThrottleNotice.record_held` gives the
+                # reason the notice ranks by count: display-name churn on one
+                # sender would otherwise push a real one out of the listing.
+                top_senders = [
+                    sender for sender, _n in sorted(
+                        senders.items(), key=lambda kv: (-kv[1], kv[0]),
                     )
-                    result = task_alert_source.write(
-                        conn, notice.user_id,
-                        dedup_key=task_alert_source.throttle_key(kind),
-                        title=_THROTTLE_TITLES.get(kind, "Inbound mail notice"),
-                        body=notice.message(window_seconds, kind),
-                        severity="warning",
-                        actionable=(kind == "held"),
-                        params={
-                            "kind": kind,
-                            "filed": notice.filed,
-                            "held": notice.held,
-                            "senders": sorted(senders)[:task_alert_source.MAX_PARAM_ENTRIES],
-                            "window_seconds": window_seconds,
-                        },
-                    )
-                    if result is not None:
-                        out[(notice.user_id, kind)] = result.notification_id
+                ][:task_alert_source.MAX_PARAM_ENTRIES]
+                result = task_alert_source.write(
+                    conn, notice.user_id,
+                    dedup_key=task_alert_source.throttle_key(kind),
+                    title=_THROTTLE_TITLES.get(kind, "Inbound mail notice"),
+                    body=notice.message(window_seconds, kind),
+                    severity="warning",
+                    actionable=(kind == "held"),
+                    params={
+                        "kind": kind,
+                        "filed": notice.filed,
+                        "held": notice.held,
+                        "senders": top_senders,
+                        "window_seconds": window_seconds,
+                    },
+                )
+                if result is not None:
+                    out[(notice.user_id, kind)] = result.notification_id
     except Exception:
         logger.warning("could not record throttle notifications", exc_info=True)
     return out
-
 
 def _newest_uid(config: Config, email_config) -> int:
     """Highest UID currently in the poll folder, or 0 if it can't be read."""

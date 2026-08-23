@@ -377,11 +377,16 @@ def test_task_alert_never_emits_a_link_or_a_link_action(config, conn, key, hosti
     assert _emitted_paths(items[0]) == []
     assert items[0].link is None
     assert items[0].actions == ()
-    # And the rendered text carries no live markup either — this class is
-    # delivered into Talk, which renders it.
-    for char in "[]()`*_~<>|":
+    # And the rendered text carries nothing that could become a link, a code
+    # span, raw HTML or a table — this class is delivered into Talk, which
+    # renders it. Emphasis characters survive in the *body* on purpose: they are
+    # cosmetic in Talk and load-bearing in a path (`~/Documents`) or an
+    # identifier (`file_upload.py`).
+    for char in "[]()`<>|":
         assert char not in items[0].title
         assert char not in items[0].body
+    for char in "*_~":
+        assert char not in items[0].title
 
 
 def test_task_alert_is_registered_and_auto_resolving(config, conn):

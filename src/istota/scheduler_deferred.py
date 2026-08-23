@@ -518,6 +518,7 @@ def _process_deferred_user_alerts(
             task.id, dropped, task_alert.MAX_DEFERRED_ALERTS_PER_TASK,
         )
 
+    recorded = not by_type
     if by_type:
         # Guarded as a whole. `write_notification` and `deliver_pending` never
         # raise, but `db.get_db` can — and `_drain_deferred_ops` calls its nine
@@ -538,8 +539,7 @@ def _process_deferred_user_alerts(
                         conn, task.user_id,
                         dedup_key=task_alert.deferred_key(task.id, alert_type),
                         title=_deferred_alert_title(alert_type, task.id),
-                        body="\n".join(f"- {m}" for m in messages)
-                        if len(messages) > 1 else messages[0],
+                        body=_deferred_alert_body(messages),
                         severity=(
                             "danger"
                             if alert_type == task_alert.ALERT_TYPE_SECURITY
@@ -556,19 +556,74 @@ def _process_deferred_user_alerts(
                         room_token=task.conversation_token,
                     ))
             deliver_pending(config, results)
+            recorded = any(r is not None for r in results)
         except Exception:
             logger.warning(
                 "Could not record the deferred user alerts for task %d",
                 task.id, exc_info=True,
             )
+            # Fall back to what this path did before the inbox existed: send
+            # directly, with no row. Routing the alert through the database
+            # bought durability, and it must not also become a way to lose the
+            # alert outright — a locked or unwritable DB would otherwise mean no
+            # row, no push, and the file deleted below, which is a strictly
+            # worse outcome than the one this whole change set out to fix.
+            recorded = _send_deferred_alerts_unrecorded(config, task, by_type)
 
     if count:
         logger.info(
             "Recorded %d deferred user alert(s) for task %d in %d notification(s)",
             count, task.id, len(by_type),
         )
-    path.unlink(missing_ok=True)
+
+    if recorded:
+        path.unlink(missing_ok=True)
+    else:
+        # Nothing holds this alert now: no row was written and no destination
+        # accepted the fallback push. Deleting the file here is exactly the
+        # "the model raised an alert and the evidence was deleted" failure the
+        # inbox exists to end, so the file stays and the unconsumed-file warning
+        # at the end of the drain reports it.
+        logger.error(
+            "Deferred user alerts for task %d were neither recorded nor "
+            "delivered; leaving %s in place",
+            task.id, path.name,
+        )
     return count
+
+
+def _deferred_alert_body(messages: list[str]) -> str:
+    """One message on its own, several as a list."""
+    if len(messages) > 1:
+        return "\n".join(f"- {m}" for m in messages)
+    return messages[0]
+
+
+def _send_deferred_alerts_unrecorded(
+    config: Config, task: db.Task, by_type: dict[str, list[str]],
+) -> bool:
+    """Push the alerts with no row behind them. Returns whether any got through.
+
+    The pre-inbox behaviour, kept as the fallback for a framework DB that could
+    not be opened. It touches no database, which is the property that makes it
+    a usable last resort here.
+    """
+    from .notifications import send_notification
+
+    delivered = False
+    for alert_type, messages in by_type.items():
+        title = _deferred_alert_title(alert_type, task.id)
+        text = f"{title}\n\n{_deferred_alert_body(messages)}"
+        try:
+            if send_notification(config, task.user_id, text, purpose="alert",
+                                 title=title):
+                delivered = True
+        except Exception:
+            logger.warning(
+                "Fallback delivery of a deferred user alert for task %d failed",
+                task.id, exc_info=True,
+            )
+    return delivered
 
 
 def _deferred_alert_title(alert_type: str, task_id: int) -> str:

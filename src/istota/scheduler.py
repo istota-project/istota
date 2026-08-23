@@ -5603,9 +5603,16 @@ def run_cleanup_checks(config: Config) -> None:
     #
     # `sweep_retention` is the other end — a closed row is kept for reopen and
     # for post-hoc debugging, then deleted.
+    #
+    # A transaction each, not one shared between them. `db.get_db` commits once
+    # on exit, so a shared block would hold the write lock from the first row
+    # the age sweep closes right through the retention delete — and the
+    # retention delete is the larger of the two by far on the day it first
+    # bites. Splitting them is the same move 4c makes for the usage prune.
     try:
         with db.get_db(config.db_path) as conn:
             closed_alerts = sweep_expired_alerts(conn)
+        with db.get_db(config.db_path) as conn:
             deleted_notifications = sweep_retention(conn)
         if closed_alerts or deleted_notifications:
             logger.info(

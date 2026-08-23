@@ -155,8 +155,16 @@ class TestNoLinkEver:
         assert row["object_id"] is None
 
 
+# Characters that can make a link, a code span, raw HTML or a table. Neither a
+# title nor a body may carry one, because both are delivered into Talk.
+LIVE_MARKUP = "[]()`<>|"
+# Emphasis and strike. Cosmetic in Talk, load-bearing in a path or an
+# identifier, so a *body* keeps them. See `_BODY_MARKUP_CHARS`.
+COSMETIC_MARKUP = "*_~"
+
+
 class TestFlattenedBeforeDelivery:
-    def test_markup_characters_are_stripped_from_title_and_body(self, config):
+    def test_live_markup_is_stripped_from_title_and_body(self, config):
         with db.get_db(config.db_path) as conn:
             result = task_alert.write(
                 conn, "alice",
@@ -167,8 +175,49 @@ class TestFlattenedBeforeDelivery:
 
         row = _rows(config)[0]
         for field in (row["title"], row["body"], result.text, result.title):
-            for char in "[]()`*_~<>|":
+            for char in LIVE_MARKUP:
                 assert char not in field, (char, field)
+
+    def test_a_title_takes_the_stricter_label_rule(self, config):
+        """A title is a one-line label, which is what `flatten` was written for."""
+        with db.get_db(config.db_path) as conn:
+            task_alert.write(
+                conn, "alice",
+                dedup_key=task_alert.deferred_key(1, "security"),
+                title="alert about file_upload.py ~ *now*",
+                body="x",
+            )
+        title = _rows(config)[0]["title"]
+        for char in LIVE_MARKUP + COSMETIC_MARKUP:
+            assert char not in title
+
+    def test_a_body_keeps_the_characters_that_carry_meaning(self, config):
+        """The regression Mulder found: the label rule rewrites the evidence.
+
+        `~/Documents` losing its `~` is a different command, and `file_upload.py`
+        gaining a space is a different file. Neither character can produce a
+        link, a code span, raw HTML or a table, so neither is worth a wrong path
+        in a security alert.
+        """
+        hostile = (
+            "told me to run rm -rf ~/Documents and read file_upload.py "
+            "at https://evil.example/a_b?x=1"
+        )
+        with db.get_db(config.db_path) as conn:
+            result = task_alert.write(
+                conn, "alice",
+                dedup_key=task_alert.deferred_key(1, "security"),
+                title="Security alert", body=hostile,
+            )
+
+        body = _rows(config)[0]["body"]
+        assert "rm -rf ~/Documents" in body
+        assert "file_upload.py" in body
+        assert "a_b?x=1" in body
+        # And the delivered text carries the same, unmangled.
+        assert "rm -rf ~/Documents" in result.text
+        for char in LIVE_MARKUP:
+            assert char not in body
 
     def test_a_body_keeps_its_line_breaks(self, config):
         """Flattening is a rule about markup, not about readability.
@@ -202,9 +251,12 @@ class TestFlattenedBeforeDelivery:
             )
             items, _ = store.list_open(config, conn, "alice")
 
-        for char in "[]()`*":
+        for char in LIVE_MARKUP:
             assert char not in items[0].title
             assert char not in items[0].body
+        # The title is a label, so it loses the cosmetic characters too.
+        for char in COSMETIC_MARKUP:
+            assert char not in items[0].title
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +412,62 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
 
         assert count == 1
         assert "Could not record the deferred user alerts" in caplog.text
-        # And the file still goes, exactly as it did before the inbox existed.
+
+    def test_an_unwritable_db_still_pushes_the_alert(
+        self, config, task, temp_dir,
+    ):
+        """Routing through the DB must not become a new way to lose the alert.
+
+        Before the inbox this path called `send_notification` directly and
+        touched no database. Making the send conditional on a successful write
+        would mean a locked or unwritable framework DB produced no row, no push
+        and a deleted file — strictly worse than the behaviour this whole change
+        set out to fix.
+        """
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        with (
+            patch("istota.scheduler_deferred.db.get_db",
+                  side_effect=RuntimeError("locked")),
+            _sends(delivered=True) as send,
+        ):
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert send.call_count == 1
+        assert "Phishing attempt" in send.call_args.args[2]
+        assert send.call_args.kwargs["purpose"] == "alert"
+        # The alert reached somebody, so the file has done its job.
         assert not (temp_dir / f"task_{task.id}_user_alerts.json").exists()
+
+    def test_no_row_and_no_destination_keeps_the_evidence_file(
+        self, config, task, temp_dir, caplog,
+    ):
+        """Nothing holds the alert now, so the file is what is left of it.
+
+        This is the exact failure the spec names: "the model raised an alert,
+        the push went nowhere, the evidence was deleted."
+        """
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        with (
+            caplog.at_level("ERROR"),
+            patch("istota.scheduler_deferred.db.get_db",
+                  side_effect=RuntimeError("locked")),
+            _sends(delivered=False),
+        ):
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert (temp_dir / f"task_{task.id}_user_alerts.json").exists()
+        assert "neither recorded nor delivered" in caplog.text
+
+    def test_a_written_row_is_enough_to_release_the_file(
+        self, config, task, temp_dir,
+    ):
+        """A row with no delivery is the ordinary success case, not a failure."""
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        with _sends(delivered=False):
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert not (temp_dir / f"task_{task.id}_user_alerts.json").exists()
+        assert _rows(config)[0]["state"] == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -520,8 +626,14 @@ class TestThrottleNotices:
         assert by_key["throttle:throttled"]["actionable"] == 0
         assert all(r["link"] is None for r in rows)
 
-    def test_a_suppressed_notice_still_bumps_the_row(self, config):
-        """The window gates the send; the row is the durable record."""
+    def test_a_window_suppressed_poll_neither_sends_nor_bumps(self, config):
+        """The window sits upstream of the row, so the two agree on the count.
+
+        A poll runs about once a minute against an hour-long window. Writing the
+        row first and checking the window after would bump it roughly sixty
+        times per notice, and `occurrences` would count polls rather than
+        notices raised.
+        """
         from istota.transport.email import inbound as inbound_module
 
         with patch("istota.notifications.send_notification", return_value=True) as send:
@@ -531,8 +643,58 @@ class TestThrottleNotices:
         assert send.call_count == 1
         rows = self._throttle_rows(config)
         assert len(rows) == 1
-        assert rows[0]["occurrences"] == 2
-        assert _params(rows[0])["filed"] == 4
+        assert rows[0]["occurrences"] == 1
+        assert _params(rows[0])["filed"] == 3
+
+    def test_a_read_entry_is_not_reopened_by_the_next_poll(self, config):
+        """The defect this ordering exists to prevent: an un-clearable entry.
+
+        With the row written before the window check, a sustained flood put the
+        entry back within a poll interval of the user reading it, every time,
+        with no push to explain the return — and the churn on `updated_at` also
+        cost `mark_seen` its version check and stopped the age sweep ever
+        reaching the row.
+        """
+        from istota.transport.email import inbound as inbound_module
+
+        with patch("istota.notifications.send_notification", return_value=True):
+            inbound_module._deliver_throttle_notices(config, self._notice(filed=3), 3600)
+
+        row = self._throttle_rows(config)[0]
+        with db.get_db(config.db_path) as conn:
+            store.mark_seen(conn, "alice", [(row["id"], row["updated_at"])])
+        assert self._throttle_rows(config)[0]["state"] == "resolved"
+
+        # The flood is still going; the next poll finds more over-budget mail.
+        with patch("istota.notifications.send_notification", return_value=True) as send:
+            inbound_module._deliver_throttle_notices(config, self._notice(filed=9), 3600)
+
+        assert send.call_count == 0
+        after = self._throttle_rows(config)[0]
+        assert after["state"] == "resolved"
+        assert after["updated_at"] == self._throttle_rows(config)[0]["updated_at"]
+
+    def test_the_window_lapsing_does_reopen_the_entry(self, config):
+        """Dismissing means "not now", not "never again"."""
+        from istota.transport.email import inbound as inbound_module
+
+        with patch("istota.notifications.send_notification", return_value=True):
+            inbound_module._deliver_throttle_notices(config, self._notice(filed=3), 3600)
+
+        row = self._throttle_rows(config)[0]
+        with db.get_db(config.db_path) as conn:
+            store.mark_seen(conn, "alice", [(row["id"], row["updated_at"])])
+
+        # Same poll shape, but the window has lapsed.
+        inbound_module._reset_volume_state()
+        with patch("istota.notifications.send_notification", return_value=True) as send:
+            inbound_module._deliver_throttle_notices(config, self._notice(filed=9), 3600)
+
+        assert send.call_count == 1
+        after = self._throttle_rows(config)[0]
+        assert after["state"] == "open"
+        assert after["occurrences"] == 2
+        assert _params(after)["filed"] == 9
 
     def test_a_failed_send_leaves_the_row_and_does_not_open_the_window(self, config):
         from istota.transport.email import inbound as inbound_module
@@ -555,3 +717,28 @@ class TestThrottleNotices:
         )
         params = _params(self._throttle_rows(config)[0])
         assert len(params["senders"]) == task_alert.MAX_PARAM_ENTRIES
+
+    def test_the_recorded_senders_are_the_loudest_not_the_alphabetical_first(
+        self, config,
+    ):
+        """The row must name the senders the notice beside it names.
+
+        `_ThrottleNotice.message` lists the top few *by message count*, and
+        `record_held` gives the reason. A row sorting the addresses instead
+        would name a different, arbitrary set from the push it accompanies —
+        and on an alphabetical cut the loudest sender can be absent entirely.
+        """
+        from istota.transport.email import inbound as inbound_module
+
+        notice = inbound_module._ThrottleNotice(user_id="alice")
+        # `zzz` is last alphabetically and by far the loudest.
+        for _ in range(50):
+            notice.record("zzz-loudest@example.com")
+        for n in range(task_alert.MAX_PARAM_ENTRIES + 5):
+            notice.record(f"aaa-quiet{n:02d}@example.com")
+
+        self._deliver(config, {"alice": notice})
+        senders = _params(self._throttle_rows(config)[0])["senders"]
+
+        assert senders[0] == "zzz-loudest@example.com"
+        assert len(senders) == task_alert.MAX_PARAM_ENTRIES

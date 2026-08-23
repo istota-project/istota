@@ -464,7 +464,16 @@ def mark_delivered(
     re-delivery sweep would skip.
     """
     try:
-        ids = [int(i) for i in (notification_ids or [])]
+        # Coerced per element rather than in one comprehension: a single bad id
+        # from some future caller would otherwise raise before the first UPDATE
+        # and cost the whole batch its stamp, logged only at WARNING. Every id
+        # that is an id gets stamped.
+        ids: list[int] = []
+        for raw in notification_ids or []:
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                logger.warning("mark_delivered skipping a non-numeric id %r", raw)
         if not ids:
             return
         now = db.iso_utc_now()

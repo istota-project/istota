@@ -30,15 +30,23 @@ is rendered into an anchor, where a text-node rule buys nothing and a
 could emit one, so there is nothing for a future edit to get wrong: `resolve`
 returns ``link=None`` and an empty action tuple for every row of this source.
 
-**Every stored title and body is flattened**, through the same
-``confirmations.flatten`` the gate's labels use. This class is the one that
-carries model-authored text, ``send_notification`` puts that text into Talk, and
-Talk renders markdown. Flattened on the way in *and* on the way out, because the
-render path has no way to know which version of the producer wrote a stored row.
-A body goes through :func:`flatten_block`, which flattens each line and keeps the
-breaks: `_MARKUP_CHARS` maps a newline to a space because it was written for
-one-line *labels*, and a body that collapsed several collapsed alerts onto one
-run-on line would be the readability cost of a rule aimed at links.
+**Every stored title and body is flattened**, on the way in *and* on the way
+out — the render path has no way to know which version of a producer wrote a
+stored row. This class is the one carrying model-authored text,
+``send_notification`` puts that text into Talk, and Talk renders markdown.
+
+Titles take ``confirmations.flatten`` unchanged: a title is a one-line label,
+which is exactly what that rule was written for. **Bodies take
+:func:`flatten_body`, which strips less**, and the difference is deliberate. The
+label rule deletes ``* _ ~`` and every newline along with the link characters,
+and in a body that is not conservatism, it is corruption: a security finding
+reading ``run rm -rf ~/Documents`` is delivered as ``run rm -rf /Documents`` — a
+different command — and ``file_upload.py`` arrives as ``file upload.py``. The
+body of an alert is where the evidence is, so it keeps every character that
+cannot make a link, a code span, raw HTML or a table, and keeps its line breaks.
+The spec's rule is that this text is flattened *before delivery*, and names "an
+equivalent exported for the purpose" as the way to do it; this is that
+equivalent.
 
 **Every axis a key is built from is bounded.** ``alert_type`` arrives from the
 model's own JSON and ``verdict`` from a parsed mail header; an unbounded axis
@@ -82,7 +90,8 @@ MAX_DEFERRED_ALERTS_PER_TASK = 20
 # be N rows, and appending every one to a JSON blob would be N entries in a
 # single row instead. The *first* N are kept rather than the newest, so the
 # stored value is stable across occurrences and the earliest evidence survives;
-# the count of what was dropped rides alongside.
+# a count of how often something was dropped rides alongside under
+# `{key}_dropped`.
 MAX_PARAM_ENTRIES = 20
 
 # How much of a notice survives into the stored row. The full text of a rescued
@@ -109,15 +118,35 @@ def flatten(text: str | None) -> str:
     return _flatten(text or "")
 
 
-def flatten_block(text: str | None) -> str:
-    """Flatten every line of a body, keeping the line breaks between them.
+# What a *body* may not contain, and nothing more. Each of these can turn
+# model-authored text into something Talk renders as a link, a code span, raw
+# HTML or a table:
+#
+#   [ ] ( )  inline and reference links, and images
+#   < >      autolinks and raw HTML
+#   `        code spans, which can hide the rest of the line
+#   |        table cells
+#
+# Deliberately absent: ``* _ ~``, which can only produce emphasis or a strike,
+# and a newline, which can produce nothing at all. The label rule takes those
+# too — correctly, for a one-line label — and in a body it silently rewrites the
+# evidence: ``~/Documents`` loses the home directory, ``file_upload.py`` gains a
+# space, and a collapsed multi-alert body becomes one run-on line. A cosmetic
+# markdown artefact in an alert body is a far cheaper error than a wrong path.
+_BODY_MARKUP_CHARS = str.maketrans({c: " " for c in "[]()`<>|\r"})
 
-    :func:`flatten` is the label rule and maps a newline to a space, which is
-    right for a one-line title and wrong for a body listing several collapsed
-    alerts. A newline is not a markdown-injection vector; the bracket and
-    backtick characters are, and those still go.
+
+def flatten_body(text: str | None) -> str:
+    """Strip a body's link, code, HTML and table characters, keeping its lines.
+
+    Line-by-line, so the breaks between several collapsed alerts survive while
+    each line still has its whitespace collapsed. See :data:`_BODY_MARKUP_CHARS`
+    for why this strips less than :func:`flatten`.
     """
-    lines = [flatten(line) for line in str(text or "").splitlines()]
+    lines = [
+        " ".join(line.translate(_BODY_MARKUP_CHARS).split())
+        for line in str(text or "").splitlines()
+    ]
     return "\n".join(line for line in lines if line)
 
 
@@ -206,7 +235,7 @@ def write(
         source=SOURCE,
         dedup_key=dedup_key,
         title=flatten(title)[:MAX_ALERT_TITLE_CHARS] or "Notice",
-        body=flatten_block(body)[:MAX_ALERT_BODY_CHARS],
+        body=flatten_body(body)[:MAX_ALERT_BODY_CHARS],
         severity=severity,
         actionable=actionable,
         params=params or {},
@@ -230,18 +259,31 @@ def merge_param_list(
     covers every forged sender that produced the same verdict, and the senders
     are what makes the row worth reading.
 
-    Bounded at :data:`MAX_PARAM_ENTRIES`, keeping the first entries seen and
-    counting the rest under ``{key}_omitted``. Never raises — a params read that
-    failed must not cost the row.
+    Bounded at :data:`MAX_PARAM_ENTRIES`, keeping the first entries seen for the
+    current open row and counting the rest under ``{key}_dropped``.
+
+    **That count is drop *events*, not distinct dropped values**, and the name
+    says so. Deduplicating it would mean carrying the dropped values too, which
+    is the unbounded list this cap exists to refuse — so the honest cheap answer
+    is a counter with an accurate name. A row whose senders list is full and
+    whose `dropped` is far larger than `occurrences` is telling the operator the
+    same thing either way: the axis is wide and the list is a sample.
+
+    Never raises — a params read that failed must not cost the row.
     """
     kept: list[str] = []
-    omitted = 0
+    dropped = 0
     try:
         import json
 
+        # `state = 'open'` on purpose. A closed row that a fresh alert is about
+        # to reopen is a *previous* incident: carrying its full list forward
+        # would mean the new incident's evidence could only ever land in the
+        # drop counter, because the list is already at the cap. The list belongs
+        # to the generation that collected it.
         row = conn.execute(
             "SELECT params FROM notifications "
-            "WHERE user_id = ? AND source = ? AND dedup_key = ?",
+            "WHERE user_id = ? AND source = ? AND dedup_key = ? AND state = 'open'",
             (user_id, SOURCE, dedup_key),
         ).fetchone()
         if row is not None:
@@ -251,23 +293,23 @@ def merge_param_list(
                 if isinstance(existing, list):
                     kept = [str(v) for v in existing][:MAX_PARAM_ENTRIES]
                 try:
-                    omitted = max(0, int(stored.get(f"{key}_omitted") or 0))
+                    dropped = max(0, int(stored.get(f"{key}_dropped") or 0))
                 except (TypeError, ValueError):
-                    omitted = 0
+                    dropped = 0
     except Exception:
         logger.debug("could not read params for %r, starting fresh", dedup_key, exc_info=True)
-        kept, omitted = [], 0
+        kept, dropped = [], 0
 
     flat = flatten(value)[:MAX_ALERT_TITLE_CHARS]
     if flat and flat not in kept:
         if len(kept) < MAX_PARAM_ENTRIES:
             kept.append(flat)
         else:
-            omitted += 1
+            dropped += 1
 
     out: dict = {key: kept}
-    if omitted:
-        out[f"{key}_omitted"] = omitted
+    if dropped:
+        out[f"{key}_dropped"] = dropped
     return out
 
 
@@ -286,11 +328,11 @@ def body_for(row: "NotificationRow") -> str:
     params = row.params if isinstance(row.params, dict) else {}
     messages = params.get("messages")
     if isinstance(messages, list) and messages:
-        lines = [flatten(str(m)) for m in messages[:MAX_DEFERRED_ALERTS_PER_TASK]]  # one line each
+        lines = [flatten_body(str(m)) for m in messages[:MAX_DEFERRED_ALERTS_PER_TASK]]
         rendered = "\n".join(f"- {line}" for line in lines if line)
         if rendered:
             return rendered[:MAX_ALERT_BODY_CHARS]
-    return flatten_block(row.body)[:MAX_ALERT_BODY_CHARS]
+    return flatten_body(row.body)[:MAX_ALERT_BODY_CHARS]
 
 
 class TaskAlertResolver:
