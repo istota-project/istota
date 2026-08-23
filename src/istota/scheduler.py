@@ -77,6 +77,7 @@ from .consumers import (
 )
 from .db_health import CheckReport, check_and_repair
 from .events import EventWriter, PROGRESS_MESSAGES
+from .shell_exec import shell_argv
 from .skills.briefing import (
     get_briefings_for_user,
     parse_briefing_json,
@@ -1758,7 +1759,7 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 
 
 def _run_capture(
-    cmd, *, timeout: float, cwd: str, env: dict, shell: bool = False,
+    cmd, *, timeout: float, cwd: str, env: dict,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess capturing stdout/stderr, killing the whole process
     *group* on timeout.
@@ -1775,8 +1776,11 @@ def _run_capture(
     handle the deadline exactly as before; otherwise returns a CompletedProcess
     so call sites keep using ``.returncode`` / ``.stdout`` / ``.stderr``.
     """
+    # Always an argv list, never `shell=True`. A caller wanting a shell builds
+    # one with `shell_exec.shell_argv`, which sets `pipefail`; reintroducing
+    # `shell=True` here would quietly reintroduce the status bug it fixes.
     proc = subprocess.Popen(
-        cmd, shell=shell, cwd=cwd, env=env, text=True,
+        cmd, cwd=cwd, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True,
     )
@@ -2002,12 +2006,16 @@ def _execute_command_task(
     # point at the wrong user's DB.
     env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
     try:
+        # `shell_argv` rather than `shell=True`: the latter is `/bin/sh -c`,
+        # which on Debian is dash and starts with `pipefail` off, so a CRON
+        # `command:` row ending in a pipe reported its last stage. A job whose
+        # real work failed was recorded as healthy indefinitely — the inverse of
+        # what the five-consecutive-failure auto-disable exists to catch.
         proc = _run_capture(
-            task.command,
+            shell_argv(task.command),
             timeout=timeout,
             cwd=str(config.temp_dir),
             env=env,
-            shell=True,
         )
     except subprocess.TimeoutExpired:
         return False, f"Command timed out after {config.scheduler.task_timeout_minutes} minutes"

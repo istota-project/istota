@@ -20,6 +20,7 @@ from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
 from istota import task_cgroup
 from istota.process_group import kill_process_group
+from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 
 from .env import ToolEnv
 
@@ -61,7 +62,14 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         timeout_ms = args.get("timeout")
         timeout_s = (int(timeout_ms) / 1000.0) if timeout_ms else float(env.bash_timeout_seconds)
 
-        cmd = ["bash", "-c", command]
+        # `pipefail` on, because the result this tool returns ends in
+        # `[exit code: N]` and the model reads that as whether the command
+        # worked. Without it a pipeline reported its last stage, so
+        # `pytest … | tail -3` came back clean on a suite that failed. The bare
+        # name rather than a probed absolute path: the argv below is wrapped in
+        # bubblewrap, and PATH resolution inside that namespace is what has
+        # always worked here.
+        cmd = shell_argv(command, bash="bash")
         if env.sandbox_wrap:
             cmd = env.sandbox_wrap(cmd)
 
@@ -179,6 +187,10 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
             status_suffix = "\n[command aborted]"
         elif status == "timeout":
             status_suffix = f"\n[command timed out after {timeout_s:.0f}s]"
+        elif proc.returncode == SIGPIPE_EXIT:
+            # `pipefail`'s one recognisable cost. A bare 141 reads as a failure;
+            # `yes | head -1` is a correct command that now reports one.
+            status_suffix = f"\n[exit code: {SIGPIPE_EXIT}] {SIGPIPE_NOTE}"
         elif proc.returncode not in (0, None):
             status_suffix = f"\n[exit code: {proc.returncode}]"
         text += status_suffix
