@@ -15,11 +15,20 @@ Hardening layers (see also `.claude/rules/skills.md` § devbox):
 * ``cp-in`` / ``cp-out`` host paths must stay under ``ISTOTA_DEFERRED_DIR``
   or the user's ``NEXTCLOUD_MOUNT_PATH`` subtree; host-side symlinks are
   refused.
-* Container paths inside a tmpfs mount (``_CONTAINER_TMPFS_MOUNTS``) are
-  refused for ``cp-in`` / ``cp-out``, and ``cp-in`` reads the destination back
-  from inside the container — ``docker cp`` cannot traverse a tmpfs and exits
-  0 anyway (ISSUE-306). Both checks anchor the path at ``/`` the way
-  ``docker cp`` does, not at the image's WORKDIR.
+* Container paths inside a tmpfs mount (``_CONTAINER_TMPFS_MOUNTS``) or the
+  credential socket directory (``_CONTAINER_OFFLIMITS_PATHS``) are refused for
+  ``cp-in`` / ``cp-out`` — ``docker cp`` cannot traverse a tmpfs and exits 0
+  anyway (ISSUE-306). **Both verbs also ask the container**: ``cp-in`` reads
+  the destination back afterwards, ``cp-out`` checks the source first, since a
+  copy out of a shadowed path returned real bytes on the host under
+  ``{"status": "ok"}`` (ISSUE-312). **The two do different jobs and neither
+  subsumes the other**: a read-back detects a path *absent* from the
+  container's view, which is what a shadowed directory usually looks like, but
+  where a file exists at both the mounted path and the shadowed one it answers
+  yes and cannot tell which was read. Only the lists close that, and the lists
+  are hand-kept. Every check anchors the path at ``/`` the way ``docker cp``
+  does, not at the image's WORKDIR, and refuses the spellings on which the two
+  resolvers disagree (``..``, surrounding whitespace, the bare root).
 * ``reset --yes`` requires ``/home/dev`` to be a real mountpoint inside
   the container before wiping it (prevents nuking a baked-in image layer
   when the volume is mis-attached).
@@ -83,7 +92,45 @@ _SIGPIPE_NOTE = SIGPIPE_NOTE
 # Hand-maintained mirror of the ``tmpfs:`` keys in the devbox compose files
 # (deploy/ansible/templates/docker-compose.devbox.yml.j2 and
 # docker/docker-compose.yml); tests/test_skills_devbox.py pins the two together.
-_CONTAINER_TMPFS_MOUNTS = ("/workspace",)
+_COMPOSE_TMPFS_MOUNTS = ("/workspace",)
+
+# The mount that produced a report and appears in no compose file, so the pin
+# above was complete and the list was still short by it (ISSUE-312). The
+# container's own `mount` output is the evidence: ``/dev`` and ``/dev/shm`` are
+# both tmpfs there and neither is a ``tmpfs:`` key anywhere, because the
+# runtime creates ``/dev`` and the daemon creates ``/dev/shm`` per container.
+# The phantom was reproduced against ``/dev/shm``: a `cp-in` there failed its
+# arrival check while leaving the bytes in the shadowed rootfs directory, and
+# the matching `cp-out` returned them and reported success.
+#
+# ``/dev`` is what got a report, not a claim to be the set of what the runtime
+# creates — ``/proc``, ``/sys`` and the ``/etc/{hosts,hostname,resolv.conf}``
+# binds are in the same position and are not listed, because refusing them
+# needs a third message rather than this one and nothing exchanges files
+# through them. That is a judgement about likelihood, so the read-backs on
+# both verbs stay the backstop.
+#
+# What is deliberately *not* asserted here is what `docker inspect` would
+# report for these. It would decide whether this list could be derived rather
+# than hand-kept, and it was not checked against a live daemon, so the list
+# stays hand-kept and nothing downstream leans on the answer.
+#
+# ``/dev/shm`` is deliberately not listed beside ``/dev``: the prefix match
+# below is anchored on a separator, so ``/dev`` already covers it, and a path
+# matched by two entries is a path whose refusal message depends on list order.
+_RUNTIME_TMPFS_MOUNTS = ("/dev",)
+
+_CONTAINER_TMPFS_MOUNTS = _COMPOSE_TMPFS_MOUNTS + _RUNTIME_TMPFS_MOUNTS
+
+# Reachable, and still not an exchange path. ``/run/istota-cred`` is the
+# credential proxy's per-user socket directory, bind-mounted from the host by
+# the Ansible compose template. A bind *is* in the container's MountPoints, so
+# unlike the tmpfs above `docker cp` may well traverse it — which would make a
+# copy in a write into a directory the daemon owns, and a copy out a read of
+# it. Refused by name so the outcome does not depend on which way `docker cp`
+# resolves a mount whose behaviour we have not measured, and so the refusal
+# does not have to claim a tmpfs explanation that may not be the true one.
+_CONTAINER_OFFLIMITS_PATHS = ("/run/istota-cred",)
 
 # Where `exec-file` stages the script it is about to run. /home/dev is the ext4
 # volume, so `docker cp` reaches it, the cleanup `rm -f` removes a file that
@@ -238,17 +285,28 @@ def _normalize_container_path(path: str) -> str:
     return posixpath.normpath(posixpath.join("/", collapsed))
 
 
-def _tmpfs_path_error(path: str, *, what: str) -> str | None:
-    """Refuse a container path that lands inside a tmpfs mount.
+def _is_within(normalized: str, mount: str) -> bool:
+    """Anchored on a separator: `/workspaces/a` is not inside `/workspace`."""
+    return normalized == mount or normalized.startswith(mount + "/")
+
+
+def _container_path_error(path: str, *, what: str) -> str | None:
+    """Refuse a container path that is not an exchange path.
+
+    Two reasons, and they are kept apart because the explanations are not
+    interchangeable. A tmpfs is one `docker cp` cannot traverse, so the copy
+    goes somewhere nothing in the container can see; `/run/istota-cred` is a
+    host bind that `docker cp` probably *can* traverse, which is a different
+    problem with the same answer. Telling a caller the second is a tmpfs would
+    be a guess presented as a mechanism.
 
     Comparison is against the normalized path, so `/workspace/../x` and
     `workspace/x` are judged on where they end up rather than on how they were
-    spelled. A prefix match is anchored on a separator: `/workspaces/a` is not
-    inside `/workspace`.
+    spelled.
     """
     normalized = _normalize_container_path(path)
     for mount in _CONTAINER_TMPFS_MOUNTS:
-        if normalized == mount or normalized.startswith(mount + "/"):
+        if _is_within(normalized, mount):
             return (
                 f"{what} {path} is inside {mount}, which is a tmpfs mount. "
                 "`docker cp` cannot traverse a tmpfs, so the copy would go to "
@@ -256,6 +314,41 @@ def _tmpfs_path_error(path: str, *, what: str) -> str | None:
                 f"under {_DEFAULT_WORKDIR} instead — {mount} is scratch space "
                 "for the container's own processes, not an exchange path."
             )
+    for mount in _CONTAINER_OFFLIMITS_PATHS:
+        if _is_within(normalized, mount):
+            return (
+                f"{what} {path} is inside {mount}, the credential proxy's "
+                "socket directory, which is mounted in from the host and is "
+                "not an exchange path in either direction. Use a path under "
+                f"{_DEFAULT_WORKDIR} instead."
+            )
+    # Everything below is about the *spellings* on which this function's
+    # lexical answer and `docker cp`'s real resolution can disagree. The lists
+    # above go first so a path that lands in one of them keeps the message
+    # that names the mount, which is the more useful thing to be told.
+    if normalized == "/":
+        return (
+            f"{what} {path!r} names the container's root. `docker cp` reads a "
+            "container path as relative to `/`, so an empty, `.` or `/` path "
+            "is the whole filesystem — copying it out would tar the rootfs "
+            f"including every mount above. Name a file under {_DEFAULT_WORKDIR}."
+        )
+    if path != path.strip():
+        return (
+            f"{what} {path!r} has surrounding whitespace. `docker cp` keeps it "
+            "and the checks here do not, so the two would be about different "
+            "files. Remove it."
+        )
+    # Raw, not normalized: normalizing is what collapses `..`, so the
+    # normalized form never carries one and testing it would test nothing.
+    if ".." in path.split("/"):
+        return (
+            f"{what} {path} contains a `..` segment, which is refused. It is "
+            "the one construction where this check and `docker cp` provably "
+            "resolve to different files: `..` is collapsed here before "
+            "anything is followed, while moby follows a symlink first and "
+            "applies `..` to wherever it landed. Write the path out instead."
+        )
     return None
 
 
@@ -457,9 +550,9 @@ def cmd_cp_in(args) -> dict:
     src, path_err = _resolve_host_path(Path(args.src), must_exist=True)
     if path_err:
         return _err(path_err)
-    tmpfs_err = _tmpfs_path_error(args.dest, what="Destination")
-    if tmpfs_err:
-        return _err(tmpfs_err)
+    path_error = _container_path_error(args.dest, what="Destination")
+    if path_error:
+        return _err(path_error)
     ownership_err = _check_owned(container)
     if ownership_err:
         return _err(ownership_err)
@@ -506,22 +599,10 @@ def _check_arrived(container: str, dest: str, basename: str, *, src_is_dir: bool
         script = 'test -e "$1"'
     else:
         script = 'if [ -d "$1" ]; then test -e "$1/$2"; else test -e "$1"; fi'
-    rc, _, stderr = _run_docker(
-        ["exec", "-u", "root", container, "sh", "-c", script, "sh", dest, basename],
-        timeout=30,
-    )
-    if rc == 0:
+    present, detail = _ask_container(container, script, dest, basename)
+    if present:
         return None
-    detail = stderr.decode("utf-8", "replace").strip()
     if detail:
-        # `rc` here is the *docker CLI's*, and only one of the two things it
-        # can mean is "the file is absent". `docker exec` writes to stderr when
-        # it could not run the check or could not fetch its status — the
-        # allowlist proxy refusing an untracked exec is the case that happens
-        # (ISSUE-313) — and `test -e` answering "no" writes nothing at all. So
-        # a non-empty stderr means the question was never answered, and the
-        # message below would be a confident false claim of the exact defect
-        # ISSUE-306 was filed for. Report what was observed instead.
         return (
             f"could not read {dest} back from inside {container} after the "
             f"copy: {detail}. Whether the file arrived is unknown — the check "
@@ -534,19 +615,108 @@ def _check_arrived(container: str, dest: str, basename: str, *, src_is_dir: bool
     )
 
 
+def _ask_container(container: str, script: str, *argv: str) -> tuple[bool, str | None]:
+    """Run a `test` script inside the container. ``(answered yes, stderr)``.
+
+    Both read-backs go through here, because the thing that is easy to get
+    wrong is shared. The exit status is the *docker CLI's*, and only one of the
+    two things it can mean is the answer to the question: `docker exec` writes
+    to stderr when it could not run the check or could not fetch its status —
+    the API allowlist proxy refusing an untracked exec is the case that happens
+    (ISSUE-313) — while `test -e` answering "no" writes nothing at all. So a
+    non-empty stderr means the question was never answered, and a caller that
+    reports it as a "no" is making a confident false claim.
+
+    Paths go in as positional arguments, nothing spliced into the script text.
+    Root, so a path under a directory `dev` cannot traverse still gives a real
+    answer, and no `-w`, so every path must already be anchored at `/` by
+    `_normalize_container_path`.
+    """
+    rc, _, stderr = _run_docker(
+        ["exec", "-u", "root", container, "sh", "-c", script, "sh", *argv],
+        timeout=30,
+    )
+    if rc == 0:
+        return True, None
+    return False, stderr.decode("utf-8", "replace").strip() or None
+
+
+def _check_source_visible(container: str, src: str) -> str | None:
+    """Ask the container whether `src` exists, *before* copying it out.
+
+    The symmetric half of `_check_arrived`, and the fix for ISSUE-312. `docker
+    cp` resolves a container path against the container's rootfs on the host,
+    so a path shadowed by a mount reads the directory underneath rather than
+    the mount — and a failed `cp-in` leaves its bytes in exactly that shadowed
+    directory. Copying out then returned those bytes, on the host, under
+    ``{"status": "ok"}``, with nothing to distinguish them from the file the
+    caller asked for. Reproduced against `/dev/shm`, which the mount list did
+    not name at the time.
+
+    Before rather than after, and that ordering is the fix. `docker cp` writes
+    the host file whatever it found, so a check afterwards would leave the
+    phantom bytes on disk and only then report a problem — and the host file is
+    what the caller goes on to read.
+
+    **What it catches is a path absent from the container's view**, which is
+    what a shadowed directory looks like when nothing has been left in it. It
+    is not a general shadowing detector: where a file exists at both the
+    mounted path and the shadowed path underneath — a symlink aimed into a
+    tmpfs the container itself has written to, say — this answers yes and
+    `docker cp` still reads the shadowed one. The mount lists are what close
+    that, which is why they are still there and still hand-kept.
+
+    Two more limits, stated rather than implied. The container is running, so
+    it can change the path between the check and the copy; an unlink or a
+    restart turns that into a `docker cp` failure, which costs nothing, but a
+    replacement with a symlink into a shadowed directory is the case above
+    arriving late. And this makes `cp-out` depend on `docker exec` — where the
+    exec cannot run, the copy is refused rather than performed unverified,
+    because bytes on the host with an unknown provenance are the defect.
+    """
+    # `test -L` as well as `test -e`: `test -e` follows the link, and `docker
+    # cp` without `-L` copies the link itself, so a dangling symlink is a copy
+    # that works and would otherwise be refused here.
+    present, detail = _ask_container(container, 'test -e "$1" || test -L "$1"', src)
+    if present:
+        return None
+    if detail:
+        return (
+            f"could not check {src} inside {container} before copying it out: "
+            f"{detail}. Whether it exists is unknown — the check did not run "
+            "to an answer."
+        )
+    return (
+        f"{src} does not exist inside {container}. `docker cp` resolves a "
+        "container path against the container's rootfs, so a path shadowed by "
+        "a mount can still yield bytes on the host that no process in the "
+        "container can see — refusing rather than copying those out."
+    )
+
+
 def cmd_cp_out(args) -> dict:
     container = _container_name()
     if not container:
         return _err("No devbox configured.")
-    dest, path_err = _resolve_host_path(Path(args.dest), must_exist=False)
-    if path_err:
-        return _err(path_err)
-    tmpfs_err = _tmpfs_path_error(args.src, what="Source")
-    if tmpfs_err:
-        return _err(tmpfs_err)
+    # Container-side checks first, host path last. `_resolve_host_path`
+    # creates the destination's parents (inside the allowlist, after its own
+    # containment check), so resolving before the source is known to exist
+    # left an empty tree in the user's workspace behind every refusal. Nothing
+    # below needs the host path, so the ordering is free.
+    path_error = _container_path_error(args.src, what="Source")
+    if path_error:
+        return _err(path_error)
     ownership_err = _check_owned(container)
     if ownership_err:
         return _err(ownership_err)
+    visible_err = _check_source_visible(
+        container, _normalize_container_path(args.src),
+    )
+    if visible_err:
+        return _err(visible_err)
+    dest, path_err = _resolve_host_path(Path(args.dest), must_exist=False)
+    if path_err:
+        return _err(path_err)
     rc, _, stderr = _run_docker(
         ["cp", f"{container}:{args.src}", str(dest)], timeout=120,
     )
