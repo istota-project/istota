@@ -147,7 +147,9 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 |---|---|
 | `talk.py` | Async HTTP client for Nextcloud Talk API (send, poll, download attachments) |
 | `async_runtime.py` | One persistent asyncio loop + one pooled httpx client for all Talk I/O (`run_coro`, `get_talk_client` singleton); started/stopped by `run_daemon` |
-| `notifications.py` | Unified dispatcher for Talk, email, ntfy, and web notifications; per-user purpose-keyed routing table |
+| `notifications.py` | **Delivery.** Unified dispatcher for Talk, email and ntfy; per-user purpose-keyed routing table. Distinct from the two below, which are the inbox |
+| `notification_store.py` | **The inbox.** The `notifications` table — the durable open set of what is waiting on a user, behind the app-bar bell. The write and the send are two separate calls, so a push that reached nobody leaves the row intact |
+| `notification_sources.py` | The resolver seam behind the inbox: one resolver per source, returning `None` for an object that is gone. That single value is the whole anti-staleness story, so an item answered over Talk can never render stale |
 | `events.py` | Task-event-streaming: `TaskEvent`, `EventWriter`, `EventSubscriber` + the `task_events` log that feeds every output surface |
 | `consumers/` | Event consumers: `TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber` |
 | `commands.py` | Surface-agnostic `!command` dispatch (`CommandContext` + registry), handled synchronously across Talk / web / CLI |

@@ -32,15 +32,18 @@ while not shutdown_requested:
     check_scheduled_jobs()      # every briefing_check_interval
     _run_sleep_cycles()         # off-thread; polled every briefing_check_interval
     check_travel_timezone()     # off-thread; every TRAVEL_TZ_CHECK_INTERVAL
-    poll_emails()               # every email_poll_interval (60s)
+    poll_emails()               # off-thread; every email_poll_interval (60s)
     discover_and_organize_shared_files()  # every shared_file_check_interval (120s)
     poll_all_tasks_files()      # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
     write_status()              # every 60s
     check_db_health()           # off-thread; every db_health_check_interval (24h)
+    check_doctor()              # off-thread; every doctor_check_interval (1h)
+    check_worktree_reap()       # off-thread; every worktree_reap_interval (6h)
     _run_db_backup()            # off-thread; every db_backup_interval (24h)
     _maybe_alert_backup_stale() # every tick
     _emit_scheduler_stats()     # every scheduler_stats_interval (60s; 0 disables)
+    _emit_host_pressure_breadcrumb()  # every host_pressure_breadcrumb_interval (300s)
     check_heartbeats()          # every heartbeat_check_interval (60s) — last gated check
     sleep(poll_interval)        # 2s, sub-ticking pool.dispatch() every dispatch_interval
 ```
@@ -51,7 +54,21 @@ Talk polling runs in a separate daemon thread, started at scheduler launch.
 
 ### Off-thread periodic checks
 
-Four checks can outlast a tick — the DB health sweep and the DB backup snapshot both walk every per-user DB (the backup writing to the rclone FUSE mount, where latency is unbounded), the nightly sleep cycles make synchronous per-user LLM calls, and the travel-timezone check opens a per-user `location.db` and may send a notification. Run inline they blocked `pool.dispatch()` for their whole duration. `_spawn_background_check(name, fn, inflight, *, overlap_expected=False)` puts each on a short-lived `bgcheck-<name>` daemon thread, skipping the tick when the previous run under the same name is still alive, so a wedged sweep cannot stack one thread per tick. `overlap_expected=True` (sleep cycles, travel timezone) demotes that skip log to DEBUG, because for those two a pass outliving the poll interval is the normal case rather than a symptom. Exceptions are contained and logged. The interval clocks advance at spawn time (fixed cadence; the in-flight guard prevents overlap), while the *staleness* alert reads the persisted last-run clock, which only advances on a durable OK run.
+Seven checks can outlast a tick, and each is on the list for a reason of its own:
+
+| Check | Why it can run long |
+|---|---|
+| `db-health` | walks every per-user DB |
+| `db-backup` | walks every per-user DB, writing to the rclone FUSE mount, where latency is unbounded |
+| `sleep-cycles` | synchronous per-user LLM calls |
+| `travel-timezone` | opens a per-user `location.db` and may send a notification |
+| `email-poll` | one IMAP connection per message read and another per message with attachments, each attachment uploaded to Nextcloud over WebDAV — unbounded network I/O whose duration an outside sender can influence (ISSUE-250) |
+| `doctor` | `runtime.model_cli` and the forge version checks each spawn a `--version`, so a wedged binary would starve dispatch |
+| `worktree-reap` | fetches each bare clone and walks each candidate checkout, so a slow forge or a cold cache would starve dispatch |
+
+Run inline they blocked `pool.dispatch()` for their whole duration. `_spawn_background_check(name, fn, inflight, *, overlap_expected=False)` puts each on a short-lived `bgcheck-<name>` daemon thread, skipping the tick when the previous run under the same name is still alive, so a wedged sweep cannot stack one thread per tick. `overlap_expected=True` (sleep cycles, travel timezone, email poll) demotes that skip log to DEBUG, because for those three a pass outliving the poll interval is the normal case rather than a symptom — an email batch draining a backlog legitimately runs past the interval. Exceptions are contained and logged. The interval clocks advance at spawn time (fixed cadence; the in-flight guard prevents overlap), while the *staleness* alert reads the persisted last-run clock, which only advances on a durable OK run.
+
+`doctor` re-runs the runtime self-check rather than trusting the one at boot, because the drift it catches happens *after* boot: the auto-update cron changes what is installed under a config the daemon already loaded, so a boot-only check is blind to it.
 
 Because none of the known-long checks runs on the loop thread any more, there are no `LoopWatchdog.suspended()` call sites left — the stall watchdog covers the whole loop.
 
@@ -190,6 +207,7 @@ Runs every `briefing_check_interval`:
 - Prune `task_usage` / `task_usage_models` rows older than `usage_retention_days` (180) — far above the task window on purpose, so spend history survives task cleanup
 - Prune `processed_emails` rows older than `processed_email_retention_days` (90, floored at `email_retention_days + 1`), excluding rows the stored transcript still references
 - Prune the `message_deletions` ledger (fixed 30 days) — it exists only to tell a reconnecting client what vanished while it was away
+- Close open fire-and-forget [notification](../features/notifications.md) rows older than 14 days, then delete closed rows past 30 days. Two sweeps, each in its own transaction for the same reason the usage prune is split out: `get_db` commits once on exit, so a shared block would hold the write lock from the first row the age sweep closes right through the retention delete. The retention delete is chunked at 500, because the first run after a long accumulation would otherwise take the whole backlog in one statement while every reader waits out its busy timeout. Object-backed rows are never swept at any age — their close condition is the object, not the clock — and neither is a row whose source failed to register in *this* process, since one broken import in the scheduler would otherwise close every open row of a source that is live in the web process
 - Delete processed emails from IMAP older than `email_retention_days` (7), via one server-side `BEFORE` search
 - Trim the Talk message cache
 - Delete old temp files
@@ -210,6 +228,12 @@ Runs every `briefing_check_interval`:
 | Shared files | 120s | `shared_file_check_interval` |
 | Heartbeats | 60s | `heartbeat_check_interval` |
 | SQLite health (`quick_check` + self-heal `REINDEX`) | 86400s (24h) | `db_health_check_interval` |
+| Runtime self-check (`istota doctor`) | 3600s (1h) | `doctor_check_interval` |
+| Developer worktree reap | 21600s (6h) | `worktree_reap_interval` |
+| DB backup snapshot | 86400s (24h) | `db_backup_interval` |
+| Scheduler process-health line | 60s | `scheduler_stats_interval` |
 | Host memory breadcrumb | 300s | `host_pressure_breadcrumb_interval` |
+
+A 0 disables the check in every row below the dispatch sub-tick. The worktree reap additionally needs `developer.enabled`, `developer.repos_dir` and `developer.worktree_reap_enabled`; the backup needs `db_backup_enabled`.
 
 `dispatch_interval` decouples cold pending-task pickup latency from the interval-gated checks: the main loop runs `pool.dispatch()` on this sub-tick cadence without re-running the per-subsystem checks (0 or ≥ `poll_interval` = legacy one-dispatch-per-tick). `cron_max_staleness_minutes` (default 60) is the insertion-time staleness gate for `check_scheduled_jobs` / `check_briefings` — after a long outage it skips the catch-up insert and resumes from the next future fire, suppressing thundering-herd catch-up.

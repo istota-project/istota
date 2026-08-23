@@ -758,15 +758,19 @@ class DeveloperConfig:
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out
     # Worktree reaping (ISSUE-288, src/istota/worktree_reaper.py). Nothing used
     # to remove a task's worktree, so `repos_dir` accumulated gigabyte
-    # checkouts with no owner. The sweep runs on the developer skill's setup
-    # path and removes only a worktree that is clean, unlocked, idle for the
-    # retention window and carrying no commit that is not already upstream.
+    # checkouts with no owner. The sweep runs from the *scheduler*, on
+    # `scheduler.worktree_reap_interval` — not from the developer skill's
+    # `setup_env`, because `dispatch_setup_env_hooks` calls every skill's hook
+    # whatever the task selected, so a sweep there fired before every Talk
+    # reply, cron job and heartbeat tick. It removes only a worktree that is
+    # clean, unlocked, idle for the retention window and carrying no commit
+    # that is not already upstream.
     worktree_reap_enabled: bool = True
     # Hours of no activity before a worktree is a candidate. This is what
     # protects a *concurrently running* task: tasks for one user run in
     # parallel and none knows the others exist, so recent activity is the only
-    # evidence available that a checkout is in use. 0 turns the age guard off
-    # and nothing else.
+    # evidence available that a checkout is in use. Clamped to a one-hour
+    # floor — a shorter window reaps the checkout a task is still setting up.
     worktree_retention_hours: float = 24.0
     review: ReviewConfig = field(default_factory=ReviewConfig)
 
@@ -1162,9 +1166,12 @@ class ClaudeCodeBrainConfig:
     Every field is defaulted, so an absent ``[brain.claude_code]`` block is the
     shipping behaviour. The poll is read-only: the credential is never written
     and never refreshed. ``subscription_usage = false`` makes the doctor check
-    ``SKIP`` and the admin card report ``disabled by config`` in place of its
-    tiles — the card is not hidden, because ``available: false`` always carries
-    a reason and an operator expecting the reading has to learn why it is gone.
+    ``SKIP`` and the admin card **absent** — the section key is omitted rather
+    than carrying ``available: false`` with a reason. The reason existed while a
+    missing reading meant something was wrong; it stopped being right once the
+    endpoint turned out to answer the long-lived setup token both server shapes
+    deploy with a persistent 429, which made the note permanent and left it
+    naming nothing an operator could do.
 
     ``_validate_claude_code_brain`` (config load) corrects a configuration that
     would make the feature misbehave — see its docstring for the three rules.
@@ -1182,8 +1189,10 @@ class ClaudeCodeBrainConfig:
     # about the plan, not a defect in the host.
     subscription_usage_warn_percent: float = 80.0
     subscription_usage_high_percent: float = 95.0
-    # A stale-cache reading older than this WARNs rather than being reported as
-    # a current one.
+    # A stale-cache reading older than this is reported as SKIP rather than as
+    # a current one: a reading this old means the fetches are failing, which on
+    # a server shape is the steady state rather than a fault, so there is
+    # nothing to check. Reporting it as WARN named nothing actionable.
     subscription_usage_stale_after_seconds: int = 3600
 
 

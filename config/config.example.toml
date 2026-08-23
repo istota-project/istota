@@ -195,8 +195,8 @@ features = []
 # [brain.claude_code]
 # Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
 # on /admin and in `istota doctor`. Read-only: the credential is never written or
-# refreshed. Off = the doctor check SKIPs and the admin card says so in place of
-# its tiles, rather than disappearing.
+# refreshed. Off = the doctor check SKIPs and the admin card is absent; there is
+# no reading to draw, and a permanent "unavailable" note names nothing to do.
 # subscription_usage = true
 # subscription_usage_cache_ttl_seconds = 1800    # one deployment-wide fetch per this window,
 #                                                #   and the floor on the retry after a failure.
@@ -210,7 +210,8 @@ features = []
 #                                                #   both clamp to [0, 100]; warn above high is
 #                                                #   lowered to high (logged) — an inverted pair
 #                                                #   leaves no amber band
-# subscription_usage_stale_after_seconds = 3600  # a stale-cache reading older than this WARNs
+# subscription_usage_stale_after_seconds = 3600  # a stale-cache reading older than this is
+#                                                #   reported SKIP, not as a current number
 #
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on

@@ -28,6 +28,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `talk_poll_state` | Last message ID per Talk conversation |
 | `talk_messages` | Poller-fed message cache for conversation context |
 | `processed_emails` | Email dedup with RFC 5322 thread tracking |
+| `email_poll_state` | Inbound poll cursor, one row per polled folder: `folder, uidvalidity, last_uid, updated_at`. Each tick takes the oldest `email_poll_batch_size` UIDs *above* `last_uid`, so the batch is a boundary rather than a window and a backlog drains instead of truncating. A changed `uidvalidity` means the mailbox was recreated and UIDs restarted, so the cursor is meaningless and resets (ISSUE-250) |
 | `sent_emails` | Outbound email tracking for emissary thread matching |
 | `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate, read in both directions (inbound confirmation and outbound approval) |
 | `outbound_drafts` | Outbound mail held by the approval gate: recipients, subject, body, headers and origin surface snapshotted at hold time, plus `status` (`pending` \| `sending` \| `sent` \| `discarded`), the room it belongs to and the task that composed it. Released rows carry `sent_message_id`. Never expired — see [answering a held draft](../features/email.md#answering-a-held-draft) |
@@ -54,6 +55,22 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 | `room_read_state` | Per-surface, per-user read cursors driving unread badges |
 | `message_stars` | Per-user starred messages (Talk has no per-message star API, so this is web-only) |
 | `message_deletions` | Hard-delete ledger with its own stream cursor, so a reconnecting client learns what vanished while it was away. Pruned at 30 days |
+
+### Notifications
+
+| Table | Purpose |
+|---|---|
+| `notifications` | The durable open set of what is waiting on a user — the inbox behind the app-bar bell. One row per thing needing attention: `source` (the registered producer), `dedup_key` (its stable identity), an optional `object_type` / `object_id` the resolver validates, `severity`, `actionable`, `title` / `body` / `params`, an in-app `link` checked against an allowlist on every read, `occurrences`, `seen_at`, and `state` (`open` \| `resolved` \| `dismissed` \| `stale`). `UNIQUE (user_id, source, dedup_key)` is what makes a producer idempotent |
+
+Two things about this table are load-bearing and easy to undo by accident.
+
+`last_delivered_at` records only a send that actually reached a destination. `send_notification` returns False when none is configured, and suppressing a re-delivery on the strength of a send that reached nobody is the exact failure the inbox exists to fix.
+
+Ordering is `updated_at DESC`, not `created_at DESC` — hence `idx_notifications_user_state`. A reopen preserves `created_at` and refreshes `updated_at`; under `created_at` ordering an old row reopened today would deliver a push and bump the badge while sorting below fifty newer rows, so it would be unreachable in the panel. Never seen means never closed for an auto-resolving source.
+
+`idx_notifications_object` leads with `user_id`, and so does `resolve_by_object`. Panel ids come from the per-user health module DB, where every user has a panel `12`, so a close path keyed on `(source, object_type, object_id)` alone would resolve every other user's row when one user confirms theirs.
+
+See [notifications and the inbox](../features/notifications.md).
 
 ### Scheduling
 
@@ -91,6 +108,7 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 |---|---|
 | `task_usage` | One row per brain attempt — tokens, cost, timing, and the identity to attribute them |
 | `task_usage_models` | Per-model split of one `task_usage` row, where the brain reports one |
+| `code_review_calls` | Rounds charged per task by the `code_review` skill's own model calls (`task_id, calls, updated_at`), counting rounds whether or not the response parsed. Cascades with the task |
 
 `task_usage` is deliberately **not** foreign-keyed to `tasks`. `cleanup_old_tasks` deletes tasks at `task_retention_days` (7) and a usage row must outlive that, at `usage_retention_days` (180), so `task_id` dangles afterwards. It is NULL outright for the daemon's own model calls, which have no task — the sleep cycle, shared briefing blocks, health OCR, code review — and `origin` names which. The denormalized identity columns (`user_id`, `source_type`, `brain_kind`, `model`) keep every row self-sufficient, so no aggregate ever joins `tasks`. `tasks.id` is `AUTOINCREMENT`, so a dangling `task_id` can never be reassigned.
 
