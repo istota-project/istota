@@ -43,7 +43,8 @@ while not shutdown_requested:
     _run_db_backup()            # off-thread; every db_backup_interval (24h)
     _maybe_alert_backup_stale() # every tick
     _emit_scheduler_stats()     # every scheduler_stats_interval (60s; 0 disables)
-    _emit_host_pressure_breadcrumb()  # every host_pressure_breadcrumb_interval (300s)
+    _emit_host_pressure_breadcrumb()  # every host_pressure_breadcrumb_interval_seconds (300s)
+    _check_host_pressure()      # every host_pressure_sample_interval_seconds (30s); feeds the admission gate
     check_heartbeats()          # every heartbeat_check_interval (60s) — last gated check
     sleep(poll_interval)        # 2s, sub-ticking pool.dispatch() every dispatch_interval
 ```
@@ -74,7 +75,7 @@ Because none of the known-long checks runs on the loop thread any more, there ar
 
 ### Host memory breadcrumb
 
-Every `host_pressure_breadcrumb_interval` seconds (default 300), the loop writes one `host_pressure` line carrying `MemAvailable`, `Shmem`, `SwapFree`, the PSI memory figures, per-tmpfs usage, and `shmem_unaccounted_kb` — `Shmem` minus the summed tmpfs usage. It runs whether or not the box is under pressure, which is the point: a slow leak crosses no alarm threshold until the day it is fatal, and the August 2026 host loss accumulated 4.64 GB of unreclaimable shmem over five days with nothing recording any of it.
+Every `host_pressure_breadcrumb_interval_seconds` (default 300), the loop writes one `host_pressure` line carrying `MemAvailable`, `Shmem`, `SwapFree`, the PSI memory figures, per-tmpfs usage, and `shmem_unaccounted_kb` — `Shmem` minus the summed tmpfs usage. It runs whether or not the box is under pressure, which is the point: a slow leak crosses no alarm threshold until the day it is fatal, and the August 2026 host loss accumulated 4.64 GB of unreclaimable shmem over five days with nothing recording any of it.
 
 `shmem_unaccounted_kb` is the field that does the work. It separates memory some mount can be `du`'d for from memory that lives in no filesystem at all — the distinction the outage investigation could not make, and the reason it never named a culprit.
 
@@ -83,6 +84,26 @@ The line goes to its own logger (`istota.scheduler.pressure`), so a multi-day se
 It costs six small file reads plus a `statvfs` and a `stat` per tmpfs mount, so it stays on the loop thread rather than paying for a thread every interval. `host_pressure_enabled = false` turns it off; so does an interval of 0. On a platform with no PSI interface (macOS, a kernel without `CONFIG_PSI`) it says so once and then no-ops.
 
 `host_pressure.py` is a stdlib-only leaf. Every reader takes its `/proc` root as a parameter and none of them raise. `python -m istota.host_pressure --snapshot` produces the threshold snapshot that attributes shmem to mounts, containers and `memfd` fd holders.
+
+### Admission gate
+
+`_check_host_pressure()` samples on its own cadence (`host_pressure_sample_interval_seconds`, default 30 — faster than the breadcrumb, because this reading feeds a decision rather than a series) and hands the sample to the worker pool. `WorkerPool._admission_decision()` reads it: below `min_available_memory_mb` of `MemAvailable` (default 768), or with PSI `memory some avg10` above `host_pressure_psi_threshold` (default 40), the gate is shut.
+
+**It is about starting work, never about stopping it.** Running tasks are not consulted, counted, preempted or failed. A shut gate refuses a *start*, and the pending row waits exactly as it does when a worker cap is full. Both dispatch call sites are gated, and so is the claim a worker makes for itself — gating `dispatch()` alone would bound new worker *threads* while an already-alive worker kept claiming into the slot it had, which is the whole of the incident this came from.
+
+**It fails open in every uncertain case**: sampling disabled, both thresholds at 0, no sample yet, a sample that would not parse. `update_pressure(None)` clears rather than latches, so a sampler that starts failing cannot leave a stale bad reading holding the queue shut for the life of the process. The asymmetry is deliberate — one task admitted onto a busy box is a slow task, whereas a sampler defect that halts all dispatch presents as an unexplained total outage.
+
+A shut gate logs `dispatch_admission_closed` once on the first closed tick and then at most once per `host_pressure_alert_cooldown_seconds` (default 900), re-arming when the gate reopens so a fresh squeeze reads as a new event. The same cooldown bounds the threshold snapshot and the operator alert. `host_pressure_shmem_unaccounted_alert_mb` (default 1024) is a third snapshot trigger and is deliberately **not** wired into the gate: unaccounted shmem that swap absorbs is a reason to collect evidence, not a reason to refuse work.
+
+### Per-task cgroups
+
+`task_cgroup.py` puts each task's subprocesses in `<unit cgroup>/task-<id>/` with `memory.max`, `pids.max` and `cpu.max` set from `task_memory_max_mb` (2048), `task_pids_max` (512) and `task_cpu_max_percent` (200, a percentage of one core). A tree that overruns is OOM-killed inside its own group: one failed task instead of a host-wide event. `MemoryHigh=` on the unit bounds the daemon as a whole and does nothing about this case, and bwrap gives a task filesystem and network isolation with no resource isolation at all.
+
+The directory is a **sibling** of the daemon's own leaf, not a child of it. cgroup v2 forbids a non-root cgroup from both holding processes and enabling controllers for its children, so a `task-<id>/` made inside the daemon's cgroup would be created successfully and then contain no `memory.max` — containment that never engages and never reports. `Delegate=memory pids cpu` plus `DelegateSubgroup=supervisor` on the scheduler unit is what makes the sibling shape available; `resolve_root()` walks up from `/proc/self/cgroup` to the `.service` / `.scope` component to find it.
+
+There is no separate capability probe. On a real cgroup2fs the interface files are kernel-made and a writer cannot create them, so a `memory.max` write that succeeds *is* the proof the controller is delegated here; a failure removes the directory again rather than leaving an empty cgroup that reads as containment in `systemd-cgls`.
+
+**Fails open, never silently.** A deployment that has not taken the updated unit file keeps working exactly as before — every function returns quietly rather than raising, and `create()` returns `None` so the caller spawns as it always did. The reason is logged once per process, because "containment engaged" and "containment never engaged" must not look alike in a log.
 
 ### Startup orphan recovery
 
@@ -232,7 +253,8 @@ Runs every `briefing_check_interval`:
 | Developer worktree reap | 21600s (6h) | `worktree_reap_interval` |
 | DB backup snapshot | 86400s (24h) | `db_backup_interval` |
 | Scheduler process-health line | 60s | `scheduler_stats_interval` |
-| Host memory breadcrumb | 300s | `host_pressure_breadcrumb_interval` |
+| Host memory breadcrumb | 300s | `host_pressure_breadcrumb_interval_seconds` |
+| Host memory gate/snapshot sample | 30s | `host_pressure_sample_interval_seconds` |
 
 A 0 disables the check in every row below the dispatch sub-tick. The worktree reap additionally needs `developer.enabled`, `developer.repos_dir` and `developer.worktree_reap_enabled`; the backup needs `db_backup_enabled`.
 
