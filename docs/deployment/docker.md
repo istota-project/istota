@@ -46,6 +46,27 @@ docker compose exec istota vi /data/config/config.toml
 docker compose restart istota
 ```
 
+## Upgrading an existing deployment
+
+Two things this stack does are first-install only, and both are easy to mistake for "the upgrade did not work". `entrypoint.sh` writes `/data/config/config.toml` only when the file is absent, and it lives on the `istota_data` volume; `provision-nc.sh` is a Nextcloud post-installation hook, so it runs against a fresh instance and never again. A release whose fix is a new config key or a new `occ` call therefore lands on new installs and needs a hand patch on old ones. The CHANGELOG says so where it applies.
+
+One such patch is outstanding as of the DAV-prefix release. The shared volume reaches Nextcloud as an external storage mount, so the bot's own folder tree puts everything one level below the path the bot was asking for, and sharing is refused on an external mount by default. A fresh install gets both right. An existing one needs, in `/data/config/config.toml`:
+
+```toml
+[nextcloud]
+dav_prefix = "Shared Files"
+auto_share_bot_dir = false
+```
+
+and, in the Nextcloud container, sharing enabled on each of the two mounts the installer created — the one named after the shared volume (`Shared Files` unless `ISTOTA_NC_SHARED_MOUNT_NAME` says otherwise) and the one named after the bot:
+
+```bash
+docker compose exec -u www-data nextcloud php /var/www/html/occ files_external:list
+docker compose exec -u www-data nextcloud php /var/www/html/occ files_external:option <mount_id> enable_sharing true
+```
+
+Restart `istota` afterwards. Without the config keys the `nextcloud` skill's `files` and `share` verbs answer 404 and the bot logs `Failed to share folder` on every boot; without the mount option every share of anything in the workspace is refused.
+
 ## Optional profiles
 
 ```bash
@@ -75,7 +96,8 @@ Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Tal
 ## Security differences
 
 - **No network proxy**: Docker's network isolation replaces the CONNECT proxy
-- **Sandbox + skill proxy**: enabled by default, work inside the container
+- **The filesystem sandbox does not run here.** `sandbox_enabled` is true in the generated config, but Docker's default seccomp profile blocks the `unshare(CLONE_NEWUSER)` bubblewrap needs, so the daemon's startup probe fails and every task runs unconfined, with the framework database, every user's module databases, `config.toml` and `.secret_key` in view. It says so at startup, in a line carrying `bubblewrap unavailable` — as `SECURITY UNSUPPORTED CONFIGURATION` with more than one user configured, and as a plainer `SECURITY` warning with one. Two container settings on the `istota` service fix it, and they are a pair — `security_opt: [seccomp:unconfined, systempaths=unconfined]`. Seccomp alone lets bwrap create the namespace but not mount a procfs inside it, and `--cap-add=SYS_ADMIN` is not an alternative: it gets past the unshare and then fails at `pivot_root`. The shipped compose file grants neither, deliberately, because `systempaths=unconfined` unmasks the host kernel's `/proc` to the container and the supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed. Add both if you want a single-container Docker deployment confined; this is a per-operator trade, not a default
+- **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment, and with the sandbox off it is the only thing doing so
 - **All extras installed**: every optional dependency included in the image
 - **No devbox credential proxy**: this shape runs no host-side credential daemon, so `gh`, `glab` and `git push` do not work inside the devbox container. That is deliberate — the proxy is a host process rather than a service in the stack. The Ansible deployment runs one per user and has the capability; here, do forge work outside the box. See ISSUE-282.
 - **No devbox network filtering**: the DOCKER-USER rules that drop RFC1918 and cloud metadata for the devbox are added by the Ansible role and are not present here

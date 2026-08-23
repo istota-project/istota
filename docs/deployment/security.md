@@ -6,7 +6,7 @@ Istota isolates Claude Code invocations through layered security: clean environm
 
 Linux with [bubblewrap](https://github.com/containers/bubblewrap) is the only supported deployment configuration. The filesystem sandbox is the boundary between users and between Claude and the host — without it, env-var scoping in the prompt is the only thing keeping one user's tasks from reading another user's data, and that boundary depends on the model following instructions.
 
-macOS and any Linux without bwrap (or where bwrap can't create user namespaces — e.g. containers without `CAP_SYS_ADMIN`) are **development configurations only**. They will run, but they provide no isolation guarantees and are not suitable for multi-user deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it detects either condition with more than one user configured.
+macOS and any Linux without bwrap, or where bwrap can't create user namespaces, are **development configurations only**. A container is the common case of the second, and `CAP_SYS_ADMIN` is not what it is missing: Docker's default seccomp profile blocks the `unshare` call, and granting the capability instead gets past that and then fails at `pivot_root`. What a container needs is `seccomp:unconfined` together with `systempaths=unconfined`, which is a trade an operator makes deliberately — see [Docker deployment](docker.md). They will run, but they provide no isolation guarantees and are not suitable for multi-user deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it detects either condition with more than one user configured.
 
 If you disable the sandbox or run on an unsupported platform, you accept that:
 
