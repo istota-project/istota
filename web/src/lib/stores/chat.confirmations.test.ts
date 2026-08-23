@@ -1,15 +1,26 @@
 /**
- * The pending-confirmations banner (ISSUE-241).
+ * Answering a confirmation from the chat surface.
  *
- * An inbound email held by the untrusted-sender gate belongs to no room — its
- * conversation token is a synthetic thread hash — and its body is deliberately
- * withheld from every transcript until the user approves it. So there was
- * nothing in web chat to render a card on, and the user was never asked. This
- * store slice is the surface for those questions.
+ * The banner this file used to cover is gone. `PendingConfirmations.svelte`,
+ * `GET /chat/confirmations` and the `pendingConfirmations` /
+ * `refreshConfirmations` / `answerConfirmation` slice were the web answer to
+ * ISSUE-241 — a question held by the inbound email gate belongs to no
+ * transcript, so it had nothing to hang a card on. The notification inbox
+ * carries the same question from every route in the app instead of only from
+ * `/chat`, which is what the strip could never do; the store-level assertions
+ * for it live in `notifications.test.ts` and the API-level ones in
+ * `tests/test_confirmation_surfaces.py`.
+ *
+ * What is left here is the part that was never the banner's: answering with a
+ * bare "yes" in the composer (ISSUE-243). The endpoint runs it inside the
+ * request like a `!command` — no task, an inline result — but unlike a command
+ * the exchange is *durable*: the server writes the answer and the ack into
+ * `messages`, so both come back over the room stream. The ids it returns are
+ * what stop that echo appending a second copy of each.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
-import type { ChatRoom, PendingConfirmation } from '$lib/api';
+import type { ChatRoom } from '$lib/api';
 
 const api = vi.hoisted(() => ({
   getChatConfig: vi.fn(),
@@ -24,10 +35,16 @@ const api = vi.hoisted(() => ({
   promoteChatRoom: vi.fn(),
   cancelChatTask: vi.fn(),
   confirmChatTask: vi.fn(),
-  listPendingConfirmations: vi.fn(),
   chatStreamUrl: vi.fn(),
+  // Deliberately still here, on a module that no longer exports it: the point
+  // of the removal test is that the store never reaches for it, and a spy that
+  // does not exist cannot record not being called.
+  listPendingConfirmations: vi.fn(),
   ChatRoomBusyError: class extends Error {},
 }));
+
+/** The rooms reconciler's own interval, restated from `chat.ts`. */
+const ROOMS_REFRESH_MS = 30000;
 
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/stores/persisted', () => ({
@@ -55,144 +72,78 @@ function room(id: number): ChatRoom {
   };
 }
 
-function gate(taskId: number, sender = 'stranger@evil.com'): PendingConfirmation {
-  return {
-    task_id: taskId,
-    source_type: 'email',
-    created_at: '2026-01-01T10:00:00Z',
-    prompt: `Email from unknown sender ${sender}`,
-    summary: `email from ${sender} — Invite`,
-    room_token: null,
-    email: { sender, subject: 'Invite', routing_method: 'plus_address' },
-  };
-}
-
 async function freshSession() {
   vi.resetModules();
   const mod = await import('./chat');
   return mod.getChatSession();
 }
 
-describe('chat store — pending confirmations', () => {
-  beforeEach(() => {
-    Object.values(api).forEach((v) => {
-      if (typeof v === 'function' && 'mockReset' in v)
-        (v as unknown as { mockReset(): void }).mockReset();
-    });
-    notices.notifyError.mockReset();
-    api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500 });
-    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
-    api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
-    api.markRoomRead.mockResolvedValue({ ok: true, last_read_message_id: 0 });
-    api.getTaskEvents.mockResolvedValue({ events: [], next_seq: 0 });
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+function resetMocks() {
+  Object.values(api).forEach((v) => {
+    if (typeof v === 'function' && 'mockReset' in v)
+      (v as unknown as { mockReset(): void }).mockReset();
   });
+  Object.values(notices).forEach((v) => v.mockReset());
+  api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500 });
+  api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+  api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
+  api.markRoomRead.mockResolvedValue({ ok: true, last_read_message_id: 0 });
+  api.getTaskEvents.mockResolvedValue({ events: [], next_seq: 0 });
+  Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+}
+
+describe('chat store — the banner is gone', () => {
+  beforeEach(resetMocks);
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it('seeds the banner on entry, so a gate parked before the tab opened is visible', async () => {
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(40122)] });
-    const s = await freshSession();
-    await s.init();
-    await Promise.resolve();
-
-    expect(api.listPendingConfirmations).toHaveBeenCalled();
-    expect(get(s.pendingConfirmations).map((c) => c.task_id)).toEqual([40122]);
+  it('exposes no confirmations slice', async () => {
+    // Asserted rather than merely deleted: a store still publishing
+    // `pendingConfirmations` would let a page mount a second answer path for a
+    // question the inbox already owns, and answering from one would leave the
+    // other stale — which is the failure the strip had against the
+    // in-transcript card, reintroduced against the bell.
+    const s = (await freshSession()) as unknown as Record<string, unknown>;
+    expect(s.pendingConfirmations).toBeUndefined();
+    expect(s.refreshConfirmations).toBeUndefined();
+    expect(s.answerConfirmation).toBeUndefined();
   });
 
-  it('confirming clears the card and releases the task', async () => {
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(1), gate(2)] });
-    api.confirmChatTask.mockResolvedValue({ status: 'ok' });
+  it('does not poll a listing endpoint on entry or on the rooms tick', async () => {
+    // The seed-on-entry call and the 30s rooms-reconciler call both went with
+    // the slice. The bell's count is polled by the root layout, from every
+    // route, and the room stream's `notifications` frame is the fast path.
+    //
+    // Asserted against a live mock that is still wired up, and driven past the
+    // reconciler's own interval. Asserting that the *mock* has no such key
+    // would pass whatever the store did, which is the shape of a test that
+    // cannot fail; this one fails against the pre-change store on both call
+    // sites.
+    vi.useFakeTimers();
+    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
     const s = await freshSession();
     await s.init();
-    await s.refreshConfirmations();
+    expect(api.listPendingConfirmations).not.toHaveBeenCalled();
 
-    await s.answerConfirmation(1, true);
+    await vi.advanceTimersByTimeAsync(ROOMS_REFRESH_MS * 2);
 
-    expect(api.confirmChatTask).toHaveBeenCalledWith(1);
-    expect(get(s.pendingConfirmations).map((c) => c.task_id)).toEqual([2]);
-  });
-
-  it('discarding cancels the task rather than confirming it', async () => {
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(5)] });
-    api.cancelChatTask.mockResolvedValue({ status: 'ok' });
-    const s = await freshSession();
-    await s.init();
-    await s.refreshConfirmations();
-
-    await s.answerConfirmation(5, false);
-
-    expect(api.cancelChatTask).toHaveBeenCalledWith(5);
-    expect(api.confirmChatTask).not.toHaveBeenCalled();
-    expect(get(s.pendingConfirmations)).toEqual([]);
-  });
-
-  it('keeps the card when the answer fails, so the question is not lost', async () => {
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(9)] });
-    api.confirmChatTask.mockRejectedValue(new Error('offline'));
-    const s = await freshSession();
-    await s.init();
-    await s.refreshConfirmations();
-
-    await s.answerConfirmation(9, true);
-
-    expect(get(s.pendingConfirmations).map((c) => c.task_id)).toEqual([9]);
-    expect(notices.notifyError).toHaveBeenCalled();
-  });
-
-  it('a failed poll leaves the banner alone and raises no notice', async () => {
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(3)] });
-    const s = await freshSession();
-    await s.init();
-    await s.refreshConfirmations();
-    expect(get(s.pendingConfirmations)).toHaveLength(1);
-
-    api.listPendingConfirmations.mockRejectedValue(new Error('network'));
-    await s.refreshConfirmations();
-
-    expect(get(s.pendingConfirmations)).toHaveLength(1);
-    expect(notices.notifyError).not.toHaveBeenCalled();
+    expect(api.listPendingConfirmations).not.toHaveBeenCalled();
+    s.teardown();
   });
 });
 
-/**
- * Answering with a bare "yes" from the composer (ISSUE-243).
- *
- * The endpoint runs it inside the request like a `!command` — no task, an
- * inline result — but unlike a command the exchange is *durable*: the server
- * writes the answer and the ack into `messages`, so both come back over the
- * room stream. The ids it returns are what stop that echo appending a second
- * copy of each.
- */
 describe('chat store — answering a confirmation from the composer', () => {
-  beforeEach(() => {
-    Object.values(api).forEach((v) => {
-      if (typeof v === 'function' && 'mockReset' in v)
-        (v as unknown as { mockReset(): void }).mockReset();
-    });
-    notices.notifyError.mockReset();
-    api.getChatConfig.mockResolvedValue({ client_poll_interval_ms: 1500 });
-    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
-    api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
-    api.markRoomRead.mockResolvedValue({ ok: true, last_read_message_id: 0 });
-    api.getTaskEvents.mockResolvedValue({ events: [], next_seq: 0 });
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
-  });
+  beforeEach(resetMocks);
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
   async function answeredSession() {
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [gate(40122)] });
     const s = await freshSession();
     await s.init();
-    await s.refreshConfirmations();
-    expect(get(s.pendingConfirmations)).toHaveLength(1);
 
     api.sendChatMessage.mockResolvedValue({
       ok: true,
@@ -201,7 +152,6 @@ describe('chat store — answering a confirmation from the composer', () => {
       inline_result: 'Confirmed.',
       command_data: { kind: 'confirmation_answered', user_msg_id: 71, system_msg_id: 72 },
     });
-    api.listPendingConfirmations.mockResolvedValue({ confirmations: [] });
     await s.send('yes');
     return s;
   }
@@ -215,11 +165,7 @@ describe('chat store — answering a confirmation from the composer', () => {
     expect(user?.msgId).toBe(71);
     expect(ack?.text).toBe('Confirmed.');
     expect(ack?.msgId).toBe(72);
-  });
-
-  it('clears the banner immediately rather than at the next poll', async () => {
-    const s = await answeredSession();
-    expect(get(s.pendingConfirmations)).toEqual([]);
+    s.teardown();
   });
 
   it('an ordinary inline command is untouched by the stamping', async () => {
@@ -237,5 +183,6 @@ describe('chat store — answering a confirmation from the composer', () => {
     const ack = get(s.messages).find((m) => m.role === 'system');
     expect(ack?.text).toBe('pong');
     expect(ack?.msgId).toBeUndefined();
+    s.teardown();
   });
 });

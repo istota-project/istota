@@ -31,6 +31,7 @@ const api = vi.hoisted(() => ({
   cancelChatTask: vi.fn(),
   confirmChatTask: vi.fn(),
   chatStreamUrl: vi.fn(() => '/task-stream'),
+  getNotificationCounts: vi.fn(),
   ChatRoomBusyError: class extends Error {},
 }));
 
@@ -686,6 +687,71 @@ describe('chat store — live room stream', () => {
       room: { id: 1, token: 't1', name: 'new name', origin: 'web', model: null, effort: null },
     });
     expect(get(s.rooms)[0].name).toBe('new name');
+    s.teardown();
+  });
+
+  /** A fresh notification store bound to the session just created.
+   *
+   * `freshSession` resets the module registry, so this has to be imported
+   * *after* it or the frame would publish into a different instance of the
+   * store than the one under assertion — which is also exactly the bug a
+   * caller wiring this up in an app would hit.
+   */
+  async function startNotifications() {
+    api.getNotificationCounts.mockResolvedValue({ open: 0, actionable: 0 });
+    const mod = await import('./notifications');
+    mod.startNotificationPoll();
+    return mod;
+  }
+
+  it('publishes a notifications frame into the bell', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    const notifications = await startNotifications();
+    await s.init();
+
+    es.current!.emit('notifications', { open: 3, actionable: 2 });
+
+    expect(get(notifications.notificationCounts)).toEqual({ open: 3, actionable: 2 });
+    notifications.stopNotificationPoll();
+    s.teardown();
+  });
+
+  it('ignores a notifications frame once the poll has stopped', async () => {
+    // An EventSource outliving a logout by a tick must not put a badge back
+    // over a page that has logged out — the same guard `generation` gives a
+    // request already on the wire.
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    const notifications = await startNotifications();
+    await s.init();
+    notifications.stopNotificationPoll();
+
+    es.current!.emit('notifications', { open: 9, actionable: 9 });
+
+    expect(get(notifications.notificationCounts)).toEqual({ open: 0, actionable: 0 });
+    s.teardown();
+  });
+
+  it('a malformed notifications frame does not kill the stream', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    const notifications = await startNotifications();
+    await s.init();
+
+    for (const fn of (es.current as any).listeners.get('notifications') ?? []) {
+      fn({ data: 'not json' });
+    }
+    es.current!.emit('message', row(10, 't1', { text: 'still here' }), '10');
+
+    expect(get(s.messages).some((m) => m.text === 'still here')).toBe(true);
+    notifications.stopNotificationPoll();
     s.teardown();
   });
 

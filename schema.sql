@@ -1128,3 +1128,57 @@ CREATE TABLE IF NOT EXISTS task_usage_models (
 
 CREATE INDEX IF NOT EXISTS idx_task_usage_models_parent ON task_usage_models(task_usage_id);
 CREATE INDEX IF NOT EXISTS idx_task_usage_models_model  ON task_usage_models(model);
+
+-- The notification inbox: what is currently waiting on a user.
+--
+-- Distinct from `src/istota/notifications.py`, which is *delivery*. This table
+-- is the durable open set behind the bell; raising a notification writes a row
+-- here and, separately, fans out through the delivery layer. A user with no
+-- alerts channel loses nothing, because the bell is always there.
+--
+-- `title` / `body` are fallback text, not the authoritative render: a row whose
+-- source has been unregistered still renders something, and the delivery
+-- fan-out needs text without loading a resolver. The rich render comes from
+-- `params` through the source's resolver at read time.
+CREATE TABLE IF NOT EXISTS notifications (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           TEXT NOT NULL,
+    source            TEXT NOT NULL,      -- registered producer id
+    dedup_key         TEXT NOT NULL,      -- stable identity of the thing being notified about
+    object_type       TEXT,               -- 'task', 'draft', 'scheduled_job', 'health_panel', 'secret'
+    object_id         TEXT,               -- opaque to the store; validated by the resolver
+    severity          TEXT NOT NULL DEFAULT 'info',    -- info | success | warning | danger
+    actionable        INTEGER NOT NULL DEFAULT 0,
+    title             TEXT NOT NULL,
+    body              TEXT NOT NULL DEFAULT '',
+    params            TEXT NOT NULL DEFAULT '{}',      -- JSON, owned by the source
+    link              TEXT,                            -- in-app route; validated on read
+    room_token        TEXT,                            -- provenance only
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- Set only when a send actually reached a destination. `send_notification`
+    -- returns False when none is configured, and suppressing a re-delivery on
+    -- the strength of a send that reached nobody is the exact failure the inbox
+    -- exists to fix.
+    last_delivered_at TEXT,
+    occurrences       INTEGER NOT NULL DEFAULT 1,
+    seen_at           TEXT,
+    state             TEXT NOT NULL DEFAULT 'open',    -- open | resolved | dismissed | stale
+    resolved_at       TEXT,
+    resolved_by       TEXT,                            -- 'web' | 'talk' | 'email' | 'cli' | 'system'
+    UNIQUE (user_id, source, dedup_key)
+);
+
+-- Ordering is `updated_at DESC`, not `created_at DESC`. A reopen preserves
+-- `created_at` and refreshes `updated_at`; under `created_at` ordering an old
+-- row reopened today would deliver a push, bump the badge and sort below fifty
+-- newer rows — unreachable in the panel, and never seen means never closed for
+-- an auto-resolving source.
+CREATE INDEX IF NOT EXISTS idx_notifications_user_state
+    ON notifications (user_id, state, updated_at DESC);
+-- Leads with `user_id`, and so does `resolve_by_object`. Panel ids come from
+-- the per-user health module DB, where every user has a panel `12`, so a close
+-- path keyed on (source, object_type, object_id) alone would resolve every
+-- other user's row when one user confirms theirs.
+CREATE INDEX IF NOT EXISTS idx_notifications_object
+    ON notifications (user_id, source, object_type, object_id);

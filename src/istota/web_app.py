@@ -2952,6 +2952,40 @@ def _drafts_snapshot(username: str) -> list[dict]:
     return sorted(out, key=lambda d: d["id"])
 
 
+def _notifications_snapshot(username: str) -> dict[str, int]:
+    """`{"open": N, "actionable": M}` for the room stream's own frame.
+
+    The bell's number comes from a 30-second poll in the root layout, which is
+    the contract and works on every route. This is the fast path for the one
+    route that already holds a stream open, so a confirmation parked while the
+    user is reading a room lights the bell in about a second instead of thirty.
+
+    Plain SQL and no resolvers, the same as `GET /notifications/count` — this
+    fires on a timer, on every open connection, and a resolver pass here would
+    open per-user module DBs on each tick. The panel's own open is what runs the
+    liveness pass and makes the number exact.
+
+    On the stream's 2s busy timeout rather than the default thirty: a room-check
+    tick must not park the generator on the scheduler's write lock. It rides the
+    same tick as the room and draft diffs, so `room_stream_room_check_seconds =
+    0` disables it too — which is why nothing may be tuned down on its account.
+
+    **`strict=True`, so a failed read raises instead of answering zero.** The
+    store never raises by default, which is right for a producer and wrong here:
+    this pair is *pushed*, the frame is a diff against a baseline, and a `{0, 0}`
+    handed back for a two-second busy timeout differs from the real counts, goes
+    out, and blanks the bell over items still waiting — and the low timeout makes
+    that more likely, not less. Raising puts it on the generator's skip-this-tick
+    path, which is what `_room_events_batch` and `_drafts_snapshot` already do.
+    """
+    from . import db, notification_store  # noqa: PLC0415
+
+    with db.get_db(
+        _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
+    ) as conn:
+        return notification_store.counts(conn, username, strict=True)
+
+
 def _room_delta_frames(before: dict[str, dict], after: dict[str, dict]) -> list[dict]:
     """`room` frame payloads for what changed between two snapshots — a rename,
     a model/effort change, or a room appearing / disappearing on another device
@@ -3062,6 +3096,11 @@ async def chat_room_stream(
         # is pushed, which is what covers one held between the client's own
         # `GET /chat/drafts` and this stream opening.
         drafts: list[dict] = []
+        # Seeded at zero for the same reason, and with one extra: a user who
+        # already has open rows when the connection opens differs from this and
+        # gets a frame immediately, instead of waiting up to thirty seconds for
+        # the layout poll to be the first thing that tells them.
+        notif_counts: dict[str, int] = {"open": 0, "actionable": 0}
         _room_stream_conn_delta(1)
         try:
             while True:
@@ -3144,6 +3183,26 @@ async def chat_room_stream(
                         drafts = held
                         yield ("event: drafts\n"
                                f"data: {json.dumps({'drafts': held})}\n\n")
+                        last_frame = time.monotonic()
+
+                    # Added *beside* the drafts frame, not in place of it. The
+                    # inline `DraftCard` under the turn that composed a draft
+                    # survives the inbox, and `GET /chat/events` carries the
+                    # same `drafts` payload for the documented polling
+                    # fallback — so that frame still has consumers.
+                    try:
+                        fresh_counts = await asyncio.to_thread(
+                            _notifications_snapshot, username,
+                        )
+                    except Exception:  # noqa: BLE001 — best-effort, like drafts
+                        fresh_counts = None
+                    if fresh_counts is not None and fresh_counts != notif_counts:
+                        # No `id:`. Auxiliary, like `room` and `drafts`: moving
+                        # EventSource's resume cursor off the message tail here
+                        # would strand it.
+                        notif_counts = fresh_counts
+                        yield ("event: notifications\n"
+                               f"data: {json.dumps(fresh_counts)}\n\n")
                         last_frame = time.monotonic()
 
                 if time.monotonic() - last_frame >= keepalive:
@@ -3758,7 +3817,7 @@ def _chat_answer_confirmation(
         if res.task is None:
             return None
 
-        ack = confirmations.apply_answer(conn, res.task, answer, _config)
+        ack = confirmations.apply_answer(conn, res.task, answer, _config, by="web")
         user_msg_id, system_msg_id = confirmations.record_exchange(
             conn, token, answer_text=text, ack=ack, origin_surface="web",
             client_msg_id=client_msg_id, answered_by=username,
@@ -5008,7 +5067,7 @@ def _chat_create_web_task(
     it must be a message in *this* room, and its body — never a client-supplied
     quote — is what gets snapshotted onto the task.
     """
-    from . import db
+    from . import confirmations, db
     from .transport import record_inbound
     chat = _config.web.chat
     with db.get_db(_config.db_path) as conn:
@@ -5061,9 +5120,10 @@ def _chat_create_web_task(
         # inherits the origin room as its token and so does park here, and since
         # ISSUE-254 a *self-addressed* one has no row in the room either, so
         # cancelling it discards mail the user cannot see in this transcript.
-        # What keeps that from being a defect is the user-scoped
-        # `/chat/confirmations` banner below, which is deliberately not
-        # room-scoped and shows the question wherever the user is looking.
+        # What keeps that from being a defect is the notification inbox, which
+        # is user-scoped rather than room-scoped and shows the question from
+        # any route in the app — the bell replaced the `/chat/confirmations`
+        # banner that used to make the same argument from above the transcript.
         # Tightening this to "tasks with a `role='user'` row in the room" would
         # make the comment true of the cancel itself. And it is skipped on a
         # **replay**:
@@ -5073,7 +5133,9 @@ def _chat_create_web_task(
         # Ordered before `record_inbound` for the same reason Talk orders it
         # that way — the new task must not be a candidate for its own cancel.
         if not replaying:
-            cancelled = db.cancel_pending_confirmations(conn, token, username)
+            cancelled = confirmations.cancel_for_conversation(
+                conn, token, username, by="web",
+            )
             if cancelled:
                 logger.info(
                     "Cancelled %d pending confirmation(s) in %s for %s (new message)",
@@ -6211,72 +6273,7 @@ def _chat_confirm_task(task_id: int) -> None:
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
-        confirmations.approve(conn, task, config=_config)
-
-
-def _chat_pending_confirmations(username: str) -> list[dict]:
-    """Every question waiting on this user, oldest first.
-
-    The API equivalent of `handle_confirmation_reply`'s Path C, and the reason
-    it is its own endpoint rather than a widening of the room history query: the
-    aux gap-fill renders `tasks.prompt`, which for a gated email is exactly the
-    untrusted body the gate is holding back. `_AUX_ROOM_SCOPE` admits an email
-    task only through its mirrored `role='user'` row, and a gated turn has none
-    (`suppress_transcript_mirror`), so that stays true now the exchange has a
-    room at all (ISSUE-247).
-
-    What ships is the bot-composed prompt plus the sender / subject / routing
-    method off `processed_emails`. Sender and subject are still attacker
-    supplied, so the client renders them as text, never as markup.
-    """
-    from . import confirmations, db
-    from .transport.ingest import ROOM_SURFACES
-    out: list[dict] = []
-    with db.get_db(_config.db_path) as conn:
-        for task in confirmations.pending_for_user(conn, username):
-            # A turn that started on a room surface already renders its own
-            # `ConfirmationCard` in the transcript (its `confirmation` event
-            # replays on the task stream). Listing it here too would show one
-            # question twice with two answer paths, and answering from the
-            # banner leaves the card stale. `ROOM_SURFACES` is the same set
-            # `record_inbound` uses to decide who owns a room.
-            if (task.source_type or "") in ROOM_SURFACES:
-                continue
-            email: dict | None = None
-            if task.source_type == "email":
-                record = db.get_email_for_task(conn, task.id)
-                if record is not None:
-                    email = {
-                        "sender": record.sender_email,
-                        "subject": record.subject,
-                        "routing_method": record.routing_method,
-                    }
-            out.append({
-                "task_id": task.id,
-                "source_type": task.source_type,
-                "created_at": _iso_utc(task.created_at),
-                "prompt": task.confirmation_prompt or "",
-                "summary": confirmations.describe(conn, task),
-                "room_token": (
-                    task.conversation_token
-                    if db.get_room(conn, task.conversation_token or "") is not None
-                    else None
-                ),
-                "email": email,
-            })
-    return out
-
-
-@api_router.get("/chat/confirmations")
-async def chat_pending_confirmations(user: dict = Depends(_require_api_auth)):
-    """Questions the user has been asked but not answered, on any surface.
-
-    Unconditionally reachable from web chat — it needs no routing
-    configuration, which is what makes a web-only user able to see an email
-    gate at all (ISSUE-241).
-    """
-    items = await asyncio.to_thread(_chat_pending_confirmations, user["username"])
-    return {"confirmations": items}
+        confirmations.approve(conn, task, config=_config, by="web")
 
 
 # Ceiling on an edited draft body. Not a policy about email length — it exists
@@ -6480,7 +6477,7 @@ async def chat_approve_draft(
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
         message_id = await asyncio.to_thread(
-            outbound_drafts.release, _config, draft_id,
+            outbound_drafts.release, _config, draft_id, by="web",
         )
     except outbound_drafts.DraftSentButUnrecorded as e:
         # Checked ahead of DraftError, which it subclasses. The mail is gone;
@@ -6635,7 +6632,7 @@ async def chat_discard_draft(
 
     def _discard() -> None:
         with db.get_db(_config.db_path) as conn:
-            outbound_drafts.discard(conn, draft_id)
+            outbound_drafts.discard(conn, draft_id, by="web")
 
     try:
         await asyncio.to_thread(_discard)
@@ -6675,7 +6672,7 @@ def _chat_cancel_task(task_id: int) -> None:
             # Talk poller and `!confirm` do.
             task = db.get_task(conn, task_id)
             if task is not None:
-                confirmations.decline(conn, task)
+                confirmations.decline(conn, task, by="web")
             return
         conn.execute(
             "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
@@ -6712,6 +6709,191 @@ async def chat_cancel_task(
     await _authorize_task_access(task_id, user)
     await asyncio.to_thread(_chat_cancel_task, task_id)
     return {"status": "cancelling"}
+
+
+# --- the notification inbox ----------------------------------------------
+#
+# Four routes over `notification_store`, all scoped by the *session's* user id
+# and never by a value off the request. There is deliberately no generic
+# `/act` dispatcher: an action's `endpoint` is an existing producer path
+# (`/chat/tasks/{id}/confirm`, `/chat/drafts/{id}/approve`) and the client calls
+# it directly, because those handlers already own their authorization and a
+# dispatcher would be a second, weaker gate in front of them.
+#
+# Every path in this block is written apiFetch-relative, which is what the
+# client's fetcher and `NotificationAction.endpoint` both take. Writing them as
+# `/api/notifications/...` beside producer routes spelled `/chat/...` yields
+# `/istota/api/api/notifications/...` through the same fetcher.
+
+# The most ids one `seen` batch may carry. Not an arbitrary ceiling: `list_open`
+# clamps its render limit to `notification_store.LIVENESS_SCAN_MAX`, so no honest
+# client can ever have rendered more rows than that, and anything above it is a
+# list the caller did not render arriving at a write path. Restated rather than
+# imported because a top-level import down here trips E402;
+# `test_web_notifications.py` pins the two together so the copy cannot drift.
+_SEEN_BATCH_MAX = 500
+
+# Ceiling on one `updated_at` in that batch. The value is only ever compared
+# against `db.iso_utc_now()`, which is 24 characters, so anything longer cannot
+# match any stored row — it is not a timestamp, it is a client putting an
+# unbounded string on a write path. Generous against the format rather than
+# tight to it, since the column also holds the schema default's spelling.
+_SEEN_VERSION_MAX_CHARS = 64
+
+
+def _notification_counts(username: str) -> dict:
+    from . import db, notification_store  # noqa: PLC0415
+
+    with db.get_db(_config.db_path) as conn:
+        return notification_store.counts(conn, username)
+
+
+def _notification_list(username: str, filter_: str, limit) -> dict:
+    from . import db, notification_store  # noqa: PLC0415
+
+    with db.get_db(_config.db_path) as conn:
+        rendered, total_open = notification_store.list_open(
+            _config, conn, username, filter=filter_, limit=limit,
+        )
+    return {
+        "notifications": [item.to_dict() for item in rendered],
+        "total_open": total_open,
+    }
+
+
+def _notification_dismiss(username: str, notification_id: int) -> bool:
+    from . import db, notification_store  # noqa: PLC0415
+
+    with db.get_db(_config.db_path) as conn:
+        return notification_store.dismiss(
+            conn, notification_id, username, by="web",
+        )
+
+
+def _notification_mark_seen(username: str, seen: list[tuple[int, str]]) -> None:
+    from . import db, notification_store  # noqa: PLC0415
+
+    with db.get_db(_config.db_path) as conn:
+        notification_store.mark_seen(conn, username, seen)
+
+
+@api_router.get("/notifications/count")
+async def notifications_count(user: dict = Depends(_require_api_auth)):
+    """`{"open": N, "actionable": M}` — what the bell renders.
+
+    Plain SQL, no resolvers: the root layout polls this every thirty seconds
+    from every route, and a resolver pass on a timer would open per-user module
+    DBs repeatedly. It is exact immediately after any panel open, which runs the
+    liveness pass, and can briefly over-count between one open and the next if a
+    producer missed a close.
+    """
+    return await asyncio.to_thread(_notification_counts, user["username"])
+
+
+@api_router.get("/notifications")
+async def notifications_list(
+    filter: str = Query("all"),  # noqa: A002 — the query param's name is the API
+    limit: str = Query("50"),
+    user: dict = Depends(_require_api_auth),
+):
+    """The panel payload: the rendered rows plus the honest open total.
+
+    `total_open` is the post-sweep count of the *whole* open set, not of the
+    filtered page — the client derives both tab labels from it and the rows it
+    got back, so "Needs action (3)" can never sit above a visibly shorter list.
+
+    **`limit` is taken as a string and handed to the store unparsed.** The clamp
+    and the coercion live in `list_open`, in one place, so a route-level `int`
+    bound cannot drift from the store's own ceiling; and a junk `?limit=` then
+    degrades to the default rather than 422-ing, which on a read surface would
+    read to the user as "nothing is waiting on you". Same for an unrecognised
+    `filter`, which the store folds onto "all".
+    """
+    return await asyncio.to_thread(
+        _notification_list, user["username"], filter, limit,
+    )
+
+
+@api_router.post("/notifications/{notification_id}/dismiss")
+async def notifications_dismiss(
+    notification_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Clear a row by hand. "Not now", not "never again" — a later raise reopens it.
+
+    A row belonging to another user is a **404, never a 403**: the row's
+    existence is not the other user's business to confirm, and the same reply
+    covers an id that never existed. A second dismiss of an already-dismissed
+    row is a 200, so a duplicate tap reports what happened rather than an error.
+
+    **The 404 also covers a store failure**, and that conflation is worth
+    stating rather than leaving to be discovered. `notification_store.dismiss`
+    never raises — it logs at WARNING and returns False — so a swallowed
+    `sqlite3.OperationalError` is indistinguishable here from "not yours". The
+    user is then told the notification is gone while the row is still open. It
+    is left this way because the alternative reply is worse: a 500 on a
+    transient lock would put an error banner over a panel that is about to
+    correct itself, and the client refreshes after every action, so the row
+    reappears on its own. The log line is where that case is diagnosed.
+    """
+    owned = await asyncio.to_thread(
+        _notification_dismiss, user["username"], notification_id,
+    )
+    if not owned:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"status": "dismissed", "notification_id": notification_id}
+
+
+@api_router.post("/notifications/seen")
+async def notifications_seen(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Stamp `seen_at` on what the panel rendered, and close the fire-and-forget rows.
+
+    The body is `{"seen": [{"id": 1, "updated_at": "..."}]}` — **pairs, not bare
+    ids**. The `updated_at` is the version the client actually rendered, and
+    `mark_seen` resolves an `auto_resolve_on_seen` row only where the stored
+    value still matches it. Without that, two sequences close an occurrence
+    nobody saw: a row bumped between the fetch and this POST (the bump delivers
+    nothing, so the new occurrence would vanish silently), and a late or retried
+    POST arriving after the row was reopened and re-delivered.
+
+    An id belonging to another user is skipped inside the store rather than
+    refused here — a partial batch is not worth failing a panel open over.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict) or not isinstance(data.get("seen"), list):
+        return JSONResponse(
+            {"error": 'body must be {"seen": [{"id": N, "updated_at": "..."}]}'},
+            status_code=422,
+        )
+    entries = data["seen"]
+    if len(entries) > _SEEN_BATCH_MAX:
+        return JSONResponse(
+            {"error": "too many ids", "max": _SEEN_BATCH_MAX}, status_code=422,
+        )
+    seen: list[tuple[int, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return JSONResponse({"error": "malformed entry"}, status_code=422)
+        notification_id = entry.get("id")
+        updated_at = entry.get("updated_at")
+        # `bool` is an `int` subclass, and `True` would index a row.
+        if isinstance(notification_id, bool) or not isinstance(notification_id, int):
+            return JSONResponse({"error": "malformed entry"}, status_code=422)
+        if not isinstance(updated_at, str):
+            return JSONResponse({"error": "malformed entry"}, status_code=422)
+        if len(updated_at) > _SEEN_VERSION_MAX_CHARS:
+            return JSONResponse({"error": "malformed entry"}, status_code=422)
+        seen.append((notification_id, updated_at))
+    await asyncio.to_thread(_notification_mark_seen, user["username"], seen)
+    return {"status": "ok", "count": len(seen)}
 
 
 def _chat_attachment_dir(username: str, day: str) -> Path:

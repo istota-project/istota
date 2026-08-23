@@ -27,8 +27,6 @@ import {
   getTaskEvents,
   chatRoomStreamUrl,
   type ChatRoomEvent,
-  listPendingConfirmations,
-  type PendingConfirmation,
   listOutboundDrafts,
   approveOutboundDraft,
   discardOutboundDraft,
@@ -50,6 +48,7 @@ import {
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
+import { applyNotificationCounts } from '$lib/stores/notifications';
 import { isKnownCommand, resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
 import {
   applyEvent as applySegmentEvent,
@@ -292,14 +291,6 @@ export interface ChatSession {
   cancel: () => Promise<void>;
   confirm: (cid: number, taskId: number) => Promise<void>;
   reject: (cid: number, taskId: number) => Promise<void>;
-  // Questions waiting on the user that no room transcript can render: an
-  // inbound email held by the untrusted-sender gate carries a synthetic thread
-  // token, so it belongs to no room, and its body is withheld by design
-  // (ISSUE-241). The banner above the transcript is the surface for those, and
-  // it is what makes a web-only user able to answer at all.
-  pendingConfirmations: Writable<PendingConfirmation[]>;
-  refreshConfirmations: () => Promise<void>;
-  answerConfirmation: (taskId: number, approve: boolean) => Promise<void>;
   // Outbound mail the approval gate is holding. User-scoped rather than
   // room-scoped — rooms are shared and a co-member must not see the body — so
   // the client places each card by the `room_token` on the draft.
@@ -800,39 +791,6 @@ function createSession(): ChatSession {
     });
   }
 
-  // ---- Pending confirmations (the cross-room banner) ----
-
-  const pendingConfirmations = writable<PendingConfirmation[]>([]);
-
-  async function refreshConfirmations() {
-    try {
-      const res = await listPendingConfirmations();
-      pendingConfirmations.set(res.confirmations ?? []);
-    } catch {
-      // Never a notice: the banner is a supplement to whatever surface the
-      // prompt was delivered on, and a failed poll is not a thing the user did.
-      // The next tick retries.
-    }
-  }
-
-  async function answerConfirmation(taskId: number, approve: boolean) {
-    // Pessimistic removal: a card that vanished and came back would read as the
-    // question having been asked twice.
-    try {
-      if (approve) await confirmChatTask(taskId);
-      else await cancelChatTask(taskId);
-    } catch {
-      notifyError('Could not answer that request. Try again.', {
-        key: 'chat:confirmation',
-      });
-      return;
-    }
-    pendingConfirmations.update((list) => list.filter((c) => c.task_id !== taskId));
-    // The approved task starts running in a room the user may be watching; the
-    // room stream carries it from here.
-    void refreshRooms();
-  }
-
   // ---- Held outbound drafts ----
 
   const outboundDrafts = writable<OutboundDraft[]>([]);
@@ -1026,7 +984,6 @@ function createSession(): ChatSession {
     if (roomsTimer) return;
     roomsTimer = setInterval(() => {
       void refreshRooms();
-      void refreshConfirmations();
     }, ROOMS_REFRESH_MS);
   }
 
@@ -1529,6 +1486,21 @@ function createSession(): ChatSession {
           /* swallow */
         }
       });
+      // The bell's fast path, and the one frame here that publishes outside the
+      // chat session: this route already holds a stream open, so a question
+      // parked while the user is reading a room lights the bell in about a
+      // second rather than waiting on the root layout's thirty-second poll.
+      // That poll is still the contract — this frame rides the room-check tick,
+      // which `room_stream_room_check_seconds = 0` disables outright.
+      es.addEventListener('notifications', (e: MessageEvent) => {
+        if (e.data == null) return;
+        lastRoomEventAt = Date.now();
+        try {
+          applyNotificationCounts(JSON.parse(e.data));
+        } catch {
+          /* swallow */
+        }
+      });
       // Auxiliary frame — it carries no SSE `id:` (that cursor belongs to the
       // message tail), so the deletion cursor travels inside the payload.
       es.addEventListener('message_deleted', (e: MessageEvent) => {
@@ -1957,14 +1929,11 @@ function createSession(): ChatSession {
       // Slow metadata reconciler (see ROOMS_REFRESH_MS) — the stream is the
       // live path.
       startRoomsRefresh();
-      // A gate parked before this tab was open has no stream frame to arrive
-      // on, so the banner is seeded on entry rather than only on the next tick.
-      void refreshConfirmations();
-      // Same reason, and one more: the drafts frame is *diffed* against a
-      // baseline seeded empty, so an instance where the set has not changed
-      // since the connection opened pushes no frame at all. Without this seed a
-      // draft held before the tab opened would wait for the next change to
-      // something else.
+      // Seeded on entry because the drafts frame is *diffed* against a baseline
+      // seeded empty, so an instance where the set has not changed since the
+      // connection opened pushes no frame at all. Without this seed a draft
+      // held before the tab opened would wait for the next change to something
+      // else.
       void refreshDrafts();
       if (typeof document !== 'undefined') {
         removeVisibilityListener(); // never stack two
@@ -2667,10 +2636,13 @@ function createSession(): ChatSession {
           m.msgId = answered.system_msg_id!;
         });
       }
-      // The banner above the transcript holds the same question. Clear it
-      // now rather than at the next 30s tick — an answer that works while
-      // the card lingers reads as the answer not having taken.
-      void refreshConfirmations();
+      // The bell holds the same question, and `confirmations.apply_answer`
+      // has just closed its row. Nothing is refreshed from here: the count
+      // is the notification store's, which the root layout polls on every
+      // route, and on this one the room stream's `notifications` frame
+      // carries it on the next room-check tick. Reaching into that store
+      // from the chat session would make the chat route the one place the
+      // badge is maintained by hand.
     }
     if (cd && cd.kind === 'steer_recorded') {
       // Durable in the same way and stamped for the same reason: `cmd_steer`
@@ -2913,9 +2885,6 @@ function createSession(): ChatSession {
     cancel,
     confirm,
     reject,
-    pendingConfirmations,
-    refreshConfirmations,
-    answerConfirmation,
     outboundDrafts,
     refreshDrafts,
     applyDraftsSnapshot,

@@ -382,9 +382,9 @@ describe('the other blocks in the chip slot’s position', () => {
     expect(decl('.content > :global(.draft-card)', 'margin-top')).toBe(
       decl('.chip-slot.gap-above', 'margin-top'),
     );
-    // Scoped to this row, not written on the component: `DraftCard` is also
-    // rendered into the loose-drafts list, a flex column already spacing its
-    // own children, where a margin on the card would stack with the gap.
+    // Scoped to this row, not written on the component: `DraftCard` also takes
+    // a `banner` placement, whose container is a flex column already spacing
+    // its own children, where a margin on the card would stack with the gap.
     expect(readFileSync(resolve(here, 'DraftCard.svelte'), 'utf8')).not.toMatch(
       /\.draft-card\s*\{[^}]*margin/,
     );

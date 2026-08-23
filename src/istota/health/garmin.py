@@ -551,6 +551,28 @@ def _validate_db_path(db_path: Path | None) -> Path:
     return Path(db_path)
 
 
+def _close_reconnect_notification(db_path: Path, user_id: str) -> None:
+    """Close the inbox row a failed sync raised, now that the state has ended.
+
+    The resolver is the backstop for this and would flip the row `stale` on the
+    next panel read anyway; closing it here makes it `resolved` by the thing that
+    actually fixed it, and does it without waiting for a read. Function-local
+    import and a never-raises callee, because this module is reached from the
+    sandboxless skill CLI as well as from the daemon.
+
+    ``resolved_by='system'``, and there is no parameter for it. Both call sites
+    have several callers between them — an explicit reconnect from the settings
+    page, the CLI, and a token rotation the sync engine writes back on its own —
+    and nothing at this depth can tell which surface is above it. Naming one
+    would be a guess recorded as a fact.
+    """
+    from istota.notification_resolvers import connected_service
+
+    connected_service.close_for_service(
+        db_path, user_id, SECRET_SERVICE, by="system",
+    )
+
+
 def store_tokens(
     db_path: Path, user_id: str, tokens: dict[str, Any],
     *, email: str | None = None,
@@ -572,6 +594,7 @@ def store_tokens(
         )
     # Any prior error becomes stale on a successful (re)connect.
     secrets_store.delete_secret(db_path, user_id, SECRET_SERVICE, SECRET_KEY_ERROR)
+    _close_reconnect_notification(db_path, user_id)
 
 
 def load_tokens(db_path: Path, user_id: str) -> dict[str, Any] | None:
@@ -663,6 +686,10 @@ def clear_tokens(db_path: Path, user_id: str) -> None:
     db_path = _validate_db_path(db_path)
     for key in (SECRET_KEY_BLOB, SECRET_KEY_LAST_SYNC, SECRET_KEY_ERROR):
         secrets_store.delete_secret(db_path, user_id, SECRET_SERVICE, key)
+    # Disconnecting on purpose ends the condition just as reconnecting does:
+    # there is nothing left to reconnect, so an open "needs reconnecting" row is
+    # the bot asking for something the user has already answered.
+    _close_reconnect_notification(db_path, user_id)
 
 
 def mark_token_error(db_path: Path, user_id: str, reason: str) -> None:
