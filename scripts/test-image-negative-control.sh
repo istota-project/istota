@@ -98,8 +98,15 @@ echo "[control] Read the failures above and confirm they name the missing path."
 devbox_base_tag="$(
     ISTOTA_TEST_PLATFORM="$platform" uv run python -c '
 import os, sys
-sys.path.insert(0, "tests")
-from image.conftest import _tag_for, DEVBOX_DOCKERFILE, resolve_platform
+# Spelled exactly as the istota half above, and for the reason stated there:
+# `tests/image/conftest.py` reaches `resolve_platform` in the rootdir conftest
+# by relative import, so a flat `image.conftest` is a top-level package with
+# nothing above it to import from. This half carried the flat spelling and
+# raised ImportError on every run — and with `set -e` on an assignment from a
+# command substitution, that took the script down before a single devbox
+# control was built, leaving a run that read as clean and complete.
+sys.path.insert(0, ".")
+from tests.image.conftest import _tag_for, DEVBOX_DOCKERFILE, resolve_platform
 
 
 class _Config:
