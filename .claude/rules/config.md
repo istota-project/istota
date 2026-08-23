@@ -375,7 +375,7 @@ written and never refreshed.
   The default is 30 minutes rather than the 5 it shipped with, because the endpoint rate-limits a deployment that polls it harder — and the shortest window it reports is five hours, so a faster poll buys no accuracy for the extra requests. A production host running the 5-minute default never obtained a single successful reading: it was answered with `HTTP 429` and a `Retry-After` of 2327 seconds, retried 7 times inside that window, and stayed limited. Which is the other half of the fix — a stated `Retry-After` now overrides this floor, so this number is the *minimum* backoff after a failure and no longer the whole of it. See `MAX_RETRY_AFTER_SECONDS` in `subscription_usage.py` for the ceiling on what a server can ask for.
 - `subscription_usage_timeout_seconds: float = 10.0` — matches `doctor.PROBE_TIMEOUT`. Floored at 1.
 - `subscription_usage_warn_percent: float = 80.0` / `subscription_usage_high_percent: float = 95.0` — our own thresholds, applied identically by doctor and the admin tile (the server's own `severity` is carried on the wire but does not drive either). Doctor WARNs and the tile turns amber at or above `warn`, red at or above `high`. **Never a `FAIL` at any utilization** — a busy plan is a fact about the plan, not a defect in the host, and a `FAIL` would exit `istota doctor` non-zero and alert every admin.
-- `subscription_usage_stale_after_seconds: int = 3600` — a stale-cache reading older than this WARNs rather than being reported as current.
+- `subscription_usage_stale_after_seconds: int = 3600` — a stale-cache reading older than this is reported `SKIP` rather than as a current one. Not `WARN`: a reading this old means the fetches are failing, which on a server shape is the steady state rather than a fault, so there is nothing left to check — the same reasoning as the no-data branch beside it. The numbers are still shown on the admin card, with their age and the error, because there the alternative is a blank card rather than a misleading verdict.
 
 **Only a failure the endpoint produced is shared; "no credential here" is not.** The retry timer above is a file in the shared data dir, and a 403, a 500 or an unreachable host are facts about the deployment that every process reading that dir is entitled to reuse. A `None` from `resolve_token` is not: it reports the environment and home directory of *the calling process*. `istota-scheduler` and `istota-web` take `CLAUDE_CODE_OAUTH_TOKEN` from a systemd `EnvironmentFile`; an operator's `istota doctor` in a shell usually does not, and on macOS a background agent and a login session do not see the same keychain. Writing that answer into the shared file would have one read-only diagnostic run tell the dashboard for a full TTL that there is no credential while the daemon was happily using one. So the no-credential branch is rate-limited by a **process-local** record instead, keyed by data dir — which is also where its actual cost lives, the macOS `security` subprocess. A token added five minutes later is still picked up within one TTL by the process that could not find it, and instantly by any other.
 
@@ -624,8 +624,8 @@ glab_bin_path: str = "/usr/local/bin/glab"
 devbox_proxy_enabled: bool = True
 devbox_proxy_socket_dir: str = "/var/run/istota"
 devbox_proxy_audit_log: str = ""
-worktree_reap_enabled: bool = True    # Reap landed worktrees on the setup path
-worktree_retention_hours: float = 24.0  # Idle time before one is a candidate; 0 = no age guard
+worktree_reap_enabled: bool = True    # Reap landed worktrees, from the scheduler
+worktree_retention_hours: float = 24.0  # Idle time before one is a candidate; clamped to a 1h floor
 review: ReviewConfig
 ```
 

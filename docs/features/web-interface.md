@@ -134,6 +134,10 @@ The UI ships a favicon, an Apple touch icon and a web app manifest, so adding it
 
 The manifest asks for a portrait orientation. The layout is a single column with a docked composer, and landscape leaves too little height once the keyboard is up. That request only binds an Android home-screen install: iOS ignores the manifest key (the native shell locks iPhone to portrait itself, and leaves iPad free to rotate), and an ordinary browser tab cannot be locked at all.
 
+## The app bar
+
+A **notification bell** sits in the app bar on every page, not only in the chat. The badge counts what is open — a task held for your approval, a reply held at the outbound gate, a scheduled job that switched itself off, a credential the remote rejected, a bloodwork panel left in draft, or a one-shot alert. Clicking it opens a panel with an "All" and a "Needs action" tab, carrying the same Confirm and Discard buttons the chat cards have. An answer given on any surface closes the item on all of them. See [notifications and the inbox](notifications.md).
+
 ## Pages
 
 **Chat**: an always-on, full-page in-app chat console — the first nav tab, before Feeds. Discord/Slack-style rooms in a sidebar, live SSE streaming of tool use and intermediate text, `!commands` and the `!model` prefix, confirmation cards, attachments (drag, paste, the `+` button, or a voice message), clickable attachment chips, and per-message copy / star / delete. See [Web chat](web-chat.md) for the full surface.
@@ -148,7 +152,9 @@ The manifest asks for a portrait orientation. The layout is a single column with
 
 **Admin**: read-only system health (task counts by source, worker pool, per-module DB stats, models pane showing the active brain and its resolved role tiers). A banner surfaces a degraded primary brain — when the availability breaker is open, automatic work is being skipped or routed to the fallback. Gated by the `/etc/istota/admins` allowlist, which fails closed when empty.
 
-A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, and average initial and peak context, then breaks the 30-day window down by model, by brain and by origin. Per-user tokens and cost sit on the Users rows beside that user's task counts rather than being repeated here, so the two copies cannot disagree. Cost is shown as currency only where it is real charged spend; a plan-equivalent or a catalog estimate renders as a dash. The card renders on its own — a database that has not yet been upgraded with the usage table takes out that section alone rather than blanking the dashboard. See [token usage and cost](usage.md).
+A **Claude Code subscription** card carries the plan's rate-limit windows — a tile per window, tinted by the configured warn and high thresholds, plus an Extra usage tile where pay-as-you-go credits are enabled. It is the budget the cost column below it cannot report, since pricing plan tokens at list rates would be inventing an invoice. A footer gives the reading's age and, where the last fetch failed, the error behind the stale number. The card is **absent** rather than showing an error when there is no reading to draw — on a deployment that cannot use the subscription it never polls at all. See [the subscription reading](usage.md#the-subscription-reading).
+
+A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, and average initial and peak context, then breaks the 30-day window down by model, by brain and by origin. Per-user tokens and cost sit on the Users rows beside that user's task counts rather than being repeated here, so the two copies cannot disagree. Cost is shown as currency only where it is real charged spend; a plan-equivalent or a catalog estimate renders as a dash. Two honesty counters sit alongside: how many tasks in the window recorded no usage at all, and how many rows recorded no context measurement. The card renders on its own — a database that has not yet been upgraded with the usage table takes out that section alone rather than blanking the dashboard. See [token usage and cost](usage.md).
 
 "Last active" in the user list counts only interactive tasks. Scheduled jobs, briefings and module pollers do not move it, so someone whose only traffic is automated shows a dash. Their task total still counts everything.
 
@@ -192,6 +198,10 @@ A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, an
 | `/istota/api/chat/tasks/{id}/events` | Snapshot of a task's events |
 | `/istota/api/chat/tasks/{id}/confirm` · `/cancel` | Confirm / cancel a chat task |
 | `/istota/api/chat/attachments` | Attachment upload (multipart, one file per request) |
+| `/istota/api/notifications/count` | Bell badge: `{"open": N, "actionable": M}`. Plain SQL, no resolver pass — the layout polls it every 30s from every route |
+| `/istota/api/notifications` | The panel's rendered rows plus `total_open`; `?filter=` and `?limit=` |
+| `/istota/api/notifications/{id}/dismiss` | Close one row. Another user's row is a 404, never a 403 |
+| `/istota/api/notifications/seen` | Mark rendered rows seen. The body carries `(id, updated_at)` pairs, so a row bumped between the fetch and the POST is stamped but not closed |
 
 The SvelteKit build is served as static files for all other `/istota/*` paths.
 

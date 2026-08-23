@@ -1,6 +1,6 @@
 # Testing
 
-Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 13,900 tests across ~414 files; the frontend has its own vitest suite under `web/`.
+Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 16,200 tests across ~466 files; the frontend has its own vitest suite under `web/`.
 
 Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The six discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
 
@@ -37,6 +37,8 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Every run ends with one verdict line on stderr — `qtest: PASS exit=0 time=3m41s cmd: uv run pytest`, or `FAIL`, or `KILLED-SIGKILL`, or `NO-SLOT` — so a run read through `| tail`, which reports the pipe's exit code rather than the suite's, still says plainly how it went; stdout is left untouched. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
+Four variables tune it: `QTEST_SLOTS` (how many runs may hold the machine at once, default 1), `QTEST_TIMEOUT` (seconds to wait for a slot, default 1800), `QTEST_LOCK_DIR` (default `~/.cache/qtest`, deliberately outside any repo, because the resource being shared is the laptop) and `QTEST_DISABLE=1` to bypass the semaphore entirely.
+
 Eight marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
@@ -54,7 +56,7 @@ Eight marker sets are deselected by default (also via `addopts`), each with a di
 
 A ninth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
-`image`, `smoke` and `full` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. The conftest fails the session with that reason rather than letting it happen.
+`image`, `smoke`, `full` and `testbed` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. `testbed` is on the list for the same reason at a smaller scale — its mail container and two mailboxes are session-scoped. All four conftests fail the session with that reason rather than letting it happen.
 
 **Two shapes, one seam.** `smoke` and `full` are the same fixtures over different compose files. The *lean* shape (`docker/docker-compose.test.yml`) is one container with the entrypoint bypassed and the config rendered on the host: seconds to boot, right for a subsystem whose external is an HTTP endpoint. The *full* shape (`docker/docker-compose.yml` plus `testbed/compose/testbed.yml`) is the deployment as shipped — postgres, redis, nextcloud, istota, web, nginx — booted through `entrypoint.sh` with the generator running inside the container. It is the only thing that executes `provision-nc.sh` or reaches the half of `entrypoint.sh` past the config write. Full detail on both, and on everything below, is in `.claude/rules/testbed.md`.
 
@@ -164,7 +166,7 @@ The generated passwords, the module switches derived from the profile's service 
 
 **The two security options are a pair and neither substitutes for the other.** Seccomp lets bubblewrap create the user namespace; it does not let it mount a procfs inside one, and `build_bwrap_cmd` emits `--proc /proc` on every sandbox. Docker's masked `/proc` entries and read-only `/proc/sys` make the container's procfs not "fully visible" to the kernel, which then refuses the mount, so with only the seccomp grant every real sandbox dies at "Can't mount proc on /newroot/proc". `--cap-add=SYS_ADMIN` is not an alternative: measured, it gets past the unshare and fails at `pivot_root`. `docker/docker-compose.test.yml` carries the same pair.
 
-**The shipped `docker/docker-compose.yml` carries neither, so a Docker deployment runs every task unsandboxed.** That is an open product decision rather than a settled state: the pair trades the container's own boundary for the task's, which is a different bargain on a shared deployment than on a single-user one, and the supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed. `docs/deployment/docker.md` has the trade written out.
+**The shipped `docker/docker-compose.yml` carries neither, so a Docker deployment runs every task unsandboxed.** That is deliberate and settled, and it is why bare metal via Ansible is the only canonical deployment shape. The pair costs the container's own boundary: the container runs as root and is not userns-remapped, so a writable `/proc/sys` hands it kernel entries that are not namespaced, and `seccomp:unconfined` drops the syscall filter as well. On bare metal bwrap unshares the user namespace unasked and neither setting is needed. `docs/deployment/docker.md` has the trade written out.
 
 ### The storage backend, and why it needs no stack
 
@@ -193,7 +195,20 @@ The pieces under `testbed/` are general, not forge-specific. The forge chain is 
 
 ### Writing a new service
 
-A **service** is anything the daemon talks to that is not the daemon, real or written by us; a **stub** is one we wrote. The protocol is four members, in `testbed/services/__init__.py`: `container_url` (the address a process inside the container reaches it on, which the caller never has to know the shape of), `config_env()`, `reset()` and `close()`, plus a `name` that is its registry key. Register the factory in `REGISTRY`, list the name in `HOST_STUBS` or `ATTACHED`, and give it a profile in `testbed/profiles.py` and an entry in `profiles.ALL`.
+A **service** is anything the daemon talks to that is not the daemon, real or written by us; a **stub** is one we wrote. The protocol in `testbed/services/__init__.py` has five required members: `name` (its registry key), `container_url` (the address a process inside the container reaches it on, which the caller never has to know the shape of), `config_env()`, `reset()` and `close()`.
+
+Four more are optional and resolved by `getattr`, so a service implements only the ones it needs:
+
+| Member | Implemented by | What it is for |
+|---|---|---|
+| `compose_env()` | `mail` | Host paths and image tags a compose *overlay* binds. Held to a different rule from `config_env()` — these appear in no shipped file, so the two-file rule below does not apply to them |
+| `container_state_paths` | `gitlab` | Container-side directories this service's use dirties. They are `rm -rf`'d as root inside the container, so the list is validated against a protected-path set that refuses `..`, relative paths and anything at or under the database and config directories |
+| `bind_stack(stack)` | `nextcloud`, `mail` | Hands the service the stack it belongs to. It is what lets an attached service exist at all |
+| `describe()` | most | What the service renders about itself into `Stack.diagnostics` |
+
+The checklist for adding one: register the factory in `REGISTRY`, give it a branch in `services.build()` (a deliberately non-uniform adapter — `tests/test_testbed_services.py::test_it_covers_every_registered_service` fails without it), list the name in `HOST_STUBS` or `ATTACHED`, give it a profile in `testbed/profiles.py` with an entry in `profiles.ALL`, and — if it ships a new module — add it to `only-include` in `testbed/pyproject.toml`. That last one fails quietly: the in-tree import keeps working and only an installed consumer sees the gap.
+
+Keep the dependency footprint to the standard library. `testbed/` depends on `cryptography` and nothing else on purpose, because a resolver conflict would push the two rigs outside this repo back to copying the package rather than installing it.
 
 Call recording is deliberately not on the protocol. It is on `HttpStub`, the shared `ThreadingHTTPServer` base, because it does not generalize — a mail server speaks IMAP and Nextcloud is asserted through its own API. A `calls` list on the protocol would mean something different for two of six members.
 
@@ -207,7 +222,42 @@ Four rules bind anything added. The first three are enforced in the default suit
 
 **Do not stub a service whose client negotiates with it.** `nextcloud/capabilities.py` means the client asks before it acts, so a stub answering wrongly steers the daemon down paths no test chose; that is why the full shape runs a real Nextcloud, and why the mail service is a real IMAP/SMTP server in a container rather than something we wrote. The rule is not "never stub". `gitlab` is spoken to by a real `glab` and a real `git`, and `ntfy`'s whole assertion is about header bytes, which a recording stub sees better than a real server would.
 
-Then write the scenario. `reset()` runs before each test rather than after, so a failed test's state is still there to inspect; it must be cheap and total, because a reset that leaves one mutation behind is a cross-test dependency that gets diagnosed as flake. Anything the daemon writes *inside* the container is the service's to declare too — a host-side stub can rebuild its own state and cannot reach the checkout the model cloned into `/data/repos` on the previous test.
+`reset()` runs before each test rather than after, so a failed test's state is still there to inspect; it must be cheap and total, because a reset that leaves one mutation behind is a cross-test dependency that gets diagnosed as flake. Anything the daemon writes *inside* the container is the service's to declare too — a host-side stub can rebuild its own state and cannot reach the checkout the model cloned into `/data/repos` on the previous test.
+
+### Writing a scenario
+
+A scenario declares the stack it wants with a marker and imports nothing from `testbed`:
+
+```python
+@pytest.mark.profile("forge")
+@pytest.mark.script([{"text": "on it"}, {"bash": "git status"}])
+def test_the_thing(stack):
+    task_id = stack.submit("do the thing")
+    task = stack.probe.wait_for_task(status="completed", task_id=task_id)
+    assert task["status"] == "completed", stack.diagnostics(task)
+```
+
+**`@pytest.mark.script` is what the model answers**, turn by turn. Omit it and the fixture installs `DEFAULT_SCRIPT`, one plain answer — right for a scenario that only needs a task to run to completion. For a script that depends on something invented at run time, call `stack.script(...)` inside the test instead of declaring it on the marker.
+
+**Filter `wait_for_task` on something that identifies your task** — `task_id`, or `conversation_token`, or `id_above`. Not on `user_id` alone: the scheduler queues its own work for the same user at startup, which is how the first smoke tests came back asserting against a `scheduled` row nobody wrote. `wait_for_task` also watches every terminal status alongside the one you asked for, so waiting for `completed` on a task that already failed returns the failure immediately rather than spending the whole timeout and then reporting "nothing reached completed", which says nothing about why.
+
+**A negative assertion needs `stack.mark`**, the watermark `reset` returned, *and* a discriminating column — see the third rule above.
+
+`@pytest.mark.profile("full", fresh=True)` buys a private stack torn down at test end, for anything asserting on start-up behaviour. Note what that costs on the full shape: a fresh six-container boot per test. Where a whole file shares one start-up stack, take a module-scoped fixture calling `stacks.get(profiles.FULL, fresh=True)` instead — `tests/full/test_provisioning.py` is the worked example.
+
+### When a stack fails
+
+`stack.diagnostics(task)` is the one call worth reaching for first. It assembles the task row, the daemon log and every service's own `describe()`, because a scenario that prints only the task row reports "the task failed" identically for a denied wrapper, a token that never arrived and a stub that answered 501. Pass it as the assertion message rather than calling it after the fact. `stack.logs(tail=...)` gets the daemon log alone.
+
+Three failures are harness conditions rather than code defects, and each says so:
+
+- A bare `pytest.fail(..., pytrace=False)` out of the `stack` fixture means the reset could not quiesce. The line worth reading is the task-id list.
+- A `TimeoutError` out of `Stack.script` counts barrier refusals and turns served before the scenario submitted anything. It is the tier's most confusing failure and its most informative message.
+- A `StackError` naming a conflicting process variable means your shell exports something that outranks the env-file — an exported `ISTOTA_BRAIN_KIND` would run the tier against the real API. Read it as "the scrub does not cover this one", not as a `.env` to go and clean up.
+
+Every session prints two diagnostic lines of its own: how many `docker compose exec` calls the probe made, and how long each profile waited on which service to come up.
+
+**There is no way to keep a lean stack alive for inspection.** `ISTOTA_TESTBED_KEEP` is full-shape only, keeps volumes rather than containers, and `tests/full/` refuses to run under it. Lean project names are random, and the session sweep reaps them.
 
 ### Prompt goldens
 
