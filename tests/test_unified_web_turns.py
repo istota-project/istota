@@ -170,3 +170,45 @@ class TestDisplayLoaderCrossSurface:
         assert len(sys_msgs) == 1
         assert "logged out" in sys_msgs[0]["text"]
         assert sys_msgs[0]["notif_id"] is not None
+
+    def test_a_mirrored_alert_shows_its_title_once(self, db_path, tmp_path):
+        """The reported symptom of ISSUE-311, through the seam that produced it.
+
+        This route composes a system message as the bolded title, a blank line,
+        then the body. `notification_store._delivery_text` had already composed
+        the *same* title into the front of the text Talk was sent, and the mirror
+        stored that text verbatim, so an alert rendered here with its label
+        twice. `_dispatch` now hands the mirror the body and the title
+        separately, which is the arrangement this route was written for.
+        """
+        from istota.config import Config, NextcloudConfig, UserConfig
+        from istota import notifications
+        from unittest.mock import AsyncMock, patch
+
+        title = "Security alert — task #7"
+        config = Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"u": UserConfig()},
+        )
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "u", "Chat")
+            token = room.token
+            # The mirror writes against the Talk-side token, so register one.
+            db.register_room(conn, "talkroom7", "u", origin="talk")
+            conn.commit()
+
+        with patch.object(notifications, "_send_talk",
+                          new=AsyncMock(return_value=11)):
+            notifications.send_notification(
+                config, "u", f"{title}\n\nSomebody tried something.",
+                surface="talk:talkroom7", title=title,
+            )
+
+        out = self._loader(db_path)("u", "talkroom7", 50)
+        sys_msgs = [m for m in out["messages"] if m["role"] == "system"]
+        assert len(sys_msgs) == 1
+        text = sys_msgs[0]["text"]
+        assert text.count(title) == 1, text
+        assert "Somebody tried something." in text
+        assert token  # the web room exists; the alert landed in the Talk one

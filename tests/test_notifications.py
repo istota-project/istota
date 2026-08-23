@@ -648,3 +648,162 @@ class TestWebSurface:
         with db.get_db(config.db_path) as conn:
             token = db.ensure_default_web_chat_room(conn, "alice").token
         assert dests == [Destination("web", token)]
+
+
+class TestTheTitleIsNotRepeated:
+    """A notice arriving with its own label printed twice (ISSUE-311).
+
+    `notification_store._delivery_text` composes ``title + blank line + body``
+    because Talk has no title field — a Talk reader sees the label only as the
+    message's first line. Every other surface takes `title` as its own argument,
+    so the same composed string arrives with the label rendered as a header
+    *and* repeated as the opening line of the body:
+
+        Security alert — task #4021
+        Security alert — task #4021
+        somebody@example.com followed up on the earlier thread ...
+
+    The split is per surface, so Talk keeps the prefix and the rest lose it.
+    """
+
+    TITLE = "Security alert — task #99"
+    BODY = "Somebody tried something."
+    COMPOSED = f"{TITLE}\n\n{BODY}"
+
+    def test_the_helper_drops_a_leading_title(self):
+        from istota.notifications import strip_leading_title
+
+        assert strip_leading_title(self.COMPOSED, self.TITLE) == self.BODY
+
+    def test_the_helper_leaves_an_unprefixed_message_alone(self):
+        from istota.notifications import strip_leading_title
+
+        assert strip_leading_title(self.BODY, self.TITLE) == self.BODY
+        assert strip_leading_title(self.BODY, None) == self.BODY
+
+    def test_a_title_only_message_survives(self):
+        """`_delivery_text` returns the bare title when the body is empty.
+
+        Stripping there would deliver an empty notification, which is worse than
+        a repeated label.
+        """
+        from istota.notifications import strip_leading_title
+
+        assert strip_leading_title(self.TITLE, self.TITLE) == self.TITLE
+
+    def test_a_body_that_merely_starts_with_similar_text_is_untouched(self):
+        """Anchored on the whole title plus the blank line, not on a prefix."""
+        from istota.notifications import strip_leading_title
+
+        message = "Security alert — task #991 is a different task"
+        assert strip_leading_title(message, self.TITLE) == message
+
+    def test_ntfy_gets_the_body_and_the_title_separately(self):
+        from istota import notifications
+
+        config = Config(users={"alice": UserConfig()})
+        with patch.object(notifications, "_send_ntfy", return_value=True) as ntfy:
+            notifications.send_notification(
+                config, "alice", self.COMPOSED, surface="ntfy", title=self.TITLE,
+            )
+
+        assert ntfy.call_args.args[2] == self.BODY
+        assert ntfy.call_args.kwargs["title"] == self.TITLE
+
+    def test_email_gets_the_body_under_the_subject(self):
+        from istota import notifications
+
+        config = Config(
+            email=EmailConfig(enabled=True, bot_email="bot@test.com"),
+            users={"alice": UserConfig(email_addresses=["alice@test.com"])},
+        )
+        with patch.object(notifications, "_send_email", return_value=True) as mail:
+            notifications.send_notification(
+                config, "alice", self.COMPOSED, surface="email", title=self.TITLE,
+            )
+
+        # (config, user_id, subject, body)
+        assert mail.call_args.args[2] == self.TITLE
+        assert mail.call_args.args[3] == self.BODY
+
+    def test_talk_keeps_the_prefix_because_it_has_nowhere_else_to_put_it(self):
+        """The reason `_delivery_text` composes at all.
+
+        Removing the prefix everywhere would leave a Talk reader with an
+        unlabelled notice.
+        """
+        from istota import notifications
+
+        config = Config(
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            users={"alice": UserConfig()},
+        )
+        with (
+            patch.object(notifications, "_send_talk",
+                         new=AsyncMock(return_value=7)) as talk,
+            patch.object(notifications, "mirror_talk_to_room") as mirror,
+        ):
+            notifications.send_notification(
+                config, "alice", self.COMPOSED, surface="talk:room1",
+                title=self.TITLE,
+            )
+
+        assert talk.call_args.args[2] == self.COMPOSED
+        # The mirror writes `title` into its own column, so it takes the body.
+        assert mirror.call_args.args[2] == self.BODY
+        assert mirror.call_args.kwargs["title"] == self.TITLE
+
+    def test_web_gets_the_body_and_keeps_the_title(self):
+        """The leg where the title now survives *only* as a separate argument.
+
+        `WebTransport.deliver` puts it in `messages.title`, which two renderers
+        re-compose (`web_app.py`'s room history and its notification view). While
+        the body carried the label too, dropping the argument was cosmetic; now
+        it would lose the label outright.
+        """
+        from istota import notifications
+
+        config = Config(users={"alice": UserConfig()})
+        with patch.object(notifications, "_send_web", return_value=True) as web:
+            notifications.send_notification(
+                config, "alice", self.COMPOSED, surface="web:room1",
+                title=self.TITLE,
+            )
+
+        assert web.call_args.args[2] == self.BODY
+        assert web.call_args.kwargs["title"] == self.TITLE
+
+    def test_a_bolded_prefix_is_stripped_too(self):
+        """`heartbeat.send_heartbeat_alert` composes its own, and bolds it.
+
+        Talk renders markdown and has no title field, so bolding the label there
+        is deliberate. The producer fires on a schedule, so leaving this spelling
+        unmatched would have left the highest-volume alert in the tree showing
+        the doubling this whole change removes.
+        """
+        from istota.notifications import strip_leading_title
+
+        title = "Heartbeat Alert: disk"
+        message = f"**{title}**\n\nDisk at 95%"
+        assert strip_leading_title(message, title) == "Disk at 95%"
+
+    def test_the_real_heartbeat_alert_does_not_repeat_its_label(self):
+        """Through the producer, not a reconstruction of its format string."""
+        from istota import heartbeat, notifications
+
+        check = heartbeat.HeartbeatCheck(
+            name="disk", type="shell-command", config={}, channel="ntfy",
+        )
+        result = heartbeat.CheckResult(healthy=False, message="Disk at 95%")
+        config = Config(users={"alice": UserConfig()})
+
+        with patch.object(notifications, "_send_ntfy", return_value=True) as ntfy:
+            heartbeat.send_heartbeat_alert(
+                config, "alice", check, result, heartbeat.HeartbeatSettings(),
+            )
+
+        body = ntfy.call_args.args[2]
+        title = ntfy.call_args.kwargs["title"]
+        assert title == "Heartbeat Alert: disk"
+        assert body == "Disk at 95%"
+        assert "Heartbeat Alert" not in body

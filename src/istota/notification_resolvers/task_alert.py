@@ -51,8 +51,17 @@ equivalent.
 **Every axis a key is built from is bounded.** ``alert_type`` arrives from the
 model's own JSON and ``verdict`` from a parsed mail header; an unbounded axis
 would mean one durable row per attacker-chosen value, each firing a push. The
-alert type is narrowed to the two the producer actually distinguishes, and every
-other component goes through :func:`_slug`.
+alert type is narrowed to the three the producer actually distinguishes, and
+every other component goes through :func:`_slug`.
+
+**A grade that interrupts somebody has to be named.** The deferred-alert
+producer has three grades and only two of them are pushed; ``note`` is written
+to the table, read in the panel, and delivered nowhere. It is also what an
+unrecognised or absent ``type`` falls back to, which is the inversion ISSUE-311
+bought: the model authors this field, and while the fallback was ``security`` the
+loudest grade in the system was the one reached by saying nothing. Nothing here
+downgrades a grade the model asked for by name — an explicit ``security`` is
+still ``danger``, and still pushed.
 """
 
 from __future__ import annotations
@@ -71,13 +80,45 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "task_alert"
 
-# The two alert types `_process_deferred_user_alerts` distinguishes. The model
-# writes this field, so anything else collapses onto `security`: the producer's
-# own branch is already binary, and honouring an arbitrary string would put a
-# model-chosen value in a `dedup_key` — one durable row per value, per task.
+# The three alert types `_process_deferred_user_alerts` distinguishes. The model
+# writes this field, so anything else collapses onto one of them: honouring an
+# arbitrary string would put a model-chosen value in a `dedup_key` — one durable
+# row per value, per task.
+#
+# `note` is the quiet one, and it is also the *fallback* (ISSUE-311). Both loud
+# grades are pushed, and for a long time an unrecognised or absent type landed on
+# `security`, which is `danger` severity. That made the loudest grade the one a
+# model reached by saying nothing — and the guideline's own example wrote the
+# file with no `type` key at all, so the shape a model copies was the alarming
+# one. A routine "I handed the thread back to you" arrived as a security alert.
+# The rule is now the other way round: a grade that interrupts somebody has to be
+# asked for by name.
 ALERT_TYPE_SECURITY = "security"
 ALERT_TYPE_ACTION_NEEDED = "action_needed"
-ALERT_TYPES = (ALERT_TYPE_SECURITY, ALERT_TYPE_ACTION_NEEDED)
+ALERT_TYPE_NOTE = "note"
+ALERT_TYPES = (ALERT_TYPE_SECURITY, ALERT_TYPE_ACTION_NEEDED, ALERT_TYPE_NOTE)
+
+# The grades that reach a surface. A `note` is written to the table and read in
+# the panel; nothing is pushed for it, so the producer keeps its `RaiseResult`
+# out of `deliver_pending`. Named here rather than spelled as `!= ALERT_TYPE_NOTE`
+# at the call sites, so the delivery decision is stated once.
+#
+# A fourth grade is four edits, not one: this tuple, `ALERT_TYPES`,
+# `ALERT_SEVERITY`, and a branch in `scheduler_deferred._deferred_alert_title`.
+# Two of those fail quietly if forgotten — a missing `ALERT_SEVERITY` entry
+# raises `KeyError` into a blanket `except` that demotes the whole drain to the
+# unrecorded fallback, and a missing title branch labels the grade `Note`. The
+# first two are held by `test_the_type_axis_is_still_bounded`.
+DELIVERED_ALERT_TYPES = (ALERT_TYPE_SECURITY, ALERT_TYPE_ACTION_NEEDED)
+
+# What each grade is worth in the two columns the panel renders on. A row that is
+# silent on the wire but still an actionable warning in the bell has moved the
+# noise, not removed it.
+ALERT_SEVERITY = {
+    ALERT_TYPE_SECURITY: "danger",
+    ALERT_TYPE_ACTION_NEEDED: "warning",
+    ALERT_TYPE_NOTE: "info",
+}
 
 # The JSON array the model writes has no bound on entry count, and one row per
 # entry would let a single task leave hundreds of durable rows. Entries collapse
@@ -166,9 +207,39 @@ def _slug(value: object, *, limit: int = 32, fallback: str = "other") -> str:
 
 
 def normalize_alert_type(value: object) -> str:
-    """The model's `type` field, narrowed to the two the producer branches on."""
+    """The model's `type` field, narrowed to the three the producer branches on.
+
+    Anything unrecognised — including a missing key — is a `note`. See
+    :data:`ALERT_TYPES` for why the fallback is the quiet grade rather than the
+    loud one.
+
+    **A non-empty near-miss is logged; a missing key is not.** `"urgent"`,
+    `"warning"`, `"security_alert"` all coerce to `note`, and the whole point of
+    the quiet grade is that nothing downstream makes a sound about it — no push,
+    no action chip, and `auto_resolve_on_seen` closes the row on the first panel
+    render. That is right for a grade the model chose and wrong as the only trace
+    of one it fumbled, so the coercion itself goes to the journal where a
+    systematic misspelling is discoverable. A missing key stays silent: it is the
+    documented default, not a mistake.
+    """
     text = str(value or "").strip().lower()
-    return text if text in ALERT_TYPES else ALERT_TYPE_SECURITY
+    if text and text not in ALERT_TYPES:
+        logger.info(
+            "deferred alert type %r is not one of %s; filing it as %r",
+            text[:64], ALERT_TYPES, ALERT_TYPE_NOTE,
+        )
+        return ALERT_TYPE_NOTE
+    return text if text in ALERT_TYPES else ALERT_TYPE_NOTE
+
+
+def delivers(alert_type: str) -> bool:
+    """Whether this grade is pushed as well as written."""
+    return normalize_alert_type(alert_type) in DELIVERED_ALERT_TYPES
+
+
+def severity_for(alert_type: str) -> str:
+    """The row severity for a grade. Unknown grades are already normalised."""
+    return ALERT_SEVERITY[normalize_alert_type(alert_type)]
 
 
 # --- keys ----------------------------------------------------------------

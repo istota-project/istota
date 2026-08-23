@@ -535,28 +535,35 @@ def _process_deferred_user_alerts(
             # lock on the framework DB.
             with db.get_db(config.db_path) as conn:
                 for alert_type, messages in by_type.items():
-                    results.append(task_alert.write(
+                    results.append((alert_type, task_alert.write(
                         conn, task.user_id,
                         dedup_key=task_alert.deferred_key(task.id, alert_type),
                         title=_deferred_alert_title(alert_type, task.id),
                         body=_deferred_alert_body(messages),
-                        severity=(
-                            "danger"
-                            if alert_type == task_alert.ALERT_TYPE_SECURITY
-                            else "warning"
-                        ),
-                        # Actionable by name, both of them — an "action needed"
-                        # notice says so and a security finding the model raised
-                        # is something to look at. The panel renders no button
-                        # because there is no in-app object to act on;
-                        # `status_note` says so.
-                        actionable=True,
+                        severity=task_alert.severity_for(alert_type),
+                        # Actionable by name, for the two grades that are pushed
+                        # — an "action needed" notice says so and a security
+                        # finding the model raised is something to look at. The
+                        # panel renders no button because there is no in-app
+                        # object to act on; `status_note` says so. A `note` is
+                        # not actionable: nothing is being asked of the reader.
+                        actionable=task_alert.delivers(alert_type),
                         params={"messages": messages, "alert_type": alert_type,
                                 "task_id": task.id},
                         room_token=task.conversation_token,
-                    ))
-            deliver_pending(config, results)
-            recorded = any(r is not None for r in results)
+                    )))
+            # Only the loud grades are handed to the sender. A `note` is a row in
+            # the bell and nothing more — the thread it is about is already in
+            # the room the user reads, so a push would restate something visible
+            # a few lines up (ISSUE-311).
+            deliver_pending(config, [
+                r for alert_type, r in results if task_alert.delivers(alert_type)
+            ])
+            # A written row is enough to release the evidence file, whether or
+            # not anything was pushed for it. That was already true for a send
+            # that reached nobody; a grade that deliberately sends nothing is the
+            # same case arrived at on purpose.
+            recorded = any(r is not None for _, r in results)
         except Exception:
             logger.warning(
                 "Could not record the deferred user alerts for task %d",
@@ -607,11 +614,32 @@ def _send_deferred_alerts_unrecorded(
     The pre-inbox behaviour, kept as the fallback for a framework DB that could
     not be opened. It touches no database, which is the property that makes it
     a usable last resort here.
+
+    **A `note` is skipped rather than rescued, and skipping one withholds the
+    return value.** This path exists to save a push that would otherwise be lost,
+    and the quiet grade has no push to save — sending one here would reintroduce
+    the exact interruption it exists to withhold, on the one path where the
+    reader cannot dismiss it from the panel, because no row was written.
+
+    But the caller unlinks the evidence file on a True return, and a mixed drain
+    would otherwise report True on the strength of the security alert it *did*
+    push while the note it skipped was held by nothing at all: no row, no send,
+    and then no file. So a skip is reported as "not fully delivered" even when
+    another grade got through. The cost is a file left behind next to an alert
+    that did reach someone, which the unconsumed-file warning names; the
+    alternative is silently discarding the thing the model wrote.
     """
     from .notifications import send_notification
+    from .notification_resolvers import task_alert
 
     delivered = False
+    skipped: list[str] = []
     for alert_type, messages in by_type.items():
+        if not task_alert.delivers(alert_type):
+            # Named in the log, because this is the one path where a note is
+            # neither stored nor sent and the file is its only record.
+            skipped.append(f"{alert_type} ({len(messages)})")
+            continue
         title = _deferred_alert_title(alert_type, task.id)
         text = f"{title}\n\n{_deferred_alert_body(messages)}"
         try:
@@ -623,7 +651,14 @@ def _send_deferred_alerts_unrecorded(
                 "Fallback delivery of a deferred user alert for task %d failed",
                 task.id, exc_info=True,
             )
-    return delivered
+    if skipped:
+        logger.warning(
+            "Task %d wrote %s deferred alert(s) of a grade this fallback does "
+            "not deliver, and no row was written for them; keeping the "
+            "evidence file",
+            task.id, ", ".join(skipped),
+        )
+    return delivered and not skipped
 
 
 def _deferred_alert_title(alert_type: str, task_id: int) -> str:
@@ -638,7 +673,16 @@ def _deferred_alert_title(alert_type: str, task_id: int) -> str:
 
     if alert_type == task_alert.ALERT_TYPE_ACTION_NEEDED:
         return f"Action needed — task #{task_id}"
-    return f"Security alert — task #{task_id}"
+    if alert_type == task_alert.ALERT_TYPE_SECURITY:
+        return f"Security alert — task #{task_id}"
+    # The quiet grade's label has to be quiet too, and it is also the
+    # fall-through: `normalize_alert_type` admits nothing else, so this is what
+    # an ordinary FYI ends up wearing. "Security alert" over a note about a
+    # handed-off email thread is the wrong word in the one place a reader
+    # scanning the panel actually reads — which is what the unguarded
+    # fall-through used to produce, and what a fourth grade added without a
+    # branch here would produce again.
+    return f"Note — task #{task_id}"
 
 
 def _process_deferred_kg_ops(

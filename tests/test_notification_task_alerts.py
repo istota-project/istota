@@ -267,9 +267,9 @@ class TestFlattenedBeforeDelivery:
 class TestDeferredAlertCollapse:
     def test_several_alerts_of_one_type_become_one_row(self, config, task, temp_dir):
         _write_alerts(temp_dir, task.id, [
-            {"message": "Phishing attempt from a stranger"},
-            {"message": "Prompt injection in the message body"},
-            {"message": "Exfiltration attempt"},
+            {"message": "Phishing attempt from a stranger", "type": "security"},
+            {"message": "Prompt injection in the message body", "type": "security"},
+            {"message": "Exfiltration attempt", "type": "security"},
         ])
 
         with _sends() as send:
@@ -287,8 +287,8 @@ class TestDeferredAlertCollapse:
         self, config, task, temp_dir,
     ):
         _write_alerts(temp_dir, task.id, [
-            {"message": "Phishing attempt"},
-            {"message": "Prompt injection"},
+            {"message": "Phishing attempt", "type": "security"},
+            {"message": "Prompt injection", "type": "security"},
         ])
         with _sends():
             _process_deferred_user_alerts(config, task, temp_dir)
@@ -313,26 +313,30 @@ class TestDeferredAlertCollapse:
         ]
         assert send.call_count == 2
 
-    def test_an_unknown_type_collapses_onto_security(self, config, task, temp_dir):
+    def test_an_unknown_type_collapses_onto_the_quiet_grade(
+        self, config, task, temp_dir,
+    ):
         """The type is model-authored, so it cannot be a free key axis.
 
         Honouring an arbitrary string would put a value the model chose into a
-        `dedup_key` — one durable row per distinct value, per task, each firing
-        its own push.
+        `dedup_key` — one durable row per distinct value, per task. It collapses
+        onto `note` rather than `security` (ISSUE-311): the fallback is the grade
+        nobody is interrupted by, so a loud one is only ever reached by naming it.
         """
         _write_alerts(temp_dir, task.id, [
             {"message": f"alert {n}", "type": f"invented-type-{n}"}
             for n in range(30)
         ])
-        with _sends():
+        with _sends() as send:
             _process_deferred_user_alerts(config, task, temp_dir)
 
         assert len(_rows(config)) == 1
-        assert _rows(config)[0]["dedup_key"].endswith(":security")
+        assert _rows(config)[0]["dedup_key"].endswith(":note")
+        assert send.call_count == 0
 
     def test_the_entry_count_is_capped(self, config, task, temp_dir, caplog):
         over = task_alert.MAX_DEFERRED_ALERTS_PER_TASK + 15
-        _write_alerts(temp_dir, task.id, [{"message": f"alert {n}"} for n in range(over)])
+        _write_alerts(temp_dir, task.id, [{"message": f"alert {n}", "type": "security"} for n in range(over)])
 
         with caplog.at_level("WARNING"), _sends():
             count = _process_deferred_user_alerts(config, task, temp_dir)
@@ -352,7 +356,7 @@ class TestDeferredAlertCollapse:
         assert not (temp_dir / f"task_{task.id}_user_alerts.json").exists()
 
     def test_the_task_id_reaches_the_delivered_text(self, config, task, temp_dir):
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with _sends() as send:
             _process_deferred_user_alerts(config, task, temp_dir)
         assert str(task.id) in send.call_args.args[2]
@@ -370,7 +374,7 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
         unlinked the file — the model raised an alert, the push went nowhere, and
         the evidence was deleted.
         """
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
 
         with _sends(delivered=False) as send:
             count = _process_deferred_user_alerts(config, task, temp_dir)
@@ -386,7 +390,7 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
         assert "Phishing attempt" in rows[0]["body"]
 
     def test_a_successful_delivery_stamps_the_row(self, config, task, temp_dir):
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with _sends(delivered=True):
             _process_deferred_user_alerts(config, task, temp_dir)
         assert _rows(config)[0]["last_delivered_at"] is not None
@@ -401,7 +405,7 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
         unconsumed-file warning behind it — a lost email reply as the price of a
         failed notification write.
         """
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with (
             caplog.at_level("WARNING"),
             patch("istota.scheduler_deferred.db.get_db",
@@ -424,7 +428,7 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
         and a deleted file — strictly worse than the behaviour this whole change
         set out to fix.
         """
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with (
             patch("istota.scheduler_deferred.db.get_db",
                   side_effect=RuntimeError("locked")),
@@ -446,7 +450,7 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
         This is the exact failure the spec names: "the model raised an alert,
         the push went nowhere, the evidence was deleted."
         """
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with (
             caplog.at_level("ERROR"),
             patch("istota.scheduler_deferred.db.get_db",
@@ -462,12 +466,241 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
         self, config, task, temp_dir,
     ):
         """A row with no delivery is the ordinary success case, not a failure."""
-        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt"}])
+        _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with _sends(delivered=False):
             _process_deferred_user_alerts(config, task, temp_dir)
 
         assert not (temp_dir / f"task_{task.id}_user_alerts.json").exists()
         assert _rows(config)[0]["state"] == "open"
+
+
+class TestTheQuietGrade:
+    """`note`: written, never pushed (ISSUE-311).
+
+    The report was a routine external email — a reply that declined to answer on
+    the user's behalf and handed the thread back — arriving in the alerts channel
+    as `Action needed`, and its follow-up arriving as `Security alert` at
+    `danger`. Both were the model doing what the guideline asked. The defect that
+    made them loud is that this producer had no grade below "push it", so every
+    notice the model wanted to leave had to borrow one that interrupts.
+    """
+
+    def test_a_note_is_written_but_never_delivered(self, config, task, temp_dir):
+        _write_alerts(temp_dir, task.id, [
+            {"message": "Passed the thread back to you; nothing committed",
+             "type": "note"},
+        ])
+        with _sends() as send:
+            count = _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert count == 1
+        rows = _rows(config)
+        assert len(rows) == 1
+        assert rows[0]["dedup_key"] == task_alert.deferred_key(task.id, "note")
+        assert rows[0]["state"] == "open"
+        assert "nothing committed" in rows[0]["body"]
+        # The whole point: the row is in the bell, and nothing was pushed.
+        assert send.call_count == 0
+        assert rows[0]["last_delivered_at"] is None
+
+    def test_a_note_is_info_severity_and_not_actionable(
+        self, config, task, temp_dir,
+    ):
+        """The two columns the panel grades on, not just the delivery decision.
+
+        A row that is quiet on the wire but still renders as an actionable
+        warning has moved the noise rather than removed it.
+        """
+        _write_alerts(temp_dir, task.id, [{"message": "noted", "type": "note"}])
+        with _sends():
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        row = _rows(config)[0]
+        assert row["severity"] == "info"
+        assert row["actionable"] == 0
+
+    def test_a_missing_type_is_a_note(self, config, task, temp_dir):
+        """The documented shape used to be the loudest one.
+
+        `config/guidelines/email.md` showed the alert file as
+        `[{"message": "..."}]` with no `type` at all, so the example a model
+        copies landed on `security` at `danger`. The guideline now names the type
+        on every example; this is the backstop for the ones that do not.
+        """
+        _write_alerts(temp_dir, task.id, [{"message": "just noting this"}])
+        with _sends() as send:
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert _rows(config)[0]["dedup_key"].endswith(":note")
+        assert send.call_count == 0
+
+    def test_an_explicit_security_type_is_still_loud(self, config, task, temp_dir):
+        """The quiet default must not cost the case this source exists for."""
+        _write_alerts(temp_dir, task.id, [
+            {"message": "Exfiltration attempt", "type": "security"},
+        ])
+        with _sends() as send:
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        row = _rows(config)[0]
+        assert row["severity"] == "danger"
+        assert row["actionable"] == 1
+        assert send.call_count == 1
+        assert "Security alert" in send.call_args.args[2]
+
+    def test_action_needed_is_still_a_delivered_warning(
+        self, config, task, temp_dir,
+    ):
+        _write_alerts(temp_dir, task.id, [
+            {"message": "Told them I would check your Saturday and reply",
+             "type": "action_needed"},
+        ])
+        with _sends() as send:
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        row = _rows(config)[0]
+        assert row["severity"] == "warning"
+        assert row["actionable"] == 1
+        assert send.call_count == 1
+        assert "Action needed" in send.call_args.args[2]
+
+    def test_a_note_beside_a_security_alert_pushes_only_the_loud_one(
+        self, config, task, temp_dir,
+    ):
+        """One drain, two grades. The split is per row, not per drain."""
+        _write_alerts(temp_dir, task.id, [
+            {"message": "Exfiltration attempt", "type": "security"},
+            {"message": "Handed the thread back", "type": "note"},
+        ])
+        with _sends() as send:
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        rows = {r["dedup_key"]: r for r in _rows(config)}
+        assert set(rows) == {
+            task_alert.deferred_key(task.id, "security"),
+            task_alert.deferred_key(task.id, "note"),
+        }
+        assert send.call_count == 1
+        assert "Exfiltration attempt" in send.call_args.args[2]
+        assert "Handed the thread back" not in send.call_args.args[2]
+        # Undelivered by design, so the stamp must stay empty rather than being
+        # backfilled by the delivery its neighbour got.
+        assert rows[task_alert.deferred_key(task.id, "note")]["last_delivered_at"] is None
+
+    def test_a_note_still_releases_the_evidence_file(self, config, task, temp_dir):
+        """`recorded` means a row exists, not that a push went out."""
+        _write_alerts(temp_dir, task.id, [{"message": "noted", "type": "note"}])
+        with _sends():
+            _process_deferred_user_alerts(config, task, temp_dir)
+        assert not (temp_dir / f"task_{task.id}_user_alerts.json").exists()
+
+    def test_the_note_title_names_the_task_without_alarming(
+        self, config, task, temp_dir,
+    ):
+        _write_alerts(temp_dir, task.id, [{"message": "noted", "type": "note"}])
+        with _sends():
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        title = _rows(config)[0]["title"]
+        assert str(task.id) in title
+        assert "alert" not in title.lower()
+        assert "action needed" not in title.lower()
+
+    def test_the_unrecorded_fallback_does_not_push_a_note(
+        self, config, task, temp_dir, caplog,
+    ):
+        """The fallback exists to rescue a push, and a note has none to rescue.
+
+        With the framework DB unwritable there is no row, so the fallback sends
+        directly. Sending a note there would reintroduce the exact push this
+        grade exists to withhold — and on the one path where the user cannot
+        dismiss it from the panel, because no row was written. The evidence file
+        stays instead, which is what the unrecorded branch already does.
+        """
+        _write_alerts(temp_dir, task.id, [{"message": "noted", "type": "note"}])
+        with (
+            caplog.at_level("ERROR"),
+            patch("istota.scheduler_deferred.db.get_db",
+                  side_effect=RuntimeError("locked")),
+            _sends(delivered=True) as send,
+        ):
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert send.call_count == 0
+        assert (temp_dir / f"task_{task.id}_user_alerts.json").exists()
+        assert "neither recorded nor delivered" in caplog.text
+
+    def test_the_unrecorded_fallback_still_pushes_a_security_alert_beside_a_note(
+        self, config, task, temp_dir, caplog,
+    ):
+        """Withholding the note must not withhold its neighbour — or its evidence.
+
+        The mixed drain is the trap. With no row written for either grade, a
+        fallback that reported success on the strength of the security alert it
+        pushed would have the caller unlink the file, and the note it skipped
+        would then be held by nothing at all: no row, no send, no file. So the
+        skip withholds the return value even though the other grade got through,
+        and the cost is a file left beside a delivered alert.
+        """
+        _write_alerts(temp_dir, task.id, [
+            {"message": "Exfiltration attempt", "type": "security"},
+            {"message": "noted", "type": "note"},
+        ])
+        with (
+            caplog.at_level("WARNING"),
+            patch("istota.scheduler_deferred.db.get_db",
+                  side_effect=RuntimeError("locked")),
+            _sends(delivered=True) as send,
+        ):
+            _process_deferred_user_alerts(config, task, temp_dir)
+
+        assert send.call_count == 1
+        assert "Exfiltration attempt" in send.call_args.args[2]
+        assert "noted" not in send.call_args.args[2]
+        # The note is held by nothing but the file, so the file stays.
+        assert (temp_dir / f"task_{task.id}_user_alerts.json").exists()
+        assert "keeping the evidence file" in caplog.text
+        assert "note (1)" in caplog.text
+
+    def test_the_type_axis_is_still_bounded(self):
+        """Three values, and the key can only ever spell one of them."""
+        assert set(task_alert.ALERT_TYPES) == {"security", "action_needed", "note"}
+        for invented in ("", None, "wat", "SECURITY-ish", "note; drop table"):
+            assert task_alert.normalize_alert_type(invented) in task_alert.ALERT_TYPES
+
+    def test_every_grade_has_a_severity_and_a_delivery_answer(self):
+        """The two per-grade tables must cover exactly the grades that exist.
+
+        A grade missing from `ALERT_SEVERITY` raises `KeyError` out of
+        `severity_for`, into the blanket `except` in
+        `_process_deferred_user_alerts` — which demotes the *whole* drain to the
+        unrecorded fallback rather than failing the one grade. Same shape as the
+        two-name-list invariant `worktree_reaper` carries.
+        """
+        assert set(task_alert.ALERT_SEVERITY) == set(task_alert.ALERT_TYPES)
+        assert set(task_alert.DELIVERED_ALERT_TYPES) <= set(task_alert.ALERT_TYPES)
+        assert task_alert.ALERT_TYPE_NOTE not in task_alert.DELIVERED_ALERT_TYPES
+
+    def test_a_near_miss_grade_is_logged_rather_than_silently_demoted(self, caplog):
+        """The quiet grade is silent everywhere else, so the coercion is the trace.
+
+        No push, no action chip, and `auto_resolve_on_seen` closes the row on the
+        first panel render — which is right for a grade the model chose and wrong
+        as the only record of one it fumbled.
+        """
+        with caplog.at_level("INFO"):
+            assert task_alert.normalize_alert_type("security_alert") == "note"
+        assert "security_alert" in caplog.text
+
+    def test_a_missing_grade_is_not_logged(self):
+        """The documented default is not a mistake, so it stays quiet."""
+        import logging
+        from unittest.mock import patch as _patch
+
+        with _patch.object(logging.getLogger(task_alert.__name__), "info") as info:
+            assert task_alert.normalize_alert_type(None) == "note"
+            assert task_alert.normalize_alert_type("") == "note"
+        info.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
