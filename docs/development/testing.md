@@ -43,7 +43,7 @@ Eight marker sets are deselected by default (also via `addopts`), each with a di
 
 | Marker | Needs | Runner |
 |---|---|---|
-| `integration` | a live Nextcloud instance, or Garmin credentials | `uv run pytest -m integration` |
+| `integration` | a live Nextcloud instance, Garmin credentials, or a running devbox reachable from a host shell — see below | `uv run pytest -m integration` |
 | `live` | a real LLM API key; costs money | `uv run pytest -m live` |
 | `linux` | a real Linux kernel, a usable bubblewrap, and — for the cgroup tests — a delegated cgroup v2 subtree | `scripts/test-linux.sh` |
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
@@ -51,6 +51,8 @@ Eight marker sets are deselected by default (also via `addopts`), each with a di
 | `full` | a Docker daemon, and the network — see below | `uv run pytest -m full -n0` |
 | `testbed` | a Docker daemon, and no istota image | `uv run pytest -m testbed -n0` |
 | `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
+
+**The devbox half of the `integration` marker has to run from a host shell, not from a task.** `tests/test_skills_devbox_integration.py` is the only tier that executes the `docker cp` / `docker exec` boundary for real — every other devbox test fakes `_run_docker` — and it calls `docker` directly. The socket a sandboxed task sees is `istota-docker-proxy`, which tracks the exec ids it issued and refuses any other, so a raw `docker exec` from a task is denied at the exec-inspect step *after the command has already run*: the CLI exits 1 with the command's own status never fetched, which is indistinguishable from the command failing. Run it as `ISTOTA_USER_ID=<user> uv run pytest -m integration tests/test_skills_devbox_integration.py -n0` from a shell on the deployment, outside the sandbox. Run from a task it skips, having probed for the refusal first (ISSUE-313) — it used to report `6 failed, 2 passed`, and the two passes were the ISSUE-306 and ISSUE-307 regression tests, both satisfied by the refusal rather than by the container.
 
 **The cgroup tests need a subtree the driver builds.** `task_cgroup.resolve_root()` reads `/proc/self/cgroup` and truncates at the `.service` / `.scope` component; under Docker's default private cgroup namespace that file reads `0::/`, so it answers `None` however writable the tree is, and the `linux`-marked cgroup tests would skip inside the one runner meant to execute them. `scripts/dev/linux-tier-cgroup.sh`, sourced by the driver, remounts `/sys/fs/cgroup` read-write, empties the container's own cgroup into a `supervisor/` leaf (the `DelegateSubgroup=` shape — cgroup v2 will not let one cgroup both hold processes and enable controllers for its children), turns on the controllers, and exports `ISTOTA_TEST_CGROUP_ROOT` only after proving a `memory.max` write succeeds. The tests treat that variable as a promise: set and unusable is a failure, unset is an honest skip. So a Docker without `SYS_ADMIN` or with a read-only cgroup2 mount loses those tests and keeps the rest of the tier.
 
