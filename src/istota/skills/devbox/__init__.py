@@ -46,6 +46,7 @@ import sys
 import time
 from pathlib import Path
 
+from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 from istota.skill_host_paths import resolve_host_path, validate_host_path
 
 DEFAULT_TIMEOUT = 300
@@ -54,24 +55,19 @@ MAX_COMMAND_BYTES = 32 * 1024  # `bash -o pipefail -c` argv length cap
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 _OWNER_LABEL = "com.istota.user_id"
 
-# 128 + SIGPIPE(13). `pipefail` newly colours a pipeline in two cases, and this
-# is the one that can be annotated: a downstream `head` or `grep -q` closes the
-# pipe early and kills a producer that was doing nothing wrong. It has a fixed
-# code, so it can be recognised.
+# Both re-exported from `istota.shell_exec` rather than restated here. This
+# module is where the rule was first paid for, and the sentence below is
+# user-facing text: a second copy is a second thing to keep in step, which is
+# what `shell_exec` exists to prevent. `shell_exec` is a stdlib-only leaf, so a
+# skill CLI subprocess can import it.
 #
-# The other case cannot be, and is named in skill.md instead: a non-final stage
-# that exits non-zero to *report* something rather than to fail — `grep` with no
-# match, `diff`, `cmp`, `git diff --quiet`. `grep -c x f | wc -l` now returns 1
-# where it returned 0, and nothing distinguishes that from a real failure, here
-# or anywhere else. It is the price of the option rather than a defect in it.
-_SIGPIPE_EXIT = 141
-_SIGPIPE_NOTE = (
-    "exit 141 usually means SIGPIPE: a command in the pipeline was killed "
-    "because the next one closed the pipe (`| head`, `| grep -q`), and with "
-    "pipefail on that becomes the pipeline's status. If the consumer's output "
-    "is what you wanted, this is not a failure — re-run without the early-exit "
-    "consumer to get a status you can act on."
-)
+# The note covers the one case `pipefail` newly colours that has a fixed code —
+# a downstream `head` or `grep -q` closing the pipe on a producer that was doing
+# nothing wrong. The other cannot be recognised and is named in skill.md
+# instead: a non-final stage exiting non-zero to *report* something rather than
+# to fail, so `grep -c x f | wc -l` now returns 1 where it returned 0.
+_SIGPIPE_EXIT = SIGPIPE_EXIT
+_SIGPIPE_NOTE = SIGPIPE_NOTE
 
 # Container paths `docker cp` cannot reach. The daemon resolves a container
 # path against the container's rootfs on the host and mounts only the
@@ -302,7 +298,7 @@ def cmd_exec(args) -> dict:
     # reassuring direction is acted on, which is what settles the trade.
     cmd = [
         "exec", "-i", "-u", "dev", "-w", _DEFAULT_WORKDIR,
-        container, "bash", "-o", "pipefail", "-c", args.command,
+        container, *shell_argv(args.command, bash="bash"),
     ]
     start = time.monotonic()
     try:

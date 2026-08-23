@@ -17,6 +17,8 @@ Heartbeat needs the Nextcloud mount — the config file lives on it, so `load_he
 
 `shell-command` checks run with `build_stripped_env()`, but arbitrary shell is still arbitrary shell — a non-admin's check returns unhealthy with "shell-command checks are admin-only" rather than running.
 
+`shell-command` runs under `bash -o pipefail -c`, so a probe ending in a pipe reports the first stage that failed rather than the last command. Two things follow. A non-final stage that exits non-zero to *report* something — `grep` with no match, `diff` — now makes the check unhealthy; append `|| true` where that is not what you mean. And a probe ending in `head` or `grep -q` reports status 141, which is the pipe being closed early rather than a failure; the alert message says so. Note also that these run under bash rather than `/bin/sh`, so `echo` no longer expands backslash escapes — if a check compares output against a `condition`, confirm it still matches.
+
 The `self-check` execution test actually spawns a sandboxed `claude` and asks it to echo a known string, which is the only step that proves the whole path works end to end. It is on by default; set `execution_test = false` on the check to skip it.
 
 ## Per-check controls

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from istota import shell_exec
 from istota.skills import devbox
 
 
@@ -300,6 +301,22 @@ class TestExecKeepsThePipelineStatus:
         would read as a pipefail regression.
         """
         return argv[argv.index(devbox._DEFAULT_WORKDIR) + 2:]
+
+    def test_the_argv_comes_from_the_shared_builder(self, monkeypatch):
+        """Not a second hardcoded spelling of the same rule.
+
+        `shell_exec` says in its own docstring that it exists so the next
+        caller inherits the rule rather than repeating it, and this is the
+        caller that paid for the rule — a hardcoded copy here would make that
+        claim false on the first file anyone checks.
+        """
+        argv = self._exec_argv(monkeypatch, "echo hi")
+        assert self._shell_argv(argv) == shell_exec.shell_argv("echo hi", bash="bash")
+
+    def test_the_sigpipe_constants_are_the_shared_ones(self):
+        """Both are user-facing text; two copies is two things to keep in step."""
+        assert devbox._SIGPIPE_EXIT is shell_exec.SIGPIPE_EXIT
+        assert devbox._SIGPIPE_NOTE is shell_exec.SIGPIPE_NOTE
 
     def test_the_shell_argv_turns_pipefail_on(self, monkeypatch):
         shell = self._shell_argv(self._exec_argv(monkeypatch, "echo hi"))

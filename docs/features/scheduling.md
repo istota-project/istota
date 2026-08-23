@@ -30,6 +30,12 @@ command = "df -h / | tail -1"
 ```
 ````
 
+**Shell semantics for `command` jobs.** The command runs under `bash -o pipefail -c`, so a pipeline reports the first stage that failed rather than the last command — `<runner> … | tail` no longer comes back clean on a run that failed. Three consequences worth knowing when you write one:
+
+- A non-final stage that exits non-zero to *report* something rather than to fail now fails the whole job. `grep` finding no match is the common one; `diff` and `git diff --quiet` behave the same way. Put those on their own line, or append `|| true` where the status genuinely does not matter.
+- A pipeline ending in `head` or `grep -q` closes the pipe early and reports status 141. That is SIGPIPE rather than a failure, the job's `last_error` says so, and it is failed without retrying — the retry would re-run a command whose first stage already did its work.
+- The interpreter is bash, not `/bin/sh`. If a job was written against dash, note that `echo` no longer expands backslash escapes such as `\t`.
+
 CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definitions to the `scheduled_jobs` DB table.
 
 ## Job types

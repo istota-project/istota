@@ -357,15 +357,36 @@ class TestCheckShellCommand:
         assert result.healthy is False
 
     def test_a_succeeding_pipeline_is_still_healthy(self, tmp_path):
-        """Control — a piped probe that works must not start alerting."""
+        """Control — a piped probe that works must not start alerting.
+
+        Deliberately carries no `condition`: `_check_shell_command` only reads
+        `result.returncode` in the `if not condition:` branch, so a control with
+        one would decide health from stdout alone and pass identically against
+        the pre-pipefail code — proving nothing about the change it guards.
+        """
         config = Config(nextcloud_mount_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
-            config={"command": "echo 50 | tail -1", "condition": "< 90"},
+            config={"command": "echo hi | tail -1"},
         )
         result = _check_shell_command(check, config)
         assert result.healthy is True
+
+    def test_a_sigpipe_probe_says_what_141_means(self, tmp_path):
+        """The message reaches an operator through an alert, with no stderr
+        beside it — a SIGPIPE'd producer writes none. A bare `exit 141` on a
+        correct probe is the kind of thing someone debugs at 3am."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "yes | head -1"},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is False
+        assert "141" in result.message
+        assert "SIGPIPE" in result.message, result.message
 
     def test_less_than_condition_pass(self, tmp_path):
         config = Config(nextcloud_mount_path=tmp_path)

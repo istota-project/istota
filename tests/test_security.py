@@ -299,6 +299,34 @@ class TestBuildStrippedEnv:
         assert "MY_SECRET" not in env
         assert "SERVICE_API_KEY" not in env
 
+    def test_strips_bash_env(self):
+        """Cron rows and heartbeat commands run under bash now, not `/bin/sh`.
+
+        Bash sources `$BASH_ENV` for a non-interactive shell where dash sources
+        nothing, so an inherited value would newly execute a file before every
+        one of those commands — a capability the previous interpreter did not
+        have. Needs control of the daemon's environment to reach, so it is a
+        capability removal rather than a hole being closed.
+        """
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "BASH_ENV": "/tmp/evil.sh",
+        }, clear=True):
+            env = build_stripped_env()
+        assert "BASH_ENV" not in env
+        assert "PATH" in env
+
+    def test_does_not_strip_env(self):
+        """`ENV` is a deployment name far more often than a startup file.
+
+        POSIX shells read it only for *interactive* shells, and `bash -c` is
+        not in POSIX mode and reads `BASH_ENV` instead — so stripping it would
+        buy nothing and break an operator command that reads `$ENV`.
+        """
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "ENV": "production"}, clear=True):
+            env = build_stripped_env()
+        assert env.get("ENV") == "production"
+
     def test_strips_nc_pass(self):
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",

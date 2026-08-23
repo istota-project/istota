@@ -77,7 +77,7 @@ from .consumers import (
 )
 from .db_health import CheckReport, check_and_repair
 from .events import EventWriter, PROGRESS_MESSAGES
-from .shell_exec import shell_argv
+from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure, shell_argv
 from .skills.briefing import (
     get_briefings_for_user,
     parse_briefing_json,
@@ -2039,6 +2039,14 @@ def _execute_command_task(
         return True, result
     else:
         error = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
+        if proc.returncode == SIGPIPE_EXIT:
+            # This string becomes `scheduled_jobs.last_error`, which `!cron`,
+            # the admin UI and the `cron_job` inbox row all show to a human. A
+            # SIGPIPE'd producer writes nothing to stderr, so without the note
+            # the operator gets a bare "Exit code 141" on a correct command.
+            # It is also what `is_sigpipe_failure` keys on to keep this off the
+            # retry ladder — see the failure branch in `process_one_task`.
+            error = f"{error}. {SIGPIPE_NOTE}"
         return False, error
 
 
@@ -2884,6 +2892,22 @@ def process_one_task(
                     "Task %d: permanent provider error, not retrying: %s",
                     task_id, result[:200],
                 )
+            # A command task killed by SIGPIPE is the second non-retryable
+            # class, and the reason is stronger than "the retry cannot help".
+            # `pipefail` turned `<producer> | head -N` from exit 0 into exit
+            # 141, and the ladder re-runs the *whole* command string — so a
+            # producer that sends mail or writes a file does it again at 1, 4
+            # and 16 minutes, having already succeeded. 141 will recur anyway.
+            # Gated on `task.command` because `_execute_command_task` is the
+            # only thing that composes this text; an LLM answer quoting it is
+            # not a reason to skip a retry the task earned.
+            is_sigpipe = bool(task.command) and is_sigpipe_failure(result)
+            if is_sigpipe:
+                logger.warning(
+                    "Task %d: command killed by SIGPIPE, not retrying (the "
+                    "pipeline's producer already ran): %s",
+                    task_id, result[:200],
+                )
             if is_cancelled:
                 db.update_task_status(conn, task_id, "cancelled", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
@@ -2936,7 +2960,7 @@ def process_one_task(
                     task, get_user_temp_dir(config, task.user_id),
                 )
             elif task.attempt_count < task.max_attempts - 1 and not is_oom \
-                    and not is_permanent:
+                    and not is_permanent and not is_sigpipe:
                 # Exponential backoff: 1, 4, 16 minutes
                 delay = 1 << (task.attempt_count * 2)
                 db.set_task_pending_retry(conn, task_id, result, delay)

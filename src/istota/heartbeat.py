@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import db
-from .shell_exec import shell_argv
+from .shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 from .storage import get_user_heartbeat_path
 
 if TYPE_CHECKING:
@@ -365,9 +365,19 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
                     message=f"Command returned error envelope: {err_msg}",
                     details={"value": value, "returncode": result.returncode},
                 )
+        if healthy:
+            message = "Command succeeded"
+        else:
+            message = f"Command failed (exit {result.returncode})"
+            if result.returncode == SIGPIPE_EXIT:
+                # This message is what reaches the operator in an alert, and a
+                # SIGPIPE'd producer writes nothing to stderr to go with it. A
+                # bare "exit 141" on a probe that was correct is the kind of
+                # thing someone debugs from scratch at 3am.
+                message = f"{message}. {SIGPIPE_NOTE}"
         return CheckResult(
             healthy=healthy,
-            message="Command succeeded" if healthy else f"Command failed (exit {result.returncode})",
+            message=message,
             details={"value": value, "returncode": result.returncode},
         )
 

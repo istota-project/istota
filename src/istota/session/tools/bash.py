@@ -35,9 +35,12 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
     schema = ToolSchema(
         name="Bash",
         description=(
-            "Run a bash command in the working directory. Output (stdout+stderr) "
-            "is captured and capped. Provide a short `description` for progress "
-            "display. Optional `timeout` in milliseconds."
+            "Run a bash command in the working directory. Runs under "
+            "`set -o pipefail`, so a pipeline reports the first failing stage "
+            "rather than the last command — note that a non-final `grep` with "
+            "no match fails the pipeline. Output (stdout+stderr) is captured "
+            "and capped. Provide a short `description` for progress display. "
+            "Optional `timeout` in milliseconds."
         ),
         parameters=[
             ToolParameter(name="command", type="string", description="The command to run."),

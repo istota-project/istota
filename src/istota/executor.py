@@ -990,6 +990,25 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
     "APP_PASSWORD", "NC_PASS", "PRIVATE_KEY",
 })
 
+#: Shell startup files, stripped by exact name rather than by substring.
+#:
+#: Cron ``command:`` rows and heartbeat shell commands run under bash now
+#: (``shell_exec.shell_argv``) where they used to run under ``/bin/sh``. Bash
+#: sources ``$BASH_ENV`` for a *non-interactive* shell and dash sources nothing,
+#: so a value inherited from the daemon's own environment would newly execute
+#: before every one of those commands. Not reachable by a task or by the model —
+#: it needs control of the daemon's environment — but it is a capability the
+#: previous interpreter did not have, so it goes.
+#:
+#: ``ENV`` is deliberately **not** here. POSIX shells read it only for
+#: *interactive* shells, and bash invoked as ``bash -c`` is not in POSIX mode
+#: and reads ``BASH_ENV`` instead — so stripping it would buy nothing and would
+#: break an operator whose command reads ``$ENV`` as a deployment name.
+#:
+#: Exact match, because these go through a substring test above: ``ENV`` as a
+#: substring would strip most of the environment.
+_SHELL_STARTUP_ENV_VARS = frozenset({"BASH_ENV"})
+
 _bwrap_checked: bool | None = None
 
 #: Whether this host's bwrap needs ``--unshare-user`` spelled out.
@@ -1424,6 +1443,7 @@ def build_stripped_env() -> dict[str, str]:
     env = {
         k: v for k, v in os.environ.items()
         if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+        and k.upper() not in _SHELL_STARTUP_ENV_VARS
     }
     env["PRECOMMIT_SCANS_REQUIRED"] = "1"
     return env

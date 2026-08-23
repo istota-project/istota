@@ -62,7 +62,7 @@ class ToolEnv:
 
     - ``cwd`` — working directory; relative paths resolve against it and Bash
       runs in it.
-    - ``sandbox_wrap`` — wraps a raw argv (``["bash", "-c", …]``) with bwrap.
+    - ``sandbox_wrap`` — wraps a raw argv (``["bash", "-o", "pipefail", "-c", …]``) with bwrap.
       ``None`` on macOS / when the sandbox is disabled (the wrap is a no-op).
     - ``subprocess_env`` — environment for Bash subprocesses (already
       credential-stripped by the caller). ``None`` inherits the parent env.

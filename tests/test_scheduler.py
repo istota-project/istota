@@ -2164,6 +2164,55 @@ class TestProcessOneTask:
         result = process_one_task(config)
         assert result is None
 
+    def _make_command_task(self, db_path, command: str) -> int:
+        """A CRON `command:` row. `create_task` has no `command` parameter —
+        the scheduler's cron sync writes the column, so the test does too."""
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="", user_id="testuser", source_type="scheduled",
+            )
+            conn.execute(
+                "UPDATE tasks SET command = ?, prompt = '' WHERE id = ?",
+                (command, task_id),
+            )
+            conn.commit()
+        return task_id
+
+    def test_a_sigpipe_command_failure_is_not_retried(self, db_path, tmp_path):
+        """Retrying a SIGPIPE re-runs the producer that already did its work.
+
+        `pipefail` turned `<something> | head -N` from exit 0 into exit 141, and
+        the failure branch retries at 1, 4 and 16 minutes — so a row whose first
+        stage sends mail or writes a file now does it up to four times per
+        scheduled run, and the retry cannot succeed anyway because 141 recurs.
+        The status is right; riding the ladder with it is not.
+        """
+        config = self._make_config(db_path, tmp_path)
+        task_id = self._make_command_task(db_path, "yes | head -1")
+
+        result = process_one_task(config)
+        assert result is not None
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "failed", (
+            f"a SIGPIPE command task was left {task.status!r} — it is on the "
+            "retry ladder, re-running its producer"
+        )
+
+    def test_an_ordinary_command_failure_still_retries(self, db_path, tmp_path):
+        """Control. Without it, refusing every command failure would pass above."""
+        config = self._make_config(db_path, tmp_path)
+        task_id = self._make_command_task(db_path, "echo boom >&2; exit 1")
+
+        result = process_one_task(config)
+        assert result is not None
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "pending", task.status
+        assert task.attempt_count == 1
+
     @patch("istota.scheduler.execute_task", return_value=(True, "All done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_success_completes_task(self, mock_arun, mock_exec, db_path, tmp_path):
@@ -3917,6 +3966,19 @@ class TestExecuteCommandTask:
         success, result = _execute_command_task(task, config)
         assert success is True, result
         assert result == "hello world"
+
+    def test_a_sigpipe_failure_says_what_141_means(self, db_path, tmp_path):
+        """`last_error` is read by a human — `!cron`, the admin UI, the inbox.
+
+        A SIGPIPE'd producer writes nothing to stderr, so without this the
+        operator gets a bare `Exit code 141` on a job whose command was correct.
+        """
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="yes | head -1")
+        success, result = _execute_command_task(task, config)
+        assert success is False, result
+        assert "141" in result
+        assert "SIGPIPE" in result, result
 
     def test_failure_returns_stderr(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
