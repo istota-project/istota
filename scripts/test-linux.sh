@@ -93,14 +93,103 @@ CACHE_VOLUME="istota-test-cache"
 # not go near Docker, so a sandboxed task that got as far as resolving a mode
 # would be told to try the one route this check exists to close.
 if [ -n "${ISTOTA_SANDBOXED:-}" ]; then
+    # Both routes are named, because Docker is not the only one and on a Linux
+    # deployment host it is not the one that bites first (ISSUE-315). The
+    # original message explained itself entirely in terms of Docker, which left
+    # an agent on a Linux box with `/usr/bin/bwrap` in view an obvious next
+    # move: skip the container and run bwrap directly. That fails with a
+    # namespace error naming nothing about the real boundary — the same
+    # confusion ISSUE-293 was filed about, one layer along — and native mode
+    # turned "skip the container" into a supported flag.
+    #
+    # The Docker half is fixed and prints first, ahead of the probe. A probe is
+    # a subprocess and a subprocess can hang; a refusal that printed nothing
+    # until bwrap came back would read as a wedged task rather than as a
+    # boundary, which is the failure mode this whole message exists to remove.
     echo "scripts/test-linux.sh cannot run inside the sandbox." >&2
     echo "" >&2
-    echo "This tier runs a container with CAP_SYS_ADMIN and CAP_NET_ADMIN so that" >&2
-    echo "bwrap can create namespaces. A task reaches Docker through the devbox" >&2
-    echo "allowlist proxy, which does not permit creating or starting a container" >&2
-    echo "and should not — that grant would be a host escape." >&2
+    echo "Container mode is closed by Docker. It runs a container with" >&2
+    echo "CAP_SYS_ADMIN and CAP_NET_ADMIN so that bwrap can create namespaces," >&2
+    echo "and a task reaches Docker through the devbox allowlist proxy, which" >&2
+    echo "does not permit creating or starting a container and should not —" >&2
+    echo "that grant would be a host escape." >&2
+    echo "" >&2
+
+    # The nested-namespace half is *probed*, not asserted. A task's sandbox
+    # passes `--unshare-user --disable-userns` only where bwrap supports the
+    # flag (0.8+), and `_bwrap_supports` also records it unsupported when its
+    # own probe times out — so on some hosts the flag never reached the argv
+    # and a nested namespace really would start. Claiming otherwise there would
+    # be the same kind of confident wrong answer this issue is about.
+    #
+    # Deliberately *not* the same probe as the product's
+    # `_bwrap_supports_disable_userns`, which passes `--disable-userns` and
+    # asks whether bwrap accepts the flag. This one omits it and asks whether a
+    # nested namespace starts, which is the question a reader here actually
+    # has, and it answers it about the sandbox they are standing in rather than
+    # about the bwrap binary.
+    #
+    # Bounded where `timeout` exists, and the output is kept rather than
+    # discarded: the probe answers "did a nested bwrap start", which is one
+    # question short of "why", and bwrap's own stderr is the only thing that
+    # closes that gap. Printing it is what keeps the branch below from
+    # asserting a cause it did not establish.
+    nested_userns="absent"
+    probe_output=""
+    probe_status=0
+    probe_bounded=""
+    if command -v bwrap >/dev/null 2>&1; then
+        bwrap_probe=(bwrap)
+        if command -v timeout >/dev/null 2>&1; then
+            bwrap_probe=(timeout 5 bwrap)
+            probe_bounded="1"
+        fi
+        probe_output="$("${bwrap_probe[@]}" --unshare-user --ro-bind / / -- true 2>&1)" \
+            || probe_status=$?
+        if [ "$probe_status" -eq 0 ]; then
+            nested_userns="open"
+        elif [ -n "$probe_bounded" ] && [ "$probe_status" -eq 124 ]; then
+            nested_userns="stuck"
+        else
+            nested_userns="blocked"
+        fi
+    fi
+
+    case "$nested_userns" in
+        blocked)
+            echo "Native mode is closed too. It needs bwrap to create a user namespace," >&2
+            echo "and a nested one does not start in here. Probed just now:" >&2
+            echo "" >&2
+            echo "  \$ bwrap --unshare-user --ro-bind / / -- true" >&2
+            echo "  ${probe_output}" >&2
+            echo "" >&2
+            echo "That is what --disable-userns does, and your sandbox passes it wherever" >&2
+            echo "bwrap supports the flag. It is the sandbox working, not a broken" >&2
+            echo "install, and not a flag to remove." >&2
+            ;;
+        open)
+            echo "Native mode is not closed by the sandbox on this host: 'bwrap" >&2
+            echo "--unshare-user' succeeds in here, so --disable-userns never reached" >&2
+            echo "the sandbox argv (bwrap older than 0.8, or a support probe that could" >&2
+            echo "not run). It is refused anyway. A task runs on the machine the daemon" >&2
+            echo "runs on, where this tier would claim every core beside it, and the" >&2
+            echo "sandbox masks the database directories, keeps config out of view and" >&2
+            echo "routes the network through an allowlist — so the suite would go red on" >&2
+            echo "the sandbox rather than tell you anything about it." >&2
+            ;;
+        stuck)
+            echo "Native mode cannot be vouched for: the nested-namespace probe did not" >&2
+            echo "return within 5 seconds, so this says nothing either way. It is" >&2
+            echo "refused regardless, for the reasons above." >&2
+            ;;
+        *)
+            echo "Native mode is closed too: it needs bwrap, and there is none on PATH" >&2
+            echo "in here to run or to probe." >&2
+            ;;
+    esac
     echo "" >&2
     echo "This is not a test failure. Nothing is broken and nothing is red." >&2
+    echo "No value of ISTOTA_LINUX_TIER_MODE opens either route." >&2
     echo "Say in the merge request that the change touches the sandbox and that" >&2
     echo "the linux tier is out of reach from a task, and ask for the run before" >&2
     echo "merge. See docs/development/testing.md, 'Deployment tiers'." >&2
