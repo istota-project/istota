@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import db
+from .shell_exec import shell_argv
 from .storage import get_user_heartbeat_path
 
 if TYPE_CHECKING:
@@ -326,9 +327,12 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
                     "heartbeat skill-env resolution failed for user=%s: %s",
                     user_id, e,
                 )
+        # `shell_argv` rather than `shell=True` (`/bin/sh -c`, dash, no
+        # `pipefail`): a probe ending in a pipe reported its last stage, so a
+        # check whose real command failed read as healthy indefinitely — the
+        # exact condition a heartbeat exists to detect.
         result = subprocess.run(
-            command,
-            shell=True,
+            shell_argv(command),
             capture_output=True,
             text=True,
             timeout=timeout,

@@ -49,7 +49,9 @@ class TestBash:
         env = _env(tmp_path)
         env.sandbox_wrap = _wrap
         await _run(make_bash_tool(env), {"command": "echo hi"})
-        assert seen["cmd"][:2] == ["bash", "-c"]
+        # The wrap receives the shell argv whole, `pipefail` included — the
+        # option has to be inside the sandbox, not applied to the wrapper.
+        assert seen["cmd"] == ["bash", "-o", "pipefail", "-c", "echo hi"]
 
     async def test_streaming_on_update(self, tmp_path):
         updates = []
@@ -108,6 +110,45 @@ class TestBash:
     async def test_exclude_from_context_default_includes_output(self, tmp_path):
         result = await _run(make_bash_tool(_env(tmp_path)), {"command": "echo visible"})
         assert "visible" in _text(result)
+
+
+class TestBashPipelineStatus:
+    """The tool appends `[exit code: N]` to what the model reads, so that number
+    is a claim about whether the command worked.
+
+    It ran under `bash -c`, which starts with `pipefail` off, so a pipeline
+    reported its *last* stage — `pytest … | tail -3` came back clean on a suite
+    that failed. Same defect ISSUE-307 fixed for `devbox exec`, on the shell the
+    native brain actually uses.
+    """
+
+    async def test_a_failing_stage_is_reported(self, tmp_path):
+        result = await _run(
+            make_bash_tool(_env(tmp_path)), {"command": "false | tail -1"},
+        )
+        assert "exit code: 1" in _text(result), _text(result)
+
+    async def test_a_succeeding_pipeline_is_not_reported_as_a_failure(self, tmp_path):
+        """Control: the option must not colour every pipeline."""
+        result = await _run(
+            make_bash_tool(_env(tmp_path)), {"command": "echo hi | tail -1"},
+        )
+        text = _text(result)
+        assert "hi" in text
+        assert "exit code" not in text, text
+
+    async def test_sigpipe_is_named_rather_than_left_as_a_bare_number(self, tmp_path):
+        """`pipefail`'s one recognisable cost, answered where the model reads.
+
+        `yes | head -1` is a correct command that now reports 141. Left as a
+        bare number it reads as a failure; the tool says what it is instead.
+        """
+        result = await _run(
+            make_bash_tool(_env(tmp_path)), {"command": "yes | head -1"},
+        )
+        text = _text(result)
+        assert "141" in text, text
+        assert "SIGPIPE" in text, text
 
 
 class TestBashOutputSpill:

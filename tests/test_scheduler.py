@@ -3897,6 +3897,27 @@ class TestExecuteCommandTask:
         assert "timed out" in result.lower()
         assert elapsed < 15, f"timeout wedged on grandchild pipe ({elapsed:.1f}s)"
 
+    def test_a_failing_stage_of_a_pipeline_is_a_failed_command(self, db_path, tmp_path):
+        """A CRON `command:` row keyed auto-disable on the last stage's status.
+
+        `shell=True` is `/bin/sh -c`, which starts with `pipefail` off, so
+        `<runner> … | tail` reported success on a run that failed and the job
+        was recorded as healthy indefinitely. The counterpart of ISSUE-307 on
+        the operator-authored surface.
+        """
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="echo oops >&2 | tail -1; false | tail -1")
+        success, result = _execute_command_task(task, config)
+        assert success is False, result
+
+    def test_a_succeeding_pipeline_is_still_a_success(self, db_path, tmp_path):
+        """Control — the change must not fail every job that uses a pipe."""
+        config = self._make_config(db_path, tmp_path)
+        task = self._make_task(command="echo hello world | tail -1")
+        success, result = _execute_command_task(task, config)
+        assert success is True, result
+        assert result == "hello world"
+
     def test_failure_returns_stderr(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
         task = self._make_task(command="echo oops >&2 && exit 1")

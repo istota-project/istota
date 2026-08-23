@@ -651,6 +651,20 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   doesn't need to reason over. Failure markers (`[exit code: N]` /
   `[command aborted]` / `[command timed out …]`) are appended to the stub so a
   failure still surfaces even when the body is omitted.
+- **Bash runs under `pipefail`.** The argv is built by `shell_exec.shell_argv`,
+  so it is `bash -o pipefail -c` rather than `bash -c` — the counterpart of
+  ISSUE-307 on the shell the native brain actually uses. `[exit code: N]` is a
+  claim about whether the command worked, and without the option a pipeline
+  reported its *last* stage, so `pytest … | tail -3` came back clean on a suite
+  that failed. It is the bare name rather than a probed absolute path because
+  the argv is handed to `sandbox_wrap`: bubblewrap binds `/usr` and need not
+  reproduce the host's `/bin` symlink, so PATH resolution inside the namespace
+  is what has always worked here. `exit 141` is SIGPIPE (`| head`, `| grep -q`
+  closing the pipe early) and carries `shell_exec.SIGPIPE_NOTE` after the
+  marker, since a bare 141 reads as a failure and the command was correct. The
+  second cost has no marker and is documented rather than detected: a non-final
+  stage exiting non-zero to *report* something (`grep` with no match) now
+  colours the pipeline.
 
 NativeBrain hardening (2026-07-18 audit, NB-1…NB-24 — see the audit doc in the
 project notes for the full list):
