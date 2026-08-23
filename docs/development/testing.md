@@ -98,6 +98,8 @@ When to run each:
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |
 
+The costs above were measured on one arm64 developer machine with warm caches; they are the shape of each tier rather than a threshold.
+
 Two of these carry a negative control, and the controls are not a formality — on a tier that asserts against an artifact, reading the test tells you almost nothing about whether it can fail. `scripts/test-image-negative-control.sh` covers both halves of the image tier and requires each to go red against a deliberately broken image.
 
 The istota half is one control: the image with `/usr/local/lib/istota_forge` removed. The devbox half needs **four**, because that file asserts several separable things and no single broken image reaches all thirteen of its assertions:
@@ -162,7 +164,7 @@ The generated passwords, the module switches derived from the profile's service 
 
 **The two security options are a pair and neither substitutes for the other.** Seccomp lets bubblewrap create the user namespace; it does not let it mount a procfs inside one, and `build_bwrap_cmd` emits `--proc /proc` on every sandbox. Docker's masked `/proc` entries and read-only `/proc/sys` make the container's procfs not "fully visible" to the kernel, which then refuses the mount, so with only the seccomp grant every real sandbox dies at "Can't mount proc on /newroot/proc". `--cap-add=SYS_ADMIN` is not an alternative: measured, it gets past the unshare and fails at `pivot_root`. `docker/docker-compose.test.yml` carries the same pair.
 
-**The shipped `docker/docker-compose.yml` carries neither, so a Docker deployment runs every task unsandboxed.** That is an open product decision rather than a settled state — `systempaths=unconfined` unmasks the host kernel's `/proc` to the container, and the supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed. See `docs/deployment/docker.md`.
+**The shipped `docker/docker-compose.yml` carries neither, so a Docker deployment runs every task unsandboxed.** That is an open product decision rather than a settled state: the pair trades the container's own boundary for the task's, which is a different bargain on a shared deployment than on a single-user one, and the supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed. `docs/deployment/docker.md` has the trade written out.
 
 ### The storage backend, and why it needs no stack
 
@@ -195,9 +197,9 @@ A **service** is anything the daemon talks to that is not the daemon, real or wr
 
 Call recording is deliberately not on the protocol. It is on `HttpStub`, the shared `ThreadingHTTPServer` base, because it does not generalize — a mail server speaks IMAP and Nextcloud is asserted through its own API. A `calls` list on the protocol would mean something different for two of six members.
 
-Four rules bind anything added. The first three are enforced in the default suite rather than left as convention — `tests/test_testbed_services.py` and `tests/test_render_config.py` grep the two shipped files and check every profile, `HttpStub.start` raises, and `Probe.rows_above` refuses. The fourth is a judgement call and is the one to argue about before writing the stub, not after:
+Four rules bind anything added. The first three are enforced in the default suite rather than left as convention — `tests/test_testbed_services.py` checks every service's and every profile's variables against the two shipped files, `HttpStub.start` raises, and `Probe.rows_above` refuses. The fourth is a judgement call and is the one to argue about before writing the stub, not after:
 
-**Wire it in through a variable the shipped generator reads and compose passes through.** Two files, `docker/istota/render-config.sh` *and* `docker/docker-compose.yml`, and they are not automatically in sync: `ISTOTA_EMAIL_AUTHSERV_ID` and `ISTOTA_EMAIL_CONFIRM_SENDER_MATCH` were read by the generator and passed by neither, so an operator who set the confirmation gate to `verify` in `docker/.env` silently got `off`. If a variable is missing, add it to both as a reviewed product change. Never side-load config from the fixture: that is the property that makes the whole tier honest, and it applies to `Profile.config` exactly as it does to `config_env()`. A service with no such variable — ntfy is a per-user secret, feed URLs are DB rows — returns an empty `config_env()` and says in its docstring why, because an empty one otherwise reads as an oversight.
+**Wire it in through a variable the shipped generator reads and compose passes through.** Two files, `docker/istota/render-config.sh` *and* `docker/docker-compose.yml`, and they are not automatically in sync: `ISTOTA_EMAIL_AUTHSERV_ID` and `ISTOTA_EMAIL_CONFIRM_SENDER_MATCH` were read by the generator and passed by neither, so an operator who set the confirmation gate to `verify` in `docker/.env` silently got `off`. If a variable is missing, add it to both as a reviewed product change. The guard on the product side of that — `tests/test_render_config.py`'s passthrough check — is parametrized over `ISTOTA_DEVELOPER_`, `ISTOTA_EMAIL_` and `ISTOTA_NEXTCLOUD_` rather than over everything the generator reads, so a variable in a fourth family needs the prefix list widened with it. Never side-load config from the fixture: that is the property that makes the whole tier honest, and it applies to `Profile.config` exactly as it does to `config_env()`. A service with no such variable — ntfy is a per-user secret, feed URLs are DB rows — returns an empty `config_env()` and says in its docstring why, because an empty one otherwise reads as an oversight.
 
 **A stub bound to anything but loopback must be given a credential to expect.** `HttpStub.start` raises otherwise. Both compose tiers bind all interfaces so a container can reach the stub, which on a laptop on a shared network is an open listener — and in the forge stub's case one running `git http-backend` with `GIT_HTTP_EXPORT_ALL`. It also gives `tests/smoke/test_secret_isolation.py` the name of every secret the session published, which is what it sweeps the model transcript for.
 
@@ -209,7 +211,7 @@ Then write the scenario. `reset()` runs before each test rather than after, so a
 
 ### Prompt goldens
 
-`tests/test_prompt_golden.py` runs in the default suite against no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple — emissaries, persona, channel guidelines, the storage vocabulary, eager skill bodies, the on-demand menu, conversation context, memory, the rules block — and twelve cases snapshot it into `tests/golden/prompts/`. The point is the failure substring assertions decay away from: a layer that silently stops being included.
+`tests/test_prompt_golden.py` runs in the default suite against no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple, behind a `[DRY RUN] Would execute with prompt:` line the test strips — emissaries, persona, channel guidelines, the storage vocabulary, eager skill bodies, the on-demand menu, conversation context, memory, the rules block — and twelve cases snapshot it into `tests/golden/prompts/`. The point is the failure substring assertions decay away from: a layer that silently stops being included.
 
 A diff is a failure. An intentional change is a reviewed golden update:
 

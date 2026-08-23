@@ -49,9 +49,11 @@ services:
     #
     # This is a decision rather than a detail. `render-config.sh:230` renders
     # `sandbox_enabled` true and `docker-compose.yml:168` leaves it true, so
-    # without the grant a full-shape stack boots a daemon whose every
-    # filesystem-touching task fails — the tier would be asserting against a
-    # daemon that cannot run a task. The alternative fix, turning the sandbox
+    # without the grant a full-shape stack boots a daemon that runs every task
+    # *unconfined*: `_bwrap_available` answers no and `build_bwrap_cmd` returns
+    # the argv unwrapped, behind one warning line. Nothing fails, which is
+    # worse than failing and is why the mask assertion exists. The alternative
+    # fix, turning the sandbox
     # off, is worse: `build_bwrap_cmd`'s per-user scoping is what keeps
     # `/mnt/shared/.istota-provisioned` (mode 644, `OAUTH_CLIENT_SECRET` in
     # plaintext), `/data/config/.api-provisioned` (`APP_PASSWORD`),

@@ -63,9 +63,14 @@ services:
     # Docker Desktop 29.x: `bwrap --unshare-user` reports "No permissions to
     # create new namespace, likely because the kernel does not allow
     # non-privileged user namespaces", which reads as a host misconfiguration
-    # rather than as a container policy. Without this, every task that runs a
-    # Bash tool call fails, and the forge scenarios below cannot reach the
-    # wrapper at all.
+    # rather than as a container policy. Without this the daemon does not fail
+    # loudly — `_bwrap_available` answers no, `build_bwrap_cmd` hands back the
+    # unwrapped argv, and every task runs unconfined behind one warning line,
+    # which is what makes an assertion on the masks the only way to tell the
+    # two apart. (This comment used to say every Bash tool call fails. It does
+    # not, and the reason it does not is the whole reason
+    # `test_sandbox_in_stack.py` asserts on a tmpfs rather than on output
+    # coming back.)
     #
     # `systempaths=unconfined` is the second half of the same grant, and it was
     # measured in Stage 7 rather than anticipated. seccomp lets bwrap *create*
