@@ -640,6 +640,46 @@ class TestCp:
         cp_call = [c for c in calls if c[0] == "cp"][0]
         assert cp_call[2] == "devbox-bob:/home/dev/a.txt"
 
+    def test_cp_in_says_the_arrival_check_failed_rather_than_that_the_file_is_gone(
+        self, monkeypatch, tmp_path,
+    ):
+        """ISSUE-313. The arrival check reads a *docker* exit status, and only
+        one of the two things it can mean is "the file is absent". When the
+        exec itself could not answer — the allowlist proxy refusing an
+        untracked exec is the case that happens — the old message claimed the
+        ISSUE-306 symptom outright, which is a confident false statement about
+        a copy that in fact landed."""
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp — the tar relay is allowed
+            (1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec"),
+        ]))
+        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
+        result = devbox.cmd_cp_in(args)
+        assert result["status"] == "error"
+        assert "untracked_exec" in result["error"]
+        assert "is unknown" in result["error"]
+        assert "does not exist inside" not in result["error"]
+
+    def test_cp_in_still_names_a_genuinely_absent_destination(
+        self, monkeypatch, tmp_path,
+    ):
+        """Control: `test -e` answering "no" writes nothing to stderr, and that
+        case must keep the ISSUE-306 wording."""
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp
+            (1, b"", b""),  # arrival check: absent, and it said so cleanly
+        ]))
+        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
+        result = devbox.cmd_cp_in(args)
+        assert result["status"] == "error"
+        assert "does not exist inside" in result["error"]
+
     def test_cp_in_rejects_path_outside_allowlist(self):
         args = type("A", (), {"src": "/etc/passwd", "dest": "/home/dev/p"})()
         result = devbox.cmd_cp_in(args)
@@ -1179,3 +1219,233 @@ class TestTmpfsMountList:
         for mount in devbox._CONTAINER_TMPFS_MOUNTS:
             assert not devbox._EXEC_STAGING_DIR.startswith(mount + "/")
             assert devbox._EXEC_STAGING_DIR != mount
+
+
+class TestTheIntegrationTierCannotReadARefusalAsAnAnswer:
+    """ISSUE-313, the half of it that runs without a devbox.
+
+    `tests/test_skills_devbox_integration.py` needs a container, so nothing in
+    it executes here. What is checkable here is the guard it grew: the
+    docker-API allowlist proxy refuses a raw `docker exec` at the exec-inspect
+    step, the CLI exits 1 with the command's own status never fetched, and read
+    as an answer that satisfied both of the file's negative assertions —
+    including the ISSUE-306 and ISSUE-307 regression tests, which were the two
+    that passed. These pin the pieces that turn that refusal into a skip.
+    """
+
+    @staticmethod
+    def _integration_module():
+        from tests import test_skills_devbox_integration as devbox_it
+
+        return devbox_it
+
+    @staticmethod
+    def _fixture_body(fixture):
+        """The plain function behind a `@pytest.fixture`.
+
+        Testing the gate helper on its own leaves the fixture free to stop
+        calling it — verified: dropping that one line turned nothing red. So
+        the fixture's own body is what gets exercised, and pytest keeps it
+        under a private name that has changed once already. Both spellings are
+        tried and a miss is an explicit failure, because the alternative is
+        this check quietly becoming a no-op on some future upgrade.
+        """
+        getter = getattr(fixture, "_get_wrapped_function", None)
+        if getter is not None:
+            return getter()
+        wrapped = getattr(fixture, "__wrapped__", None)
+        assert wrapped is not None, (
+            "pytest no longer exposes a fixture's underlying function under "
+            "either name — update this helper rather than dropping the check"
+        )
+        return wrapped
+
+    def test_the_writer_interpolates_the_constant_the_reader_matches_on(self):
+        """Narrow on purpose: this proves only that `_http_response` still
+        builds its body from `PROXY_ERROR_PREFIX`, so re-inlining the literal
+        there goes red. It cannot catch a *rename* of the constant, since both
+        sides would move together — the assertions holding the value itself are
+        the one below and `tests/test_docker_proxy.py`'s `b"istota-docker-proxy"`
+        pin, both hardcoded."""
+        from istota import docker_proxy
+
+        body = docker_proxy._http_response(403, "Forbidden", "untracked_exec")
+        assert docker_proxy.PROXY_ERROR_PREFIX.encode() + b"untracked_exec" in body
+        assert self._integration_module()._proxy_refusal(
+            body.decode("utf-8"),
+        ) is not None
+
+    def test_a_refusal_in_any_stream_is_recognised(self):
+        devbox_it = self._integration_module()
+        refusal = (
+            "Error response from daemon: istota-docker-proxy: untracked_exec\n"
+        )
+        assert devbox_it._proxy_refusal("", refusal) == refusal.strip()
+        assert devbox_it._proxy_refusal("", "") is None
+        assert devbox_it._proxy_refusal("bash: no such file\n") is None
+        # The command's own output rides along on a refused exec, since the
+        # command ran; the refusal line is what gets named.
+        assert devbox_it._proxy_refusal(
+            f"warning: something\n{refusal}stack trace line\n",
+        ) == refusal.strip()
+
+    def test_exec_raises_on_a_refusal_rather_than_returning_it(self, monkeypatch):
+        """The whole defect in one assertion: `false | tail -1` came back with
+        `status: "ok"` and `exit_code: 1` because the *docker CLI* exited 1,
+        and the ISSUE-307 regression test asserts exactly that pair."""
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.devbox, "cmd_exec", lambda args: {
+            "status": "ok",
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": (
+                "Error response from daemon: istota-docker-proxy: "
+                "untracked_exec\n"
+            ),
+        })
+        with pytest.raises(AssertionError, match="refused"):
+            devbox_it._exec("false | tail -1")
+
+    def test_an_ordinary_failure_is_still_returned(self, monkeypatch):
+        """Control: the guard must not turn every non-zero exit into an error."""
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.devbox, "cmd_exec", lambda args: {
+            "status": "ok", "exit_code": 1, "stdout": "", "stderr": "",
+        })
+        assert devbox_it._exec("false | tail -1")["exit_code"] == 1
+
+    def test_exec_file_carries_the_same_guard(self, monkeypatch):
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.devbox, "cmd_exec_file", lambda args: {
+            "status": "ok",
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "istota-docker-proxy: untracked_exec\n",
+        })
+        with pytest.raises(AssertionError, match="refused"):
+            devbox_it._exec_file("/tmp/probe.sh")
+
+    def test_a_refusal_folded_into_error_is_caught_too(self, monkeypatch):
+        """`exec-file`'s staging legs and both copy verbs put the CLI's stderr
+        in `error`, not `stderr` — see `cmd_exec_file`'s "could not create
+        staging dir" branch. Same refusal, different field."""
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.devbox, "cmd_exec_file", lambda args: {
+            "status": "error",
+            "error": (
+                "could not create staging dir /home/dev/.istota-exec in "
+                "devbox: Error response from daemon: istota-docker-proxy: "
+                "untracked_exec"
+            ),
+        })
+        with pytest.raises(AssertionError, match="refused"):
+            devbox_it._exec_file("/tmp/probe.sh")
+
+    def test_the_copy_verbs_carry_the_guard(self, monkeypatch):
+        """`cp-in`'s arrival check is a `docker exec`, so a refusal reaches it
+        as "the file is not there" — the ISSUE-306 symptom, manufactured."""
+        devbox_it = self._integration_module()
+        refused = {
+            "status": "error",
+            "error": (
+                "could not read /home/dev/a.txt back from inside devbox-bob "
+                "after the copy: Error response from daemon: "
+                "istota-docker-proxy: untracked_exec. Whether the file arrived "
+                "is unknown — the check did not run to an answer."
+            ),
+        }
+        monkeypatch.setattr(devbox_it.devbox, "cmd_cp_in", lambda args: refused)
+        monkeypatch.setattr(devbox_it.devbox, "cmd_cp_out", lambda args: refused)
+        with pytest.raises(AssertionError, match="refused"):
+            devbox_it._cp_in("/tmp/a.txt", "/home/dev/a.txt")
+        with pytest.raises(AssertionError, match="refused"):
+            devbox_it._cp_out("/home/dev/a.txt", "/tmp/a.txt")
+
+    def test_a_probe_that_never_finished_is_not_read_as_permission(self, monkeypatch):
+        """`TimeoutExpired` must escape rather than answer "not refused"."""
+        devbox_it = self._integration_module()
+
+        def _timeout(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="docker exec", timeout=30)
+
+        monkeypatch.setattr(devbox_it.subprocess, "run", _timeout)
+        with pytest.raises(subprocess.TimeoutExpired):
+            devbox_it._exec_refusal("devbox-bob")
+
+    def test_a_docker_cli_that_is_not_there_is_not_a_refusal(self, monkeypatch):
+        devbox_it = self._integration_module()
+
+        def _missing(*a, **kw):
+            raise FileNotFoundError("docker")
+
+        monkeypatch.setattr(devbox_it.subprocess, "run", _missing)
+        assert devbox_it._exec_refusal("devbox-bob") is None
+
+    def test_the_probe_reports_a_refused_exec(self, monkeypatch):
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
+            1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec\n",
+        ))
+        assert "untracked_exec" in devbox_it._exec_refusal("devbox-bob")
+
+    def test_the_probe_is_silent_when_exec_works(self, monkeypatch):
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
+            0, b"", b"",
+        ))
+        assert devbox_it._exec_refusal("devbox-bob") is None
+
+    def test_the_probe_does_not_invent_a_skip_for_an_unrelated_failure(self, monkeypatch):
+        """A container that is simply broken must still fail loudly."""
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
+            126, b"", b"exec: \"true\": permission denied\n",
+        ))
+        assert devbox_it._exec_refusal("devbox-bob") is None
+
+    def test_a_refusal_produces_a_skip_and_not_ten_results(self, monkeypatch):
+        """The control for the whole file: with the proxy refusing, the tier
+        has to come back skipped. It came back `6 failed, 2 passed`, and the
+        two passes were the ISSUE-306 and ISSUE-307 regressions.
+
+        Driven through the fixture's own body rather than the gate helper, so
+        a fixture that stops calling the gate fails here too.
+        """
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it, "_running_container", lambda: "devbox-bob")
+        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
+            1, b"", b"Error response from daemon: istota-docker-proxy: untracked_exec\n",
+        ))
+        with pytest.raises(pytest.skip.Exception, match="untracked_exec"):
+            self._fixture_body(devbox_it.container)()
+
+    def test_a_reachable_devbox_is_not_skipped(self, monkeypatch):
+        devbox_it = self._integration_module()
+        monkeypatch.setattr(devbox_it, "_running_container", lambda: "devbox-bob")
+        monkeypatch.setattr(devbox_it.subprocess, "run", lambda *a, **kw: _CompletedStub(
+            0, b"", b"",
+        ))
+        assert self._fixture_body(devbox_it.container)() == "devbox-bob"
+
+    def test_the_probe_is_autouse_so_no_test_can_bypass_it(self):
+        """A guard a new test can forget to request is the same hole again."""
+        devbox_it = self._integration_module()
+        fixture = devbox_it.container
+        marker = getattr(fixture, "_fixture_function_marker", None) or getattr(
+            fixture, "_pytestfixturefunction", None,
+        )
+        assert marker is not None, (
+            "pytest no longer records a fixture's marker under either name — "
+            "update this check rather than letting it pass vacuously"
+        )
+        assert marker.autouse is True
+        assert marker.scope == "module"
+
+
+class _CompletedStub:
+    """Enough of `subprocess.CompletedProcess` for the probe above."""
+
+    def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr

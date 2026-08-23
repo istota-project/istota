@@ -506,12 +506,27 @@ def _check_arrived(container: str, dest: str, basename: str, *, src_is_dir: bool
         script = 'test -e "$1"'
     else:
         script = 'if [ -d "$1" ]; then test -e "$1/$2"; else test -e "$1"; fi'
-    rc, _, _ = _run_docker(
+    rc, _, stderr = _run_docker(
         ["exec", "-u", "root", container, "sh", "-c", script, "sh", dest, basename],
         timeout=30,
     )
     if rc == 0:
         return None
+    detail = stderr.decode("utf-8", "replace").strip()
+    if detail:
+        # `rc` here is the *docker CLI's*, and only one of the two things it
+        # can mean is "the file is absent". `docker exec` writes to stderr when
+        # it could not run the check or could not fetch its status — the
+        # allowlist proxy refusing an untracked exec is the case that happens
+        # (ISSUE-313) — and `test -e` answering "no" writes nothing at all. So
+        # a non-empty stderr means the question was never answered, and the
+        # message below would be a confident false claim of the exact defect
+        # ISSUE-306 was filed for. Report what was observed instead.
+        return (
+            f"could not read {dest} back from inside {container} after the "
+            f"copy: {detail}. Whether the file arrived is unknown — the check "
+            "did not run to an answer."
+        )
     return (
         f"docker cp reported success but {dest} does not exist inside "
         f"{container}. The file was not copied; nothing was written where the "

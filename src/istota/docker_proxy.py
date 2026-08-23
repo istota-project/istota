@@ -73,6 +73,19 @@ audit_logger = logging.getLogger("istota.docker_proxy.audit")
 audit_logger.propagate = True
 audit_logger.setLevel(logging.INFO)
 
+# Every refusal this proxy writes carries this prefix in its JSON ``message``,
+# and the docker CLI reprints it verbatim: ``Error response from daemon:
+# istota-docker-proxy: untracked_exec``. Named rather than spelled inline
+# because a caller has to be able to tell a refusal apart from an answer, and
+# nothing else in the exchange does. A ``docker exec`` refused at the
+# exec-inspect step has already run the command and streamed its output; only
+# the fetch of the command's own status is denied, so the CLI exits 1 — which
+# is exactly what a command that failed looks like. Read as an answer, that
+# satisfies any assertion expecting a failure, whatever the container did
+# (ISSUE-313). One literal in one place, so a reader's match cannot drift from
+# what the writer emits.
+PROXY_ERROR_PREFIX = "istota-docker-proxy: "
+
 
 # ---- Allowlist classification (pure, unit-testable core) -------------------
 
@@ -293,7 +306,7 @@ def is_hijack_response(status: int, headers: dict[str, str]) -> bool:
 
 
 def _http_response(status_code: int, reason_phrase: str, message: str) -> bytes:
-    body = json.dumps({"message": f"istota-docker-proxy: {message}"}).encode("utf-8")
+    body = json.dumps({"message": f"{PROXY_ERROR_PREFIX}{message}"}).encode("utf-8")
     head = (
         f"HTTP/1.1 {status_code} {reason_phrase}\r\n"
         f"Content-Type: application/json\r\n"
