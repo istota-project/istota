@@ -31,6 +31,16 @@ server {
 
   charset utf-8;
 
+  # Every proxied location below forwards `Host: $http_host`, not `$host`.
+  # `$host` is normalized with the **port stripped**, so a deployment reached on
+  # any port but the scheme default hands the upstream a bare hostname, and
+  # every absolute URL the upstream builds from the Host header loses the port.
+  # The visible case is the SPA's own directory redirect: Starlette answers
+  # `/istota/chat` with a 307 to `{scheme}://{Host header}/istota/chat/`.
+  # `$http_host` is the client's header verbatim. The `return 301` above
+  # deliberately keeps `$host` — that one is redirecting *to* the scheme
+  # default, where a port has no business appearing.
+
   # Prevent search engine indexing by default
   add_header X-Robots-Tag "noindex, nofollow" always;
 
@@ -66,7 +76,7 @@ server {
     proxy_pass http://127.0.0.1:{{ istota_web_port }}/istota/api/chat/;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -89,7 +99,7 @@ server {
     # reports failure for an import that succeeded. The app bounds its own
     # network work; this is the belt-and-braces.
     proxy_read_timeout 300s;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -103,7 +113,7 @@ server {
 {% if istota_location_enabled %}
   location /webhooks/ {
     proxy_pass http://127.0.0.1:{{ istota_webhooks_port }}/webhooks/;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;

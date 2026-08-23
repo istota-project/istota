@@ -113,6 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Typing a web UI address with a path into the browser now lands on the page. The reverse proxy forwarded the client's hostname with the port stripped off, so on a stack reached at anything but the default port the web app answered `/istota/chat` with a redirect to `http://localhost/istota/chat/` — the right path at an address nothing is listening on. Clicking through the app never went near it, so only deep links, bookmarks and reloads broke. The proxy now forwards the address as sent, in all four configs the repo ships, and the redirect itself no longer names a host at all — a relative one is resolved by the browser against the address it actually used, which also stops a TLS deployment from answering with a plaintext URL.
+
 - A Docker install that points one model role at a different model now has that setting honoured. The generated config wrote the per-role map under a key that was renamed a few releases ago and is read by nothing since, so the settings for aiming the quick, general and heavyweight roles at different models were parsed and dropped — every role quietly fell back to the single configured model, and each start logged a warning about a key the operator never wrote.
 
 - Running the bot's own command-line tools inside the Docker container works now. The container keeps its config somewhere none of the four places those tools look, so every `docker compose exec` call the deployment guide suggests — submitting a task, adding a user, listing secrets — died on a raw Python traceback about a database it could not open. The container now tells the tools where its config is.
