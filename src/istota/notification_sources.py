@@ -249,8 +249,6 @@ def _register_all() -> None:
     holding whatever had been imported before the failure, and every row of
     every later source would render as "source no longer available" — a
     plausible-looking panel with no button that works.
-
-    A later stage adds `task_alert` to the list below.
     """
     global _REGISTERED
     if _REGISTERED:
@@ -264,6 +262,7 @@ def _register_all() -> None:
             "cron_job",
             "connected_service",
             "health_panel",
+            "task_alert",
         ):
             try:
                 module = importlib.import_module(

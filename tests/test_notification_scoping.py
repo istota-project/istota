@@ -15,6 +15,14 @@ from istota.config import Config, UserConfig
 from istota.notification_resolvers import health_panel as panel_source
 
 
+# The synthetic fire-and-forget source these tests use. Deliberately *not*
+# `task_alert`, which is a real registered source since stage 6: every reader
+# primes the registry on read, so `register()`ing a fake under that name is
+# undone by the next `get_resolver` / `auto_resolve_sources` call and the test
+# then exercises the real resolver instead of its own stub.
+ALERT_SOURCE = "alert_thing"
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry():
     sources.reset_registry()
@@ -116,7 +124,7 @@ def test_mark_seen_skips_another_users_row(conn, panels):
 
 def test_counts_are_scoped(conn, panels):
     store.write_notification(
-        conn, "bob", source="task_alert", dedup_key="a:1", title="Bob's alert"
+        conn, "bob", source=ALERT_SOURCE, dedup_key="a:1", title="Bob's alert"
     )
     assert store.counts(conn, "alice") == {"open": 1, "actionable": 1}
     assert store.counts(conn, "bob") == {"open": 2, "actionable": 1}

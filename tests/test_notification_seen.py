@@ -13,6 +13,14 @@ from istota import db, notification_sources as sources, notification_store as st
 from istota.config import Config, UserConfig
 
 
+# The synthetic fire-and-forget source these tests use. Deliberately *not*
+# `task_alert`, which is a real registered source since stage 6: every reader
+# primes the registry on read, so `register()`ing a fake under that name is
+# undone by the next `get_resolver` / `auto_resolve_sources` call and the test
+# then exercises the real resolver instead of its own stub.
+ALERT_SOURCE = "alert_thing"
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry():
     sources.reset_registry()
@@ -50,7 +58,7 @@ def _row(conn, notification_id):
     ).fetchone()
 
 
-def _write(conn, user_id="alice", source="task_alert", dedup_key="task:1:security"):
+def _write(conn, user_id="alice", source=ALERT_SOURCE, dedup_key="task:1:security"):
     return store.write_notification(
         conn, user_id, source=source, dedup_key=dedup_key, title="Alert"
     )
@@ -59,7 +67,7 @@ def _write(conn, user_id="alice", source="task_alert", dedup_key="task:1:securit
 @pytest.fixture
 def registered():
     """`task_alert` auto-resolves on seen; `confirmation` does not."""
-    sources.register(_Resolver("task_alert", auto=True))
+    sources.register(_Resolver(ALERT_SOURCE, auto=True))
     sources.register(_Resolver("confirmation", auto=False))
 
 
@@ -100,8 +108,13 @@ def test_resolves_only_auto_resolving_sources(conn, registered):
 
 
 def test_unregistered_source_is_not_auto_resolved(conn):
-    """No registry entry means no `auto_resolve_on_seen` declaration to trust."""
-    alert = _write(conn)
+    """No registry entry means no `auto_resolve_on_seen` declaration to trust.
+
+    A source id no module claims, deliberately — `task_alert` is a real,
+    registered, auto-resolving source now, and `auto_resolve_sources` primes the
+    registry on read, so using its name here would test the opposite property.
+    """
+    alert = _write(conn, source="a_source_nobody_registered", dedup_key="x:1")
     store.mark_seen(
         conn, "alice",
         [(alert.notification_id, _row(conn, alert.notification_id)["updated_at"])],

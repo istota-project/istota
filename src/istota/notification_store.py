@@ -435,19 +435,48 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
                 if ok:
                     delivered.append(result.notification_id)
 
-            if not delivered:
-                return
-
-            now = db.iso_utc_now()
-            for chunk in _chunks(delivered):
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(
-                    "UPDATE notifications SET last_delivered_at = ? "
-                    f"WHERE id IN ({placeholders})",
-                    [now, *chunk],
-                )
+            mark_delivered(conn, delivered)
     except Exception:
         logger.warning("deliver_pending failed", exc_info=True)
+
+
+def mark_delivered(
+    conn: sqlite3.Connection, notification_ids: list[int]
+) -> None:
+    """Stamp `last_delivered_at` on rows a send actually reached somebody with.
+
+    :func:`deliver_pending` uses this on its own results. It is public for the
+    producers that keep their **own** delivery call, of which there are two
+    kinds and both are deliberate:
+
+    - the ones whose delivery gate is an in-process window rather than the
+      store's dedup branch — the DMARC canary's 24-hour key, the mail throttle's
+      per-window notice. The spec rejected replacing those windows with table
+      dedup: the throttle stamp is written only on a *successful* delivery, so an
+      open-row suppression would let one failed send silence every subsequent
+      one, which is the exact failure the inbox exists to fix.
+    - the ones whose send carries routing the store does not model, such as the
+      expired-confirmation notice's `conversation_token`.
+
+    The rule those callers have to keep is the one this name states: stamp only
+    where `send_notification` returned True. `False` means no destination
+    accepted it, and a row that records a send reaching nobody is a row a later
+    re-delivery sweep would skip.
+    """
+    try:
+        ids = [int(i) for i in (notification_ids or [])]
+        if not ids:
+            return
+        now = db.iso_utc_now()
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(
+                "UPDATE notifications SET last_delivered_at = ? "
+                f"WHERE id IN ({placeholders})",
+                [now, *chunk],
+            )
+    except Exception:
+        logger.warning("mark_delivered failed (%r)", notification_ids, exc_info=True)
 
 
 def raise_notification(config: "Config", user_id: str, **kwargs) -> int | None:
@@ -696,6 +725,23 @@ def sweep_expired_alerts(conn: sqlite3.Connection) -> int:
     Ages from `updated_at`, so a row bumped yesterday is not an old row whatever
     its `created_at`. Object-backed sources are never swept here: their close
     condition is the object, not the clock.
+
+    **A row whose source is not registered at all is deliberately exempt too**,
+    and that is a decision rather than an oversight. `auto_resolve_sources()`
+    reads the registry, so an unregistered source is in neither set and no clock
+    closes its rows; `list_open` does not stale them either, since it falls back
+    to stored text rather than calling a resolver that is not there. The
+    alternative — sweeping them on the alert clock — was rejected: `_register_all`
+    guards each import separately precisely so one broken resolver module costs
+    only its own source, and this runs in the *scheduler* process, so a module
+    that fails to import there and imports fine in the web process would silently
+    close every open row of a live, object-backed source, fourteen days at a
+    time, with the user's panel showing them the whole while. The failure modes
+    are not symmetric: an unswept row renders from its stored title with a
+    `status_note` and a working Dismiss, and the user can clear it in one click;
+    a wrongly swept row is a held item nobody is told about again. `list_open`
+    logs the source ids it could not resolve so the state is visible rather than
+    merely tolerated.
     """
     try:
         auto_sources = sorted(sources.auto_resolve_sources())
@@ -908,11 +954,13 @@ def list_open(
 
         survivors: list[tuple[NotificationRow, ResolvedNotification]] = []
         dead: list[int] = []
+        unregistered: set[str] = set()
 
         for raw in rows:
             row = _row_to_notification(raw)
             resolver = sources.get_resolver(row.source)
             if resolver is None:
+                unregistered.add(row.source)
                 survivors.append((row, _fallback(row, _UNREGISTERED_NOTE)))
                 continue
             # The whole per-row pass is guarded, not just the `resolve` call:
@@ -941,6 +989,21 @@ def list_open(
                     row.source, row.id, exc_info=True,
                 )
                 survivors.append((row, _fallback(row, _UNRENDERABLE_NOTE)))
+
+        if unregistered:
+            # Once per panel open, not once per row. Every registered source
+            # ships with the package, so in practice this means a resolver module
+            # that failed to import — which `_register_all` logs at ERROR and then
+            # contains, so nothing else says the rows went dumb. It is also the
+            # only visible sign of a row whose source was removed in an upgrade,
+            # since neither sweep will ever close one; see `sweep_expired_alerts`
+            # for why that exemption is deliberate.
+            logger.warning(
+                "notification rows for user %r name unregistered source(s) %s; "
+                "they render from stored text with no actions and no sweep will "
+                "close them",
+                user_id, ", ".join(sorted(unregistered)),
+            )
 
         if dead:
             _sweep_stale(config, conn, dead)
@@ -1012,6 +1075,7 @@ __all__ = [
     "deliver_pending",
     "dismiss",
     "list_open",
+    "mark_delivered",
     "mark_seen",
     "mark_stale",
     "raise_notification",

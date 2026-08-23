@@ -15,6 +15,14 @@ from istota import db, notification_sources as sources, notification_store as st
 from istota.config import Config, UserConfig
 
 
+# The synthetic fire-and-forget source these tests use. Deliberately *not*
+# `task_alert`, which is a real registered source since stage 6: every reader
+# primes the registry on read, so `register()`ing a fake under that name is
+# undone by the next `get_resolver` / `auto_resolve_sources` call and the test
+# then exercises the real resolver instead of its own stub.
+ALERT_SOURCE = "alert_thing"
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry():
     sources.reset_registry()
@@ -48,7 +56,7 @@ class _Resolver:
 
 @pytest.fixture(autouse=True)
 def registered():
-    sources.register(_Resolver("task_alert", auto=True))
+    sources.register(_Resolver(ALERT_SOURCE, auto=True))
     sources.register(_Resolver("confirmation", auto=False))
 
 
@@ -58,7 +66,7 @@ def _row(conn, notification_id):
     ).fetchone()
 
 
-def _aged(conn, *, days, source="task_alert", dedup_key="a:1", state="open",
+def _aged(conn, *, days, source=ALERT_SOURCE, dedup_key="a:1", state="open",
           user_id="alice"):
     """A row whose timestamps sit `days` in the past."""
     result = store.write_notification(
@@ -97,8 +105,21 @@ class TestSweepExpiredAlerts:
         assert _row(conn, held)["state"] == "open"
 
     def test_leaves_an_unregistered_source_alone(self, conn):
+        """Exempt from this sweep, and that is decided rather than inherited.
+
+        An unregistered source is in neither the auto set nor the object-backed
+        one, so nothing on a clock closes its rows. Sweeping them instead would
+        let one resolver module failing to import *in the scheduler process* —
+        which `_register_all` guards per module precisely so it costs only its
+        own source — silently close every open row of a live, object-backed
+        source, fourteen days at a time, while the user's panel still showed
+        them. The failure modes are not symmetric: an unswept row renders from
+        its stored title with a `status_note` and a working Dismiss, and
+        `list_open` logs the source id so the state is visible rather than
+        merely tolerated.
+        """
         orphan = _aged(conn, days=400, source="retired_module", dedup_key="x:1")
-        store.sweep_expired_alerts(conn)
+        assert store.sweep_expired_alerts(conn) == 0
         assert _row(conn, orphan)["state"] == "open"
 
     def test_ages_from_the_last_occurrence(self, conn):
@@ -116,10 +137,19 @@ class TestSweepExpiredAlerts:
         assert store.sweep_expired_alerts(conn) == 0
         assert _row(conn, closed)["state"] == "dismissed"
 
-    def test_no_registered_auto_sources_is_a_no_op(self, conn):
-        sources.reset_registry()
-        _aged(conn, days=15)
+    def test_no_registered_auto_sources_is_a_no_op(self, conn, monkeypatch):
+        """The empty-set branch, which the real registry can no longer produce.
+
+        `reset_registry()` is not a way to reach it: every reader primes the
+        registry on read, so `auto_resolve_sources` re-imports the built-ins and
+        `task_alert` is one of them. Stubbing the reader is what states the
+        property — the sweep must issue no statement at all rather than one with
+        an empty `IN ()`, which SQLite parses as matching everything.
+        """
+        monkeypatch.setattr(sources, "auto_resolve_sources", set)
+        old = _aged(conn, days=15)
         assert store.sweep_expired_alerts(conn) == 0
+        assert _row(conn, old)["state"] == "open"
 
 
 class TestSweepRetention:

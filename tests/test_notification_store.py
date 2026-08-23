@@ -15,6 +15,14 @@ from istota import db, notification_sources as sources, notification_store as st
 from istota.config import Config, UserConfig
 
 
+# The synthetic fire-and-forget source these tests use. Deliberately *not*
+# `task_alert`, which is a real registered source since stage 6: every reader
+# primes the registry on read, so `register()`ing a fake under that name is
+# undone by the next `get_resolver` / `auto_resolve_sources` call and the test
+# then exercises the real resolver instead of its own stub.
+ALERT_SOURCE = "alert_thing"
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry():
     """The resolver registry is a process global; xdist reuses the process."""
@@ -143,7 +151,7 @@ class TestInsertBranch:
 
     def test_defaults_fill_in(self, conn):
         result = store.write_notification(
-            conn, "alice", source="task_alert", dedup_key="task:1:security", title="t"
+            conn, "alice", source=ALERT_SOURCE, dedup_key="task:1:security", title="t"
         )
         row = _row(conn, result.notification_id)
         assert row["body"] == ""
@@ -335,7 +343,7 @@ class TestRaiseNotification:
         )
 
         notification_id = store.raise_notification(
-            config, "alice", source="task_alert", dedup_key="task:9:security",
+            config, "alice", source=ALERT_SOURCE, dedup_key="task:9:security",
             title="Security alert",
         )
 
@@ -478,7 +486,7 @@ class TestListOpen:
         excludes the dead rows — subtracting them again would under-count."""
         _write(conn, source="held_thing", dedup_key="task:1")
         _write(conn, source="held_thing", dedup_key="task:2")
-        _write(conn, source="task_alert", dedup_key="a:1")
+        _write(conn, source=ALERT_SOURCE, dedup_key="a:1")
         sources.register(_Resolver("held_thing", view=None))  # both objects gone
         conn.commit()
 
@@ -489,11 +497,11 @@ class TestListOpen:
 
     def test_a_raising_resolver_degrades_one_row_only(self, conn, config):
         _write(conn, source="held_thing", dedup_key="task:1", title="fallback text")
-        _write(conn, source="task_alert", dedup_key="a:1", title="alert text")
+        _write(conn, source=ALERT_SOURCE, dedup_key="a:1", title="alert text")
         sources.register(_Resolver("held_thing", raises=True))
         sources.register(
             _Resolver(
-                "task_alert",
+                ALERT_SOURCE,
                 view=sources.NotificationView(
                     title="rendered", body="", severity="info",
                     actions=(), link=None, status_note=None,
@@ -657,11 +665,11 @@ class TestListOpen:
         object.__setattr__(broken, "status_note", None)
 
         _write(conn, source="held_thing", dedup_key="task:1", title="fallback text")
-        _write(conn, source="task_alert", dedup_key="a:1", title="alert text")
+        _write(conn, source=ALERT_SOURCE, dedup_key="a:1", title="alert text")
         sources.register(_Resolver("held_thing", view=broken))
         sources.register(
             _Resolver(
-                "task_alert",
+                ALERT_SOURCE,
                 view=sources.NotificationView(
                     title="rendered", body="", severity="info",
                     actions=(), link=None, status_note=None,
@@ -711,9 +719,9 @@ class TestRawConnection:
         assert store.counts(raw, "alice") == {"open": 0, "actionable": 0}
 
     def test_mark_seen_works_on_a_tuple_connection(self, raw):
-        sources.register(_Resolver("task_alert", auto=True))
+        sources.register(_Resolver(ALERT_SOURCE, auto=True))
         written = store.write_notification(
-            raw, "alice", source="task_alert", dedup_key="a:1", title="Alert"
+            raw, "alice", source=ALERT_SOURCE, dedup_key="a:1", title="Alert"
         )
         stamp = raw.execute(
             "SELECT updated_at FROM notifications WHERE id = ?",
@@ -867,7 +875,7 @@ class TestNeverRaises:
         # Both sweeps and `mark_seen` short-circuit on an empty registry before
         # they ever touch the connection, so without a registration the
         # assertions below would pass without exercising anything.
-        sources.register(_Resolver("task_alert", auto=True))
+        sources.register(_Resolver(ALERT_SOURCE, auto=True))
         bad = _BoomConn()
         assert store.write_notification(
             bad, "alice", source="s", dedup_key="k", title="t"

@@ -36,6 +36,7 @@ from istota.notification_resolvers import connected_service as service_source
 from istota.notification_resolvers import cron_job as cron_source
 from istota.notification_resolvers import health_panel as panel_source
 from istota.notification_resolvers import outbound_draft as draft_source
+from istota.notification_resolvers import task_alert as task_alert_source
 
 try:
     import authlib  # noqa: F401
@@ -321,3 +322,70 @@ def test_paths_are_apifetch_relative_not_double_prefixed(config, conn):
     for path in (p for item in items for p in _emitted_paths(item)):
         assert not path.startswith("/api/")
         assert not path.startswith("/istota/")
+
+
+# ---------------------------------------------------------------------------
+# 4. `task_alert` emits no URL of any kind, on any path
+# ---------------------------------------------------------------------------
+
+
+TASK_ALERT_KEYS = [
+    "task:1:security",
+    "task:1:action_needed",
+    "throttle:held",
+    "throttle:throttled",
+    "expired:1",
+    "dmarc:fail",
+    "undelivered:1",
+]
+
+# Text a model could write into the JSON file `_process_deferred_user_alerts`
+# reads from inside the sandbox. A `link` is rendered into an anchor, where a
+# text-node rule buys nothing and `javascript:` or an off-origin absolute URL
+# sails straight through.
+MODEL_AUTHORED = [
+    "https://evil.example/steal",
+    "javascript:alert(1)",
+    "[click me](https://evil.example)",
+    "/istota/api/chat/tasks/1/confirm",
+    "//evil.example",
+    "1/../../admin/x",
+]
+
+
+@pytest.mark.parametrize("key", TASK_ALERT_KEYS)
+@pytest.mark.parametrize("hostile", MODEL_AUTHORED)
+def test_task_alert_never_emits_a_link_or_a_link_action(config, conn, key, hostile):
+    """Unconditional, and the one rule in this file with no escape hatch.
+
+    Every other source builds a path from an id it coerces first, with the
+    runtime allowlist behind it as a backstop. This source builds none at all:
+    its content is model-authored, so the guarantee is structural rather than
+    validated.
+    """
+    sources.register(task_alert_source.RESOLVER)
+    task_alert_source.write(
+        conn, "alice",
+        dedup_key=key,
+        title=hostile,
+        body=hostile,
+        params={"messages": [hostile], "link": hostile, "href": hostile},
+    )
+
+    items, total = store.list_open(config, conn, "alice")
+    assert total == 1
+    assert _emitted_paths(items[0]) == []
+    assert items[0].link is None
+    assert items[0].actions == ()
+    # And the rendered text carries no live markup either — this class is
+    # delivered into Talk, which renders it.
+    for char in "[]()`*_~<>|":
+        assert char not in items[0].title
+        assert char not in items[0].body
+
+
+def test_task_alert_is_registered_and_auto_resolving(config, conn):
+    resolver = sources.get_resolver("task_alert")
+    assert resolver is not None
+    assert resolver.auto_resolve_on_seen is True
+    assert "task_alert" in sources.auto_resolve_sources()
