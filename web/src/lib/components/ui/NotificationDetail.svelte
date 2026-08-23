@@ -3,9 +3,14 @@
    * One notification, opened.
    *
    * The full body, the `status_note` where there is one, and **every** action —
-   * the row above shows at most two. Dismiss is always offered, including on a
-   * row whose source is no longer registered: a notification nobody can explain
-   * is still one the user should be able to clear.
+   * the row above shows at most two.
+   *
+   * Close is always there and does nothing but close. Dismiss appears **only on
+   * a row with no actions**, which is the case it exists for: a row whose source
+   * is no longer registered is one nobody can explain, and the user still has to
+   * be able to clear it. On a row that has actions, answering *is* how it
+   * closes, and offering Dismiss beside Confirm and Discard asks the reader to
+   * tell apart two pairs of buttons that look alike and are not.
    *
    * **No `{@html}`, here or anywhere in this feature.** `title` and `body` carry
    * a stranger's subject line and a bot-composed question built from it, so both
@@ -69,7 +74,26 @@
       <p class="detail-link"><a href="{base}{item.link}">Open</a></p>
     {/if}
     {#snippet footer()}
-      <Button variant="subtle" size="sm" onclick={() => onDismiss(item!)}>Dismiss</Button>
+      <!-- Close always; Dismiss only when there is nothing else to do.
+           Four buttons reading Close / Dismiss / Confirm / Discard asks the
+           user to distinguish two pairs that do not differ in any way they can
+           see. The rule instead: **the item's own actions are what close it.**
+           Answering the question is what ends a held email; Close just closes
+           the window and leaves the row alone.
+
+           Dismiss survives for the one case it was written for -- a row with no
+           actions at all, including one whose source is no longer registered.
+           A notification nobody can explain is still one the user has to be able
+           to clear, and there is nothing else on that modal that would. -->
+      <Button variant="subtle" size="sm" onclick={() => onOpenChange(false)}>Close</Button>
+      {#if actions.length === 0}
+        <Button
+          variant="secondary"
+          size="sm"
+          title="Clear this from your notifications. It comes back if it happens again."
+          onclick={() => onDismiss(item!)}>Dismiss</Button
+        >
+      {/if}
       {#each actions as action (action.id)}
         {#if action.method === 'LINK' && action.href}
           <Button

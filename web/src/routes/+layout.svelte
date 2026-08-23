@@ -146,6 +146,7 @@
       >
         {user.display_name}
       </a>
+      <NotificationBell />
       <button
         type="button"
         class="nav-icon-btn theme-btn"
@@ -159,7 +160,6 @@
           <Moon size={15} />
         {/if}
       </button>
-      <NotificationBell />
       <LogoutButton />
       <DropdownMenu.Root>
         <DropdownMenu.Trigger>

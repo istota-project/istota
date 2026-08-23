@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { render, cleanup, screen } from '@testing-library/svelte';
+import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import type { NotificationAction, ResolvedNotification } from '$lib/api';
 import NotificationDetail from './NotificationDetail.svelte';
 
@@ -132,11 +132,53 @@ describe('actions', () => {
     expect(screen.getByText('Third')).toBeInTheDocument();
   });
 
-  it('always offers Dismiss', () => {
-    // Including on a row nobody can explain: one whose source is gone is still
-    // one the user should be able to clear.
+  it('offers a Close that leaves the notification alone', async () => {
+    // The complaint this came from: Dismiss sat alone in the slot a Cancel
+    // occupies everywhere else in the app, so the obvious way to get rid of the
+    // popup silently closed the notification -- and nothing in this feature
+    // lists closed rows, so the item was simply gone.
+    const seen: string[] = [];
+    render(NotificationDetail, {
+      item: item(),
+      open: true,
+      onOpenChange: (next: boolean) => seen.push(`open:${next}`),
+      onAction: noop,
+      onDismiss: () => seen.push('dismiss'),
+    });
+    await fireEvent.click(screen.getByText('Close'));
+    // Closed, and *not* dismissed. Asserting both is the point: a Close wired
+    // to onDismiss would pass a test that only checked the modal shut.
+    expect(seen).toEqual(['open:false']);
+  });
+
+  it('still dismisses from Dismiss, on a row that has one', async () => {
+    const seen: string[] = [];
+    render(NotificationDetail, {
+      item: item({ actions: [] }),
+      open: true,
+      onOpenChange: noop,
+      onAction: noop,
+      onDismiss: () => seen.push('dismiss'),
+    });
+    await fireEvent.click(screen.getByText('Dismiss'));
+    expect(seen).toEqual(['dismiss']);
+  });
+
+  it('offers Dismiss on a row nobody can explain', () => {
+    // The case it exists for: a row whose source is gone has no actions at all,
+    // so without Dismiss there would be nothing on the modal that clears it.
     open({ actions: [], status_note: "This notification's source is no longer available." });
     expect(screen.getByText('Dismiss')).toBeInTheDocument();
+  });
+
+  it('does not offer Dismiss beside real actions', () => {
+    // Close / Dismiss / Confirm / Discard is two pairs the reader cannot tell
+    // apart. Answering the question is what closes a held email; Close closes
+    // the window. So Dismiss is not offered when the row has actions of its own.
+    open({ actions: [action(), action({ id: 'discard', label: 'Discard', kind: 'danger' })] });
+    expect(screen.getByText('Confirm')).toBeInTheDocument();
+    expect(screen.getByText('Close')).toBeInTheDocument();
+    expect(screen.queryByText('Dismiss')).not.toBeInTheDocument();
   });
 
   it('does not offer an action whose path fails the allowlist', () => {

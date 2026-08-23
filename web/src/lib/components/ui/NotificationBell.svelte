@@ -59,7 +59,21 @@
 
   .notification-btn :global(.count-pill) {
     position: absolute;
-    top: 0;
-    left: 55%;
+    top: -0.25rem;
+    /* Anchored to the right edge, not to a percentage from the left: the pill
+       widens with its own digits, and growing rightward pushes it across the
+       fixed 1.25rem gap into the next control — at `99+` it lands on top of it.
+       Anchored here it grows leftward over the glyph instead, so the overhang
+       is 0.4rem whatever the count. */
+    right: -0.4rem;
+    left: auto;
+    /* Compact in this one context. The shared pill is sized to sit *beside*
+       text (chat's room rows); over a 15px glyph in a 1.44rem button it is
+       nearly as wide as the button and hides the bell it is annotating. Only
+       the box shrinks -- the font stays `--text-xs`, which is the token both
+       call sites share. */
+    min-width: 0.95rem;
+    height: 0.95rem;
+    padding: 0 var(--space-1);
   }
 </style>

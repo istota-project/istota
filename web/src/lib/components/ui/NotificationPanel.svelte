@@ -85,6 +85,19 @@
     if (next) void load('all');
   }
 
+  function openDetail(item: ResolvedNotification) {
+    detailItem = item;
+    // Close the panel behind it. Two reasons, and the second is the hard one:
+    // a list and a detail of one of its rows are the same thing twice, and on
+    // a phone the panel is a full-width fixed sheet that the modal would have
+    // to sit on top of -- but `--z-popover` (100) is deliberately *above*
+    // `--z-modal` (50), because a Select opened inside a dialog has to clear
+    // the dialog. So the modal renders under the panel, and no z-index on the
+    // modal can fix it without breaking that rule for every other dialog.
+    // Closing the panel removes the overlap instead of re-ordering it.
+    open = false;
+  }
+
   function onAction(item: ResolvedNotification, action: NotificationAction) {
     detailItem = null;
     void runAction(item.id, action);
@@ -128,7 +141,7 @@
       <div class="panel-list">
         {#if $notificationItems.length}
           {#each $notificationItems as item (item.id)}
-            <NotificationItem {item} onOpen={(i) => (detailItem = i)} {onAction} />
+            <NotificationItem {item} onOpen={openDetail} {onAction} />
           {/each}
         {:else if $notificationsLoading}
           <p class="empty small">Loading…</p>
@@ -183,17 +196,20 @@
     outline: none;
   }
 
-  /* Below the shell's breakpoint the anchored popover is narrower than the
-     titles it holds, so it stops being anchored. Insets rather than a width, so
-     it cannot overflow, and safe-area aware because it is fixed and escapes
-     every ancestor's padding. */
+  /* Only the height changes on a phone. This used to re-position the panel --
+     `position: fixed` with left/right insets, to stop being anchored -- and it
+     never worked: bits-ui positions `Popover.Content` through floating-ui,
+     which writes `position`, `left` and `transform` as *inline* styles, and an
+     inline style beats a stylesheet rule. The insets were ignored, the width
+     collapsed, and the panel rendered as a ~40px vertical sliver under the
+     bell on every screen below 768px.
+
+     Nothing needs to replace them. The base rule is already responsive --
+     `width: 24rem` capped by `max-width: calc(100vw - var(--space-4))` -- so a
+     narrow viewport gets a panel just inside its edges, and floating-ui's
+     collision handling, which is on by default, keeps it there. */
   @media (max-width: 768px) {
     :global(.ui-notification-panel) {
-      position: fixed;
-      width: auto;
-      max-width: none;
-      left: max(var(--space-2), var(--safe-left));
-      right: max(var(--space-2), var(--safe-right));
       max-height: 60dvh;
     }
   }

@@ -320,8 +320,27 @@ describe('actions', () => {
     expect(await screen.findByText('the whole question')).toBeInTheDocument();
   });
 
-  it('dismisses from the detail modal', async () => {
+  it('closes the panel behind the modal', async () => {
+    // A list and the detail of one of its rows are the same thing twice, and on
+    // a phone the panel is a full-width fixed sheet -- with `--z-popover` (100)
+    // deliberately above `--z-modal` (50) so a Select inside a dialog clears the
+    // dialog, the modal rendered *under* the panel there. Closing the panel
+    // removes the overlap rather than re-ordering the z-scale for everyone.
     set(notificationItems, [row(1)]);
+    await openPanel();
+    expect(screen.getByText('Notifications')).toBeInTheDocument();
+    await fireEvent.click(await screen.findByLabelText('Open notification: Question 1'));
+    // The modal is up...
+    expect(await screen.findByText('the whole question')).toBeInTheDocument();
+    // ...and the panel behind it is gone. `queryByText` because absence is the
+    // assertion; `getByText` would throw before it could report.
+    expect(screen.queryByText('Notifications')).not.toBeInTheDocument();
+  });
+
+  it('dismisses from the detail modal', async () => {
+    // No actions: Dismiss is offered only where the row has nothing else that
+    // would clear it, so a row carrying Confirm/Discard has no Dismiss to click.
+    set(notificationItems, [row(1, { actions: [], status_note: 'Nothing to do.' })]);
     await openPanel();
     await fireEvent.click(await screen.findByLabelText('Open notification: Question 1'));
     await fireEvent.click(await screen.findByText('Dismiss'));
