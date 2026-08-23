@@ -707,6 +707,14 @@ if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     echo "[istota] Claude Code OAuth token configured."
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     echo "[istota] Using ANTHROPIC_API_KEY (direct API access)."
+elif [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "native" ] && [ -n "${ISTOTA_BRAIN_NATIVE_API_KEY:-}" ]; then
+    # The native brain runs the agent loop in-process against its own endpoint
+    # and never shells out to the `claude` CLI, so a Claude Code credential is
+    # not the credential it needs. Warning about one here told an operator with
+    # a perfectly working deployment that it had no credentials at all.
+    echo "[istota] Using ISTOTA_BRAIN_NATIVE_API_KEY (brain.kind = native)."
+elif [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "native" ]; then
+    echo "[istota] WARNING: No model credentials found. brain.kind = native needs ISTOTA_BRAIN_NATIVE_API_KEY."
 else
     echo "[istota] WARNING: No Claude Code credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY."
 fi
