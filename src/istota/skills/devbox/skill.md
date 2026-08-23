@@ -27,12 +27,12 @@ The most common case today: **network diagnostics**. The main sandbox has `dig`,
 istota-skill devbox exec "dig MX example.com +short"
 istota-skill devbox exec "pip install --user pandas && python -c 'import pandas; print(pandas.__version__)'"
 
-# Run a local script file (copies it into /workspace, runs it, returns output)
+# Run a local script file (copies it into the container, runs it, returns output)
 istota-skill devbox exec-file /path/to/local/script.py
 
-# Move a file in / out
-istota-skill devbox cp-in  /local/file.csv     /workspace/file.csv
-istota-skill devbox cp-out /workspace/out.json /local/out.json
+# Move a file in / out. Container paths must be under /home/dev — see Rules.
+istota-skill devbox cp-in  /local/file.csv    /home/dev/file.csv
+istota-skill devbox cp-out /home/dev/out.json /local/out.json
 
 # State + maintenance
 istota-skill devbox status         # running? uptime? disk? image?
@@ -81,8 +81,9 @@ istota-skill devbox exec "echo | openssl s_client -connect example.com:443 -serv
 
 ## Rules
 
-- **Files**: the devbox cannot see your workspace or any local file unless you `cp-in` it first. `/workspace/` is a tmpfs scratch dir (cleared on container restart); `/home/dev/` is the persistent volume (good for clones, builds, caches). Host-side `cp-in` source and `cp-out` destination paths must stay under {BOT_NAME}'s deferred-op dir or the user's workspace subtree — copying to/from anywhere else is refused.
-- **Shell semantics**: `exec` runs commands through `bash -c` inside the container, so pipes / redirects / `&&` work. Single-quote your argument to keep the host shell from rewriting it.
+- **Files**: the devbox cannot see your workspace or any local file unless you `cp-in` it first. `/home/dev/` is the persistent volume and the only exchange path: it is where `exec` starts, where `cp-in` and `cp-out` work, and where clones, builds and caches belong — nothing reclaims it but `reset --yes`, so clean up after a big build. `/workspace/` is a tmpfs scratch dir (cleared on container restart) reachable **only from inside the container** — `cp-in` and `cp-out` refuse it, because `docker cp` cannot traverse a tmpfs mount and would drop the file instead. Host-side `cp-in` source and `cp-out` destination paths must stay under {BOT_NAME}'s deferred-op dir or the user's workspace subtree — copying to/from anywhere else is refused.
+- **Shell semantics**: `exec` runs commands through `bash -c` inside the container, starting in `/home/dev`, so pipes / redirects / `&&` work. Single-quote your argument to keep the host shell from rewriting it.
+- **Always give `cp-in` / `cp-out` an absolute container path.** A relative one is resolved against `/`, not against the directory `exec` starts in — so `exec 'thing > out.json'` writes `/home/dev/out.json` and `cp-out out.json …` looks for `/out.json` and fails. Write `cp-out /home/dev/out.json …`.
 - **No interactive TTYs**: `exec` runs non-interactively. Commands that wait for stdin will hang and hit the timeout.
 - **Never use the devbox for write access to {BOT_NAME}'s own data**: the database, secrets store, and your workspace are deliberately unreachable. If a task wants those, do it directly outside the devbox.
 - **Don't probe internal infrastructure**: the host, the database, other services on the deployment. Treat this rule as the boundary — not the network, which does less than it looks like. The Ansible deployment drops traffic *forwarded* out of the devbox network to RFC1918 and cloud metadata; the Docker-compose shape drops nothing. Neither covers the host itself: anything addressed to the bridge gateway or to a published port terminates on the host rather than being forwarded, so no rule filters it. A connection that succeeds is not permission — don't reach for internal addresses in the first place.

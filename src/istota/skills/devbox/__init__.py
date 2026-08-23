@@ -15,6 +15,11 @@ Hardening layers (see also `.claude/rules/skills.md` § devbox):
 * ``cp-in`` / ``cp-out`` host paths must stay under ``ISTOTA_DEFERRED_DIR``
   or the user's ``NEXTCLOUD_MOUNT_PATH`` subtree; host-side symlinks are
   refused.
+* Container paths inside a tmpfs mount (``_CONTAINER_TMPFS_MOUNTS``) are
+  refused for ``cp-in`` / ``cp-out``, and ``cp-in`` reads the destination back
+  from inside the container — ``docker cp`` cannot traverse a tmpfs and exits
+  0 anyway (ISSUE-306). Both checks anchor the path at ``/`` the way
+  ``docker cp`` does, not at the image's WORKDIR.
 * ``reset --yes`` requires ``/home/dev`` to be a real mountpoint inside
   the container before wiping it (prevents nuking a baked-in image layer
   when the volume is mis-attached).
@@ -33,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -47,6 +53,34 @@ DEFAULT_MAX_OUTPUT_BYTES = 102_400
 MAX_COMMAND_BYTES = 32 * 1024  # bash -c argv length cap
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 _OWNER_LABEL = "com.istota.user_id"
+
+# Container paths `docker cp` cannot reach. The daemon resolves a container
+# path against the container's rootfs on the host and mounts only the
+# container's MountPoints first — moby's setupMounts skips tmpfs destinations
+# outright, so nothing ever mounts them into that view. A copy in therefore
+# lands in the rootfs directory shadowed by the mount, where no process inside
+# the container can see it, and a copy out looks in that same shadowed
+# directory and finds nothing. Both directions, every subcommand, and `docker
+# cp` exits 0 on the way in — which is why it read as working (ISSUE-306).
+# This is a permanent property of `docker cp`, not a bug to wait out, so the
+# only honest answer is to refuse the path.
+#
+# Hand-maintained mirror of the ``tmpfs:`` keys in the devbox compose files
+# (deploy/ansible/templates/docker-compose.devbox.yml.j2 and
+# docker/docker-compose.yml); tests/test_skills_devbox.py pins the two together.
+_CONTAINER_TMPFS_MOUNTS = ("/workspace",)
+
+# Where `exec-file` stages the script it is about to run. /home/dev is the ext4
+# volume, so `docker cp` reaches it, the cleanup `rm -f` removes a file that
+# exists, and the tmpfs's `noexec` stops applying to the no-interpreter
+# fallback. The directory is created before each copy — `docker cp` creates no
+# parent.
+_EXEC_STAGING_DIR = "/home/dev/.istota-exec"
+
+# Working directory for `exec`. Also /home/dev rather than the tmpfs: a command
+# that writes a relative path has to leave it somewhere `cp-out` can reach, and
+# it matches the image's own WORKDIR.
+_DEFAULT_WORKDIR = "/home/dev"
 
 
 def _err(msg: str) -> dict:
@@ -173,6 +207,43 @@ def _resolve_host_path(p: Path, *, must_exist: bool) -> tuple[Path | None, str |
     )
 
 
+def _normalize_container_path(path: str) -> str:
+    """Resolve a container path the way `docker cp` does.
+
+    `docker cp` reads a container path as relative to the container's ``/``,
+    never to the image's WORKDIR — `c:tmp/x` and `c:/tmp/x` name the same file
+    (moby's `container.ResolvePath` joins onto `/`). Anything reasoning about
+    a container path has to use that base or it reasons about a different file
+    than the one being copied: an earlier cut of this fix exempted relative
+    paths on the WORKDIR premise, which both left `cp-in x workspace/a.txt`
+    landing in the shadowed rootfs and made the arrival check below report a
+    successful `cp-in x a.txt` as a failure.
+    """
+    collapsed = re.sub(r"/{2,}", "/", path.strip())
+    return posixpath.normpath(posixpath.join("/", collapsed))
+
+
+def _tmpfs_path_error(path: str, *, what: str) -> str | None:
+    """Refuse a container path that lands inside a tmpfs mount.
+
+    Comparison is against the normalized path, so `/workspace/../x` and
+    `workspace/x` are judged on where they end up rather than on how they were
+    spelled. A prefix match is anchored on a separator: `/workspaces/a` is not
+    inside `/workspace`.
+    """
+    normalized = _normalize_container_path(path)
+    for mount in _CONTAINER_TMPFS_MOUNTS:
+        if normalized == mount or normalized.startswith(mount + "/"):
+            return (
+                f"{what} {path} is inside {mount}, which is a tmpfs mount. "
+                "`docker cp` cannot traverse a tmpfs, so the copy would go to "
+                "a directory nothing in the container can see. Use a path "
+                f"under {_DEFAULT_WORKDIR} instead — {mount} is scratch space "
+                "for the container's own processes, not an exchange path."
+            )
+    return None
+
+
 def _validate_command(command: str) -> str | None:
     if "\x00" in command:
         return "NUL byte in command — refusing."
@@ -197,7 +268,10 @@ def cmd_exec(args) -> dict:
     if ownership_err:
         return _err(ownership_err)
 
-    cmd = ["exec", "-i", "-u", "dev", "-w", "/workspace", container, "bash", "-c", args.command]
+    cmd = [
+        "exec", "-i", "-u", "dev", "-w", _DEFAULT_WORKDIR,
+        container, "bash", "-c", args.command,
+    ]
     start = time.monotonic()
     try:
         rc, stdout, stderr = _run_docker(cmd, timeout=timeout)
@@ -260,29 +334,57 @@ def cmd_exec_file(args) -> dict:
     if ownership_err:
         return _err(ownership_err)
 
-    # Copy to a workspace path keyed on the script name + pid to avoid
-    # collisions when several exec-file calls run in parallel. The basename
-    # passes the same regex as the container name so a hostile filename
-    # can't escape /workspace.
+    # Copy to a staging path keyed on the script name + pid to avoid collisions
+    # when several exec-file calls run in parallel. The basename passes the same
+    # regex as the container name so a hostile filename can't escape the
+    # staging dir.
     base = local.name
     if not _NAME_PATTERN.match(base):
         return _err(f"Refusing unusual script basename: {base!r}")
-    remote = f"/workspace/exec_{os.getpid()}_{base}"
+    remote = f"{_EXEC_STAGING_DIR}/exec_{os.getpid()}_{base}"
+
+    # `docker cp` does not create the destination's parent.
+    rc_mk, _, mk_err = _run_docker(
+        ["exec", "-u", "dev", container, "mkdir", "-p", _EXEC_STAGING_DIR],
+        timeout=10,
+    )
+    if rc_mk != 0:
+        detail = mk_err.decode("utf-8", "replace").strip()
+        return _err(f"could not create staging dir {_EXEC_STAGING_DIR} in devbox: {detail}")
+
     rc, _, stderr = _run_docker(
         ["cp", str(local), f"{container}:{remote}"], timeout=30,
     )
     if rc != 0:
+        _run_docker(["exec", "-u", "dev", container, "rm", "-f", remote], timeout=10)
         return _err(f"cp into devbox failed: {stderr.decode('utf-8', 'replace').strip()}")
+
+    # `docker cp` preserves the *host* file's uid/gid and mode, and the daemon
+    # user is not the container's `dev`. A script the daemon wrote at 0600 —
+    # whatever wrote it chose the umask — therefore arrives owned by a stranger
+    # and unreadable by the user about to run it, which surfaces as a bare
+    # "Permission denied" from the interpreter. Fix the mode once, here, so
+    # both the interpreter branch and the fallback below are covered; `chmod
+    # +x` on the fallback alone would grant execute without read and still
+    # fail. Root because `dev` does not own the file; that is no privilege
+    # gain, since the image already grants `dev` passwordless sudo.
+    rc_ch, _, ch_err = _run_docker(
+        ["exec", "-u", "root", container, "chmod", "0755", remote], timeout=10,
+    )
+    if rc_ch != 0:
+        _run_docker(["exec", "-u", "dev", container, "rm", "-f", remote], timeout=10)
+        detail = ch_err.decode("utf-8", "replace").strip()
+        return _err(f"chmod on the staged script failed: {detail}")
 
     interpreter = args.interpreter or _guess_interpreter(local)
     timeout = args.timeout or _exec_timeout()
     cap = _max_output_bytes()
     if interpreter:
-        argv = ["exec", "-i", "-u", "dev", "-w", "/workspace", container, interpreter, remote]
+        argv = ["exec", "-i", "-u", "dev", "-w", _DEFAULT_WORKDIR, container, interpreter, remote]
     else:
-        # Fall back to making it executable and running it directly.
-        _run_docker(["exec", "-u", "dev", container, "chmod", "+x", remote], timeout=10)
-        argv = ["exec", "-i", "-u", "dev", "-w", "/workspace", container, remote]
+        # Run it directly; the staging copy is already 0755 and no longer on a
+        # `noexec` mount.
+        argv = ["exec", "-i", "-u", "dev", "-w", _DEFAULT_WORKDIR, container, remote]
 
     start = time.monotonic()
     timed_out = False
@@ -324,6 +426,9 @@ def cmd_cp_in(args) -> dict:
     src, path_err = _resolve_host_path(Path(args.src), must_exist=True)
     if path_err:
         return _err(path_err)
+    tmpfs_err = _tmpfs_path_error(args.dest, what="Destination")
+    if tmpfs_err:
+        return _err(tmpfs_err)
     ownership_err = _check_owned(container)
     if ownership_err:
         return _err(ownership_err)
@@ -332,7 +437,55 @@ def cmd_cp_in(args) -> dict:
     )
     if rc != 0:
         return _err(stderr.decode("utf-8", "replace").strip() or "docker cp failed")
+    arrival_err = _check_arrived(
+        container, _normalize_container_path(args.dest), src.name,
+        src_is_dir=src.is_dir(),
+    )
+    if arrival_err:
+        return _err(arrival_err)
     return {"status": "ok", "src": str(src), "dest": args.dest}
+
+
+def _check_arrived(container: str, dest: str, basename: str, *, src_is_dir: bool) -> str | None:
+    """Read the destination back from inside the container after a copy.
+
+    `docker cp` exits 0 for a write into a directory the container cannot see,
+    which is how ISSUE-306 stayed invisible for three months: silent data loss
+    reported as ``{"status": "ok"}``. It catches what the tmpfs list above
+    cannot enumerate — notably a symlink inside the container pointing an
+    otherwise innocent destination into `/workspace`, which `docker cp` follows
+    in rootfs scope and the mount list never sees.
+
+    What it proves is that something exists at the destination, not that this
+    copy is what put it there: an overwrite of a name already present passes
+    whether or not the write landed. Sizing it up to a content comparison would
+    buy the overwrite case and nothing else, so the weaker check is deliberate.
+
+    `dest` must already be anchored at `/` by `_normalize_container_path` — the
+    exec below has no `-w`, and `docker cp`'s base and the shell's cwd are not
+    the same place. A *file* copied onto an existing directory lands inside it,
+    so a bare ``test -e`` on the directory would pass without the file ever
+    arriving; a *directory* copied onto a path that does not exist becomes that
+    path rather than a child of it, which is why the source's kind decides the
+    test. Both paths go in as positional arguments, nothing spliced into the
+    script text. Root, so a destination under a directory `dev` cannot traverse
+    still gives a real answer.
+    """
+    if src_is_dir:
+        script = 'test -e "$1"'
+    else:
+        script = 'if [ -d "$1" ]; then test -e "$1/$2"; else test -e "$1"; fi'
+    rc, _, _ = _run_docker(
+        ["exec", "-u", "root", container, "sh", "-c", script, "sh", dest, basename],
+        timeout=30,
+    )
+    if rc == 0:
+        return None
+    return (
+        f"docker cp reported success but {dest} does not exist inside "
+        f"{container}. The file was not copied; nothing was written where the "
+        "container can reach it."
+    )
 
 
 def cmd_cp_out(args) -> dict:
@@ -342,6 +495,9 @@ def cmd_cp_out(args) -> dict:
     dest, path_err = _resolve_host_path(Path(args.dest), must_exist=False)
     if path_err:
         return _err(path_err)
+    tmpfs_err = _tmpfs_path_error(args.src, what="Source")
+    if tmpfs_err:
+        return _err(tmpfs_err)
     ownership_err = _check_owned(container)
     if ownership_err:
         return _err(ownership_err)
