@@ -75,8 +75,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # skill proxy, which keeps the token out of the model's environment entirely,
 # so a direct exec gets an unauthenticated `gh`. With the proxy turned off the
 # token is ambient and a direct exec is unpoliced — the same exposure a host
-# install already has at /usr/bin/gh, which is why this matches rather than
-# worsens the Ansible shape.
+# install already has at /usr/local/bin/gh, which is why this matches rather
+# than worsens the Ansible shape. The role deliberately does not copy this
+# placement: on a host an apt-installed `gh` may still be present and
+# name-resolvable, so moving the role's own binary off PATH would buy the
+# property for nobody and break `gh` for an operator on the box.
 #
 # The daemon cannot find an off-PATH binary by name, so it is named twice:
 # render-config.sh renders gh_bin_path / glab_bin_path into the [developer] block
