@@ -99,6 +99,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Linux test tier runs on the host when the host is already Linux, instead of building a container to borrow a kernel it is standing on. The container is not only slower there, it tests less: inside it bubblewrap runs as root and so never creates the user namespace the real deployment relies on, one hardening flag cannot be exercised at all, and the permission-bit tests skip. Nothing changes on macOS, which lands on exactly the path it did before. The mode is picked automatically and can be pinned with `ISTOTA_LINUX_TIER_MODE=auto|native|container`.
+
+- Running that tier on the machine hosting a live deployment now stops and says so rather than picking the host. The tier claims every core and creates real namespaces beside the running bot, so it refuses when it finds an active service or an installed config file, and names the two ways to proceed deliberately.
+
 - The Docker compose stack no longer ships a devbox container, because nothing in that shape could reach one. The skill CLI shells in with `docker exec` from inside the istota container, which has no docker client and no docker socket, and the generated config there has no `[devbox]` section to switch the skill on with — so the service only ever obliged every change to the Ansible devbox to be mirrored into a container nobody could use, which is how it came to be missing a credential socket in the first place. Devbox work goes through the Ansible deployment, which is unchanged.
 
 - **Upgrade note:** removing the service does not remove what you are running. An existing `devbox-$USER_NAME` container keeps running until you stop it and its `devbox_home` volume is kept, both now unmanaged by compose. `docs/deployment/docker.md` has the two commands and says to check the volume for anything you left in `/home/dev` first.

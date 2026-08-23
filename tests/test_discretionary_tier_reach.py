@@ -85,12 +85,28 @@ def _run(driver: Path, env: dict[str, str], *, docker: str) -> Run:
         # developer who has exported either — the first is documented in the
         # driver's own header as the way to debug a build — would otherwise
         # change what these tests assert.
+        #
+        # ISTOTA_LINUX_TIER_MODE=container is not incidental. `test-linux.sh`
+        # defaults to `auto`, which on a Linux host with a working bubblewrap
+        # resolves to *native* — no Docker call at all, and a full recursive
+        # pytest run started from inside this test, which blows the timeout
+        # below with the child still going. Every assertion in this file is
+        # about the container path's Docker precheck, so the mode is pinned
+        # rather than inferred. The refusal tests do not depend on it (they
+        # exit before the mode is read), but pinning it in one place keeps a
+        # later test from inheriting the trap. `**env` comes after, so a caller
+        # can still override it.
         result = subprocess.run(
             [str(driver)],
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
-            env={"PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, **env},
+            env={
+                "PATH": f"{tmp}:/usr/bin:/bin",
+                "HOME": tmp,
+                "ISTOTA_LINUX_TIER_MODE": "container",
+                **env,
+            },
             timeout=120,
         )
         called = argv_log.read_text().splitlines() if argv_log.exists() else []
