@@ -117,6 +117,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `shared_file_check_interval` | `120` | Seconds between shared file checks |
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
+| `doctor_check_interval` | `3600` | Seconds between re-runs of the `istota doctor` runtime self-check (1h; 0 disables). Re-run rather than trusted from boot, because the drift it catches happens after boot — the auto-update cron changes what is installed under a config the daemon already loaded |
 | `worktree_reap_interval` | `21600` | Seconds between developer-worktree reaping sweeps (ISSUE-288, 6h; 0 disables). Also gated by `[developer] worktree_reap_enabled`. Well under the 24h default retention, so nothing waits long after becoming eligible. A periodic job rather than a task setup hook: `setup_env` hooks run for every skill whatever the task selected, so a sweep there fired on every Talk reply and every heartbeat tick |
 | `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early. 0 disables |
 | `loop_stall_alert_seconds` | `180` | Defense-in-depth: a watchdog thread logs an ERROR and fires one operator alert if the single-threaded main dispatch loop hasn't ticked in this long (a slow call that slipped onto the loop thread, a wedged check), then re-arms when the loop recovers. Suspended around known multi-minute in-loop work (sleep cycles, DB-health sweep) to avoid false pages. 0 disables |
@@ -189,14 +190,33 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{nextcloud_mount_path}/istota-db-backups`. Use `db_backup_enabled = false` to disable |
 | `db_backup_retention` | `7` | Keep this many snapshot dirs |
 
-### Host memory breadcrumb
+### Host memory: breadcrumb, admission gate, snapshots
 
 | Setting | Default | Description |
 |---|---|---|
-| `host_pressure_enabled` | `true` | Master switch for host-memory sampling |
-| `host_pressure_breadcrumb_interval` | `300` | Seconds between `host_pressure` lines (0 = disabled) |
+| `host_pressure_enabled` | `true` | Master switch for host-memory sampling. `false` turns off the breadcrumb, the gate and the snapshots together |
+| `host_pressure_breadcrumb_interval_seconds` | `300` | Seconds between `host_pressure` lines (0 = disabled) |
+| `host_pressure_sample_interval_seconds` | `30` | Seconds between the samples the admission gate and the snapshot trigger read (0 = disabled). Faster than the breadcrumb because this reading feeds a decision rather than a series |
+| `min_available_memory_mb` | `768` | Admission floor. Below this much `MemAvailable`, no new worker is spawned and no idle worker claims; pending rows wait exactly as they do when a cap is full. 0 disables this half of the gate |
+| `host_pressure_psi_threshold` | `40.0` | `memory some avg10` above this also counts as pressure and closes the gate. 0 disables this half. With both this and `min_available_memory_mb` at 0 the gate is open unconditionally |
+| `host_pressure_alert_cooldown_seconds` | `900` | Minimum gap between threshold snapshots, between admin notifications, and between the `dispatch_admission_closed` log lines for one continuous closed stretch |
+| `host_pressure_shmem_unaccounted_alert_mb` | `1024` | A third snapshot trigger: shmem that no filesystem accounts for, above this many MB. Deliberately **not** wired into the admission gate — a residue swap absorbs is a reason to collect evidence, not a reason to refuse work. 0 disables |
+| `host_pressure_docker_socket` | `/var/run/docker.sock` | Read-only handle used only to ask Docker which pid a container has, so its tmpfs can be read through `/proc/<pid>/root` during a snapshot. Empty disables container lookup |
 
-One line per interval carrying `MemAvailable` / `Shmem` / `SwapFree` / PSI / per-tmpfs usage / `shmem_unaccounted`, written whether or not the host is under pressure — 288 lines a day at the default. See [host memory breadcrumb](../architecture/scheduler.md#host-memory-breadcrumb) for why it is unconditional and what `shmem_unaccounted` answers.
+One breadcrumb line per interval carries `MemAvailable` / `Shmem` / `SwapFree` / PSI / per-tmpfs usage / `shmem_unaccounted`, written whether or not the host is under pressure — 288 lines a day at the default. See [host memory breadcrumb](../architecture/scheduler.md#host-memory-breadcrumb) for why it is unconditional and what `shmem_unaccounted` answers, and [admission gate](../architecture/scheduler.md#admission-gate) for what the gate does and does not touch.
+
+The gate **fails open** in every uncertain case — sampling disabled, no sample yet, a sample that would not parse. A broken sampler must not be able to halt all dispatch.
+
+### Per-task cgroups
+
+| Setting | Default | Description |
+|---|---|---|
+| `task_cgroup_enabled` | `true` | Put each task's process tree in its own cgroup v2 group, so a runaway build or test suite is OOM-killed inside its own group instead of taking the host down. No-ops with a log line on a deployment whose unit file has no delegated subtree |
+| `task_memory_max_mb` | `2048` | `memory.max` per task (0 = unbounded) |
+| `task_pids_max` | `512` | `pids.max` per task — bounds a fork storm |
+| `task_cpu_max_percent` | `200` | `cpu.max` as a percentage of one core (200 = two cores; 0 = unset) |
+
+These need `Delegate=` and `DelegateSubgroup=supervisor` on the scheduler unit, which the Ansible role ships. Without them containment never engages; the daemon says so once in the startup log rather than looking protected. See [per-task cgroups](../architecture/scheduler.md#per-task-cgroups).
 
 ## `[security]`
 
@@ -207,6 +227,7 @@ One line per interval carrying `MemAvailable` / `Shmem` / `SwapFree` / PSI / per
 | `skill_proxy_timeout` | `300` | Proxy command timeout (seconds) |
 | `passthrough_env_vars` | `["LANG", "LC_ALL", "LC_CTYPE", "TZ"]` | Extra env vars for subprocess |
 | `sandbox_ro_paths` | `[]` | Extra RO bind-mounts in the sandbox, for co-located services. Keep entries narrow — a broad path sweeps in whatever lives under it. The DB directories are masked after this list either way |
+| `sandbox_cache_dir` | `""` | Root of a disk-backed directory for the package managers' caches. Each user gets `{root}/{user_id}`, bound RW into their sandbox with `UV_CACHE_DIR`, `XDG_CACHE_HOME` and `npm_config_cache` pointed at it. Empty leaves those caches on bwrap's own root tmpfs — RAM the host cannot attribute, discarded at task exit, so every task downloads again. Put it under `[developer] repos_dir` when that is set: uv populates a venv by hardlinking out of its cache, and `link(2)` returns `EXDEV` across a mount boundary, so a cache on another mount makes every worktree pay for a full copy. Ignored with one warning when relative, missing, unwritable, under a database directory, or at or above a path the sandbox already mounts |
 
 `sandbox_admin_db_write` was removed: the framework DB is no longer bound into the sandbox for anyone, so there is no bind left to widen. A stale key logs a warning and is ignored.
 

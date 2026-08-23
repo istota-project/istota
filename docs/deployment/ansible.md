@@ -125,7 +125,33 @@ zram rather than a disk swapfile because the disk was already the saturated reso
 
 Setting `istota_zram_enabled: false` makes every zram task a no-op, so a host where the operator arranged swap another way is left as it is. Note the asymmetry: false means "this role does not manage swap", not "tear down the swap this role previously set up". Flipping true to false on a host that already has it leaves the device in place — disable `systemd-zram-setup@zram0` and delete `/etc/systemd/zram-generator.conf` by hand.
 
-The scheduler's own [host memory breadcrumb](../architecture/scheduler.md#host-memory-breadcrumb) is the matching instrument: `istota_scheduler_host_pressure_enabled` (default `true`) and `istota_scheduler_host_pressure_breadcrumb_interval` (default `300`).
+The scheduler's own [host memory breadcrumb](../architecture/scheduler.md#host-memory-breadcrumb) is the matching instrument, and the [admission gate](../architecture/scheduler.md#admission-gate) is what acts on it:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `istota_scheduler_host_pressure_enabled` | `true` | Master switch for host-pressure sampling |
+| `istota_scheduler_host_pressure_breadcrumb_interval` | `300` | Breadcrumb cadence in seconds (0 = disabled) |
+| `istota_scheduler_host_pressure_sample_interval` | `30` | Cadence of the sample the gate and the snapshot trigger read (0 = disabled) |
+| `istota_scheduler_min_available_memory_mb` | `768` | Admission floor. Below it, dispatch spawns no new worker and pending tasks wait; nothing running is stopped |
+| `istota_scheduler_host_pressure_psi_threshold` | `40.0` | `memory some avg10` above this also counts as pressure |
+| `istota_scheduler_host_pressure_alert_cooldown` | `900` | Minimum seconds between snapshots and admin notifications |
+| `istota_scheduler_host_pressure_shmem_alert_mb` | `1024` | Third snapshot trigger — shmem no filesystem accounts for. Not wired into the gate (0 disables) |
+| `istota_scheduler_host_pressure_docker_socket` | `/var/run/docker.sock` | Read-only handle for resolving a container's pid during a snapshot; empty disables container lookup |
+
+## Per-task cgroups
+
+`MemoryHigh=` bounds the daemon as a whole. It does nothing about one task's process tree — a build, a package install, a test suite — walking the machine into a global OOM and taking an unrelated victim with it, which is what the August 2026 outage was. The role puts each task in its own cgroup v2 group under the scheduler unit instead.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `istota_scheduler_task_cgroup_enabled` | `true` | Place each task's process tree in its own cgroup |
+| `istota_scheduler_task_memory_max_mb` | `2048` | `memory.max` per task (0 = unbounded) |
+| `istota_scheduler_task_pids_max` | `512` | `pids.max` per task — bounds a fork storm |
+| `istota_scheduler_task_cpu_max_percent` | `200` | `cpu.max` as a percentage of one core (200 = two cores; 0 = unset) |
+
+This needs both `Delegate=memory pids cpu` and `DelegateSubgroup=supervisor` on the scheduler unit, which the role's template carries. `Delegate=` alone is not enough and the gap is silent: cgroup v2 forbids a non-root cgroup from both holding processes and enabling controllers for its children, so a task group made inside the daemon's own cgroup would be created and then hold no `memory.max` at all. `DelegateSubgroup=` moves the daemon into a `supervisor/` leaf and leaves the unit cgroup free to enable controllers for its siblings.
+
+**A host that has not re-run this role keeps working.** Containment never engages, nothing raises, and the daemon logs the reason once at startup rather than looking protected — so check the startup log after an Ansible run, not just the config.
 
 ## Disk growth
 

@@ -635,6 +635,35 @@ db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
 # db_backup_dir = ""                # empty = {nextcloud_mount}/istota-db-backups
 
+# Runtime self-check re-run. The auto-update cron changes what is installed
+# under a config the daemon already loaded, so a boot-only check is blind to it.
+# doctor_check_interval = 3600      # seconds between `istota doctor` re-runs (0 = disabled)
+
+# Host memory: the breadcrumb series, the admission gate, and the snapshots.
+# The breadcrumb is one host_pressure line per interval carrying MemAvailable /
+# Shmem / SwapFree / PSI / per-tmpfs usage / shmem_unaccounted, written whether
+# or not anything is wrong. The gate reads a faster sample and refuses to *start*
+# work below the floor — pending rows wait, nothing running is stopped, and every
+# uncertain case (no sample, unreadable sample, sampling off) fails open.
+# host_pressure_enabled = true                 # master switch for all three
+# host_pressure_breadcrumb_interval_seconds = 300  # breadcrumb cadence (0 = disabled)
+# host_pressure_sample_interval_seconds = 30   # gate/snapshot sample cadence (0 = disabled)
+# min_available_memory_mb = 768                # admission floor in MB (0 = disable this half)
+# host_pressure_psi_threshold = 40.0           # `memory some avg10` above this counts as pressure (0 = disable this half)
+# host_pressure_alert_cooldown_seconds = 900   # min gap between snapshots + admin notifications
+# host_pressure_shmem_unaccounted_alert_mb = 1024  # third snapshot trigger; NOT wired into the gate (0 = disabled)
+# host_pressure_docker_socket = "/var/run/docker.sock"  # read-only, resolves a container's pid for a snapshot; "" disables
+
+# Per-task cgroups. Each task's process tree gets its own cgroup v2 group, so a
+# runaway build or test suite is OOM-killed inside its own group instead of
+# taking the host down. Needs `Delegate=` and `DelegateSubgroup=supervisor` on
+# the scheduler unit; without them containment never engages and the daemon says
+# so once at startup rather than looking protected.
+# task_cgroup_enabled = true        # place each task's tree in its own cgroup
+# task_memory_max_mb = 2048         # memory.max per task (0 = unbounded)
+# task_pids_max = 512               # pids.max per task — bounds a fork storm
+# task_cpu_max_percent = 200        # cpu.max as % of one core (200 = two cores; 0 = unset)
+
 # ============================================================================
 # Default briefings (shared canonical set)
 # ============================================================================
