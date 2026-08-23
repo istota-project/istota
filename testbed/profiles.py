@@ -104,6 +104,30 @@ MAIL_CONFIG = {
 BASE = Profile("base")
 FORGE = Profile("forge", services=("model", "gitlab"))
 
+# ntfy needs no config at all: it is a per-user connected service in the
+# encrypted secrets store rather than a config block, so the scenario points
+# the daemon at the stub with `istota secret ensure` inside the container. See
+# `services/ntfy.py::NtfyService.config_env` for why that is not a gap.
+NOTIFY = Profile("notify", services=("model", "ntfy"))
+
+#: The module switch lives here rather than in `feeds.config_env()`.
+#:
+#: `ISTOTA_FEEDS_ENABLED` says the *module* is on. That is a property of the
+#: profile — it is what `FULL_MODULE_SWITCHES` derives from a profile's service
+#: list on the other shape — and not something the document server knows or
+#: could answer for. Keeping it out of `config_env()` also keeps that method's
+#: promise true: the feeds stub is pointed at by seeded DB rows and by nothing
+#: the generator reads.
+#:
+#: The two-file rule still applies and still holds: `render-config.sh:534`
+#: reads it and `docker-compose.yml:333` passes it through, which the
+#: `Profile.config` guard in `tests/test_testbed_services.py` checks.
+FEEDS = Profile(
+    "feeds",
+    services=("model", "feeds"),
+    config={"ISTOTA_FEEDS_ENABLED": "true"},
+)
+
 # The negative control: the same profile on an image with the forge binaries
 # removed, reproducing ISSUE-263. The tag is empty here and filled in by the
 # fixture that builds the control, because it is derived from whatever the
@@ -159,7 +183,7 @@ MAIL = Profile(
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
-ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, MAIL, FULL)
+ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, NOTIFY, FEEDS, MAIL, FULL)
 
 
 def by_name(name: str) -> Profile:

@@ -104,6 +104,19 @@ services:
       # Nothing in this tier can use a real key: the endpoint is scripted and
       # ignores the Authorization header entirely.
       ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint
+      # The master key the encrypted `secrets` table is derived from. On the
+      # full shape `entrypoint.sh` generates one and persists it to
+      # `/data/.secret_key`; this stack bypasses the entrypoint, so without
+      # this line every `istota secret` call and every per-user connected
+      # service (ntfy, and anything else that lives in that table) fails with
+      # "ISTOTA_SECRET_KEY is not set".
+      #
+      # A fixed literal for the same reason as the line above, and one that is
+      # obviously not a key: it is committed in a public repository, it
+      # encrypts nothing but the values this tier itself seeds, and the volume
+      # holding them is destroyed at the end of every session. `_MIN_KEY_LEN`
+      # is 32 characters, which is the only property the loader checks.
+      ISTOTA_SECRET_KEY: not-a-real-key-for-the-lean-test-stack-only
       PYTHONUNBUFFERED: "1"
 
     volumes:

@@ -153,6 +153,18 @@ def _mail_service(*args, **kwargs) -> Service:
     return mail.serve(*args, **kwargs)
 
 
+def _ntfy_service(*args, **kwargs) -> Service:
+    from . import ntfy
+
+    return ntfy.serve(*args, **kwargs)
+
+
+def _feeds_service(*args, **kwargs) -> Service:
+    from . import feeds
+
+    return feeds.serve(*args, **kwargs)
+
+
 #: Profile service names to the factory that produces one. A profile names
 #: services by string, so a typo is a `KeyError` at fixture setup rather than an
 #: import error; `tests/test_testbed_services.py` closes that by checking every
@@ -162,6 +174,8 @@ REGISTRY: dict[str, Callable[..., Service]] = {
     "gitlab": _gitlab_service,
     "nextcloud": _nextcloud_service,
     "mail": _mail_service,
+    "ntfy": _ntfy_service,
+    "feeds": _feeds_service,
 }
 
 #: Registry names that open a listening socket in the pytest process.
@@ -173,7 +187,7 @@ REGISTRY: dict[str, Callable[..., Service]] = {
 #: binds nothing has no such hazard and no credential to publish, so a guard
 #: iterating `REGISTRY` and demanding one of every member would be asserting
 #: something false about half of it.
-HOST_STUBS = frozenset({"model", "gitlab"})
+HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds"})
 
 #: Registry names that attach to something a compose file already runs.
 #:
@@ -248,6 +262,24 @@ def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
             stub.close()
             raise
         return stub
+
+    if name == "ntfy":
+        from . import ntfy
+
+        # The token is the service's own, and it is *checked* — see `serve`.
+        # The fixture reads it back off the service and seeds the same value
+        # into the container's secrets store, so the two cannot drift.
+        return ntfy.serve(host=host, credential=ntfy.NTFY_TOKEN)
+
+    if name == "feeds":
+        from . import feeds
+
+        # Nothing is registered here. A feed document is per-scenario — the
+        # test adds it and seeds the matching row — and `reset()` clears the
+        # registry between tests for the same reason `GitLabService.reset`
+        # rebuilds its repositories rather than clearing them: a stack whose
+        # documents were added at boot would lose them at the first reset.
+        return feeds.serve(host=host, credential=feeds.FEEDS_CREDENTIAL)
 
     if name == "mail":
         from . import mail

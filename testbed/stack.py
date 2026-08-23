@@ -751,7 +751,12 @@ LEAN_ENV_KEYS = (
 #: the same as not checking for a typo at all. It is also a ratchet: a unit test
 #: asserts this set and `REGISTRY` stay disjoint, so registering `mail` fails
 #: until the name is removed from here.
-PLANNED_SERVICES = frozenset({"feeds"})
+#:
+#: Empty now that `feeds` is registered — the last name on it, and the ratchet
+#: is what made removing it compulsory rather than optional. Kept rather than
+#: deleted with its guard, because the next service the map wants to name
+#: before it exists goes here.
+PLANNED_SERVICES: frozenset[str] = frozenset()
 
 #: Every module `docker-compose.yml` turns on by default, mapped to the service
 #: whose presence in a profile is what turns it back on. Empty means nothing in
