@@ -239,6 +239,13 @@ class TestExec:
         assert exec_argv[-3] == "bash"
         assert exec_argv[-2] == "-c"
         assert exec_argv[-1] == "echo hi"
+        # The working directory must be somewhere `docker cp` can reach, or a
+        # relative path written by the command cannot be copied back out
+        # (ISSUE-306).
+        cwd = exec_argv[exec_argv.index("-w") + 1]
+        assert cwd == devbox._DEFAULT_WORKDIR
+        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
+            assert cwd != mount and not cwd.startswith(mount + "/")
 
     def test_timeout_returns_error(self, monkeypatch):
         # Ownership pair, then the exec times out, then the straggler-kill
@@ -267,7 +274,9 @@ class TestExecFile:
         invocations = []
         seq = iter([
             *_ownership_sequence(),
+            (0, b"", b""),                # mkdir -p staging dir
             (0, b"", b""),                # cp into container
+            (0, b"", b""),                # chmod 0755
             (0, b"hi\n", b""),            # the actual run
             (0, b"", b""),                # rm cleanup
         ])
@@ -301,7 +310,9 @@ class TestExecFile:
         invocations = []
         seq = iter([
             *_ownership_sequence(),
+            (0, b"", b""),                # mkdir -p staging dir
             (0, b"", b""),                # cp into container
+            (0, b"", b""),                # chmod 0755
             None,                          # exec → TimeoutExpired
             (0, b"", b""),                # _kill_stragglers probe
             (0, b"", b""),                # rm cleanup
@@ -328,9 +339,128 @@ class TestExecFile:
         assert "outside allowed roots" in result["error"]
 
 
+    def test_stages_onto_the_persistent_volume_not_the_tmpfs(self, monkeypatch, tmp_path):
+        """ISSUE-306: `docker cp` cannot traverse a tmpfs mount, so a script
+        staged into /workspace lands in the shadowed rootfs directory and the
+        interpreter reports "No such file or directory"."""
+        script = tmp_path / "probe.py"
+        script.write_text("print('hi')\n")
+        invocations = []
+        seq = iter([
+            *_ownership_sequence(),
+            (0, b"", b""),                # mkdir -p staging dir
+            (0, b"", b""),                # cp into container
+            (0, b"", b""),                # chmod 0755
+            (0, b"hi\n", b""),            # the actual run
+            (0, b"", b""),                # rm cleanup
+        ])
+        def fake_run(argv, timeout):
+            invocations.append(argv)
+            return next(seq)
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
+        result = devbox.cmd_exec_file(args)
+        assert result["status"] == "ok"
+
+        cp_idx = next(i for i, c in enumerate(invocations) if c[0] == "cp")
+        remote = invocations[cp_idx][2].split(":", 1)[1]
+        assert remote.startswith(devbox._EXEC_STAGING_DIR + "/"), remote
+        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
+            assert not remote.startswith(mount + "/"), f"staged into tmpfs {mount}"
+
+        # `docker cp` creates no parent directory, so the mkdir has to precede it.
+        mkdir_idx = next(i for i, c in enumerate(invocations) if "mkdir" in c)
+        assert mkdir_idx < cp_idx
+        assert devbox._EXEC_STAGING_DIR in invocations[mkdir_idx]
+
+        # The interpreter and the cleanup must name the same staged path.
+        run_idx = next(i for i, c in enumerate(invocations) if "python3" in c)
+        assert invocations[run_idx][-1] == remote
+        assert invocations[-1][-1] == remote
+
+    @pytest.mark.parametrize("name", ["probe", "probe.py"])
+    def test_fixes_the_staged_mode_on_both_branches(self, monkeypatch, tmp_path, name):
+        """`docker cp` preserves the host file's uid/gid and mode, and the
+        daemon user is not the container's `dev` — so a 0600 script arrives
+        unreadable by the user about to run it. That bites the interpreter
+        branch as hard as the fallback, and `chmod +x` would grant execute
+        without read."""
+        script = tmp_path / name
+        script.write_text("#!/bin/sh\necho hi\n")
+        script.chmod(0o600)
+        invocations = []
+        seq = iter([
+            *_ownership_sequence(),
+            (0, b"", b""),                # mkdir -p
+            (0, b"", b""),                # cp
+            (0, b"", b""),                # chmod
+            (0, b"hi\n", b""),            # the run
+            (0, b"", b""),                # rm cleanup
+        ])
+        def fake_run(argv, timeout):
+            invocations.append(argv)
+            return next(seq)
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
+        result = devbox.cmd_exec_file(args)
+        assert result["status"] == "ok"
+        chmod_call = [c for c in invocations if "chmod" in c][0]
+        assert chmod_call[:3] == ["exec", "-u", "root"]
+        assert "0755" in chmod_call
+
+    def test_reports_a_failed_chmod_instead_of_an_opaque_eacces(self, monkeypatch, tmp_path):
+        script = tmp_path / "probe"
+        script.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),                          # mkdir -p
+            (0, b"", b""),                          # cp
+            (1, b"", b"chmod: Operation not permitted"),
+            (0, b"", b""),                          # rm cleanup
+        ]))
+        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
+        result = devbox.cmd_exec_file(args)
+        assert result["status"] == "error"
+        assert "chmod" in result["error"]
+
+    def test_removes_the_partial_copy_when_the_copy_fails(self, monkeypatch, tmp_path):
+        """`docker cp` extracts a tar, so a failure part-way leaves a truncated
+        file behind on the persistent volume."""
+        script = tmp_path / "probe.py"
+        script.write_text("print(1)\n")
+        invocations = []
+        seq = iter([
+            *_ownership_sequence(),
+            (0, b"", b""),                        # mkdir -p
+            (1, b"", b"no space left on device"), # cp
+            (0, b"", b""),                        # rm cleanup
+        ])
+        def fake_run(argv, timeout):
+            invocations.append(argv)
+            return next(seq)
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
+        result = devbox.cmd_exec_file(args)
+        assert result["status"] == "error"
+        assert "cp into devbox failed" in result["error"]
+        assert "rm" in invocations[-1] and "-f" in invocations[-1]
+
+    def test_reports_a_failed_mkdir(self, monkeypatch, tmp_path):
+        script = tmp_path / "probe.py"
+        script.write_text("print(1)\n")
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (1, b"", b"mkdir: cannot create directory"),
+        ]))
+        args = type("A", (), {"path": str(script), "interpreter": None, "timeout": None})()
+        result = devbox.cmd_exec_file(args)
+        assert result["status"] == "error"
+        assert "staging" in result["error"]
+
+
 class TestCp:
     def test_cp_in_missing_source(self, tmp_path):
-        args = type("A", (), {"src": str(tmp_path / "no-such"), "dest": "/workspace/x"})()
+        args = type("A", (), {"src": str(tmp_path / "no-such"), "dest": "/home/dev/x"})()
         result = devbox.cmd_cp_in(args)
         assert result["status"] == "error"
         assert "not found" in result["error"]
@@ -342,19 +472,20 @@ class TestCp:
         seq = iter([
             *_ownership_sequence(),
             (0, b"", b""),  # docker cp
+            (0, b"", b""),  # arrival check
         ])
         def fake_run(argv, timeout):
             calls.append(argv)
             return next(seq)
         monkeypatch.setattr(devbox, "_run_docker", fake_run)
-        args = type("A", (), {"src": str(src), "dest": "/workspace/a.txt"})()
+        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
         result = devbox.cmd_cp_in(args)
         assert result["status"] == "ok"
-        assert calls[-1][0] == "cp"
-        assert calls[-1][2] == "devbox-bob:/workspace/a.txt"
+        cp_call = [c for c in calls if c[0] == "cp"][0]
+        assert cp_call[2] == "devbox-bob:/home/dev/a.txt"
 
     def test_cp_in_rejects_path_outside_allowlist(self):
-        args = type("A", (), {"src": "/etc/passwd", "dest": "/workspace/p"})()
+        args = type("A", (), {"src": "/etc/passwd", "dest": "/home/dev/p"})()
         result = devbox.cmd_cp_in(args)
         assert result["status"] == "error"
         assert "outside allowed roots" in result["error"]
@@ -365,7 +496,7 @@ class TestCp:
             *_ownership_sequence(),
             (0, b"", b""),  # docker cp
         ]))
-        args = type("A", (), {"src": "/workspace/out.json", "dest": str(dest)})()
+        args = type("A", (), {"src": "/home/dev/out.json", "dest": str(dest)})()
         result = devbox.cmd_cp_out(args)
         assert result["status"] == "ok"
         assert dest.parent.exists()
@@ -374,7 +505,7 @@ class TestCp:
         # Build a *separate* tmp dir outside ISTOTA_DEFERRED_DIR. Writable by
         # the test user, but not on the allowlist — the right rejection path.
         outside = tmp_path_factory.mktemp("outside")
-        args = type("A", (), {"src": "/workspace/x", "dest": str(outside / "payload")})()
+        args = type("A", (), {"src": "/home/dev/x", "dest": str(outside / "payload")})()
         result = devbox.cmd_cp_out(args)
         assert result["status"] == "error"
         assert "outside allowed roots" in result["error"]
@@ -385,10 +516,164 @@ class TestCp:
             *_ownership_sequence(),
             (1, b"", b"Error: no such file"),
         ]))
-        args = type("A", (), {"src": "/workspace/missing", "dest": str(dest)})()
+        args = type("A", (), {"src": "/home/dev/missing", "dest": str(dest)})()
         result = devbox.cmd_cp_out(args)
         assert result["status"] == "error"
         assert "no such file" in result["error"]
+
+
+    @pytest.mark.parametrize("dest", [
+        "/workspace",
+        "/workspace/a.txt",
+        "/workspace/nested/a.txt",
+        "/workspace/",
+        "//workspace/a.txt",
+        "/workspace/./a.txt",
+        "/home/dev/../../workspace/a.txt",
+        # `docker cp` reads a container path as relative to `/`, not to the
+        # image's WORKDIR, so these name the tmpfs just as squarely.
+        "workspace/a.txt",
+        "./workspace/a.txt",
+        "home/dev/../../workspace/a.txt",
+    ])
+    def test_cp_in_refuses_a_tmpfs_destination(self, monkeypatch, tmp_path, dest):
+        """ISSUE-306: `docker cp` writes into the rootfs directory shadowed by
+        the tmpfs mount, so the file exists nowhere the container can see it —
+        and the copy reports success."""
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        def refuse(argv, timeout):
+            raise AssertionError(f"docker must not be called for a tmpfs dest: {argv}")
+        monkeypatch.setattr(devbox, "_run_docker", refuse)
+        args = type("A", (), {"src": str(src), "dest": dest})()
+        result = devbox.cmd_cp_in(args)
+        assert result["status"] == "error"
+        assert "tmpfs" in result["error"]
+        assert "/home/dev" in result["error"]
+
+    @pytest.mark.parametrize("src", [
+        "/workspace/out.json", "/workspace", "workspace/out.json",
+    ])
+    def test_cp_out_refuses_a_tmpfs_source(self, monkeypatch, tmp_path, src):
+        def refuse(argv, timeout):
+            raise AssertionError(f"docker must not be called for a tmpfs src: {argv}")
+        monkeypatch.setattr(devbox, "_run_docker", refuse)
+        args = type("A", (), {"src": src, "dest": str(tmp_path / "out.json")})()
+        result = devbox.cmd_cp_out(args)
+        assert result["status"] == "error"
+        assert "tmpfs" in result["error"]
+
+    @pytest.mark.parametrize("dest", [
+        "/workspaces/a.txt",
+        "/workspace-old/a.txt",
+        "/home/dev/workspaces/a.txt",
+    ])
+    def test_cp_in_allows_a_path_that_merely_starts_with_the_mount_name(
+        self, monkeypatch, tmp_path, dest,
+    ):
+        """The prefix match is anchored on a separator: `/workspaces` is a
+        different directory from `/workspace`, and dropping the anchor would
+        swallow it."""
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp
+            (0, b"", b""),  # arrival check
+        ]))
+        args = type("A", (), {"src": str(src), "dest": dest})()
+        assert devbox.cmd_cp_in(args)["status"] == "ok"
+
+    def test_cp_in_checks_arrival_at_the_path_docker_cp_actually_wrote(
+        self, monkeypatch, tmp_path,
+    ):
+        """The check runs through `docker exec`, whose cwd is the image WORKDIR,
+        while `docker cp` resolves against `/`. A relative destination has to be
+        anchored before it is read back or a copy that landed is called a
+        failure."""
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        calls = []
+        inner = _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp
+            (0, b"", b""),  # arrival check
+        ])
+        def fake_run(argv, timeout):
+            calls.append(argv)
+            return inner(argv, timeout)
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        args = type("A", (), {"src": str(src), "dest": "sub/a.txt"})()
+        assert devbox.cmd_cp_in(args)["status"] == "ok"
+        # docker cp is handed the path as given; the readback is anchored.
+        assert [c for c in calls if c[0] == "cp"][0][2] == "devbox-bob:sub/a.txt"
+        assert "/sub/a.txt" in calls[-1]
+
+    def test_cp_in_of_a_directory_checks_the_destination_itself(
+        self, monkeypatch, tmp_path,
+    ):
+        """A directory copied onto a path that does not exist *becomes* that
+        path, rather than a child of it, so the basename form would look for a
+        file that was never going to be there."""
+        src = tmp_path / "payload"
+        src.mkdir()
+        (src / "inner.txt").write_text("hello")
+        calls = []
+        inner = _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp
+            (0, b"", b""),  # arrival check
+        ])
+        def fake_run(argv, timeout):
+            calls.append(argv)
+            return inner(argv, timeout)
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        args = type("A", (), {"src": str(src), "dest": "/home/dev/target"})()
+        assert devbox.cmd_cp_in(args)["status"] == "ok"
+        script = calls[-1][calls[-1].index("-c") + 1]
+        assert script == 'test -e "$1"'
+
+    def test_cp_in_errors_when_the_file_did_not_arrive(self, monkeypatch, tmp_path):
+        """`docker cp` exiting 0 is not evidence the container can see the file.
+        Silent loss on a copy that reported success is the worse half of
+        ISSUE-306."""
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        monkeypatch.setattr(devbox, "_run_docker", _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp — exits 0
+            (1, b"", b""),  # arrival check — the file is not there
+        ]))
+        args = type("A", (), {"src": str(src), "dest": "/home/dev/a.txt"})()
+        result = devbox.cmd_cp_in(args)
+        assert result["status"] == "error"
+        assert "/home/dev/a.txt" in result["error"]
+
+    def test_cp_in_arrival_check_passes_the_dest_as_argv_not_as_script_text(
+        self, monkeypatch, tmp_path,
+    ):
+        src = tmp_path / "a.txt"
+        src.write_text("hello")
+        calls = []
+        inner = _drain([
+            *_ownership_sequence(),
+            (0, b"", b""),  # docker cp
+            (0, b"", b""),  # arrival check
+        ])
+        def fake_run(argv, timeout):
+            calls.append(argv)
+            return inner(argv, timeout)
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        dest = "/home/dev/$(touch /tmp/pwned).txt"
+        args = type("A", (), {"src": str(src), "dest": dest})()
+        assert devbox.cmd_cp_in(args)["status"] == "ok"
+        check = calls[-1]
+        assert check[0] == "exec"
+        # The destination arrives as a positional argument, never spliced into
+        # the shell script the check runs.
+        assert dest in check
+        script = check[check.index("-c") + 1]
+        assert dest not in script
 
 
 class TestStatus:
@@ -683,3 +968,58 @@ class TestExecutorExportsNothingTheCLIIgnores:
             f"a setup_env hook, another skill CLI) — widen this search and say "
             f"where it went."
         )
+
+
+class TestTmpfsMountList:
+    """`_CONTAINER_TMPFS_MOUNTS` is a hand-maintained mirror of the `tmpfs:`
+    keys in the devbox compose files. A mount added there and not here is a
+    path `docker cp` will silently swallow again, so pin the two together."""
+
+    REPO_ROOT = Path(__file__).resolve().parents[1]
+
+    @staticmethod
+    def _tmpfs_destinations(lines: list[str]) -> set[str]:
+        found: set[str] = set()
+        in_block = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == "tmpfs:":
+                in_block = True
+                continue
+            if in_block:
+                # A comment or a blank line inside the list must not be read as
+                # the end of it, or the scan truncates and pins nothing.
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if not stripped.startswith("- "):
+                    in_block = False
+                    continue
+                found.add(stripped[2:].split(":", 1)[0].strip())
+        return found
+
+    def test_ansible_template_declares_nothing_unlisted(self):
+        path = self.REPO_ROOT / "deploy/ansible/templates/docker-compose.devbox.yml.j2"
+        declared = self._tmpfs_destinations(path.read_text().splitlines())
+        assert declared == set(devbox._CONTAINER_TMPFS_MOUNTS)
+
+    def test_compose_devbox_service_declares_nothing_unlisted(self):
+        path = self.REPO_ROOT / "docker/docker-compose.yml"
+        lines = path.read_text().splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.rstrip() == "  devbox:")
+        end = next(
+            (i for i in range(start + 1, len(lines))
+             if lines[i][:3].strip() and not lines[i].startswith("   ")),
+            len(lines),
+        )
+        declared = self._tmpfs_destinations(lines[start:end])
+        assert declared == set(devbox._CONTAINER_TMPFS_MOUNTS)
+
+    def test_every_listed_mount_is_absolute_and_unslashed(self):
+        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
+            assert mount.startswith("/")
+            assert not mount.endswith("/")
+
+    def test_the_staging_dir_is_not_inside_a_tmpfs(self):
+        for mount in devbox._CONTAINER_TMPFS_MOUNTS:
+            assert not devbox._EXEC_STAGING_DIR.startswith(mount + "/")
+            assert devbox._EXEC_STAGING_DIR != mount
