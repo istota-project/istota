@@ -1079,6 +1079,39 @@ _bwrap_flag_support: dict[str, bool] = {}
 _bwrap_probe_lock = threading.Lock()
 
 
+def effective_sandboxing(config: Config) -> bool:
+    """Whether the filesystem sandbox is actually in place for this deployment.
+
+    ``sandbox_enabled`` is what the operator asked for; this is what they got.
+    Four shapes run the model with the daemon's own filesystem access: the
+    standalone install, which ships ``sandbox_enabled = false``; and — despite
+    the flag being set — a container where the bwrap probe fails (no
+    CAP_SYS_ADMIN, and that one is multi-user), a Linux host with no bwrap
+    installed, and any non-Linux host.
+
+    Named because four call sites need the same answer and three of them used
+    to spell it out inline, two under comments calling it "*effective*
+    sandboxing" without there being anything of that name to point at. One of
+    those sites decides how the prompt describes the database boundary to the
+    model, so a definition that drifted between them would have the daemon
+    telling the model the databases are masked on a deployment where they are
+    not — and the code there is explicit that a false boundary claim is worse
+    than no claim at all.
+
+    Consults the bwrap capability probe, which shells out once per process and
+    caches. That is why prompt assembly reaches `subprocess` at all (ISSUE-308).
+
+    Not every site that mentions both halves wants this predicate. The
+    scheduler's startup warning (`scheduler.py`) reads ``sandbox_enabled and
+    not _bwrap_available()`` — "asked for it, didn't get it", which is
+    ``sandbox_enabled and not effective_sandboxing(config)`` and not the plain
+    negation. Collapsing it to ``not effective_sandboxing(config)`` would fire
+    an unsupported-configuration warning on every standalone install, which
+    ships the flag off deliberately.
+    """
+    return bool(config.security.sandbox_enabled and _bwrap_available())
+
+
 def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
     """Whether this bwrap accepts *flag*, probed once per process.
 
@@ -2339,7 +2372,7 @@ def native_fs_confinement_active(config: Config) -> bool:
     too, so native stays unconfined for parity rather than surprising the
     developer with a boundary the CLI path doesn't have.
     """
-    return bool(config.security.sandbox_enabled and _bwrap_available())
+    return effective_sandboxing(config)
 
 
 def native_fs_roots(
@@ -3463,14 +3496,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # boundary. What replaces it is the rule below.
     db_path_line = "Database: reachable only through skill CLIs (no file access)"
 
-    # Whether the masks are actually in place. Two shapes run the model with
-    # the daemon's own filesystem access: a container where the bwrap probe
-    # fails (no CAP_SYS_ADMIN — and that one is multi-user), and the standalone
-    # install, which ships sandbox_enabled = false. Telling the model there is
-    # nothing to open would be false there, and a false boundary claim is worse
-    # than none — it is the thing this whole change set is correcting. So the
-    # rule keeps the older prohibition-without-mechanism wording instead.
-    db_masked = config.security.sandbox_enabled and _bwrap_available()
+    # Whether the masks are actually in place — see `effective_sandboxing` for
+    # the shapes where they are not. Telling the model there is nothing to open
+    # would be false there, and a false boundary claim is worse than none — it
+    # is the thing this whole change set is correcting. So the rule keeps the
+    # older prohibition-without-mechanism wording instead.
+    db_masked = effective_sandboxing(config)
     if db_masked:
         db_rule_admin = (
             "3. Istota's databases are not on your filesystem — the directories "
@@ -4372,11 +4403,7 @@ def execute_task(
         # would turn a supported (if now discouraged) configuration into one
         # where every skill CLI fails — including the many that never open a
         # database. That combination gets a loud warning at config load instead.
-        if (
-            config.security.sandbox_enabled
-            and config.security.skill_proxy_enabled
-            and _bwrap_available()
-        ):
+        if config.security.skill_proxy_enabled and effective_sandboxing(config):
             env["ISTOTA_SANDBOXED"] = "1"
 
         # Package-manager caches, pointed at the disk-backed directory
@@ -4850,7 +4877,7 @@ def execute_task(
             cwd=(
                 Path(workspace_dir).resolve()
                 if workspace_dir is not None
-                and not (config.security.sandbox_enabled and _bwrap_available())
+                and not effective_sandboxing(config)
                 else Path(config.temp_dir)
             ),
             env=env,
