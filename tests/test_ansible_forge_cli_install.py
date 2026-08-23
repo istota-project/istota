@@ -84,7 +84,7 @@ def _forge_section(tasks: str) -> str:
         if "Forge CLIs" in title:
             # The last task in the section. Without this the negative
             # assertions below would pass against a slice that ended early.
-            assert "Remove the forge CLI download directory" in body, (
+            assert "Assert the installed forge CLIs run and report" in body, (
                 "the forge CLI section slice is truncated; the assertions "
                 "against it would not mean what they say"
             )
@@ -226,6 +226,41 @@ class TestTheInstallIsGatedAndIdempotent:
         play reports changed."""
         assert "istota_developer_gh_version" in block
         assert "istota_developer_glab_version" in block
+
+    def test_the_install_is_verified_by_running_the_binary(self, block):
+        """The install block ends in `copy`, which succeeds whatever the bytes
+        are, and `get_url`'s digest covers the download rather than what
+        `dpkg-deb -x` produced from it. Something after the copy has to execute
+        the binary or a non-runnable `gh` is a green play — and the next play
+        re-reads no version, marks it stale and reinstalls the same broken
+        binary forever. docker/istota/Dockerfile keeps a `--version` call at the
+        end of its RUN for this reason and says not to remove it.
+
+        This existed, was deleted as part of the version-floor cleanup because
+        it was entangled with a floor assert, and had to be put back. Hence a
+        test rather than a comment."""
+        install = block.index("Install the forge CLI binaries")
+        after = block[install:]
+        assert "--version" in after, (
+            "nothing runs gh/glab after the copy; a binary that cannot exec "
+            "would install green and reinstall identically on every play"
+        )
+        assert "istota_developer_gh_version" in after, (
+            "the post-install check must compare against the pinned version, "
+            "so it catches a wrong-architecture or truncated binary rather "
+            "than merely a non-zero exit"
+        )
+
+    def test_the_post_install_check_resolves_through_path(self, block):
+        """Unlike the idempotence read, which is by absolute path. This one
+        stands in for what the wrapper's `os.execve` and an operator's shell
+        find, so an apt-installed gh shadowing ours is caught at deploy time."""
+        install = block.index("Install the forge CLI binaries")
+        after = block[install:]
+        assert "\n    - gh\n" in after and "\n    - glab\n" in after, (
+            "the post-install read loops over absolute paths; it should loop "
+            "over bare names so PATH resolution is what gets checked"
+        )
 
     def test_every_command_read_runs_in_check_mode(self, block):
         """`command` is skipped under `--check`, so a later task dereferencing

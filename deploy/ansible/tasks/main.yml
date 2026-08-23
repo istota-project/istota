@@ -195,9 +195,10 @@
 #
 # By absolute path, not through PATH, and the same path the rendered config
 # names: this asks "is the binary this role installs already the pinned one".
-# There is deliberately no post-install floor assert to pair with it — see
-# istota_developer_gitleaks_min_version in defaults for why gitleaks keeps one
-# and these two do not.
+# The post-install check further down asks the different question of whether
+# what landed actually runs and reports the pinned version. Neither is a floor:
+# see istota_developer_gitleaks_min_version in defaults for why gitleaks keeps
+# a minimum and these two do not.
 - name: Read the forge CLI version already installed
   ansible.builtin.command: "{{ item }} --version"
   register: istota_forge_installed
@@ -216,7 +217,8 @@
 # the installed binary is *the pinned one*, not whether it is new enough. An
 # ordering test would leave a host that somehow has something newer than the pin
 # reporting up to date, which is the opposite of a reproducible install. The
-# floor assert further down is where an ordering comparison belongs.
+# only ordering comparison in this file is the gitleaks minimum, in its own
+# section below; equality is the right test everywhere in this one.
 #
 # `default('', true)` makes the no-match case a value rather than the None
 # `regex_search` returns — the second argument matters, because a bare
@@ -329,6 +331,72 @@
           ansible.builtin.file:
             path: "{{ istota_forge_tmp.path }}"
             state: absent
+
+# The install block ends in `copy`, which succeeds whatever the bytes are. So
+# nothing above this point has ever executed the binary it just placed: the
+# read at the top of the section runs *before* the copy and carries
+# `failed_when: false`, and `get_url`'s digest covers the download rather than
+# what `dpkg-deb -x` produced from it. A truncated extraction, a
+# wrong-architecture binary or a missing runtime dependency therefore lands a
+# non-runnable `gh` and reports a green play — and on the next run the pre-read
+# produces no version, the stale check fires, and the role reinstalls the same
+# broken binary, `changed=true`, forever. docker/istota/Dockerfile keeps a
+# `--version` call at the end of its RUN for exactly this reason and says not
+# to remove it; this is the role's equivalent.
+#
+# Equality against the pin, not a floor: the question is "did the thing I just
+# installed land and run", and the answer the role already knows is the version
+# it asked for. That is the same expression the staleness check uses, and it
+# needs no version variable of its own.
+#
+# Through PATH rather than by absolute path, because that is what the wrapper's
+# `os.execve` and an operator's shell will find — so an apt-installed `gh` in
+# /usr/bin shadowing ours is caught here rather than at the agent's next task.
+- name: Read the forge CLI versions now on the host
+  ansible.builtin.command: "{{ item }} --version"
+  register: istota_forge_cli_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop:
+    - gh
+    - glab
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
+
+# `default('', true)` on the regex result, not on stdout: `regex_search` returns
+# None on no match, and a bare `default('')` substitutes only for an *undefined*
+# value, so None would reach the comparison and read as a mismatch with an
+# opaque message rather than the "did not run" case this is here to name.
+#
+# `check_mode: false` on the read above, because `command` is otherwise skipped
+# under `--check` and this assert reads its registered result. `| default([])`
+# keeps that from raising, which makes the check a no-op under `--check` rather
+# than a crash — the same trade the section documented before.
+- name: Assert the installed forge CLIs run and report the pinned version
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item.0.stdout | default('') | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('', true))
+        == item.1
+    fail_msg: >-
+      {{ item.0.item }} did not run, or reports a version other than the
+      {{ item.1 }} this role pins. Installed:
+      {{ item.0.stdout_lines[0] | default(item.0.stderr_lines[0] | default('nothing', true), true) }}.
+      A binary that cannot exec is reinstalled identically on every play, so
+      this will not clear on its own.
+    success_msg: "{{ item.0.stdout_lines[0] | default('') }}"
+  loop: >-
+    {{ (istota_forge_cli_installed.results | default([]))
+       | zip([istota_developer_gh_version, istota_developer_glab_version]) | list }}
+  loop_control:
+    label: "{{ item.0.item }}"
+  when: >
+    not istota_update_only and not istota_web_only
+    and istota_developer_enabled
+  tags: [developer]
 
 # ============================================================
 # gitleaks (pre-commit credential scan)
