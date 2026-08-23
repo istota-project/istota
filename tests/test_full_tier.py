@@ -656,6 +656,21 @@ class TestTheOverlayIsAddressable:
 
         assert "seccomp:unconfined" in config["services"]["istota"]["security_opt"]
 
+    def test_the_unmasked_system_paths_reach_the_istota_service(self, tmp_path):
+        """The second half of the same grant, and the quiet one.
+
+        seccomp lets bwrap create the user namespace; it does not let it mount
+        a procfs inside one, because Docker's masked `/proc` entries and
+        read-only `/proc/sys` make the container's procfs not "fully visible"
+        to the kernel. `build_bwrap_cmd` emits `--proc /proc`, so without this
+        every sandbox fails at "Can't mount proc on /newroot/proc" — and the
+        daemon answers a bwrap it cannot run by disabling the sandbox and
+        carrying on, so the loss is silent rather than red.
+        """
+        config = _compose_config(tmp_path)
+
+        assert "systempaths=unconfined" in config["services"]["istota"]["security_opt"]
+
     def test_the_host_gateway_alias_reaches_the_istota_service(self, tmp_path):
         """`host.docker.internal` is built in on Docker Desktop and absent on
         Docker Engine, and every full-shape task reaches the scripted endpoint

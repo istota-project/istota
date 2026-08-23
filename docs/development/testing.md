@@ -83,6 +83,8 @@ That refusal **exits 75**, the same code `scripts/qtest` uses for "the command d
 
 **What an agent should do instead.** When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say in the merge request that it does, name the tier that covers it, and ask for the run before merge. That is a complete handover, not an apology: the reviewer knows which command to run and why. Do not merge a sandbox-touching change while quietly reporting the default suite as green — that suite patches `_bwrap_available` and checks argv, so it has never executed the code path in question.
 
+The tier that executes it is `smoke`. `tests/smoke/test_sandbox_in_stack.py::TestTheDatabaseMasks` reads `db_path.parent` from inside a live task in the shipped image and requires an empty read-only tmpfs there, which is the only assertion in the repository that can tell a sandbox that ran from one that was skipped — a Bash tool call whose output came back proves neither. It found the deployment running every task unsandboxed the first time it was run.
+
 When to run each:
 
 | Tier | Run it when | Cost |

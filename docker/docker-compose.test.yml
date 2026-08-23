@@ -67,18 +67,32 @@ services:
     # Bash tool call fails, and the forge scenarios below cannot reach the
     # wrapper at all.
     #
-    # This is the *whole* grant: `--cap-add=SYS_ADMIN` is not needed and is not
-    # given. `/proc/sys` stays read-only, so `--disable-userns` is unavailable
-    # here — `executor._bwrap_supports_disable_userns` probes for it and omits
-    # it, which is the same accommodation `tests/linux/` documents. So the
-    # sandbox this tier exercises is the real one minus one hardening flag, and
-    # nothing here may assert about nested-userns behaviour.
+    # `systempaths=unconfined` is the second half of the same grant, and it was
+    # measured in Stage 7 rather than anticipated. seccomp lets bwrap *create*
+    # the user namespace; it does not let it mount a fresh procfs inside one.
+    # Docker's default masked paths (`/proc/kcore`, `/proc/keys`, … bind-mounted
+    # over) and its read-only `/proc/sys` make the container's procfs not
+    # "fully visible" to the kernel, and the kernel then refuses `mount("proc")`
+    # in a nested user namespace — `build_bwrap_cmd` emits `--proc /proc`, so
+    # with only the seccomp grant every real sandbox dies at "Can't mount proc
+    # on /newroot/proc: Operation not permitted". Measured on the shipped image:
+    # the same argv exits 0 with this line and 1 without it. `--cap-add=SYS_ADMIN`
+    # is not an alternative — measured too, it gets past the unshare and fails
+    # at `pivot_root`.
+    #
+    # The pair is the *whole* grant. One consequence worth stating: with
+    # `/proc/sys` writable, `executor._bwrap_supports_disable_userns` now finds
+    # `--disable-userns` supported and it reaches the real argv, so this tier
+    # exercises more of the production sandbox than it used to rather than
+    # less. Nothing here asserts about nested-userns behaviour either way.
     #
     # A test-harness concession, not a deployment recipe. The supported
-    # production shape is bare metal via Ansible, where nothing blocks the
-    # syscall; docker-compose.yml deliberately does not carry this line.
+    # production shape is bare metal via Ansible, where nothing blocks any of
+    # this; docker-compose.yml deliberately carries neither line, which is why
+    # a Docker deployment runs its tasks unsandboxed.
     security_opt:
       - seccomp:unconfined
+      - systempaths=unconfined
 
     environment:
       # Config generation already happened on the host, so almost nothing is

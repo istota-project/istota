@@ -345,7 +345,8 @@ class TestTheSeccompGrantStaysInTheTestFile:
     """
 
     @pytest.mark.parametrize(
-        "setting", ["seccomp", "privileged", "cap_add", "apparmor"]
+        "setting",
+        ["seccomp", "privileged", "cap_add", "apparmor", "systempaths"],
     )
     def test_the_production_compose_grants_no_extra_privilege(self, setting):
         lines = (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
@@ -382,6 +383,28 @@ class TestTheSeccompGrantStaysInTheTestFile:
             "the lean stack no longer relaxes seccomp; bwrap cannot create a "
             "user namespace under Docker's default profile, so every task "
             "running a Bash tool call will fail"
+        )
+
+    def test_the_test_compose_also_unmasks_the_system_paths(self):
+        """The other half, and the one whose loss is quiet rather than loud.
+
+        Without `seccomp:unconfined` bwrap cannot create the user namespace and
+        every task fails visibly. Without `systempaths=unconfined` it creates
+        the namespace and then cannot mount a procfs inside it, because
+        Docker's masked `/proc` entries and read-only `/proc/sys` make the
+        container's procfs not "fully visible" to the kernel — `build_bwrap_cmd`
+        emits `--proc /proc`, so the sandbox dies at "Can't mount proc on
+        /newroot/proc". The daemon's response to a bwrap it cannot run is to
+        disable the sandbox for the process and carry on, so losing this line
+        does not fail the tier: it silently runs every scenario unconfined,
+        which is the state `TestTheDatabaseMasks` was written to catch.
+        """
+        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
+
+        assert "systempaths=unconfined" in body, (
+            "the lean stack no longer unmasks /proc, so bwrap cannot mount a "
+            "procfs inside its user namespace and every task will run with the "
+            "sandbox skipped rather than failing"
         )
 
 

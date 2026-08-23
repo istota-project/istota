@@ -57,12 +57,28 @@ services:
     # plaintext), `/data/config/.api-provisioned` (`APP_PASSWORD`),
     # `config.toml` and `.secret_key` out of the model's view.
     #
-    # As on the lean shape this is the *whole* grant — no `--cap-add=SYS_ADMIN`
-    # — so `/proc/sys` stays read-only, `executor._bwrap_supports_disable_userns`
-    # finds `--disable-userns` unavailable and omits it, and neither shape may
-    # assert anything about nested-userns behaviour.
+    # `systempaths=unconfined` is the second half, and it was measured in Stage
+    # 7 rather than anticipated. The seccomp grant lets bwrap *create* the user
+    # namespace; it does not let it mount a fresh procfs inside one. Docker's
+    # default masks (`/proc/kcore`, `/proc/keys`, … as bind mounts) and its
+    # read-only `/proc/sys` make the container's procfs not "fully visible" to
+    # the kernel, and the kernel then refuses `mount("proc")` in a nested user
+    # namespace — `build_bwrap_cmd` emits `--proc /proc`, so with only the
+    # seccomp grant every real sandbox dies at "Can't mount proc on
+    # /newroot/proc: Operation not permitted". Measured on the shipped image:
+    # the same argv exits 0 with this line and 1 without it.
+    #
+    # Two consequences worth stating rather than leaving to be rediscovered.
+    # `--cap-add=SYS_ADMIN` is *not* an alternative — measured too, it gets past
+    # the unshare and then fails at `pivot_root` — so this is the narrowest pair
+    # that works, not a preference. And because `/proc/sys` becomes writable,
+    # `executor._bwrap_supports_disable_userns` now finds `--disable-userns`
+    # supported and the tier exercises it, which is *more* of the production
+    # sandbox than the spec budgeted for, not less. No scenario asserts about
+    # nested-userns behaviour either way; that stays out of scope.
     security_opt:
       - seccomp:unconfined
+      - systempaths=unconfined
 
     environment:
       # Fixed literals, NOT `${ANTHROPIC_API_KEY:-}` as the base file has them.
