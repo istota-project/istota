@@ -6,7 +6,11 @@ services:
     container_name: {{ istota_namespace }}-browser
     ports:
       - "127.0.0.1:{{ istota_browser_api_port }}:9223"
-      - "0.0.0.0:{{ istota_browser_vnc_port }}:6080"
+      # Compose requires an IPv6 host address to be bracketed, so a bare `::1`
+      # would render "::1:6080:6080" and fail to parse. Bracketed here rather
+      # than demanded of the operator: the guard in tasks/main.yml accepts both
+      # spellings, and a value the guard blesses has to be one this can render.
+      - "{{ ('[' ~ istota_browser_vnc_bind_address ~ ']') if (':' in istota_browser_vnc_bind_address and not istota_browser_vnc_bind_address.startswith('[')) else istota_browser_vnc_bind_address }}:{{ istota_browser_vnc_port }}:6080"
     shm_size: {{ istota_browser_shm_size }}
     volumes:
       - {{ istota_home }}/data/browser-profile:/data/browser-profile

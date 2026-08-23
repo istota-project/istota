@@ -131,14 +131,28 @@ def untrusted(payload, key):
 
 @pytest.fixture(autouse=True)
 def _unscoped_admin_env(monkeypatch, tmp_path):
-    """Address the bot's own tree directly.
+    """Address the bot's own tree directly, with the credentials put back.
 
     No ISTOTA_USER_ID plus the empty-admins-file back-compat rule puts the CLI
     in unscoped-admin mode, so paths resolve at the account root instead of
     /Users/<uid>/. The scoping tests below override this deliberately.
+
+    `run()` calls the skill's `main()` **in process**, and
+    `istota/skills/nextcloud/__init__.py` reads NC_URL/NC_USER/NC_PASS out of
+    `os.environ` itself — so unlike every other integration module here, this
+    one needs them present in a test body and not merely at import. Since
+    ISSUE-301 the suite scrubs them before every test, which would leave every
+    call in this file refused with "NC_URL, NC_USER, NC_PASS env vars
+    required". Putting them back here rather than exempting them in
+    `tests/support/env_isolation.py` keeps the scrub closed by default and puts
+    the dependency on the page: this file needs the operator's real Nextcloud,
+    which is what the `integration` marker already says.
     """
     monkeypatch.delenv("ISTOTA_USER_ID", raising=False)
     monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no-such-admins-file"))
+    monkeypatch.setenv("NC_URL", _url)
+    monkeypatch.setenv("NC_USER", _user)
+    monkeypatch.setenv("NC_PASS", _pass)
 
 
 @pytest.fixture(scope="module")

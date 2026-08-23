@@ -7,8 +7,10 @@
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
+  import { NotificationBell } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
+  import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
   import '../app.css';
@@ -61,6 +63,14 @@
     console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
     try {
       user = await getMe();
+      // The bell needs a count on every route, and `AppShell` is not on every
+      // route — the error page renders none and neither do the money loading
+      // branches — so the poll is anchored here rather than to the shell.
+      //
+      // Started only once the user has resolved: a logged-out route polling an
+      // authenticated endpoint fails, backs off, and is then indistinguishable
+      // from a real outage at the next login.
+      startNotificationPoll();
     } catch (e) {
       if (e instanceof AuthError) {
         window.location.href = `${base}/login`;
@@ -71,6 +81,12 @@
       loading = false;
     }
   });
+
+  // Its own hook, and synchronous. Svelte only honours a cleanup returned from
+  // a *synchronous* `onMount` callback — returning one from the async hook above
+  // is silently dropped, which would leave the poll running against a torn-down
+  // layout.
+  onMount(() => () => stopNotificationPoll());
 
   function isActive(path: string): boolean {
     const current = page.url.pathname;
@@ -130,6 +146,7 @@
       >
         {user.display_name}
       </a>
+      <NotificationBell />
       <button
         type="button"
         class="nav-icon-btn theme-btn"

@@ -187,6 +187,31 @@ features = []
 # usage_limit_markers = ["session limit reached", "usage limit reached", "Claude usage limit"]
 #                                   # pane substrings → stop_reason=usage_limit → fallback brain
 #
+# Headless `claude -p` brain settings. The brain's model selection still comes
+# from [brain] and [models]; this block is the subscription usage poll only, and
+# it is read whatever `kind` is set to — a native primary with a claude_code
+# fallback burns the same plan. All fields default in code, so an absent block
+# is the shipping behaviour.
+# [brain.claude_code]
+# Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
+# on /admin and in `istota doctor`. Read-only: the credential is never written or
+# refreshed. Off = the doctor check SKIPs and the admin card says so in place of
+# its tiles, rather than disappearing.
+# subscription_usage = true
+# subscription_usage_cache_ttl_seconds = 1800    # one deployment-wide fetch per this window,
+#                                                #   and the floor on the retry after a failure.
+#                                                #   The shortest window reported is five hours,
+#                                                #   so polling faster buys no accuracy and the
+#                                                #   endpoint rate-limits a deployment that does.
+#                                                #   Floored at 1 (0 would fetch on every read).
+# subscription_usage_timeout_seconds = 10        # matches doctor.PROBE_TIMEOUT; floored at 1
+# subscription_usage_warn_percent = 80.0         # doctor WARNs, the tile turns amber
+# subscription_usage_high_percent = 95.0         # the tile turns red; still a WARN, never a FAIL
+#                                                #   both clamp to [0, 100]; warn above high is
+#                                                #   lowered to high (logged) — an inverted pair
+#                                                #   leaves no amber band
+# subscription_usage_stale_after_seconds = 3600  # a stale-cache reading older than this WARNs
+#
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on
 # the native brain while interactive talk/email stays on claude_code. Unknown
@@ -218,11 +243,34 @@ features = []
 #                                  # agent needs to read. Keep entries narrow — a broad path sweeps
 #                                  # in whatever lives under it. (The DB directories are masked
 #                                  # after this list is applied, so they stay unreachable either way.)
+# sandbox_cache_dir = ""           # root of a disk-backed directory for the package managers'
+#                                  # caches. Each user gets {root}/{user_id}, bound RW into
+#                                  # their sandbox, with UV_CACHE_DIR, XDG_CACHE_HOME and
+#                                  # npm_config_cache pointed at it. Empty (the default) leaves
+#                                  # them on bwrap's own root tmpfs — RAM the host cannot
+#                                  # attribute, discarded at task exit, so every task downloads
+#                                  # again. Put it under developer.repos_dir when that is set:
+#                                  # uv hardlinks out of its cache and link(2) fails across a
+#                                  # mount boundary, so a cache elsewhere costs every worktree a
+#                                  # full copy. It is ignored, with a warning, when it is
+#                                  # relative, missing, unwritable, under a database directory,
+#                                  # or at or ABOVE anything the sandbox already mounts — a bind
+#                                  # above an earlier mount would cover it, so do not point this
+#                                  # at temp_dir, ~/.cache, ~/.local, or repos_dir itself.
 
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)
 # allow_pypi = true                # add pypi.org + files.pythonhosted.org to allowlist
 # extra_hosts = []                 # operator-specific additions (e.g. ["registry.example.com:443"])
+#
+# The public npm and crates.io registries are already added for a task that is
+# authorized for the `developer` skill, so an install inside a worktree needs
+# nothing here. `extra_hosts` is for what those defaults cannot cover: a
+# private registry, a company mirror, or an ecosystem that is not npm, PyPI or
+# cargo. Note it applies to *every* task rather than only developer ones —
+# there is no per-skill operator list. Matching is exact `host:port` with no
+# wildcards, so a missing entry fails at the boundary and reads as a broken
+# install. See docs/deployment/security.md for what is deliberately uncovered.
 
 [nextcloud]
 # Nextcloud server URL. This also drives storage vocabulary: when set, the bot

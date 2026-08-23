@@ -202,6 +202,9 @@ skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
 {% if istota_security_sandbox_ro_paths %}
 sandbox_ro_paths = {{ istota_security_sandbox_ro_paths | to_json }}
 {% endif %}
+{% if istota_security_sandbox_cache_dir %}
+sandbox_cache_dir = "{{ istota_security_sandbox_cache_dir }}"
+{% endif %}
 
 [security.network]
 enabled = {{ istota_security_network_enabled | lower }}

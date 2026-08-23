@@ -1,30 +1,30 @@
 /**
  * Cross-implementation parity for the cost render rule.
  *
- * `cli._render_cost` and `formatCost` are two implementations of one stated
- * rule, in two languages, rendering into two media. Nothing structural stops
+ * `usage_render.render_cost` and `formatCost` are two implementations of one
+ * stated rule, in two languages, rendering into two media. Nothing structural stops
  * them drifting, and they already had: the CLI showed four decimals and the
  * dashboard two, which turned a sub-cent 24h figure into a flat `$0.00`.
  *
  * The expectations below are the CLI's actual output over this case list,
- * captured by running `_render_cost` against it. Regenerate with:
+ * captured by running `render_cost` against it. Regenerate with:
  *
  *     uv run python - <<'PY'
- *     from istota.cli import _render_cost
- *     for c in CASES: print(c, _render_cost(c))
+ *     from istota.usage_render import render_cost
+ *     for c in CASES: print(c, render_cost(c))
  *     PY
  *
  * A change to either side that is not made to both fails here — but only if the
  * table below is right about the CLI, which nothing in this file can check.
  * `tests/test_cli_render_cost.py` holds the same cases against the real
- * `_render_cost`; edit the two together.
+ * `render_cost`; edit the two together.
  */
 
 import { describe, expect, it } from 'vitest';
 
 import { formatCost } from '$lib/usageFormat';
 
-// [input, what cli._render_cost produces]
+// [input, what usage_render.render_cost produces]
 const PARITY: [Record<string, number>, string][] = [
   [{}, '—'],
   [{ api: 0 }, '$0.00'],

@@ -250,4 +250,22 @@ dev = [
     #   measures fd growth with it.
     "jinja2>=3.1.0",
     "psutil>=5.9.0",
+    # The linter `AGENTS.md` mandates, which until ISSUE-301 was installed
+    # nowhere a developer works: not in this group, not in the `test` extra,
+    # and `uvx` is not present either, so `ruff check` on a fresh clone was a
+    # documented step that could not run. Its only home was a `uv tool install`
+    # in `docker/test/Dockerfile`.
+    #
+    # Pinned exactly, and to the same version that Dockerfile pins. The rule
+    # set in `[tool.ruff.lint]` is ruff's defaults for E4/E7/E9/F, so a new
+    # release can add a rule to any of them; unpinned, that arrives as a
+    # suddenly-dirty tree on whoever synced most recently rather than as a
+    # decision. Bump it deliberately, in both places.
+    #
+    # Note this group is not test-only in practice on one path: the docker
+    # image syncs `--no-dev`, but the Ansible role runs a bare `uv sync`, so a
+    # bare-metal server already carries pytest, xdist, testmon, jinja2 and
+    # psutil, and now ruff — about 10 MB more. Adding `--no-dev` there is the
+    # real answer and is a deployment change, not this one.
+    "ruff==0.16.4",
 ]

@@ -5,10 +5,53 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from contextlib import ExitStack
 
 from istota.config import Config, SleepCycleConfig, UserConfig
+from istota import executor
 from istota.executor import execute_task, get_user_temp_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bwrap_probe_cache():
+    """Give this file a clean probe cache, and leave the worker's as it was.
+
+    `_bwrap_available` and `_bwrap_supports` resolve once per process into the
+    module globals `_bwrap_checked` and `_bwrap_flag_support`. Tests here mock
+    `istota.executor.subprocess.run` — that attribute is the real `subprocess`
+    module's — so a probe reached from one of them caches a verdict derived
+    from a MagicMock: `returncode == 0` is False against a mock, so "bwrap
+    unavailable" would stick for every later test in the same xdist worker.
+
+    Cleared going in, because `TestBwrapProbePlatformDependence` asserts on the
+    probe itself and a warm cache would short-circuit it. **Restored** coming
+    out, not cleared: `tests/linux/` guards its tests with an autouse
+    `_bwrap_available()` check that calls `pytest.fail` rather than
+    `pytest.skip` under `scripts/test-linux.sh` (see
+    `tests/linux/test_sandbox_real.py`), so handing the worker either a
+    mock-derived False *or* a cold cache that some other file then poisons
+    turns the tier red for a reason that has nothing to do with the sandbox.
+    Restoring discards whatever this file wrote and hands back the real verdict
+    the worker already had, so no probe is thrown away and none escapes.
+
+    Autouse rather than requested by the three tests that need it today: the
+    two that patch nothing are exactly the ones a future edit would forget, and
+    with the restore in place the fixture costs a dict copy (found while fixing
+    ISSUE-308). It does not close the same leak in `tests/test_executor.py`,
+    which is a much larger source of it — see that issue's resolution note.
+    """
+    saved_checked = executor._bwrap_checked
+    saved_flags = dict(executor._bwrap_flag_support)
+    executor._bwrap_checked = None
+    executor._bwrap_flag_support.clear()
+    try:
+        yield
+    finally:
+        executor._bwrap_checked = saved_checked
+        executor._bwrap_flag_support.clear()
+        executor._bwrap_flag_support.update(saved_flags)
 from istota.events import EventWriter
 from istota import db
 
@@ -1363,15 +1406,73 @@ class TestStreamingStdinDelivery:
         mock_process.stdin.close.assert_called_once()
 
 
+class TestBwrapProbePlatformDependence:
+    """The probe's platform split, asserted rather than left to the host.
+
+    ISSUE-308 was a test that passed on darwin for a reason unrelated to what
+    it claimed to check: `_bwrap_available` returns early on `sys.platform`
+    before it touches `subprocess`, so "nothing shelled out" held on one
+    platform and failed on the other. Both halves are pinned here so the
+    difference is visible in the suite on either host, instead of surfacing
+    only when the discretionary `linux` tier runs.
+    """
+
+    def test_short_circuits_off_linux(self):
+        with (
+            patch("sys.platform", "darwin"),
+            patch("istota.executor.subprocess.run") as mock_run,
+        ):
+            assert executor._bwrap_available() is False
+        mock_run.assert_not_called()
+
+    def test_shells_out_on_linux(self):
+        with (
+            patch("sys.platform", "linux"),
+            patch("shutil.which", return_value="/usr/bin/bwrap"),
+            patch("istota.executor.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            assert executor._bwrap_available() is True
+        assert mock_run.call_count == 1
+        assert mock_run.call_args.args[0][0] == "bwrap"
+
+
+class TestEffectiveSandboxing:
+    """`effective_sandboxing` is what the deployment got, not what it asked for."""
+
+    def test_false_when_operator_disabled_it(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.security.sandbox_enabled = False
+        with patch("istota.executor._bwrap_available", return_value=True) as probe:
+            assert executor.effective_sandboxing(config) is False
+        # Short-circuits: no reason to probe the host for a disabled sandbox.
+        probe.assert_not_called()
+
+    def test_false_when_bwrap_cannot_run(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.security.sandbox_enabled = True
+        with patch("istota.executor._bwrap_available", return_value=False):
+            assert executor.effective_sandboxing(config) is False
+
+    def test_true_only_when_both_hold(self, tmp_path):
+        config = _make_config(tmp_path)
+        config.security.sandbox_enabled = True
+        with patch("istota.executor._bwrap_available", return_value=True):
+            assert executor.effective_sandboxing(config) is True
+
+
 class TestDryRun:
     def test_dry_run_returns_prompt(self, tmp_path):
-        """Dry run returns prompt without invoking subprocess."""
+        """Dry run returns the prompt without executing the task."""
         config = _make_config(tmp_path)
         task = _make_task()
 
         with (
             patch("istota.executor.subprocess.Popen") as mock_popen,
-            patch("istota.executor.subprocess.run") as mock_run,
+            # Patched, but no longer inspected: this stops the bwrap capability
+            # probe on the prompt path from really shelling out. See the note
+            # on the assertions below.
+            patch("istota.executor.subprocess.run"),
             patch("istota.executor.select_relevant_context", return_value=[]),
             patch("istota.executor.read_user_memory_v2", return_value=None),
             patch("istota.executor.ensure_user_directories_v2"),
@@ -1387,8 +1488,39 @@ class TestDryRun:
 
         assert success is True
         assert "[DRY RUN]" in result
+
+        # The model is never spawned: Popen is the streaming path, and the
+        # simple path's `subprocess.run` is checked below.
         mock_popen.assert_not_called()
-        mock_run.assert_not_called()
+
+        # And the return happens *before* the execution site sets up for a run.
+        # The prompt file is written on the first statement after the dry-run
+        # return, so its absence pins that return rather than merely observing
+        # that nothing ran.
+        user_temp = get_user_temp_dir(config, task.user_id)
+        # `get_user_temp_dir` only joins paths; the directory exists because
+        # `execute_task` mkdirs it well above the dry-run return. Asserted
+        # rather than assumed, because `Path.glob` on a missing directory
+        # yields nothing and raises nothing — so if that mkdir ever moves below
+        # the return (an obvious optimization: a dry run needs no temp dir),
+        # the check below would pass forever while testing nothing.
+        assert user_temp.is_dir()
+        assert not list(user_temp.glob("task_*_prompt.txt"))
+
+        # `mock_run.assert_not_called()` used to stand here, and could only
+        # ever hold on darwin (ISSUE-308). `build_prompt` consults the bwrap
+        # capability probe to decide how the prompt states the database
+        # boundary, and a dry run returns that prompt — so the probe is on this
+        # path by design. It short-circuits on `sys.platform` on darwin and
+        # shells out on Linux, which made the assertion a claim about the test
+        # host rather than about dry runs.
+        #
+        # Nothing replaces it in kind, deliberately. Filtering the probe out of
+        # `mock_run.call_args_list` would be guesswork — a sandboxed execution
+        # is also spawned through `bwrap`, so argv alone does not separate the
+        # two. The prompt-file check above is strictly stronger anyway: it pins
+        # a return that happens upstream of *both* execution paths, so nothing
+        # can have run by either one.
 
 
 def _apply_executor_patches(stack, extra_returns=None):

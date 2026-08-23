@@ -146,6 +146,56 @@ export interface AdminStatsUsage {
   error?: string;
 }
 
+/** One rate-limit window of the Claude Code plan, as the endpoint reports it. */
+export interface AdminSubscriptionWindow {
+  /** Stable id — `session`, `weekly_all`, `weekly_scoped:fable`. */
+  key: string;
+  label: string;
+  /** 0–100, clamped server-side. */
+  percent: number;
+  resets_at: string | null;
+  /** Floored at 0; null when the window has no scheduled reset. */
+  resets_in_seconds: number | null;
+  /** The server's own severity scale. Carried, never acted on — see the card. */
+  severity: string;
+  is_active: boolean | null;
+}
+
+/** Pay-as-you-go credits beyond the plan, in minor units with a currency. */
+export interface AdminSubscriptionSpend {
+  enabled: boolean;
+  used_minor: number;
+  limit_minor: number;
+  currency: string;
+  /** Minor units per major = 10 ** exponent. Never assume 2. */
+  exponent: number;
+  percent: number;
+}
+
+/**
+ * Plan utilization for the Claude Code subscription.
+ *
+ * `available: false` always carries an `error`, so the card says why instead of
+ * vanishing. Every field is optional because the whole section degrades to
+ * `{error}` when it fails — the same best-effort shape `usage` has.
+ */
+export interface AdminSubscription {
+  available?: boolean;
+  windows?: AdminSubscriptionWindow[];
+  /** Null when the payload carried no credit block at all. */
+  spend?: AdminSubscriptionSpend | null;
+  fetched_at?: string | null;
+  /** Real numbers from an earlier fetch, plus the failure that made them old. */
+  stale?: boolean;
+  /** The resolver's branch name (`env` / `file` / `keychain`), never a token. */
+  token_source?: string;
+  /** The operator's own thresholds. The card tints by these and never by a
+   *  literal of its own, or a configured threshold is silently ignored. */
+  warn_percent?: number;
+  high_percent?: number;
+  error?: string;
+}
+
 export interface AdminStatsJob {
   id: number;
   user_id: string;
@@ -177,6 +227,9 @@ export interface AdminStats {
   };
   modules: Record<string, Record<string, unknown>>;
   usage: AdminStatsUsage;
+  /** Absent unless there is a card to draw: Claude Code is the brain or the
+   *  fallback, and the endpoint returned windows. See `_admin_subscription_section`. */
+  subscription?: AdminSubscription;
   tasks: {
     total: number;
     last_24h: number;
@@ -2673,26 +2726,6 @@ export function getTaskEvents(taskId: number, sinceSeq = 0): Promise<{ events: T
   return apiFetch<{ events: TaskEventDTO[] }>(`/chat/tasks/${taskId}/events?since_seq=${sinceSeq}`);
 }
 
-/** A question the bot has asked and the user has not answered yet.
- *
- * Deliberately carries no message body: for a gated inbound email the body is
- * the untrusted content the gate is holding back, so the card is built from the
- * bot-composed prompt plus the sender / subject / routing method. Every field
- * here may be attacker-supplied text — render it, never inject it as markup. */
-export interface PendingConfirmation {
-  task_id: number;
-  source_type: string;
-  created_at: string | null;
-  prompt: string;
-  summary: string;
-  room_token: string | null;
-  email: { sender: string; subject: string | null; routing_method: string | null } | null;
-}
-
-export function listPendingConfirmations(): Promise<{ confirmations: PendingConfirmation[] }> {
-  return apiFetch<{ confirmations: PendingConfirmation[] }>('/chat/confirmations');
-}
-
 /**
  * Outbound mail the approval gate is holding for the caller.
  *
@@ -3177,6 +3210,123 @@ export async function runSharedBlock(
 
 export async function getSharedBlockOptions(): Promise<{ options: SharedBlockOption[] }> {
   return apiFetch('/briefings/shared-block-options');
+}
+
+// --- the notification inbox ------------------------------------------------
+
+/** One button on a notification.
+ *
+ * `endpoint` is an existing producer API path (`/chat/tasks/12/confirm`),
+ * apiFetch-relative — the same form every other call in this file takes. There
+ * is deliberately no generic dispatcher endpoint on the server: those handlers
+ * already own their authorization, and a dispatcher would be a second gate with
+ * less context. `href` is an in-app route, relative to `base`. */
+export interface NotificationAction {
+  id: string;
+  label: string;
+  kind: 'primary' | 'default' | 'danger';
+  method: 'POST' | 'LINK';
+  endpoint: string | null;
+  href: string | null;
+}
+
+/** A stored notification as the panel renders it.
+ *
+ * Every text field here is either bot-composed or lifted off a stranger's mail —
+ * a gated email's sender and subject reach `title` and `body`. Render them as
+ * text nodes; none of the five components touching this type uses `{@html}`. */
+export interface ResolvedNotification {
+  id: number;
+  source: string;
+  severity: 'info' | 'success' | 'warning' | 'danger';
+  actionable: boolean;
+  title: string;
+  body: string;
+  link: string | null;
+  occurrences: number;
+  created_at: string;
+  updated_at: string;
+  seen_at: string | null;
+  object_type: string | null;
+  object_id: string | null;
+  actions: NotificationAction[];
+  status_note: string | null;
+}
+
+export interface NotificationCounts {
+  open: number;
+  actionable: number;
+}
+
+export interface NotificationListing {
+  notifications: ResolvedNotification[];
+  /** The post-sweep count of the whole open set, not of the returned page.
+   *  Both tab labels are derived from this and the rows, so a label can never
+   *  claim more than the list below it shows. */
+  total_open: number;
+}
+
+/** The id and the version the client actually rendered.
+ *
+ * The pair is the whole point: the server resolves a fire-and-forget row only
+ * where the stored `updated_at` still matches, so an occurrence raised between
+ * the fetch and this call is not closed by a user who never saw it. */
+export interface NotificationSeen {
+  id: number;
+  updated_at: string;
+}
+
+/** Mirrors `notification_sources.SAFE_PATH_RE` on the server.
+ *
+ * The server validates every URL it emits, at runtime, on every view. This is
+ * the second copy rather than a substitute for it: the *browser* is what
+ * performs the fetch, with the session cookie attached, off a path the server
+ * chose — so the side taking the risk checks it too. Anchored the same way, and
+ * deliberately without the `m` flag: `$` would otherwise admit a trailing
+ * newline, and a control character reaching a fetch target is what an allowlist
+ * is for. */
+const SAFE_ACTION_PATH = /^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/;
+
+/** A type predicate, so a caller that checks a nullable `href` also narrows it —
+ *  otherwise every call site needs a second truthiness test the compiler can see,
+ *  and the two can disagree about which one is the guard. */
+export function isSafeActionPath(path: string | null | undefined): path is string {
+  return typeof path === 'string' && SAFE_ACTION_PATH.test(path);
+}
+
+export function getNotificationCounts(): Promise<NotificationCounts> {
+  return apiFetch<NotificationCounts>('/notifications/count');
+}
+
+export function listNotifications(
+  filter: 'all' | 'action' = 'all',
+  limit = 50,
+): Promise<NotificationListing> {
+  return apiFetch<NotificationListing>(`/notifications?filter=${filter}&limit=${limit}`);
+}
+
+export function dismissNotification(id: number): Promise<{ status: string }> {
+  return apiFetch(`/notifications/${id}/dismiss`, { method: 'POST' });
+}
+
+export function markNotificationsSeen(seen: NotificationSeen[]): Promise<{ status: string }> {
+  return apiFetch('/notifications/seen', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seen }),
+  });
+}
+
+/** POST the path a resolver named for this action.
+ *
+ * Refuses anything the allowlist does not accept rather than fetching it. The
+ * path is server-supplied and built by interpolating an `object_id` that is
+ * opaque `TEXT` on the row, so `1/../../admin/x` is the shape being refused. */
+export async function runNotificationAction(endpoint: string): Promise<unknown> {
+  if (!isSafeActionPath(endpoint)) {
+    throw new Error(`refusing an unsafe notification action path: ${endpoint}`);
+  }
+  return apiFetch(endpoint, { method: 'POST' });
 }
 
 export { AuthError };

@@ -169,6 +169,89 @@ interface MockChatTask {
 function mockWorkspacePath(stored: string): string | null {
   return stored.startsWith('inbox/') ? `/Users/carol/${stored}` : null;
 }
+const mockNotifications = [
+  {
+    id: 91,
+    source: 'confirmation',
+    severity: 'warning' as const,
+    actionable: true,
+    title: 'email from scheduling@partner.example — Availability next week',
+    body: 'An unknown sender emailed you. Nothing has been run, and the message body is not shown until you confirm.',
+    link: null,
+    occurrences: 1,
+    created_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+    updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+    seen_at: null,
+    object_type: 'task',
+    object_id: '40122',
+    actions: [
+      {
+        id: 'confirm',
+        label: 'Confirm',
+        kind: 'primary' as const,
+        method: 'POST' as const,
+        endpoint: '/chat/tasks/40122/confirm',
+        href: null,
+      },
+      {
+        id: 'discard',
+        label: 'Discard',
+        kind: 'danger' as const,
+        method: 'POST' as const,
+        endpoint: '/chat/tasks/40122/cancel',
+        href: null,
+      },
+    ],
+    status_note: null,
+    dismissed: false,
+  },
+  {
+    id: 92,
+    source: 'cron_job',
+    severity: 'danger' as const,
+    actionable: true,
+    title: 'Scheduled job "morning-briefing" was switched off',
+    body: 'It failed five times running. The last error was: connection refused.',
+    link: null,
+    occurrences: 4,
+    created_at: new Date(Date.now() - 4 * 24 * 3600_000).toISOString(),
+    updated_at: new Date(Date.now() - 40 * 60_000).toISOString(),
+    seen_at: null,
+    object_type: 'scheduled_job',
+    object_id: 'morning-briefing',
+    actions: [
+      {
+        id: 'enable',
+        label: 'Re-enable',
+        kind: 'primary' as const,
+        method: 'POST' as const,
+        endpoint: '/chat/cron/morning-briefing/enable',
+        href: null,
+      },
+    ],
+    status_note: null,
+    dismissed: false,
+  },
+  {
+    id: 93,
+    source: 'task_alert',
+    severity: 'info' as const,
+    actionable: false,
+    title: 'Your emailed request could not be answered',
+    body: 'The task timed out before it finished. Nothing was sent.',
+    link: null,
+    occurrences: 1,
+    created_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    updated_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    seen_at: null,
+    object_type: null,
+    object_id: null,
+    actions: [],
+    status_note: 'Nothing to do — this is a record of something that already happened.',
+    dismissed: false,
+  },
+];
+
 const mockChatRooms: MockChatRoom[] = [
   {
     id: 1,
@@ -882,6 +965,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         { name: 'stop', help: 'Cancel your currently running task' },
         { name: 'trust', help: 'Trust an email sender: `!trust sender@example.com`' },
         { name: 'untrust', help: 'Remove a trusted email sender: `!untrust sender@example.com`' },
+        { name: 'usage', help: 'Show token usage, and plan limits on a subscription' },
       ],
       model_aliases: [
         { alias: 'fast', target: 'claude-haiku-4-5', effort: null },
@@ -891,29 +975,6 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         { alias: 'opus-high', target: 'claude-opus-4-8', effort: 'high' },
         { alias: 'sonnet', target: 'claude-sonnet-4-6', effort: null },
         { alias: 'haiku', target: 'claude-haiku-4-5', effort: null },
-      ],
-    };
-  }
-
-  if (path === '/istota/api/chat/confirmations') {
-    // One held email, so the banner is visible in the mock backend. It belongs
-    // to no room on purpose — that is the case the banner exists for.
-    return {
-      confirmations: [
-        {
-          task_id: 40122,
-          source_type: 'email',
-          created_at: new Date(Date.now() - 6 * 60_000).toISOString(),
-          prompt:
-            'Email from unknown sender scheduling@partner.example\nSubject: Availability next week',
-          summary: 'email from scheduling@partner.example — Availability next week',
-          room_token: null,
-          email: {
-            sender: 'scheduling@partner.example',
-            subject: 'Availability next week',
-            routing_method: 'plus_address',
-          },
-        },
       ],
     };
   }
@@ -1553,6 +1614,65 @@ const mockAdminStats = {
     // task-origin rows that recorded no context size.
     unmeasured_tasks_24h: 3,
     context_unmeasured_rows_30d: 1150,
+  },
+  // Claude Code plan utilization. Three windows spanning the three tints the
+  // card can draw against the warn/high pair below it — green, amber, red — so
+  // `VITE_MOCK_API=1 npm run dev` exercises all of them at once rather than
+  // whichever one the day's real reading happens to fall in. `spend.enabled` is
+  // true for the same reason: the extra-usage line is otherwise unreachable in
+  // dev, and the capture it is modelled on has it off. The card's other three
+  // states are reachable through `VITE_MOCK_SUBSCRIPTION` — see
+  // `mockSubscriptionState` below.
+  subscription: {
+    available: true,
+    windows: [
+      {
+        key: 'session',
+        label: '5-hour',
+        percent: 40,
+        resets_at: new Date(Date.now() + 3847_000).toISOString(),
+        resets_in_seconds: 3847,
+        severity: 'normal',
+        is_active: true,
+      },
+      {
+        key: 'weekly_all',
+        label: 'Weekly (all models)',
+        percent: 86.4,
+        resets_at: new Date(Date.now() + 6 * 86400_000).toISOString(),
+        resets_in_seconds: 6 * 86400,
+        severity: 'normal',
+        is_active: false,
+      },
+      {
+        key: 'weekly_scoped:fable',
+        label: 'Weekly (Fable)',
+        percent: 97,
+        // A live window with no scheduled reset — the sub-line says so rather
+        // than rendering an empty second row.
+        resets_at: null,
+        resets_in_seconds: null,
+        severity: 'normal',
+        is_active: false,
+      },
+    ],
+    spend: {
+      enabled: true,
+      used_minor: 465,
+      limit_minor: 2000,
+      currency: 'USD',
+      exponent: 2,
+      percent: 23.25,
+    },
+    fetched_at: new Date(Date.now() - 40_000).toISOString(),
+    stale: false,
+    token_source: 'env',
+    // The operator's own thresholds, which the card tints by. Left at the
+    // shipping defaults here; changing them in the TOML must change the colours
+    // without a frontend edit, which is why they are on the wire at all.
+    warn_percent: 80,
+    high_percent: 95,
+    error: '',
   },
   scheduler: {
     jobs_total: 5,
@@ -2794,11 +2914,94 @@ function mockAdminConfig() {
   };
 }
 
+/**
+ * The subscription section, in whichever of its four states was asked for.
+ *
+ * `VITE_MOCK_SUBSCRIPTION=unavailable | stale | nospend`, defaulting to the
+ * populated reading above. The card has four states and a working deployment
+ * produces three of them rarely and on nobody's schedule, so without a switch
+ * the only way to look at them is to edit this file — which is exactly the
+ * check nobody performs. The component test asserts all four; this is for
+ * looking at them.
+ */
+function mockSubscriptionState() {
+  const base = mockAdminStats.subscription;
+  switch (process.env.VITE_MOCK_SUBSCRIPTION) {
+    case 'unavailable':
+      return {
+        ...base,
+        available: false,
+        windows: [],
+        spend: null,
+        fetched_at: null,
+        token_source: '',
+        error: 'no Claude Code OAuth credential found',
+      };
+    case 'stale':
+      // Real numbers from an earlier fetch, plus the failure that made them old.
+      return {
+        ...base,
+        stale: true,
+        fetched_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+        error: 'HTTP 503 from the usage endpoint',
+      };
+    case 'nospend':
+      return { ...base, spend: { ...base.spend, enabled: false } };
+    default:
+      return base;
+  }
+}
+
+// The inbox behind the bell. Three rows, chosen to cover what the panel has to
+// render differently: an actionable object-backed item belonging to no room
+// (the case the old confirmations banner existed for), a repeat carrying an
+// occurrence count, and a non-actionable fire-and-forget alert that carries a
+// `status_note` instead of actions.
+const notificationsHandler: MockHandler = ({ url, method, body }) => {
+  if (!url.startsWith('/istota/api/notifications')) return undefined;
+  const path = url.split('?')[0];
+  const open = () => mockNotifications.filter((n) => !n.dismissed);
+
+  if (path === '/istota/api/notifications/count') {
+    return { open: open().length, actionable: open().filter((n) => n.actionable).length };
+  }
+  if (path === '/istota/api/notifications' && method === 'GET') {
+    const filter = new URLSearchParams(url.split('?')[1] ?? '').get('filter') ?? 'all';
+    const rows = filter === 'action' ? open().filter((n) => n.actionable) : open();
+    return {
+      notifications: rows.map(({ dismissed: _dismissed, ...n }) => n),
+      total_open: open().length,
+    };
+  }
+  if (path.endsWith('/dismiss') && method === 'POST') {
+    const row = mockNotifications.find((n) => n.id === Number(path.split('/').at(-2)));
+    if (!row) return undefined;
+    row.dismissed = true;
+    return { ok: true };
+  }
+  if (path === '/istota/api/notifications/seen' && method === 'POST') {
+    // Only `task_alert` auto-resolves on seen, and only when the client's
+    // `updated_at` still matches -- the same version check the store makes.
+    for (const seen of body?.seen ?? []) {
+      const row = mockNotifications.find((n) => n.id === seen.id);
+      if (row && row.source === 'task_alert' && row.updated_at === seen.updated_at) {
+        row.dismissed = true;
+      }
+    }
+    return { ok: true };
+  }
+  return undefined;
+};
+
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   chatHandler,
+  notificationsHandler,
 
-  ({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
+  ({ url }) =>
+    url === '/istota/api/admin/stats'
+      ? { ...mockAdminStats, subscription: mockSubscriptionState() }
+      : undefined,
 
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),

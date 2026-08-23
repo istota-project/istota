@@ -808,6 +808,18 @@ istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 istota_browser_enabled: false
 istota_browser_api_port: 9223
 istota_browser_vnc_port: 6080
+# Which host address the noVNC console is published on. noVNC serves an
+# *interactive* view of the browser holding your logged-in profile, so this
+# used to be `0.0.0.0` in the compose template while the API port beside it was
+# correctly on loopback (ISSUE-297). Loopback by default; set it to a VPN or
+# management address to reach the console for troubleshooting, which is what
+# istota_browser_vnc_external_url below assumes you have done. Anything other
+# than a loopback address requires istota_browser_vnc_password to be set — the
+# role refuses to deploy an unauthenticated console on a reachable address.
+istota_browser_vnc_bind_address: "127.0.0.1"
+# Deliberately empty rather than generated: a generated password is one you
+# cannot log in with, and generating on upgrade would change the meaning of an
+# existing empty setting. Required only when the bind address is not loopback.
 istota_browser_vnc_password: ""
 istota_browser_vnc_external_url: ""  # e.g. https://vnc.example.com:6080
 istota_browser_max_sessions: 3
@@ -847,16 +859,40 @@ istota_devbox_pids_limit: 512
 istota_devbox_workspace_tmpfs_size: "1g"
 istota_devbox_network_name: "{{ istota_namespace }}-devbox-net"
 istota_devbox_network_subnet: "172.30.0.0/24"
-# Cloud metadata endpoint blocked by default — link-local + DigitalOcean/GCP/
-# AWS/Azure all rendezvous at 169.254.169.254.
+# Metadata and link-local blocking. Covers the whole 169.254.0.0/16, not just
+# 169.254.169.254: AWS also serves instance DNS at .169.253, ECS task
+# credentials — which hand out role credentials — at .170.2, and NTP at
+# .169.123. Also covers Azure's 168.63.129.16, which is neither link-local nor
+# private and so is matched by nothing else here.
 istota_devbox_block_metadata: true
-# RFC1918 blocking: drops outbound traffic from the devbox network targeting
-# private ranges so a compromised devbox can't pivot to the host's LAN.
+# Private-range blocking: drops outbound traffic from the devbox network
+# targeting 10/8, 172.16/12, 192.168/16 and 100.64/10, so a compromised devbox
+# can't pivot to the host's LAN. The last of those is RFC 6598 carrier-grade
+# NAT rather than RFC 1918 — it is the range Tailscale hands out, and it is
+# gated by this flag despite the flag's name. If your devbox loses reach to a
+# tailnet service, this is why.
 # Disable when you want the devbox to reach a colocated service intentionally.
 istota_devbox_block_rfc1918: true
 # Users whose containers should be created. Each entry is a user_id; the
 # container is named "{{ istota_devbox_container_prefix }}{{ user_id }}".
 istota_devbox_users: []
+
+# Force a devbox image rebuild and container recreate on the next run, even
+# when nothing Ansible tracks has changed. Two things normally trigger that on
+# their own: the compose template changing, and the content hash over
+# docker/devbox (Dockerfile, lib/, scripts/, etc/) moving. This is for the case
+# neither can see — a container someone modified by hand, a half-built image, a
+# build that failed after the marker was already written. Meant as a
+# command-line override (`-e istota_devbox_force_recreate=true`) rather than
+# something to set in inventory, where it would recreate every container on
+# every run and interrupt whatever work is in the box at the time.
+#
+# It fires the ordinary restart handler, so the build still uses Docker's layer
+# cache. That covers every file the image copies in, and does not cover the base
+# image or anything an apt-get in a RUN layer installed — for those, build once
+# by hand with `docker compose -f docker-compose.devbox.yml build --pull
+# --no-cache` and let this flag do the recreate.
+istota_devbox_force_recreate: false
 
 # Devbox credential proxy. One systemd unit per devbox user listens on a per-user
 # Unix socket, bind-mounted into the container at /run/istota-cred. It answers two
@@ -1226,9 +1262,28 @@ istota_security_skill_proxy_timeout: 300          # timeout for proxied skill co
 # framework DB and every user's module DB to every task. Keep entries narrow;
 # the DB directories are masked after this list either way.
 istota_security_sandbox_ro_paths: []
+# Root of a disk-backed directory for the package managers' caches (uv, npm,
+# and anything else honouring XDG_CACHE_HOME). Each user gets {root}/{user_id},
+# bound RW into their sandbox. Empty leaves the caches on bubblewrap's own root
+# tmpfs, which is RAM the host cannot attribute and which is discarded at task
+# exit, so every task re-downloads.
+#
+# Put it under istota_developer_repos_dir when that is set: uv hardlinks out of
+# its cache and link(2) returns EXDEV across a mount boundary, so a cache on
+# any other mount makes every worktree pay for a full copy. Do not point it AT
+# repos_dir, at the temp dir, or at ~/.cache — a bind above an existing mount
+# covers it, and the daemon refuses those values rather than doing so.
+istota_security_sandbox_cache_dir: ""
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
-istota_security_network_extra_hosts: []            # operator-specific additions
+# Operator-specific additions to the CONNECT allowlist, as "host:port" strings.
+# The public npm and crates.io registries are already added for a task holding
+# the developer skill, so an install inside a worktree needs nothing here; this
+# is for a private registry, a company mirror, or an ecosystem that is not npm,
+# PyPI or cargo. It applies to *every* task rather than only developer ones —
+# there is no per-skill operator list. Matching is exact with no wildcards, so
+# a missing entry fails at the boundary and reads as a broken install.
+istota_security_network_extra_hosts: []
 # When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
 # and omitted from config.toml (config.py reads them from env vars)
 istota_use_environment_file: true

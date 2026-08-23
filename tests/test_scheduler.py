@@ -3956,6 +3956,10 @@ class TestExecuteCommandTask:
         assert str(config.config_path) in result
 
     def test_config_path_absent_when_unset(self, db_path, tmp_path):
+        # Same reading as the CalDAV pair above: the assertion is about what
+        # the scheduler adds. An ambient ISTOTA_CONFIG_PATH would reach the
+        # child through `build_stripped_env`, which is why this failed on the
+        # deployment host until conftest started scrubbing it (ISSUE-301).
         config = self._make_config(db_path, tmp_path)
         # config.config_path defaults to None
         task = self._make_task(command="echo path=[$ISTOTA_CONFIG_PATH]")
@@ -4159,7 +4163,17 @@ class TestExecuteCommandTask:
     def test_caldav_env_omitted_when_no_calendars_discovered(self, db_path, tmp_path):
         """Gap 3 regression: ``gate_has_discovered_calendars`` on the
         calendar manifest must drop CALDAV_* when the user owns no
-        calendars. NC_* is ungated and remains."""
+        calendars. NC_* is ungated and remains.
+
+        What this proves is what the scheduler *adds*, which is narrower than
+        "the child cannot see a CALDAV_URL" (ISSUE-301). ``_execute_command_task``
+        starts from ``build_stripped_env()``, i.e. the daemon's own environment
+        minus the credential-shaped names, so a daemon host that exports
+        ``CALDAV_URL`` hands it to the child by inheritance and the gate drops
+        nothing. ``CALDAV_PASSWORD`` is the one that matters and is stripped by
+        pattern either way. The suite reads the gate rather than the
+        inheritance only because ``conftest.py`` now scrubs the ambient value;
+        before that this test failed on any host with a real config."""
         config = Config(
             db_path=db_path,
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
@@ -4656,11 +4670,12 @@ class TestGarminSyncInProcess:
         task = self._task(["garmin-sync", "--days-back", "3"])
         captured = {}
 
-        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz, config=None):
             captured["ctx_user_id"] = ctx.user_id
             captured["framework_db_path"] = framework_db_path
             captured["days_back"] = days_back
             captured["user_tz"] = user_tz
+            captured["config"] = config
             return self._fake_sync_result()
 
         fake_ctx = MagicMock(user_id="alice")
@@ -4679,6 +4694,8 @@ class TestGarminSyncInProcess:
         assert captured["framework_db_path"] == Path(db_path)
         assert captured["days_back"] == 3
         assert captured["user_tz"] == "Pacific/Auckland"
+        # Daemon-side, so an auth failure can raise the reconnect notification.
+        assert captured["config"] is config
         payload = json.loads(result)
         assert payload["status"] == "ok"
         assert payload["inserted"] == 3
@@ -4688,7 +4705,7 @@ class TestGarminSyncInProcess:
         task = self._task(["garmin-sync"])
         captured = {}
 
-        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz, config=None):
             captured["days_back"] = days_back
             return self._fake_sync_result()
 
@@ -5937,7 +5954,14 @@ class TestDeferredOperations:
             assert db.find_sent_email_by_message_id(conn, "<m2@x.com>") is not None
 
     def test_process_deferred_user_alerts_posts_to_alerts_channel(self, db_path, tmp_path):
-        """Alert JSON should post each alert to the user's alerts channel."""
+        """Alert JSON posts to the user's alerts channel, one push per alert type.
+
+        Both entries here are the default `security` type, so they collapse onto
+        one notification — the array is model-authored with no bound on its
+        length, and one push per entry is how a single task turns into a flood.
+        Both messages still reach the user; they are in the one body.
+        `tests/test_notification_task_alerts.py` covers the collapse in full.
+        """
         from istota.scheduler import _process_deferred_user_alerts
         config = self._make_config(db_path, tmp_path)
         config.users["alice"] = UserConfig(alerts_channel="alerts-room")
@@ -5959,13 +5983,14 @@ class TestDeferredOperations:
             count = _process_deferred_user_alerts(config, task, user_temp)
 
         assert count == 2
-        assert mock_notify.call_count == 2
+        assert mock_notify.call_count == 1
         # Routed by purpose="alert" — resolve_destinations maps it to the
         # user's alerts channel (legacy alerts_channel field).
         call_args = mock_notify.call_args_list[0]
         assert call_args[0][0] is config
         assert call_args[0][1] == "alice"
         assert "attacker@evil.com" in call_args[0][2]
+        assert "prompt injection" in call_args[0][2]
         assert call_args[1]["purpose"] == "alert"
 
         # File should be cleaned up

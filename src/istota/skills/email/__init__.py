@@ -2225,6 +2225,7 @@ def _outbound_gate(
     settled.
     """
     from ... import db, outbound_drafts as drafts
+    from ...notification_resolvers import outbound_draft as draft_source
     from ...outbound_policy import effective_policy, recipients_require_hold
 
     user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
@@ -2292,6 +2293,25 @@ def _outbound_gate(
                 attachments=paths,
                 origin_target=origin_target,
                 hold_reason=reason,
+            )
+            # Written and **not** delivered. This runs in the skill proxy's
+            # short-lived child process, and `deliver_pending` fans out through
+            # Talk and ntfy — network I/O in a subprocess whose whole job is to
+            # answer one CLI verb. The user learns about the draft from the
+            # bell; the model learns about it from this function's own return
+            # value, which is the surface that matters in-turn.
+            #
+            # On the caller's connection, inside the transaction `hold` just
+            # wrote in: a second connection here would wait out the full 30s
+            # busy timeout on that write lock.
+            draft_source.write(
+                conn, user_id, draft_id=draft_id,
+                title=draft_source.title_for(to[0] if to else ""),
+                body=draft_source.delivery_body_for(
+                    subject, draft_id,
+                    draft_source.visible_recipients(to, cc, bcc),
+                ),
+                room_token=room_token,
             )
     except _GateRefusal as e:
         return _gate_error(str(e)), []

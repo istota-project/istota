@@ -322,8 +322,9 @@
     gap: var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    /* The same left-border cue `PendingConfirmations` uses for "this is waiting
-       on you", so the two read as one class of thing across the surface. */
+    /* The left-border cue for "this is waiting on you", shared with the
+       confirmation strip this surface used to carry above the transcript and
+       now with the notification panel's warning rows. */
     border-left: 3px solid var(--status-warn-fg);
     border-radius: var(--radius-card);
     /* Uniform, and the same figure `.external` and `.cmd-output` use in
@@ -333,11 +334,13 @@
     /* No `max-width` here, deliberately. The `--chat-body-max` cap belongs to
        the turn placement, where the card is one block in a message's content
        column and has to match the body above it — so it is written there
-       (`Message.svelte`), beside the spacing rule that is scoped to that slot
-       for the same reason. Carried here it also applied in the banner, which is
-       pane chrome sitting beside `PendingConfirmations`: the draft stopped
-       134px short of the confirmation card directly above it, at the one width
-       the two most obviously want to agree on. */
+       (`Message.svelte`), beside the spacing rule scoped to that slot for the
+       same reason. Carried here it also applied in `banner` placement, which is
+       pane chrome spanning its container: in the chat pane's own strip the
+       draft stopped 134px short of the confirmation card directly above it, at
+       the one width the two most obviously wanted to agree on. That strip is
+       gone, but the reasoning is what decides where the rule lives, and the
+       placement it applied to is still a prop this component takes. */
   }
   /* A stuck or unreadable row is a fault to look into rather than a decision to
      take, and the colour is the only thing saying so before the text is read. */

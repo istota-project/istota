@@ -179,6 +179,50 @@ class TestTheTestOnlyDependenciesAreDeclared:
         )
 
 
+class TestRuffIsInstalledByTheDocumentedSetup:
+    """ISSUE-301: `AGENTS.md` mandates a linter the setup command did not install.
+
+    `ruff check --output-format concise src tests testbed` is the Python half of
+    the documented verification, and `ruff` was in neither the `test` extra, the
+    `dev` group nor the venv — `uvx` is not installed either, so on a fresh
+    clone the step simply could not be run. The one place it existed was
+    `docker/test/Dockerfile`, as a `uv tool install` in the Linux runner image,
+    which is the one environment a developer is least likely to be sitting in.
+
+    It goes in the `dev` group and not in an extra for the same reason `jinja2`
+    and `psutil` do: an extra is a shipping artifact, and nothing that installs
+    istota to run it wants a linter. `uv sync` installs the default groups, so
+    the `uv sync --extra test` in `scripts/setup.sh` now gets it with no new
+    flag.
+    """
+
+    def test_ruff_is_in_the_dev_group(self):
+        assert "ruff" in _requirement_names(_dev_group())
+
+    def test_it_is_pinned_exactly(self):
+        # The rule set in [tool.ruff.lint] is ruff's defaults for E4/E7/E9/F,
+        # and a new release can add a rule to any of them. Unpinned, that
+        # arrives as "the tree is suddenly dirty" on whoever syncs next.
+        requirement = next(r for r in _dev_group() if r.startswith("ruff"))
+        assert re.fullmatch(r"ruff==\d+\.\d+\.\d+", requirement), requirement
+
+    def test_the_runner_image_pins_the_same_version(self):
+        # Two installs of ruff in the Linux runner: the dev group's, and the
+        # `uv tool install` that predates it and still owns the image's PATH.
+        # Same version or the lint gate answers differently depending on which
+        # one a shell resolves.
+        body = (REPO_ROOT / "docker" / "test" / "Dockerfile").read_text()
+        match = re.search(r"uv tool install (ruff==[\d.]+)", body)
+        assert match, "docker/test/Dockerfile no longer installs ruff as a tool"
+        assert match.group(1) in _dev_group()
+
+    def test_the_verification_docs_still_name_it(self):
+        # The other half of the two-way check the file's other pairs make: a
+        # dependency nothing asks for should come back out.
+        agents = (REPO_ROOT / "AGENTS.md").read_text()
+        assert "ruff check" in agents
+
+
 class TestTheTestExtraIsAllMinusTheHeavyOnes:
     """`test` is a hand-written copy of `all`, so it drifts.
 

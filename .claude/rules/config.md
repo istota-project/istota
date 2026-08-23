@@ -217,6 +217,7 @@ sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
 skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths: list[str] = []     # extra RO binds; keep narrow
+sandbox_cache_dir: str = ""          # disk-backed RW cache dir; empty = today's behaviour
 network: NetworkConfig = NetworkConfig()
 ```
 `skill_proxy_enabled` is **required wherever `sandbox_enabled` is true**: the DB
@@ -239,6 +240,55 @@ such an install exited "System prompt file not found". `build_bwrap_cmd` now
 binds that single file itself (`custom_system_prompt_path`), so no operator
 needs an entry here for it — and `config.toml`, its neighbour, still isn't in
 the sandbox.
+
+`sandbox_cache_dir` names a disk-backed directory for the package managers' caches.
+Empty is the default and keeps the pre-ISSUE-305 behaviour, which is that `$HOME/.cache`
+exists inside the namespace only as a directory bwrap created on its own root tmpfs: a
+`uv sync` unpacks into RAM that `host_pressure.read_tmpfs_usage` cannot attribute — the
+mount is in the task's namespace and in no table the host reads, so it lands in
+`shmem_unaccounted` — and the whole cache is discarded at task exit.
+
+**It is a root, and each user gets `{root}/{user_id}`.** A single shared directory would
+be the first RW surface a non-admin task and an admin task hold in common, and it
+persists across tasks by construction; uv's unpacked-wheel cache is trusted on read and
+never re-verified against a hash, so a planted archive is executed by the next `uv sync`
+that hardlinks out of it. Per-user costs nothing the placement argument was about —
+hardlink sharing is between one user's worktrees, which stay inside one subdirectory.
+
+Put the root under `developer.repos_dir`. uv populates a venv by hardlinking out of its
+cache and `link(2)` returns EXDEV across a mount boundary even on one device, so a cache
+on any other mount makes every worktree pay for a full copy instead of sharing one byte
+set. For the same reason `resolve_sandbox_cache_dir` returns the path **as written**
+rather than resolved: `_bind` uses the string it is handed as the sandbox destination and
+the repos bind passes `repos_dir` unresolved, so resolving here would put a symlinked
+`repos_dir` and a cache under it at two names, hence two mounts, and hardlinking between
+them fails silently.
+
+`resolve_sandbox_cache_dir` (in `executor.py`) is the single predicate behind the bind,
+the environment and `native_fs_roots`, so they cannot disagree, and it **never raises** —
+both callers are on the task path, and for NativeBrain `build_bwrap_cmd` runs per Bash
+call. Every rejection falls open to today's behaviour: a path that is relative, not an
+existing writable directory, under a database directory, or **at or above anything the
+sandbox already mounts**. That last one is the rejection that matters. bwrap applies argv
+in order and the cache bind is emitted late, so a destination above an earlier mount
+covers it: `= $HOME/.cache` overmounts the read-only huggingface bind, `= config.temp_dir`
+hands every user's workspace to every task and makes the `.developer` credential helpers
+writable again, `= $HOME/.local` gives the model write access to the `claude` binary, and
+`= developer.repos_dir` — one character off the documented shape — binds the repos RW for
+non-admins, past the admin gate the repos bind carries. `_sandbox_bind_targets` is that
+list; it is the same idea as `_mask_protected`, for the one other late mount operation.
+The database check is made here rather than left to `_validate_workspace_dir`, which skips
+a relative `db_path` (the shipped default) for a REPL-shaped reason the daemon does not
+have. Each distinct refusal warns once per process, not twice per task.
+
+The environment variables (`UV_CACHE_DIR`, `XDG_CACHE_HOME`, `npm_config_cache`, and
+`HF_HOME` pinned back to `~/.cache/huggingface` so moving XDG does not orphan the
+read-only model-cache bind) are set in `execute_task`, in the model-only block **after**
+`proxy_base_env` is snapshotted — deliberately not in `build_clean_env`. That function
+feeds the proxy's base env, which SkillProxy hands every host-side skill CLI: a process
+running unsandboxed as the daemon user has no business resolving a cache out of a
+directory the model can write, which is the same confused-deputy shape the
+`ISTOTA_PATH_PREPEND` handling guards against.
 
 `sandbox_admin_db_write` was **removed**: the framework DB is no longer bound
 into the sandbox for anyone, so there is no bind left to widen. A stale key
@@ -277,6 +327,7 @@ and recalled by relevance (`executor._recall_playbooks`). Off by default.
 kind: str = "claude_code"                       # "claude_code" | "native" | "tmux_claude"
 native: NativeBrainConfig                       # [brain.native] block (native harness)
 tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
+claude_code: ClaudeCodeBrainConfig              # [brain.claude_code] block (subscription usage poll)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
 fallback: str = ""                              # brain kind to fall back to when primary unavailable
 fallback_on_transient: bool = True              # also reroute a persistent transient_api_error (ISSUE-212)
@@ -299,12 +350,72 @@ dialog / error / usage-limit marker lists (`ready_markers`, `trust_markers`,
 `usage_limit_markers` — pane substrings → `stop_reason=usage_limit` → fallback,
 checked before `error_markers`). All defaulted to the prototype's hardcoded
 values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
-Selects which `Brain` implementation handles model invocation. `source_type_overrides`
+
+`BrainConfig` selects which `Brain` implementation handles model invocation. `source_type_overrides`
 maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
 (gradual rollout: cron/heartbeat on native, interactive on claude_code). The
 executor routes per task via `brain.resolve_brain_kind(task.source_type, config.brain)`;
 unknown target kinds are logged and ignored. See `.claude/rules/brain.md` for the
 protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
+
+`ClaudeCodeBrainConfig` (`[brain.claude_code]`) — today this block is the
+**subscription usage poll only**; the headless brain's model selection still
+comes from `[brain]` and `[models]`, and its subprocess behaviour is not
+configurable. It is read whatever `kind` is set to, because a `native` primary
+with a `claude_code` fallback (or a `source_type_overrides` entry) burns the
+same plan. Every field is defaulted, so an absent block is the shipping
+behaviour. Read by `istota.subscription_usage.get_snapshot`, which the doctor
+check `runtime.subscription_usage`, the `/admin` stats payload and `!usage` all
+share — one fetch per TTL for the whole deployment, from a disk cache at
+`{db_path.parent}/subscription_usage.json`. The credential is read, never
+written and never refreshed.
+- `subscription_usage: bool = True` — poll `GET https://api.anthropic.com/api/oauth/usage` for plan utilization at all. `false` = the doctor check `SKIP`s and the admin card renders `Plan limits unavailable: disabled by config` in place of its tiles. The card is *not* hidden, and that is deliberate rather than an oversight the spec's own wording invited: `available: false` always carries a reason, so an operator who expects the reading and does not get it learns why instead of watching a card vanish.
+- `subscription_usage_cache_ttl_seconds: int = 1800` — **two jobs, one number.** It is the freshness window for a successful reading (one deployment-wide fetch per window; the dashboard's 60s poll therefore costs nothing) and it is also the retry interval after a *failed* one. A failed reading is never cached as a reading, so without the second job nothing would bound the retry: with no prior success every caller would re-fetch, and an open dashboard on a rejected credential is roughly 1,440 live 403s a day against `api.anthropic.com`. So an operator raising this to slow the polling also lengthens how long a transient network blip is suppressed for — up to one TTL, exactly as long as a rejected credential would be. That is deliberate rather than an oversight: this is a diagnostic reading, not a control path, and a separate backoff knob was rejected as a sixth number in a block that already carries five. A success clears the timer immediately, so recovery is never delayed, and a stale-cache reading is still served during the backoff — an old real number outranks a fresh failure. Floored at 1 by the loader; a zero TTL would fetch on every dashboard poll.
+
+  The default is 30 minutes rather than the 5 it shipped with, because the endpoint rate-limits a deployment that polls it harder — and the shortest window it reports is five hours, so a faster poll buys no accuracy for the extra requests. A production host running the 5-minute default never obtained a single successful reading: it was answered with `HTTP 429` and a `Retry-After` of 2327 seconds, retried 7 times inside that window, and stayed limited. Which is the other half of the fix — a stated `Retry-After` now overrides this floor, so this number is the *minimum* backoff after a failure and no longer the whole of it. See `MAX_RETRY_AFTER_SECONDS` in `subscription_usage.py` for the ceiling on what a server can ask for.
+- `subscription_usage_timeout_seconds: float = 10.0` — matches `doctor.PROBE_TIMEOUT`. Floored at 1.
+- `subscription_usage_warn_percent: float = 80.0` / `subscription_usage_high_percent: float = 95.0` — our own thresholds, applied identically by doctor and the admin tile (the server's own `severity` is carried on the wire but does not drive either). Doctor WARNs and the tile turns amber at or above `warn`, red at or above `high`. **Never a `FAIL` at any utilization** — a busy plan is a fact about the plan, not a defect in the host, and a `FAIL` would exit `istota doctor` non-zero and alert every admin.
+- `subscription_usage_stale_after_seconds: int = 3600` — a stale-cache reading older than this WARNs rather than being reported as current.
+
+**Only a failure the endpoint produced is shared; "no credential here" is not.** The retry timer above is a file in the shared data dir, and a 403, a 500 or an unreachable host are facts about the deployment that every process reading that dir is entitled to reuse. A `None` from `resolve_token` is not: it reports the environment and home directory of *the calling process*. `istota-scheduler` and `istota-web` take `CLAUDE_CODE_OAUTH_TOKEN` from a systemd `EnvironmentFile`; an operator's `istota doctor` in a shell usually does not, and on macOS a background agent and a login session do not see the same keychain. Writing that answer into the shared file would have one read-only diagnostic run tell the dashboard for a full TTL that there is no credential while the daemon was happily using one. So the no-credential branch is rate-limited by a **process-local** record instead, keyed by data dir — which is also where its actual cost lives, the macOS `security` subprocess. A token added five minutes later is still picked up within one TTL by the process that could not find it, and instantly by any other.
+
+**A bad value in this block never stops the daemon.** `load_config` runs in the
+scheduler, the web app, the webhook receiver and every host-side skill CLI the
+proxy spawns per call, so a typo on a knob that only draws a dashboard tile must
+not stop any of them from starting. Unlike the `[brain.tmux]` / `[brain.native]`
+parses above it, this one does not hand a raw TOML value to `int()` / `float()`
+— `int(float("inf"))` raises `OverflowError`, `int(float("nan"))` raises
+`ValueError`, and TOML spells both. A non-number, a non-finite number or a bool
+in a numeric slot logs one WARNING and takes the dataclass default.
+`subscription_usage` is stricter still: it accepts a real boolean or a quoted
+one (`"false"`, `"no"`, `"off"`, `"0"`, case-insensitive) and warns on anything
+else, because `bool("false")` is `True` and this is the field that decides
+whether the deployment makes an unsolicited outbound request — "operator wrote
+false, poll stayed on" is the one failure it must not have.
+
+`_validate_claude_code_brain` (config load, beside `_validate_brain_fallback`)
+then corrects rather than refuses, one WARNING per correction: both percentages
+clamp to `[0, 100]`; `warn > high` after clamping is lowered to `high` (an
+inverted pair leaves no amber band and is more likely a typo than an intent);
+the TTL and the timeout floor at 1. A **non-finite** value takes the default
+instead of a bound — clamping a NaN percentage would land it at 0.0, i.e. amber
+at every utilization for ever on a check whose whole point is that it does not
+cry wolf, and an `inf` timeout is both an unbounded socket read and a value the
+admin config pane cannot serialize (starlette renders JSON with
+`allow_nan=False`, so one would 500 `GET /api/admin/config` instance-wide).
+`stale_after_seconds` is deliberately not floored — zero there coherently means
+"treat any stale reading as too old". No I/O: the poll is reached only from a
+diagnostic path, never from `load_config`.
+
+`subscription_usage.py` is a stdlib-only leaf and carries its own copy of the
+three defaults it reads, pinned against this dataclass by
+`tests/test_config_claude_code_brain.py::TestOneSourceOfTruthForTheDefaults`.
+Its `_positive` guard refuses the same values the loader does but substitutes
+the *default* where the loader *floors*: an operator asking for a small TTL gets
+1, while a value that reached the dataclass past the loader has no intent worth
+preserving. `deploy/ansible/files/validate_config.py` allowlists `claude_code`
+under `[brain]`; the role's template renders no block (every field is
+defaulted), but an unlisted sub-table would fail the play.
 
 `NativeBrainConfig` (`[brain.native]`) — model-agnosticism knobs (see `.claude/rules/brain.md` "NativeBrain"):
 - `model_overrides: dict = {}` (`[brain.native.model_overrides."<model-id>"]`) — per-model partial `ModelInfo` (any of `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, prices). Applied globally at config load via `llm.catalog.set_model_overrides`, merged over the live-fetched entry (or the conservative default) in `get_model_info`. Lets a non-Anthropic reasoning/vision or small-window model declare real capabilities instead of being degraded to no-thinking / no-vision / 200k, and corrects a single wrong field on a fetched model (NB-4). Unknown keys are dropped.

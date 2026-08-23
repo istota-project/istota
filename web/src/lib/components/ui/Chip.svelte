@@ -7,6 +7,13 @@
     onclick?: () => void;
     children?: Snippet;
     title?: string;
+    /**
+     * Declared because the component already forwards it and only the type
+     * refused: `checked` draws the on state and says nothing to a screen
+     * reader, so a chip used as a toggle rather than as a label needs this to
+     * report the same thing the fill does.
+     */
+    'aria-pressed'?: boolean;
   }
 
   let { checked = false, icon = false, onclick, children, title, ...rest }: Props = $props();

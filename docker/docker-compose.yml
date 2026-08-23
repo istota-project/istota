@@ -192,6 +192,7 @@ services:
       ISTOTA_SECURITY_SANDBOX_ENABLED: ${ISTOTA_SECURITY_SANDBOX_ENABLED:-true}
       ISTOTA_SECURITY_SKILL_PROXY_ENABLED: ${ISTOTA_SECURITY_SKILL_PROXY_ENABLED:-true}
       ISTOTA_SECURITY_SKILL_PROXY_TIMEOUT: ${ISTOTA_SECURITY_SKILL_PROXY_TIMEOUT:-300}
+      ISTOTA_SECURITY_SANDBOX_CACHE_DIR: ${ISTOTA_SECURITY_SANDBOX_CACHE_DIR:-}
       # Master key for the encrypted secrets table (Phase 5).
       # Empty triggers entrypoint auto-generation persisted at /data/.secret_key.
       # Back this up — losing it makes stored credentials unrecoverable.
@@ -513,7 +514,7 @@ services:
       - browser
     ports:
       - "${BROWSER_API_BIND:-127.0.0.1}:${BROWSER_API_PORT:-9223}:9223"
-      - "0.0.0.0:${BROWSER_VNC_PORT:-6080}:6080"
+      - "${BROWSER_VNC_BIND:-127.0.0.1}:${BROWSER_VNC_PORT:-6080}:6080"
     shm_size: ${BROWSER_SHM_SIZE:-2gb}
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:-}

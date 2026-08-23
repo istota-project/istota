@@ -21,6 +21,8 @@ moved: attribution is now decided once at ingest and stored on the row
 from `processed_emails`. The body unwrapping stays a read-path concern.
 """
 
+import os
+
 import pytest
 
 from istota import db
@@ -163,6 +165,59 @@ def _web_turn(conn, config, token, text):
     return tid
 
 
+def _user_row_diagnosis(page, token, rows) -> str:
+    """Why the user-row count came out wrong, in one line plus the raw rows.
+
+    ISSUE-303: a single unreproducible failure of `test_web_turn_is_untouched`
+    under `-n auto` cost the whole investigation, because what came back was
+    the run summary, and `assert 2 == 1` is all the run summary had — no worker
+    id, no surplus row, nothing that separates the candidate causes. None of it
+    survives the run. So the first line carries the count, the worker and a
+    precis of every row, because pytest's short summary prints a first line and
+    nothing else; the detail below carries the database the read path was
+    looking at, since a surplus row is explained by its writer rather than by
+    the reader.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    precis = "; ".join(
+        "#{} task={} author={!r} text={!r}".format(
+            i, r.get("task_id"), r.get("author"), (r.get("text") or "")[:60],
+        )
+        for i, r in enumerate(rows)
+    )
+    lines = [
+        f"expected 1 user row in room {token!r}, got {len(rows)} "
+        f"[worker={worker}] {precis}",
+        "",
+        "rendered page:",
+    ]
+    for m in page["messages"]:
+        lines.append(
+            "  role={} task={} created_at={} text={!r}".format(
+                m.get("role"), m.get("task_id"), m.get("created_at"),
+                (m.get("text") or "")[:80],
+            )
+        )
+
+    from istota import web_app
+
+    with db.get_db(web_app._config.db_path) as conn:
+        lines.append("messages:")
+        for r in conn.execute(
+            "SELECT id, room_token, role, task_id, origin_surface, "
+            "author_user_id, author_label, created_at, substr(body, 1, 60) "
+            "FROM messages ORDER BY id"
+        ):
+            lines.append("  " + repr(tuple(r)))
+        lines.append("tasks:")
+        for r in conn.execute(
+            "SELECT id, user_id, source_type, conversation_token, status, "
+            "created_at, substr(prompt, 1, 60) FROM tasks ORDER BY id"
+        ):
+            lines.append("  " + repr(tuple(r)))
+    return "\n".join(lines)
+
+
 @_needs_web_deps
 class TestPerRoomHistory:
     def _one_user_row(self, token):
@@ -170,8 +225,29 @@ class TestPerRoomHistory:
 
         page = web_app._chat_room_messages("alice", token, 20)
         rows = [m for m in page["messages"] if m["role"] == "user"]
-        assert len(rows) == 1
+        if len(rows) != 1:
+            raise AssertionError(_user_row_diagnosis(page, token, rows))
         return rows[0]
+
+    def test_a_wrong_row_count_names_the_worker_and_the_rows(
+        self, db_path, web_config,
+    ):
+        """ISSUE-303. The count failure has to diagnose itself on first sight."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "roomtok", "alice", origin="web")
+            _web_turn(conn, web_config, "roomtok", "first turn")
+            _web_turn(conn, web_config, "roomtok", "second turn")
+
+        with pytest.raises(AssertionError) as excinfo:
+            self._one_user_row("roomtok")
+
+        message = str(excinfo.value)
+        head = message.splitlines()[0]
+        assert "got 2" in head
+        assert f"worker={os.environ.get('PYTEST_XDIST_WORKER', 'master')}" in head
+        assert "first turn" in head and "second turn" in head
+        assert "messages:" in message and "tasks:" in message
+        assert "roomtok" in message
 
     def test_external_sender_is_named_and_body_unwrapped(
         self, db_path, web_config,

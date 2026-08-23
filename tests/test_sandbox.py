@@ -848,6 +848,104 @@ class TestBuildNetworkAllowlist:
         hosts = _build_network_allowlist(config, ["developer"])
         assert "gitlab.example.com:8443" in hosts
 
+    def test_developer_npm_registry_host(self):
+        """A complete `npm ci` of this repo's web/package-lock.json (213
+        packages) made 15 CONNECTs through a logging proxy, every one of them
+        to registry.npmjs.org. Metadata and tarballs share the host, so one
+        entry is the whole of npm's reach."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "registry.npmjs.org:443" in hosts
+
+    def test_developer_cargo_registry_hosts(self):
+        """`cargo fetch` on serde and its transitive dependencies contacted the
+        sparse index and the download host, and nothing else."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "index.crates.io:443" in hosts
+        assert "static.crates.io:443" in hosts
+
+    def test_crates_io_itself_is_not_allowlisted(self):
+        """`crates.io` is the API host — publish, search and yank. The measured
+        fetch never contacted it, and building does not need it, so it stays
+        out rather than arriving as a guess alongside the two that do.
+
+        Asserted together with the two hosts that *are* expected, so a revert
+        turns this red. On its own the negative holds against an unmodified
+        tree and could only ever fail if someone later added the host."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "index.crates.io:443" in hosts
+        assert "static.crates.io:443" in hosts
+        assert "crates.io:443" not in hosts
+
+    def test_registry_hosts_absent_when_developer_not_authorized(self):
+        """The registries are gated on `developer` being in `authorized_skills`,
+        which is why no separate `allow_npm` flag exists."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["calendar"])
+        assert "registry.npmjs.org:443" not in hosts
+        assert "index.crates.io:443" not in hosts
+        assert "static.crates.io:443" not in hosts
+
+    def test_registry_hosts_ride_authorization_not_selection(self):
+        """`authorized_skills` is not the selected set. `derive_authorized_skills`
+        adds any skill whose credentials resolve, and `developer` auto-authorizes
+        as soon as either forge token is configured — so on such a deployment
+        these hosts are present for *every* task of that user, including one that
+        never chose the skill. That is the same gate the forge hosts already ride
+        and it is deliberate, but it is a wider reach than "the developer skill
+        was selected" and the test says so rather than leaving it to be
+        rediscovered."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True, repos_dir="/tmp/repos",
+                gitlab_url="https://gitlab.example.com",
+            ),
+        )
+        # What execute_task passes when the user has a forge token but the task
+        # selected something else entirely.
+        hosts = _build_network_allowlist(config, ["developer", "browse"])
+        assert "registry.npmjs.org:443" in hosts
+        assert "gitlab.example.com:443" in hosts
+
+    def test_registry_hosts_absent_when_developer_disabled(self):
+        """`developer.enabled` is the operator's switch, and it gates the
+        registries the same way it gates the forge hosts."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=False, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "registry.npmjs.org:443" not in hosts
+
+    def test_registries_do_not_depend_on_a_configured_forge(self):
+        """The forge URLs and the registries are independent: a deployment with
+        no gitlab_url or github_url still installs dependencies."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True, repos_dir="/tmp/repos",
+                gitlab_url="", github_url="",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "registry.npmjs.org:443" in hosts
+
+
 class TestNetworkConfigParsing:
     def test_defaults(self):
         nc = NetworkConfig()
@@ -976,3 +1074,204 @@ class TestNativeFsRoots:
         user_temp.mkdir(parents=True)
         _, _, denied = self._roots(sandbox_config, task, False, user_temp=user_temp)
         assert (user_temp.resolve() / ".developer") in denied
+
+
+class TestBuildBwrapCmdSandboxCacheDir:
+    """`security.sandbox_cache_dir` — a disk-backed home for package caches.
+
+    Without it `$HOME/.cache` inside the namespace resolves onto bwrap's own
+    root tmpfs, so a `uv sync` unpacks into RAM the host cannot attribute and
+    throws it away at task exit (ISSUE-305).
+    """
+
+    def _with_cache(self, sandbox_config, cache_dir):
+        sandbox_config.security.sandbox_cache_dir = str(cache_dir)
+        return sandbox_config
+
+    def test_configured_cache_dir_is_bound_rw_per_user(self, sandbox_config, make_sandbox_task):
+        """The bind is `{root}/{user_id}`, never the root itself — a shared cache
+        is a surface an admin and a non-admin task both write, and uv trusts its
+        unpacked wheels on read."""
+        cache = sandbox_config.temp_dir.parent / "uvcache"
+        cache.mkdir(parents=True)
+        self._with_cache(sandbox_config, cache)
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        per_user = str(cache / "alice")
+        assert (per_user, per_user) in _get_bind_pairs(result, "--bind"), \
+            f"per-user cache dir not bound RW: {_get_bind_pairs(result, '--bind')}"
+        assert (str(cache), str(cache)) not in _get_bind_pairs(result, "--bind"), \
+            "the cache root itself was bound — every user would share one directory"
+
+    def test_two_users_get_different_cache_dirs(self, sandbox_config, make_sandbox_task):
+        cache = sandbox_config.temp_dir.parent / "uvcache"
+        cache.mkdir(parents=True)
+        self._with_cache(sandbox_config, cache)
+
+        alice = _run_bwrap(sandbox_config, make_sandbox_task(user_id="alice"), False)
+        bob_temp = sandbox_config.temp_dir / "bob"
+        bob_temp.mkdir(parents=True, exist_ok=True)
+        bob = _run_bwrap(
+            sandbox_config, make_sandbox_task(user_id="bob"), False, user_temp=bob_temp,
+        )
+        assert str(cache / "alice") in alice
+        assert str(cache / "alice") not in bob
+        assert str(cache / "bob") in bob
+
+    def test_unset_leaves_the_argv_exactly_as_before(self, sandbox_config, make_sandbox_task):
+        """Byte-for-byte: an empty key must add nothing at all."""
+        cache = sandbox_config.temp_dir.parent / "uvcache"
+        cache.mkdir(parents=True)
+
+        without = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        self._with_cache(sandbox_config, cache)
+        with_key = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+
+        assert str(cache) not in without
+        # The only difference is the cache bind itself — drop that one
+        # three-argument group and the two argvs must be identical.
+        per_user = str(cache / "alice")
+        idx = with_key.index("--bind", 0)
+        while with_key[idx + 1] != per_user:
+            idx = with_key.index("--bind", idx + 1)
+        assert with_key[:idx] + with_key[idx + 3:] == without
+
+    def test_a_missing_directory_falls_open(self, sandbox_config, make_sandbox_task):
+        """Configured but absent: build the sandbox without it, don't fail the task."""
+        cache = sandbox_config.temp_dir.parent / "never-created"
+        self._with_cache(sandbox_config, cache)
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        assert result[0] == "bwrap"
+        assert str(cache) not in result
+
+    def test_a_relative_path_falls_open(self, sandbox_config, make_sandbox_task):
+        """A relative path would resolve against the daemon's cwd."""
+        self._with_cache(sandbox_config, "relative/cache")
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        assert result[0] == "bwrap"
+        assert not any("relative/cache" in a for a in result)
+
+    @pytest.mark.requires_dac
+    def test_an_unwritable_directory_falls_open(self, sandbox_config, make_sandbox_task):
+        cache = sandbox_config.temp_dir.parent / "uvcache"
+        cache.mkdir(parents=True)
+        cache.chmod(0o500)
+        self._with_cache(sandbox_config, cache)
+        try:
+            result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+            assert result[0] == "bwrap"
+            assert str(cache / "alice") not in result
+        finally:
+            cache.chmod(0o700)
+
+    def test_a_cache_under_the_database_directory_is_refused(self, sandbox_config, make_sandbox_task):
+        """The masks run last and are read-only, so a cache under one is a dead
+        end uv cannot write. Refuse the cache; never the mask."""
+        db_dir = Path(sandbox_config.db_path).parent
+        cache = db_dir / "uvcache"
+        cache.mkdir(parents=True)
+        self._with_cache(sandbox_config, cache)
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        assert str(cache / "alice") not in result
+        # The database mask is still there — the cache lost, not the boundary.
+        assert str(db_dir.resolve()) in result
+
+    def test_the_cache_bind_precedes_the_database_masks(self, sandbox_config, make_sandbox_task):
+        """bwrap applies operations in argv order; a bind after a mask would be
+        the one thing the mask block's comment forbids."""
+        cache = sandbox_config.temp_dir.parent / "uvcache"
+        cache.mkdir(parents=True)
+        self._with_cache(sandbox_config, cache)
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        bind_idx = result.index(str(cache / "alice"))
+        mask_idx = result.index(str(Path(sandbox_config.db_path).parent.resolve()))
+        assert bind_idx < mask_idx, f"cache bind at {bind_idx} lands after the mask at {mask_idx}"
+
+
+class TestSandboxCacheDirCannotOvermountABind:
+    """A cache bind whose destination is an *ancestor* of an earlier mount covers
+    it. The bind is emitted late, so this is reachable by configuration alone —
+    and each case below revokes a boundary the sandbox is built on.
+    """
+
+    def _argv(self, sandbox_config, task, cache_root, user_temp=None):
+        sandbox_config.security.sandbox_cache_dir = str(cache_root)
+        return _run_bwrap(sandbox_config, task, False, user_temp=user_temp)
+
+    def test_the_task_workspace_root_is_refused(self, sandbox_config, make_sandbox_task):
+        """`config.temp_dir` holds every user's workspace, and `.developer`
+        inside it carries the credential-fetch helpers behind a read-only
+        re-bind. A cache mounted above it makes both writable again."""
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        (user_temp / ".developer").mkdir()
+
+        result = self._argv(
+            sandbox_config, make_sandbox_task(), sandbox_config.temp_dir, user_temp=user_temp,
+        )
+        pairs = _get_bind_pairs(result, "--bind")
+        assert (str(sandbox_config.temp_dir), str(sandbox_config.temp_dir)) not in pairs
+        # `.developer` is still the last word on that path.
+        ro = _get_bind_pairs(result, "--ro-bind")
+        assert any(str(user_temp.resolve() / ".developer") == src for src, _ in ro)
+
+    def test_the_huggingface_cache_parent_is_refused(
+        self, sandbox_config, make_sandbox_task, tmp_path, monkeypatch,
+    ):
+        """`$HOME/.cache` is directly above the read-only model-cache bind."""
+        fake_home = tmp_path / "home"
+        (fake_home / ".cache" / "huggingface").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        result = self._argv(sandbox_config, make_sandbox_task(), fake_home / ".cache")
+        pairs = _get_bind_pairs(result, "--bind")
+        assert (str(fake_home / ".cache"), str(fake_home / ".cache")) not in pairs
+        assert str(fake_home / ".cache" / "alice") not in result
+
+    def test_the_claude_binary_directory_is_refused(
+        self, sandbox_config, make_sandbox_task, tmp_path, monkeypatch,
+    ):
+        """`$HOME/.local` holds the `claude` binary the daemon spawns host-side."""
+        fake_home = tmp_path / "home"
+        (fake_home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        result = self._argv(sandbox_config, make_sandbox_task(), fake_home / ".local")
+        assert str(fake_home / ".local" / "alice") not in result
+
+    def test_the_developer_repos_root_is_refused(self, sandbox_config, make_sandbox_task, tmp_path):
+        """Setting the cache *to* repos_dir — a one-character misreading of the
+        docs, which say to put it *under* repos_dir — would bind the repos RW
+        for non-admins, past the admin gate the repos bind itself carries."""
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        sandbox_config.developer.enabled = True
+        sandbox_config.developer.repos_dir = str(repos)
+
+        result = self._argv(sandbox_config, make_sandbox_task(), repos)
+        pairs = _get_bind_pairs(result, "--bind")
+        assert (str(repos), str(repos)) not in pairs, \
+            "a non-admin task was handed the developer repos directory"
+
+    def test_a_cache_strictly_under_repos_dir_is_the_documented_shape(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        repos = tmp_path / "repos"
+        (repos / "cache").mkdir(parents=True)
+        sandbox_config.developer.enabled = True
+        sandbox_config.developer.repos_dir = str(repos)
+
+        result = self._argv(sandbox_config, make_sandbox_task(), repos / "cache")
+        per_user = str(repos / "cache" / "alice")
+        assert (per_user, per_user) in _get_bind_pairs(result, "--bind")
+
+    def test_the_nextcloud_mount_root_is_refused(self, sandbox_config, make_sandbox_task):
+        result = self._argv(
+            sandbox_config, make_sandbox_task(), sandbox_config.nextcloud_mount_path,
+        )
+        pairs = _get_bind_pairs(result, "--bind")
+        mount = str(sandbox_config.nextcloud_mount_path)
+        assert (mount, mount) not in pairs

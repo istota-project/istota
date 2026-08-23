@@ -61,6 +61,11 @@ fi
 # needs them carries the `ml` marker and is deselected by default. Add
 # --all-extras if you want that test, or the real libraries to hand-test with.
 # See docs/development/testing.md.
+#
+# No --group flag: uv installs the default groups, so `dev` — pytest, its
+# plugins, jinja2, psutil and ruff — arrives with this. That is why ruff belongs
+# in the group rather than in an extra: `ruff check` is a documented
+# verification step and until ISSUE-301 this command installed no linter at all.
 echo "Installing dependencies..."
 uv sync --extra test
 

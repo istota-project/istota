@@ -44,6 +44,7 @@ from istota.health.units import (
     pick_canonical_range,
     widest_canonical_range,
 )
+from istota.notification_resolvers import health_panel as notification_health_panel
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +780,15 @@ async def api_replace_biomarkers(
     n = await asyncio.to_thread(_save)
     if n is None:
         raise HTTPException(404, "panel not found")
+
+    if confirm and ctx.framework_db_path is not None:
+        # The panel just left `draft`, which is the state the inbox row watches.
+        # Framework DB and session user, for the reason given on the upload path.
+        await asyncio.to_thread(
+            notification_health_panel.close_for_panel,
+            ctx.framework_db_path, ctx.user_id, panel_id, by="web",
+        )
+
     return {"status": "ok", "count": n}
 
 
@@ -859,6 +869,20 @@ async def api_panel_upload(
         return pid, collision
 
     pid, collision = await asyncio.to_thread(_save_and_record)
+
+    # The panel is a draft, and a draft is excluded from the dashboard *and*
+    # from the trends — so an upload whose review is never finished is data the
+    # user cannot see again unless they think to ask for drafts by hand. The row
+    # goes in the **framework** DB (`ctx.framework_db_path`), never
+    # `ctx.db_path`: that is this user's health module DB, and every user has a
+    # panel `12` in theirs. Written, not delivered — see `write_for_panel`.
+    if ctx.framework_db_path is not None:
+        await asyncio.to_thread(
+            notification_health_panel.write_for_panel,
+            ctx.framework_db_path, ctx.user_id,
+            panel_id=pid, drawn_at=drawn_at, lab_name=lab_name or None,
+        )
+
     out = {"status": "ok", "id": pid, "draft": True}
     if collision is not None:
         out["collision"] = {
@@ -2983,9 +3007,12 @@ async def api_garmin_sync(
     db_path = _framework_db_path(request)
     user_tz = _user_tz(request, user_id)
 
+    # Daemon-side config, for the reconnect notification an auth failure raises.
+    config = getattr(request.app.state, "istota_config", None)
+
     def _do():
         return health_garmin_sync.sync_garmin(
-            ctx, db_path, days_back=days_back, user_tz=user_tz,
+            ctx, db_path, days_back=days_back, user_tz=user_tz, config=config,
         ).to_dict()
 
     return await asyncio.to_thread(_do)
