@@ -20,9 +20,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
@@ -116,10 +118,11 @@ class TestTheModuleSwitches:
     def test_every_owner_is_a_service_that_exists_or_is_planned(self):
         """A typo in an owner name silently leaves its module off forever.
 
-        `mail` and `feeds` are named by the map before the registry holds them,
-        because the switches they own are the ones a `full` profile most needs
-        turned *off* today. `PLANNED_SERVICES` is what keeps the guard from
-        degrading into "accept any string".
+        `feeds` is named by the map before the registry holds it, because the
+        switch it owns is one a `full` profile needs turned *off* today.
+        `PLANNED_SERVICES` is what keeps the guard from degrading into "accept
+        any string". `mail` was on that list until Stage 6 registered it, and
+        the ratchet below is what forced it off.
         """
         from testbed.services import REGISTRY
 
@@ -128,8 +131,10 @@ class TestTheModuleSwitches:
             assert owner == "" or owner in known, (variable, owner)
 
     def test_a_planned_service_that_landed_must_be_taken_off_the_list(self):
-        """The ratchet. Once `mail` is in the registry, leaving it named here
-        would let a typo in a *future* planned name pass unnoticed."""
+        """The ratchet, and it has fired once. `mail` went into the registry in
+        Stage 6 and this is what refused to pass until it came off the planned
+        list — because leaving a landed name there would let a typo in a
+        *future* planned one go unnoticed."""
         from testbed.services import REGISTRY
 
         assert not compose_support.PLANNED_SERVICES & set(REGISTRY)
@@ -651,6 +656,22 @@ class TestTheOverlayIsAddressable:
 
         assert "seccomp:unconfined" in config["services"]["istota"]["security_opt"]
 
+    def test_the_unmasked_system_paths_reach_the_istota_service(self, tmp_path):
+        """The second half of the same grant, and the quiet one.
+
+        seccomp lets bwrap create the user namespace; it does not let it mount
+        a procfs inside one, because Docker's masked `/proc` entries and
+        read-only `/proc/sys` make the container's procfs not "fully visible"
+        to the kernel. `build_bwrap_cmd` emits `--proc /proc`, so without this
+        no sandbox can start — and `_bwrap_available` performs the same mounts,
+        so the daemon answers by disabling the sandbox and carrying on. The
+        loss is therefore silent rather than red, which is what makes a guard
+        on a compose line worth having.
+        """
+        config = _compose_config(tmp_path)
+
+        assert "systempaths=unconfined" in config["services"]["istota"]["security_opt"]
+
     def test_the_host_gateway_alias_reaches_the_istota_service(self, tmp_path):
         """`host.docker.internal` is built in on Docker Desktop and absent on
         Docker Engine, and every full-shape task reaches the scripted endpoint
@@ -725,6 +746,275 @@ class TestTheFullProfile:
         )
 
 
+class TestTheNextcloudReset:
+    """What `reset` touches, and — more importantly — what it does not.
+
+    The scope was settled by experiment against a booted stack (spec Open
+    question 3): a room can be deleted cleanly through the API the daemon's own
+    client exposes, and it takes its messages and its invite notification with
+    it. So the scope is exactly the rooms this object created, and everything
+    the boot made is baseline. These tests hold that boundary without a server,
+    by recording the calls the reset would make.
+    """
+
+    @staticmethod
+    def _service(monkeypatch, *, fail: set[str] = frozenset()):
+        service = nextcloud_service.attach(
+            base_url="http://localhost:1",
+            admin_password="unit-admin",
+            bot_password="unit-bot",
+            test_password="unit-user",
+        )
+        calls: list[tuple[str, str, str]] = []
+
+        def fake_ocs(path, *, user="", method="GET", body=None, tolerate=()):
+            calls.append((method, path, user))
+            token = path.rsplit("/", 1)[-1]
+            if method == "POST" and path.endswith("/room"):
+                return nextcloud_service.OcsResponse(
+                    200, "OK", {"token": f"token-{len(calls)}"}
+                )
+            if token in fail:
+                # An OCS v2 refusal *raises* — the HTTP status carries it, so
+                # `_ocs` never returns a 403. A fake that returned one would
+                # verify the guard against a shape the real client cannot
+                # produce, which is how the first version of this test passed
+                # while the code aborted the loop.
+                raise nextcloud_service.NextcloudError(f"DELETE {path} HTTP 403")
+            return nextcloud_service.OcsResponse(200, "OK", {})
+
+        monkeypatch.setattr(service, "_ocs", fake_ocs)
+        return service, calls
+
+    def test_it_deletes_the_rooms_it_created_and_nothing_else(self, monkeypatch):
+        service, calls = self._service(monkeypatch)
+        first = service.create_room(name="one")
+        second = service.create_room(name="two")
+        calls.clear()
+
+        service.reset()
+
+        assert [(method, path) for method, path, _ in calls] == [
+            ("DELETE", f"/ocs/v2.php/apps/spreed/api/v4/room/{first}"),
+            ("DELETE", f"/ocs/v2.php/apps/spreed/api/v4/room/{second}"),
+        ]
+
+    def test_a_room_is_deleted_by_the_actor_that_created_it(self, monkeypatch):
+        """Talk lets a moderator delete, and the creator is one. Deleting as the
+        bot would work for a bot-created room and 403 for a user-created one —
+        which is every room a scenario makes, since rooms are user-created."""
+        service, calls = self._service(monkeypatch)
+        service.create_room(name="one")
+        calls.clear()
+
+        service.reset()
+
+        assert [user for _, _, user in calls] == [service.test_user]
+
+    def test_a_second_reset_deletes_nothing(self, monkeypatch):
+        service, calls = self._service(monkeypatch)
+        service.create_room(name="one")
+        service.reset()
+        calls.clear()
+
+        service.reset()
+
+        assert calls == []
+
+    def test_a_room_that_survives_is_reported_rather_than_swallowed(
+        self, monkeypatch
+    ):
+        """A leaked room is a cross-test dependency, and those get diagnosed as
+        flake in whichever later scenario happens to trip over it."""
+        service, _ = self._service(monkeypatch, fail={"token-1"})
+        service.create_room(name="one")
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="survived"):
+            service.reset()
+
+    def test_one_bad_room_does_not_hide_the_others(self, monkeypatch):
+        """Every room is attempted, and the list is cleared whatever happened.
+
+        Both halves matter and both were wrong first time. Aborting at the
+        first bad room leaves the rest of the session's rooms behind it; not
+        clearing the list re-attempts the same delete before *every* remaining
+        test and reports the first test's problem against all of them.
+        """
+        service, calls = self._service(monkeypatch, fail={"token-1"})
+        service.create_room(name="one")
+        service.create_room(name="two")
+        calls.clear()
+
+        with pytest.raises(nextcloud_service.NextcloudError):
+            service.reset()
+
+        assert [path.rsplit("/", 1)[-1] for _, path, _ in calls] == [
+            "token-1", "token-2",
+        ]
+        assert service._created_rooms == []
+
+    def test_a_room_already_gone_is_not_a_failure(self, monkeypatch):
+        """A scenario may delete its own room to assert on the deletion."""
+        service, _ = self._service(monkeypatch)
+        service.create_room(name="one")
+        monkeypatch.setattr(
+            service, "_ocs",
+            lambda *a, **k: nextcloud_service.OcsResponse(404, "not found", None),
+        )
+        monkeypatch.setattr(service, "rooms", lambda **k: [])
+
+        service.reset()
+
+    def test_a_404_the_bot_can_still_see_is_a_failure(self, monkeypatch):
+        """Talk answers 404 for a room the *actor* cannot see, too.
+
+        Believing it would write off a room that is still there, still polled,
+        and still in the next test's way — the one outcome this reset promises
+        to be loud about.
+        """
+        service, _ = self._service(monkeypatch)
+        token = service.create_room(name="one")
+        monkeypatch.setattr(
+            service, "_ocs",
+            lambda *a, **k: nextcloud_service.OcsResponse(404, "not found", None),
+        )
+        monkeypatch.setattr(service, "rooms", lambda **k: [{"token": token}])
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="still sees it"):
+            service.reset()
+
+    def test_the_baseline_the_boot_creates_is_named_in_the_docstring(self):
+        """The scope is only usable if it is written where a reader will find it.
+
+        Enumerated rather than gestured at, because the failure it prevents is
+        somebody reading `rooms()` returning six entries as leakage and
+        "fixing" the reset to delete them.
+        """
+        body = nextcloud_service.NextcloudService.reset.__doc__ or ""
+
+        for baseline in ("entrypoint.sh", "#alerts", "/mnt/shared", "baseline"):
+            assert baseline in body, baseline
+
+
+class TestTheConnectionRetry:
+    """Reads are retried through a cold nginx. Writes are not, and must not be."""
+
+    @staticmethod
+    def _service():
+        return nextcloud_service.attach(
+            base_url="http://localhost:1",
+            admin_password="unit-admin",
+            bot_password="unit-bot",
+            test_password="unit-user",
+        )
+
+    def test_a_write_that_cannot_connect_fails_at_once(self, monkeypatch):
+        """A `URLError` can be raised after the request reached the server.
+
+        Replaying a POST is how you get a second Talk room whose token nothing
+        recorded — which `reset` then cannot delete — or a duplicate inbound
+        message, which turns "exactly one reply" into a flake.
+        """
+        service = self._service()
+        attempts = []
+
+        def refuse(*args, **kwargs):
+            attempts.append(1)
+            raise URLError("connection refused")
+
+        monkeypatch.setattr(nextcloud_service, "urlopen", refuse)
+        monkeypatch.setattr(nextcloud_service.time, "sleep", lambda _: None)
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="not retried"):
+            service._ocs("/ocs/v2.php/x", method="POST", body={"a": 1})
+
+        assert len(attempts) == 1
+
+    def test_a_read_is_retried_until_the_window_closes(self, monkeypatch):
+        service = self._service()
+        attempts = []
+
+        def refuse(*args, **kwargs):
+            attempts.append(1)
+            raise URLError("connection refused")
+
+        monkeypatch.setattr(nextcloud_service, "urlopen", refuse)
+        monkeypatch.setattr(nextcloud_service.time, "sleep", lambda _: None)
+        monkeypatch.setattr(nextcloud_service, "CONNECT_RETRY_SECONDS", 3)
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="within 3s"):
+            service._ocs("/ocs/v2.php/x")
+
+        assert len(attempts) > 1
+
+
+#: One depth-1 PROPFIND answer: the collection, then one file whose name needs
+#: decoding. Shared by the tests below so the two claims are made against the
+#: same bytes.
+_PROPFIND = (
+    "<d:multistatus xmlns:d='DAV:'>"
+    "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+    "</d:href></d:response>"
+    "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+    "Users/testuser/inbox/a%20note.txt</d:href></d:response>"
+    "</d:multistatus>"
+).encode()
+
+
+class TestTheWebdavPathTranslation:
+    """`files()` reports paths relative to the account's own DAV root."""
+
+    @staticmethod
+    def _service():
+        return nextcloud_service.attach(
+            base_url="http://localhost:1",
+            admin_password="unit-admin",
+            bot_password="unit-bot",
+            test_password="unit-user",
+        )
+
+    def test_the_dav_prefix_is_dropped_and_the_path_is_decoded(
+        self, monkeypatch
+    ):
+        service = self._service()
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (_PROPFIND, 207))
+
+        assert service.files("Shared Files") == [
+            "Shared Files/Users/testuser/inbox/a note.txt",
+        ]
+
+    def test_the_requested_collection_is_not_in_its_own_listing(
+        self, monkeypatch
+    ):
+        """Otherwise `assert files(d)` is non-empty for an *empty* directory.
+
+        A depth-1 PROPFIND answers with the collection first, so a caller
+        checking "the mount resolves to something" would be checking that it
+        asked for something — an assertion that cannot fail, which this repo
+        has shipped twice.
+        """
+        service = self._service()
+        only_itself = (
+            "<d:multistatus xmlns:d='DAV:'>"
+            "<d:response><d:href>/remote.php/dav/files/istota/Shared%20Files/"
+            "</d:href></d:response></d:multistatus>"
+        ).encode()
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (only_itself, 207))
+
+        assert service.files("Shared Files") == []
+        assert service.files("/Shared Files/") == []
+
+    def test_a_non_multistatus_answer_names_the_status(self, monkeypatch):
+        """A 404 here means the path does not exist in that account's tree,
+        which on this shape is the ordinary way of getting the mount point
+        wrong — and an empty list would read as an empty directory."""
+        service = self._service()
+        monkeypatch.setattr(service, "_dav", lambda *a, **k: (b"nope", 404))
+
+        with pytest.raises(nextcloud_service.NextcloudError, match="404"):
+            service.files("Users/testuser")
+
+
 class TestTheMarker:
     def test_the_full_tier_is_deselected_by_default(self):
         """Otherwise `uv run pytest` boots six containers."""
@@ -790,6 +1080,55 @@ class TestTheProvisioningSuiteRefusesAKeptVolumeSet:
         body = (REPO / "tests" / "full" / "conftest.py").read_text()
         assert "ISTOTA_TESTBED_KEEP" in body
         assert "pytest.skip" in body
+
+
+class TestTheSharedMountName:
+    """One value, three files that have to agree on it.
+
+    `provision-nc.sh` creates the bot's `files_external` mount, and the mount
+    point it chooses *is* the prefix the daemon has to put in front of every
+    logical path before it becomes a DAV or OCS path — `/Users/alice` on the
+    volume is `/Shared Files/Users/alice` in the bot's Nextcloud tree. Written
+    twice, the two drift and the symptom is a 404 from a client that looks
+    correct in isolation, so compose owns the value and hands it to both
+    containers.
+    """
+
+    def test_both_containers_are_given_the_same_value(self, tmp_path):
+        model = _compose_config(tmp_path)
+        services = model["services"]
+
+        mount_name = services["nextcloud"]["environment"]["ISTOTA_NC_SHARED_MOUNT_NAME"]
+        prefix = services["istota"]["environment"]["ISTOTA_NEXTCLOUD_DAV_PREFIX"]
+
+        assert mount_name == nextcloud_service.BOT_MOUNT_POINT
+        assert prefix == mount_name
+
+    def test_the_scripts_own_fallback_agrees_with_it(self, tmp_path):
+        """`provision-nc.sh` carries a `:-` default so it still provisions if
+        run outside compose, and that default is the only other copy."""
+        model = _compose_config(tmp_path)
+        mount_name = model["services"]["nextcloud"]["environment"][
+            "ISTOTA_NC_SHARED_MOUNT_NAME"
+        ]
+        script = (REPO / "docker" / "istota" / "provision-nc.sh").read_text()
+
+        fallback = re.search(r"\$\{ISTOTA_NC_SHARED_MOUNT_NAME:-([^}]*)\}", script)
+
+        assert fallback is not None, "the script no longer reads the compose value"
+        assert fallback.group(1) == mount_name
+
+    def test_the_auto_share_is_switched_off_as_a_literal(self, tmp_path):
+        """Not `${…:-false}`. This shape always creates the user's own mount
+        over the bot workspace, so it always wants the OCS share-back off, and
+        an exported variable in the operator's shell must not outrank that —
+        the trap the credential variables already documented."""
+        model = _compose_config(tmp_path)
+        istota = model["services"]["istota"]["environment"]
+        compose = FULL_COMPOSE.read_text()
+
+        assert istota["ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR"] == "false"
+        assert "ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR: ${" not in compose
 
 
 def _pool(tmp_path, *, keep: bool = False) -> compose_support.StackPool:

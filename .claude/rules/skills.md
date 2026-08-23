@@ -357,7 +357,8 @@ Answered via `!drafts` (Talk and web). The scheduler's `nag_stale_outbound_draft
 
 ### `nextcloud/` - Nextcloud Sharing CLI
 **Subcommands**: `share list` (`--path`), `share create` (`--path`, `--type user|link|email`, `--permissions`), `share delete SHARE_ID`, `share search QUERY`
-**Env vars**: `NC_URL`, `NC_USER`, `NC_PASS`
+**Env vars**: `NC_URL`, `NC_USER`, `NC_PASS`, `NC_DAV_PREFIX`
+**Note**: `NC_DAV_PREFIX` is `[nextcloud] dav_prefix` — where the daemon's storage root sits inside the bot account's own Nextcloud file tree, empty wherever the two are the same directory. It never appears in an argument or an answer: every path this CLI takes and returns is logical (`/Users/{uid}/…`), and the mapping is applied and inverted in the request layer. It has to be in the manifest because the CLI is a subprocess with a manifest-built environment rather than the daemon's Config, so a value the daemon has and the manifest does not is a value the skill does not have — which is how `files` and `share` came to 404 on the Docker shape while the daemon's own writes worked.
 **Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
 
 ### `location/` - GPS Location + Calendar Attendance

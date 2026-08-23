@@ -1,3 +1,14 @@
+# The bot's `files_external` mount point, owned here because two containers
+# have to agree on it and neither can derive it from the other.
+#
+# `provision-nc.sh` mounts the shared volume into the bot's Nextcloud file tree
+# under this name, so `/Users/alice` on the volume is `/Shared Files/Users/alice`
+# to the bot over DAV and OCS. The daemon has to send that second form, and a
+# second literal in the istota service would drift from the first the day
+# somebody renamed the mount — the symptom being a 404 from a client that reads
+# as correct on its own. One value, handed to both.
+x-shared-mount-name: &shared_mount_name "Shared Files"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -85,6 +96,9 @@ services:
       USER_NAME: ${USER_NAME:?Set USER_NAME in .env}
       USER_PASSWORD: ${USER_PASSWORD:?Set USER_PASSWORD in .env}
       USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
+      # The mount point provision-nc.sh gives the bot over the shared volume.
+      # The istota service is handed the same value as ISTOTA_NEXTCLOUD_DAV_PREFIX.
+      ISTOTA_NC_SHARED_MOUNT_NAME: *shared_mount_name
       # Web UI OAuth2 callback URL — must match what the user's browser hits.
       # Defaults to the nginx-proxied path so the OAuth2 client NC registers
       # matches the URL the SPA actually uses. Override either DOMAIN /
@@ -123,6 +137,16 @@ services:
       USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
       USER_TIMEZONE: ${USER_TIMEZONE:-UTC}
       NC_INTERNAL_URL: http://nextcloud
+      # Where /mnt/shared sits inside the bot's Nextcloud file tree, which on
+      # this shape is the files_external mount above rather than the tree root.
+      # Every DAV and OCS path the daemon sends is prefixed with it.
+      ISTOTA_NEXTCLOUD_DAV_PREFIX: *shared_mount_name
+      # A literal, deliberately, not ${...:-false}: this shape always creates the
+      # user's own mount over the bot workspace (provision-nc.sh:74), so it always
+      # wants the boot-time OCS share-back off — otherwise the user is handed the
+      # same directory twice. A literal cannot be outranked by a variable exported
+      # in the operator's shell, which is the trap the credential variables hit.
+      ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR: "false"
       # Bot identity
       ISTOTA_BOT_NAME: ${ISTOTA_BOT_NAME:-Istota}
       ISTOTA_EMISSARIES_ENABLED: ${ISTOTA_EMISSARIES_ENABLED:-true}
@@ -259,6 +283,14 @@ services:
       ISTOTA_EMAIL_SMTP_PORT: ${ISTOTA_EMAIL_SMTP_PORT:-587}
       ISTOTA_EMAIL_POLL_FOLDER: ${ISTOTA_EMAIL_POLL_FOLDER:-INBOX}
       ISTOTA_EMAIL_BOT_ADDRESS: ${ISTOTA_EMAIL_BOT_ADDRESS:-}
+      # The authserv-id whose Authentication-Results header the DMARC canary
+      # will read — your own MTA's, as it stamps it. Left empty the canary reads
+      # only the topmost header, whoever wrote it, which on a mailbox with
+      # nothing upstream stamping is the sender.
+      ISTOTA_EMAIL_AUTHSERV_ID: ${ISTOTA_EMAIL_AUTHSERV_ID:-}
+      # off | verify | gate — what happens when a sender claims to be the user.
+      # `verify` needs ISTOTA_EMAIL_AUTHSERV_ID set to mean anything.
+      ISTOTA_EMAIL_CONFIRM_SENDER_MATCH: ${ISTOTA_EMAIL_CONFIRM_SENDER_MATCH:-off}
       ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR: ${ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR:-untrusted}
       # Sleep cycle
       ISTOTA_SLEEP_CYCLE_ENABLED: ${ISTOTA_SLEEP_CYCLE_ENABLED:-true}

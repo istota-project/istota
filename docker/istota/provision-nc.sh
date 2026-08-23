@@ -53,11 +53,25 @@ BOT_DIR=$(printf '%s' "${ISTOTA_BOT_NAME:-Istota}" \
 # Bot user: the full shared volume. The bot owns everything under it —
 # inbox/, memories/, shared/ (its holding space for Nextcloud shares users send
 # it), the bot dir, and Channels — all bot-internal.
-MOUNT_ID=$($OCC files_external:create "Shared Files" local null::null \
+#
+# The mount point is also the prefix the daemon puts in front of every logical
+# path before it becomes a DAV or OCS one: `/Users/alice` on the volume is
+# `/${SHARED_MOUNT_NAME}/Users/alice` in the bot's Nextcloud tree. compose owns
+# the value and passes it here and to the istota container as
+# ISTOTA_NEXTCLOUD_DAV_PREFIX, so the two cannot drift; the fallback keeps this
+# script provisioning if it is ever run outside compose.
+SHARED_MOUNT_NAME="${ISTOTA_NC_SHARED_MOUNT_NAME:-Shared Files}"
+MOUNT_ID=$($OCC files_external:create "${SHARED_MOUNT_NAME}" local null::null \
     -c datadir=/mnt/shared 2>&1 | grep -o '[0-9]*$') || true
 
 if [ -n "$MOUNT_ID" ] && [ "$MOUNT_ID" -gt 0 ] 2>/dev/null; then
     $OCC files_external:applicable --add-user "${BOT_USER}" "${MOUNT_ID}"
+    # files_external mounts default to enable_sharing=false, which refuses every
+    # share of everything under /mnt/shared — the bot's whole workspace. Without
+    # this the bot cannot share a file it produced with anyone and the nextcloud
+    # skill's `share link` verb is dead on this deployment.
+    $OCC files_external:option "${MOUNT_ID}" enable_sharing true \
+        || echo "[istota-provision] Warning: could not enable sharing on mount ${MOUNT_ID}; the bot will not be able to share its own files."
     echo "[istota-provision] External storage mount ${MOUNT_ID} created for ${BOT_USER}"
 else
     echo "[istota-provision] Warning: could not create external storage mount for bot."
@@ -75,6 +89,10 @@ USER_MOUNT_ID=$($OCC files_external:create "${ISTOTA_BOT_NAME:-Istota}" local nu
 
 if [ -n "$USER_MOUNT_ID" ] && [ "$USER_MOUNT_ID" -gt 0 ] 2>/dev/null; then
     $OCC files_external:applicable --add-user "${USER_NAME}" "${USER_MOUNT_ID}"
+    # Same default, same reason, other direction: without it the user cannot
+    # share anything out of their own view of the bot workspace.
+    $OCC files_external:option "${USER_MOUNT_ID}" enable_sharing true \
+        || echo "[istota-provision] Warning: could not enable sharing on mount ${USER_MOUNT_ID}; ${USER_NAME} will not be able to share out of the workspace."
     echo "[istota-provision] External storage mount ${USER_MOUNT_ID} created for ${USER_NAME}"
 fi
 

@@ -22,7 +22,7 @@ import pytest
 from testbed import profiles, services
 from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
-from testbed.services import REGISTRY, ServiceCall, gitlab
+from testbed.services import REGISTRY, ServiceCall, gitlab, mail
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
@@ -167,6 +167,8 @@ class TestTheCredentialRuleIsStructural:
 _MINIMAL_ARGS = {
     "model": lambda tmp_path: (([{"text": "ok"}],), {}),
     "gitlab": lambda tmp_path: ((tmp_path / "repos",), {}),
+    "ntfy": lambda tmp_path: ((), {}),
+    "feeds": lambda tmp_path: ((), {}),
 }
 
 
@@ -336,12 +338,21 @@ class TestConfigEnvNamesOnlyShippedVariables:
 
     @pytest.fixture
     def services(self, tmp_path):
-        """One of each conforming service, on loopback, started and stopped."""
+        """One of each conforming service that has a `config_env()` to check.
+
+        `mail` is here and costs nothing: `serve()` starts no container — the
+        profile's compose overlay does that — so it is a certificate written
+        into `tmp_path` and a dictionary. `nextcloud` is absent because its
+        `config_env()` is empty by design, the shipped compose file already
+        pointing the daemon at its own service.
+        """
         endpoint = serve_script([{"text": "ok"}])
         forge = gitlab.serve(tmp_path / "repos")
+        post = mail.serve(tmp_path / "mail")
         try:
-            yield {endpoint.name: endpoint, forge.name: forge}
+            yield {endpoint.name: endpoint, forge.name: forge, post.name: post}
         finally:
+            post.close()
             forge.close()
             endpoint.close()
 
@@ -391,6 +402,61 @@ class TestConfigEnvNamesOnlyShippedVariables:
         assert rendered["ISTOTA_DEVELOPER_GITLAB_URL"] == forge.container_url
         assert rendered["ISTOTA_DEVELOPER_GITLAB_TOKEN"] == forge.token
         assert rendered["ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE"] == "istota-test"
+
+
+class TestProfileConfigNamesOnlyShippedVariables:
+    """The same rule, applied to the other half of the render environment.
+
+    `Profile.config` is merged into the render environment *after* every
+    service's `config_env()`, and until Stage 7 nothing checked it — so the
+    constraint that makes this tier honest held for a variable a service named
+    and not for one a profile did. The gap is the more tempting of the two: a
+    profile is where somebody reaches when a service has no natural claim on a
+    setting, which is exactly when the temptation to side-load one is highest.
+
+    The rule is unchanged. A profile may only set a variable
+    `render-config.sh` reads *and* `docker-compose.yml` passes through; if a
+    setting has no such variable, the fix is to add one to both as a reviewed
+    product change. `testbed.profiles.MAIL_CONFIG` names one that is not
+    `ISTOTA_`-prefixed (`USER_EMAIL`), which is why this checks the names a
+    profile actually declares rather than sweeping by prefix.
+    """
+
+    @pytest.fixture(scope="class")
+    def script(self) -> str:
+        return RENDER_CONFIG.read_text()
+
+    @pytest.fixture(scope="class")
+    def compose(self) -> str:
+        return FULL_COMPOSE.read_text()
+
+    def test_the_guard_covers_at_least_one_real_profile(self):
+        """Otherwise the two assertions below iterate over nothing."""
+        configured = [p.name for p in profiles.ALL if p.config]
+
+        assert configured, (
+            "no profile sets any config, so the checks below are vacuous"
+        )
+
+    def test_every_variable_is_read_by_the_shipped_generator(self, script):
+        for profile in profiles.ALL:
+            for variable in profile.config:
+                assert _reads_variable(script, variable), (
+                    f"profile {profile.name!r} sets {variable}, which "
+                    f"{RENDER_CONFIG.name} does not read — so the stack would "
+                    "boot from a config that does not carry it"
+                )
+
+    def test_every_variable_is_passed_through_by_the_full_compose_file(
+        self, compose
+    ):
+        for profile in profiles.ALL:
+            for variable in profile.config:
+                assert _passed_through(compose, variable), (
+                    f"profile {profile.name!r} sets {variable}, which "
+                    "docker-compose.yml does not pass into the container — so "
+                    "the full shape's generator would never see it"
+                )
 
 
 class TestTheForgeGuardsItsOwnListener:
@@ -548,8 +614,11 @@ class TestTheServiceBuilder:
                 service.close()
 
     def test_an_unregistered_name_says_what_exists(self, tmp_path):
+        # A name nothing will ever register, rather than the next planned
+        # service: this test used to name `feeds`, and registering it in Stage
+        # 7 turned the guard into an assertion that a working service raises.
         with pytest.raises(KeyError, match="gitlab"):
-            services.build("feeds", scratch=tmp_path, host=LOOPBACK)
+            services.build("not-a-service", scratch=tmp_path, host=LOOPBACK)
 
     def test_an_attached_service_refuses_to_be_built_without_a_stack(self, tmp_path):
         """`nextcloud` attaches to a running full stack, and says so.

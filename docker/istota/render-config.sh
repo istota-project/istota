@@ -91,9 +91,11 @@ toml_escape() {
     printf '%s' "$value"
 }
 
-# The four an operator types by hand into docker/.env, and so the four that can
-# carry a metacharacter. Everything else rendered into a TOML string is
-# machine-generated hex, a URL, or a value from the Nextcloud API.
+# The five that can carry a metacharacter: four an operator types by hand into
+# docker/.env, plus the mount point, which compose supplies but an operator may
+# override and which is free text on the Nextcloud side (a display name, not a
+# slug). Everything else rendered into a TOML string is machine-generated hex, a
+# URL, or a value from the Nextcloud API.
 #
 # Rewritten in place rather than into new names so the extracted body below
 # stays byte-identical to what it was in entrypoint.sh. Safe because this is a
@@ -102,6 +104,7 @@ APP_PASSWORD="$(toml_escape "${APP_PASSWORD}")"
 ISTOTA_EMAIL_IMAP_PASSWORD="$(toml_escape "${ISTOTA_EMAIL_IMAP_PASSWORD:-}")"
 ISTOTA_DEVELOPER_GITLAB_TOKEN="$(toml_escape "${ISTOTA_DEVELOPER_GITLAB_TOKEN:-}")"
 ISTOTA_DEVELOPER_GITHUB_TOKEN="$(toml_escape "${ISTOTA_DEVELOPER_GITHUB_TOKEN:-}")"
+ISTOTA_NEXTCLOUD_DAV_PREFIX="$(toml_escape "${ISTOTA_NEXTCLOUD_DAV_PREFIX:-}")"
 
 render_config() {
     echo "[istota] Generating config.toml..."
@@ -239,6 +242,15 @@ enabled = false
 url = "${NC_URL}"
 username = "${BOT_USER:-istota}"
 app_password = "${APP_PASSWORD}"
+# Where /mnt/shared sits inside the bot's own Nextcloud file tree. On this shape
+# it is a files_external mount, so a logical /Users/x is /<mount>/Users/x over
+# DAV and OCS; compose passes the mount point provision-nc.sh created. Empty is
+# the bare-metal shape, where the rclone mount *is* the bot's tree.
+dav_prefix = "${ISTOTA_NEXTCLOUD_DAV_PREFIX:-}"
+# The boot-time OCS share of the bot workspace back to the user. Off on this
+# shape: provision-nc.sh already mounts that directory into the user's tree, so
+# the share would hand them a second copy of it.
+auto_share_bot_dir = ${ISTOTA_NEXTCLOUD_AUTO_SHARE_BOT_DIR:-true}
 
 [talk]
 enabled = ${ISTOTA_TALK_ENABLED:-true}

@@ -901,7 +901,14 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         # Auto-share bot dir back to the user (OCS). Skipped entirely when
         # Nextcloud is unconfigured (local install) — the OCS call is a no-op
         # there and would only log a spurious "Cannot share folder" warning.
-        if config.nextcloud.url:
+        #
+        # `auto_share_bot_dir` is the second guard, and it is a deployment
+        # shape rather than a preference. On bare metal this share is how the
+        # user gets the bot workspace at all. On the Docker shape
+        # `provision-nc.sh` gives them a `files_external` mount over the very
+        # same directory at first provisioning, so the share would put a second
+        # copy of it in their file list under a different name.
+        if config.nextcloud.url and config.nextcloud.auto_share_bot_dir:
             bot_path = get_user_bot_path(user_id, bot_dir)
             share_folder_with_user(config, bot_path, user_id)
 

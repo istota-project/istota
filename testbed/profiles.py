@@ -24,6 +24,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+#: The compose overlay that runs the mail container, on either shape.
+#:
+#: A literal path rather than an import from `services.mail`, which would make
+#: this module import a service module and close a cycle: `services/__init__`
+#: is what resolves a profile's service names.
+MAIL_OVERLAY = Path(__file__).resolve().parent / "compose" / "mail" / "mail.yml"
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -70,8 +77,56 @@ class Profile:
     """Extra `-f` files, merged over the shape's base in order."""
 
 
+#: Both mail profiles poll every five seconds rather than every sixty.
+#:
+#: `ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL` is read by `render-config.sh` and
+#: passed through by `docker-compose.yml`, so this is a legitimate wiring rather
+#: than a fixture reaching past the generator. Sixty would put a minute of dead
+#: wait into every mail scenario, which on a session-scoped stack is a minute
+#: per test rather than one per session.
+#: And they give the stack's one user an address of their own.
+#:
+#: `USER_EMAIL` is read by `render-config.sh` and passed through by
+#: `docker-compose.yml`, so it satisfies the two-file rule like everything else
+#: here; it is not `ISTOTA_`-prefixed because it belongs to the identity block
+#: rather than to a module. Without it `config.users["testuser"]` has no address
+#: and neither the sender-match rung nor the plus-address rung can resolve —
+#: `extract_user_from_recipient` requires the tag to name a user that exists.
+#:
+#: `@ext.test` rather than `@bot.test`: the mail server collapses every
+#: recipient at the bot's own domain into the bot mailbox, so a user address
+#: inside it would make the bot the recipient of its own replies.
+MAIL_CONFIG = {
+    "ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL": "5",
+    "USER_EMAIL": "testuser@ext.test",
+}
+
 BASE = Profile("base")
 FORGE = Profile("forge", services=("model", "gitlab"))
+
+# ntfy needs no config at all: it is a per-user connected service in the
+# encrypted secrets store rather than a config block, so the scenario points
+# the daemon at the stub with `istota secret ensure` inside the container. See
+# `services/ntfy.py::NtfyService.config_env` for why that is not a gap.
+NOTIFY = Profile("notify", services=("model", "ntfy"))
+
+#: The module switch lives here rather than in `feeds.config_env()`.
+#:
+#: `ISTOTA_FEEDS_ENABLED` says the *module* is on. That is a property of the
+#: profile — it is what `FULL_MODULE_SWITCHES` derives from a profile's service
+#: list on the other shape — and not something the document server knows or
+#: could answer for. Keeping it out of `config_env()` also keeps that method's
+#: promise true: the feeds stub is pointed at by seeded DB rows and by nothing
+#: the generator reads.
+#:
+#: The two-file rule still applies and still holds: `render-config.sh:534`
+#: reads it and `docker-compose.yml:333` passes it through, which the
+#: `Profile.config` guard in `tests/test_testbed_services.py` checks.
+FEEDS = Profile(
+    "feeds",
+    services=("model", "feeds"),
+    config={"ISTOTA_FEEDS_ENABLED": "true"},
+)
 
 # The negative control: the same profile on an image with the forge binaries
 # removed, reproducing ISSUE-263. The tag is empty here and filled in by the
@@ -88,16 +143,47 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 # is where the tier spends its cold boot, and the extra poller is what the
 # watermark discipline absorbs.
 #
-# The `mail` service the spec's sketch names is not here yet — Stage 6 adds it,
-# along with the overlay that runs the container. A profile naming a service the
-# registry does not hold fails the guard in `tests/test_testbed_services.py`,
-# which is the point of that guard.
-FULL = Profile("full", shape="full", services=("model", "nextcloud"))
+# And it carries mail, because a second full profile would be a second cold
+# boot of the same six containers to run one attachment scenario.
+#: And it runs the self-claim gate in `verify`, which the lean profile does not.
+#:
+#: Two reasons, and the first is about being able to fail. `render-config.sh`
+#: defaults `confirm_sender_match` to `off`, so a profile that also asked for
+#: `off` would render the same line whether or not `docker-compose.yml` passed
+#: the variable through — and the assertion that the passthrough works would
+#: hold against the reverted compose file. `verify` is a value the shell default
+#: is not.
+#:
+#: The second is that `verify` is the mode worth exercising on the shape that
+#: has a real boot behind it: it needs `authserv_id` set, refuses to start
+#: without it, and decides between a message that runs and one that is held on
+#: the strength of a header. That is two of this stage's settings interacting,
+#: which is exactly what neither could do before compose passed them.
+FULL_CONFIG = {**MAIL_CONFIG, "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify"}
+
+FULL = Profile(
+    "full",
+    shape="full",
+    services=("model", "nextcloud", "mail"),
+    config=FULL_CONFIG,
+    compose_overlays=(MAIL_OVERLAY,),
+)
+
+# The lean deployed mail path: a real mail server, a real daemon polling it, and
+# no Nextcloud. `poll_emails` needs none for attachment-free mail, so everything
+# except the attachment upload is reachable thirty seconds after `up` rather
+# than a minute.
+MAIL = Profile(
+    "mail",
+    services=("model", "mail"),
+    config=MAIL_CONFIG,
+    compose_overlays=(MAIL_OVERLAY,),
+)
 
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
-ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, FULL)
+ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, NOTIFY, FEEDS, MAIL, FULL)
 
 
 def by_name(name: str) -> Profile:

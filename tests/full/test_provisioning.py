@@ -41,6 +41,17 @@ import pytest
 from testbed import profiles
 from testbed import stack as compose_support
 
+# One definition of the mask probe, not two. It is the lean tier's scenario
+# that owns it — the spec puts the sandbox assertions there, on cost grounds —
+# and importing it here is what stops the full shape's copy drifting into a
+# weaker version of the same check. `tests/smoke/conftest.py` already reaches
+# across packages the same way, into `tests/image`.
+from ..smoke.test_sandbox_in_stack import (
+    CONTAINER_DB_DIR,
+    MASK_SCRIPT,
+    probe_output,
+)
+
 pytestmark = pytest.mark.full
 
 #: Where `entrypoint.sh` persists the tokens it provisioned. Deleting it is how
@@ -143,6 +154,80 @@ class TestFirstInstallProvisioning:
         user_mount = by_path.get(user_path)
         assert user_mount is not None, f"no {user_path} mount among {sorted(by_path)}"
         assert user_mount.get("applicable_users") == ["testuser"], user_mount
+
+    def test_both_external_mounts_permit_sharing(self, provisioned):
+        """`enable_sharing` defaults to *false* on a `files_external` mount.
+
+        Left at the default it refuses every share of everything under
+        `/mnt/shared`, which is the bot's entire workspace: the bot cannot hand
+        anyone a file it produced and the `nextcloud` skill's `share link` verb
+        answers "You are not allowed to share". So `provision-nc.sh` turns it on
+        for both mounts it creates — the bot's, so the bot can share its own
+        output, and the user's, so the user can share out of their own view of
+        the workspace.
+
+        Read off `occ files_external:list` rather than inferred from a
+        successful share: this is the setting, and a share that happens to work
+        for another reason would report the setting as present.
+        """
+        mounts = _nextcloud(provisioned).external_mounts()
+        by_path = {mount.get("configuration", {}).get("datadir", ""): mount
+                   for mount in mounts}
+
+        for path in ("/mnt/shared", "/mnt/shared/Users/testuser/istota"):
+            mount = by_path.get(path)
+            assert mount is not None, f"no {path} mount among {sorted(by_path)}"
+            options = mount.get("options") or {}
+            assert "enable_sharing" in options, (
+                f"occ reports no enable_sharing option for {path}; the whole "
+                f"mount row is {mount}"
+            )
+            assert options["enable_sharing"] is True, (path, options)
+
+    def test_the_boot_does_not_try_to_share_the_bot_dir_back(self, provisioned):
+        """`[nextcloud] auto_share_bot_dir = false`, witnessed on a real boot.
+
+        `ensure_user_directories_v2` shares the bot workspace back to the user
+        over OCS every time the daemon starts, and on bare metal that share is
+        how the user gets the directory at all. This shape does not need it:
+        `provision-nc.sh:74` already mounts the very same directory into the
+        user's tree at first provisioning. Before the guard the call failed on
+        every boot and logged a warning; with sharing now enabled on the mount
+        it would instead succeed and hand the user a second copy of their
+        workspace, under the received-share name rather than the mount name.
+
+        Both halves are asserted because either alone is satisfiable the wrong
+        way: a silent log with the share still made, or a suppressed share on a
+        boot that never reached that code.
+        """
+        daemon_log = provisioned.logs(4000)
+        assert "Failed to share folder" not in daemon_log, (
+            "the boot still attempts the OCS share-back:\n"
+            + "\n".join(
+                line for line in daemon_log.splitlines()
+                if "share folder" in line
+            )
+        )
+
+        nextcloud = _nextcloud(provisioned)
+        received = [
+            row for row in nextcloud.shares(user="testuser", shared_with_me=True)
+            if (row.get("file_target") or "").strip("/").lower().startswith("istota")
+        ]
+        assert received == [], (
+            "the bot workspace arrived as a received share as well as a mount: "
+            f"{[row.get('file_target') for row in received]}"
+        )
+
+        user_tree = nextcloud.files("", user="testuser", depth="1")
+        workspace = [
+            entry for entry in user_tree
+            if entry.strip("/").lower().replace("_", " ") == "istota"
+        ]
+        assert len(workspace) == 1, (
+            f"the bot workspace appears {len(workspace)} times in the user's "
+            f"file list: {user_tree}"
+        )
 
     def test_the_directory_structure_is_present(self, provisioned):
         """`Channels/` and the pre-created bot workspace directory.
@@ -363,6 +448,48 @@ class TestTheDaemonTheDeploymentActuallyStarts:
         assert marker in transcript, (
             "the Bash tool result never came back, so the tool call did not run "
             "inside the sandbox\n" + provisioned.diagnostics(task)
+        )
+
+    def test_the_database_masks_are_in_the_namespace_on_this_shape_too(
+        self, provisioned
+    ):
+        """The witness above is not one, and this is the correction.
+
+        A task whose sandbox was *skipped* runs the same command through the
+        same shell and returns the same bytes, so the assertion above holds
+        just as well with bwrap disabled — which is the state both container
+        shapes were in until Stage 7. What distinguishes them is the mask, and
+        it is asserted here rather than only on the lean shape because the full
+        shape's two `security_opt` concessions are otherwise checked by parsing
+        the compose model: if Docker ignored one, every task here would go back
+        to running unconfined and nothing would say so.
+
+        The probe is imported from the lean scenario rather than copied. Any
+        divergence between the two shapes' idea of what a mask looks like is a
+        divergence this file could not report.
+        """
+        provisioned.reset(MASK_SCRIPT)
+        task_id = provisioned.submit("look at the database directory")
+
+        task = provisioned.probe.wait_for_task(
+            status="completed", task_id=task_id, timeout=240
+        )
+
+        assert task["status"] == "completed", provisioned.diagnostics(task)
+        observed = probe_output(provisioned)
+        assert "fstype=tmpfs" in observed, (
+            f"{CONTAINER_DB_DIR} inside the task is not a tmpfs, so this "
+            "deployment is running its tasks unsandboxed. Check the daemon log "
+            "for `Sandbox enabled but bubblewrap unavailable`, and check that "
+            "both `seccomp:unconfined` and `systempaths=unconfined` reached the "
+            f"container.\n--- probe ---\n{observed}\n"
+            + provisioned.diagnostics(task)
+        )
+        assert "framework_db=unreadable" in observed, (
+            f"the framework database is readable from inside a task\n{observed}"
+        )
+        assert "writable=no" in observed, (
+            f"the mask is writable, so `--remount-ro` was not applied\n{observed}"
         )
 
     def test_no_real_brain_credential_reaches_the_container(self, provisioned):

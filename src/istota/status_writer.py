@@ -24,6 +24,14 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
 
     The NC app reads ``config/status.json`` from the bot user's file tree
     (via ``IRootFolder::getUserFolder``), so we PUT it there directly.
+
+    That is why it is one of the two callers passing ``prefixed=False``. The
+    subject here is the *account* root, not the daemon's storage root, and on a
+    deployment where those differ — one reaching its storage through an
+    external-storage mount — the prefixed path lands on the mount, where
+    ``getUserFolder`` does not look, and ``MKCOL config`` leaves a stray
+    directory on the volume next to ``Users/`` and ``Channels/``. On the
+    rclone-mount deploy the two are the same directory and nothing changes.
     """
     nc = config.nextcloud
     if not nc.url or not nc.username:
@@ -55,14 +63,14 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
         dav_request(
             config,
             "MKCOL",
-            dav_files_url(config, "config"),
+            dav_files_url(config, "config", prefixed=False),
             timeout=10.0,
             ok_statuses=(201, 405),
         )
         dav_request(
             config,
             "PUT",
-            dav_files_url(config, "config/status.json"),
+            dav_files_url(config, "config/status.json", prefixed=False),
             content=json.dumps(status, indent=2),
             headers={"Content-Type": "application/json"},
             timeout=10.0,

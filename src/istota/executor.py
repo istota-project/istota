@@ -992,6 +992,45 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
 
 _bwrap_checked: bool | None = None
 
+#: Whether this host's bwrap needs ``--unshare-user`` spelled out.
+#:
+#: Set by ``_bwrap_available`` and read through ``_bwrap_requires_unshare_user``.
+#: False until the probe has run and found otherwise, so a host where the plain
+#: probe already succeeds is left exactly as it was.
+_bwrap_needs_unshare_user: bool = False
+
+#: The mount operations the availability probe performs, which are the ones
+#: ``build_bwrap_cmd`` performs unconditionally on every sandbox it builds.
+#:
+#: **A probe that answers for less than the command it gates is not a probe.**
+#: This used to be `--ro-bind / /` alone, which asks only whether the kernel
+#: will hand out a mount namespace — and a container can answer yes to that and
+#: still refuse `mount("proc")` inside it, because Docker's masked `/proc`
+#: entries and read-only `/proc/sys` make the container's procfs not "fully
+#: visible" and the kernel then blocks a fresh procfs in a nested user
+#: namespace. Measured on the shipped image: with `seccomp:unconfined` alone,
+#: `bwrap --unshare-user --ro-bind / / -- true` exits 0 and the same command
+#: with these mounts exits 1 at "Can't mount proc on /newroot/proc". A daemon
+#: that trusted the narrow probe there would report a working sandbox, set
+#: ``ISTOTA_SANDBOXED``, and then fail every task — which is worse than the
+#: silent fallback it replaced.
+#:
+#: `tests/test_sandbox_db_isolation.py` holds this against the real argv, so a
+#: mount added to `build_bwrap_cmd`'s unconditional set and not to this one
+#: fails in the default suite rather than on somebody's host.
+_BWRAP_PROBE_MOUNTS = [
+    "--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+]
+
+#: The whole probe argv: something to be a root, plus the mounts above.
+#:
+#: The root bind is the probe's own scaffolding and is deliberately *not* in
+#: the list above. `build_bwrap_cmd` binds selectively — `/usr`, a handful of
+#: `/etc` entries, the task's own workspace — and never `--ro-bind / /`, so a
+#: guard that required the real argv to contain the probe's root would be
+#: asserting the sandbox is broader than it is.
+_BWRAP_PROBE_ARGS = ["--ro-bind", "/", "/", *_BWRAP_PROBE_MOUNTS]
+
 
 def _release_task_cgroup(task_id: int, path: Path) -> None:
     """Give a task's cgroup back, naming an OOM kill on the way out (A6).
@@ -1038,10 +1077,33 @@ def _release_task_cgroup(task_id: int, path: Path) -> None:
 def _bwrap_available() -> bool:
     """Check if bwrap can create namespaces (cached after first call).
 
-    Returns False on non-Linux, when bwrap is not installed, or inside
-    containers without CAP_SYS_ADMIN / user namespace support.
+    Returns False on non-Linux, when bwrap is not installed, or where the
+    kernel refuses the namespaces bwrap needs.
+
+    **Probed twice, and the second probe is the one that matters as root.**
+    bwrap only forces ``CLONE_NEWUSER`` on itself when it is neither setuid nor
+    running as uid 0 — so an unprivileged daemon gets a user namespace whether
+    or not anybody asked, and a daemon running as *root without CAP_SYS_ADMIN*
+    does not. The plain probe then fails at ``unshare(CLONE_NEWNS)`` with
+    "Creating new namespace failed: Operation not permitted", the whole sandbox
+    is disabled for the process, and every task runs unconfined behind one
+    warning line. That is what every task in a Docker deployment was doing:
+    measured inside the shipped image, ``bwrap --ro-bind / / -- true`` exits 1
+    and ``bwrap --unshare-user --ro-bind / / -- true`` exits 0.
+
+    So a failed plain probe is retried with ``--unshare-user`` spelled out, and
+    the answer is remembered — `build_bwrap_cmd` and `_bwrap_supports` both
+    have to pass the same flag, or they would build an argv the probe never
+    tested. Order matters: the plain probe runs first, so a host where the
+    sandbox already worked is answered by exactly the command it was answered
+    by before and nothing about it changes.
+
+    Both probes carry `_BWRAP_PROBE_ARGS`, which performs the unconditional
+    mount set `build_bwrap_cmd` emits rather than the bare root bind this
+    used to ask about. See `_BWRAP_PROBE_MOUNTS` for why the narrower
+    question has a wrong answer on a container.
     """
-    global _bwrap_checked
+    global _bwrap_checked, _bwrap_needs_unshare_user
     if _bwrap_checked is not None:
         return _bwrap_checked
 
@@ -1057,22 +1119,53 @@ def _bwrap_available() -> bool:
         _bwrap_checked = False
         return False
 
+    def _probe(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(argv, capture_output=True, timeout=5)
+
     try:
-        result = subprocess.run(
-            ["bwrap", "--ro-bind", "/", "/", "--", "true"],
-            capture_output=True, timeout=5,
+        plain = _probe(["bwrap", *_BWRAP_PROBE_ARGS, "--", "true"])
+        if plain.returncode == 0:
+            _bwrap_checked = True
+            return True
+
+        explicit = _probe(
+            ["bwrap", "--unshare-user", *_BWRAP_PROBE_ARGS, "--", "true"]
         )
-        _bwrap_checked = result.returncode == 0
-        if not _bwrap_checked:
-            logger.warning(
-                "Sandbox skipped: bwrap namespace creation failed "
-                "(container without CAP_SYS_ADMIN?): %s",
-                result.stderr.decode(errors="replace").strip(),
+        if explicit.returncode == 0:
+            _bwrap_needs_unshare_user = True
+            _bwrap_checked = True
+            logger.info(
+                "bwrap needs --unshare-user spelled out on this host (it "
+                "declines to unshare the user namespace on its own as uid 0); "
+                "adding it. The plain probe said: %s",
+                plain.stderr.decode(errors="replace").strip(),
             )
+            return True
+
+        _bwrap_checked = False
+        logger.warning(
+            "Sandbox skipped: bwrap namespace creation failed both without and "
+            "with --unshare-user (kernel without unprivileged user namespaces, "
+            "or a container blocking the syscall): %s / %s",
+            plain.stderr.decode(errors="replace").strip(),
+            explicit.stderr.decode(errors="replace").strip(),
+        )
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.warning("Sandbox skipped: bwrap probe failed: %s", exc)
         _bwrap_checked = False
     return _bwrap_checked
+
+
+def _bwrap_requires_unshare_user() -> bool:
+    """Whether every bwrap argv on this host has to carry ``--unshare-user``.
+
+    Calls `_bwrap_available` rather than reading the global directly, because
+    the global is only meaningful once the probe has run and callers reach this
+    from several places that may each be first.
+    """
+    if not _bwrap_available():
+        return False
+    return _bwrap_needs_unshare_user
 
 
 _bwrap_flag_support: dict[str, bool] = {}
@@ -1128,6 +1221,18 @@ def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
     for anything but hardening. Locked because scheduler workers build their
     first sandbox concurrently, and an unlocked probe is N subprocesses and N
     log lines for one question.
+
+    ``--unshare-user`` is prepended where `_bwrap_available` found the host
+    needs it, for the same reason that function retries with it: without the
+    flag *every* probe here fails at namespace creation rather than at the flag
+    under test, so a supported flag reports unsupported. Fixing
+    `_bwrap_available` alone would have left that true — the sandbox would have
+    started and ``--remount-ro`` would have reported unsupported, leaving the
+    database masks writable, which is the one thing the read-only mask exists
+    to prevent.
+
+    Through `_bwrap_requires_unshare_user` rather than the global, so the two
+    places that have to agree about this flag agree through one accessor.
     """
     with _bwrap_probe_lock:
         cached = _bwrap_flag_support.get(flag)
@@ -1136,6 +1241,9 @@ def _bwrap_supports(flag: str, probe_args: list[str]) -> bool:
         if not _bwrap_available():
             _bwrap_flag_support[flag] = False
             return False
+
+        if _bwrap_requires_unshare_user() and "--unshare-user" not in probe_args:
+            probe_args = ["--unshare-user", *probe_args]
 
         supported = False
         try:
@@ -2324,6 +2432,15 @@ def build_bwrap_cmd(
         # bwrap unshares the user namespace regardless, so on the supported
         # deployment the companion flag only makes the request explicit.
         args.extend(["--unshare-user", "--disable-userns"])
+    elif _bwrap_requires_unshare_user():
+        # Not hardening, unlike the branch above: on this host it is what makes
+        # bwrap run at all. `_bwrap_available`'s plain probe failed and its
+        # `--unshare-user` probe succeeded, which happens as uid 0 with a
+        # non-setuid bwrap — bwrap only forces the user namespace on itself
+        # when it is neither. The real argv has to carry the flag the probe was
+        # answered with, or the daemon would report a working sandbox and then
+        # build one that cannot start.
+        args.append("--unshare-user")
 
     # --- Lifecycle ---
     chdir_target = workspace_resolved or user_temp_dir.resolve()

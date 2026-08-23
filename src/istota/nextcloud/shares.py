@@ -14,7 +14,16 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from ..config import Config
-from ._http import DEFAULT_TIMEOUT, OcsError, ocs_get, ocs_post, ocs_put, ocs_request
+from ._http import (
+    DEFAULT_TIMEOUT,
+    OcsError,
+    from_remote_path,
+    ocs_get,
+    ocs_post,
+    ocs_put,
+    ocs_request,
+    to_remote_path,
+)
 
 SHARES_PATH = "/apps/files_sharing/api/v1/shares"
 
@@ -33,6 +42,30 @@ LINK_SHARE_TYPE = 3
 _PASSWORD_ALPHABET = string.ascii_letters + string.digits
 
 
+def relabel(config: Config, share: dict) -> dict:
+    """A share row with its ``path`` back in logical terms.
+
+    The mapping has to be inverted here as well as applied on the way out,
+    because a share row is *read* by the skill and the model, which speak the
+    logical `/Users/{uid}` vocabulary and nothing else. Left prefixed, a path
+    from `share list` cannot be fed to `share revoke --path` or `files stat`:
+    `resolve_scoped_path` refuses it as outside the caller's workspace, and for
+    an admin, whom it lets through, it would be prefixed a second time.
+
+    Only a share the bot owns is rewritten. A `shared_with_me` row names a path
+    in the *recipient's* tree, which the bot's mount point has nothing to do
+    with, and stripping a coincidental match there would corrupt it.
+    """
+    if not isinstance(share, dict):
+        return share
+    if share.get("uid_owner") != config.nextcloud.username:
+        return share
+    path = share.get("path")
+    if not isinstance(path, str):
+        return share
+    return {**share, "path": from_remote_path(config, path)}
+
+
 def generate_password(length: int = 20) -> str:
     """A random link password. Returned to the caller — it has to be tellable."""
     return "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(length))
@@ -49,7 +82,9 @@ def list_shares(
 ) -> list[dict]:
     params: dict[str, str] = {}
     if path is not None:
-        params["path"] = path
+        # OCS names a file by a path relative to the sharer's own root, so the
+        # logical path needs the same mapping a DAV URL gets.
+        params["path"] = to_remote_path(config, path)
     if reshares:
         params["reshares"] = "true"
     if subfiles:
@@ -57,7 +92,7 @@ def list_shares(
     if shared_with_me:
         params["shared_with_me"] = "true"
     data = ocs_get(config, SHARES_PATH, params=params, timeout=timeout)
-    return list(data or [])
+    return [relabel(config, row) for row in (data or [])]
 
 
 def get_share(config: Config, share_id: int, timeout: float = DEFAULT_TIMEOUT) -> dict:
@@ -67,8 +102,8 @@ def get_share(config: Config, share_id: int, timeout: float = DEFAULT_TIMEOUT) -
             raise OcsError(
                 f"No share with id {share_id}", None, 404, f"{SHARES_PATH}/{share_id}"
             )
-        return data[0]
-    return data if isinstance(data, dict) else {}
+        return relabel(config, data[0])
+    return relabel(config, data) if isinstance(data, dict) else {}
 
 
 def create_share(
@@ -86,7 +121,7 @@ def create_share(
     attributes: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict:
-    data: dict[str, Any] = {"path": path, "shareType": share_type}
+    data: dict[str, Any] = {"path": to_remote_path(config, path), "shareType": share_type}
     if share_with is not None:
         data["shareWith"] = share_with
     if permissions is not None:
@@ -104,7 +139,7 @@ def create_share(
     if attributes is not None:
         data["attributes"] = attributes
     result = ocs_post(config, SHARES_PATH, data=data, timeout=timeout)
-    return result if isinstance(result, dict) else {}
+    return relabel(config, result) if isinstance(result, dict) else {}
 
 
 #: Order matters: the sharing API historically accepts one field per PUT, so

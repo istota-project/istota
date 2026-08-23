@@ -552,6 +552,251 @@ class TestDisableUserns:
         assert cmd.index("--unshare-user") < cmd.index("--disable-userns")
 
 
+class TestBwrapAvailabilityProbe:
+    """Whether the sandbox runs at all, and what argv the answer commits to.
+
+    The probe used to be one command — `bwrap --ro-bind / / -- true` — and that
+    command is answered by whether bwrap decided to unshare the user namespace
+    on its own. It does that when it is neither setuid nor uid 0, which is
+    every bare-metal deployment and no container: the shipped image runs as
+    root without CAP_SYS_ADMIN, so the probe failed at
+    `unshare(CLONE_NEWNS)`, the daemon logged one warning and ran **every task
+    unsandboxed**. Measured inside the image: plain exits 1, the same command
+    with `--unshare-user` exits 0.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        from istota import executor
+
+        saved = (executor._bwrap_checked, executor._bwrap_needs_unshare_user)
+        executor._bwrap_checked = None
+        executor._bwrap_needs_unshare_user = False
+        with patch.dict(executor._bwrap_flag_support, {}, clear=True):
+            yield
+        executor._bwrap_checked, executor._bwrap_needs_unshare_user = saved
+
+    def _run_probes(self, *results):
+        """Patch `subprocess.run` to answer each probe in turn, recording argv."""
+        from istota import executor
+
+        recorded: list[list[str]] = []
+        answers = list(results)
+
+        def fake_run(cmd, **kwargs):
+            recorded.append(list(cmd))
+            return answers.pop(0)
+
+        ctx = patch("istota.executor.subprocess.run", fake_run)
+        return recorded, ctx, executor
+
+    def test_a_host_where_the_plain_probe_works_is_left_alone(self):
+        """No second probe, no flag, nothing about that host changes."""
+        recorded, ctx, executor = self._run_probes(
+            SimpleNamespace(returncode=0, stderr=b""),
+        )
+        with patch("istota.executor.sys.platform", "linux"), \
+                patch("shutil.which", return_value="/usr/bin/bwrap"), ctx:
+            assert executor._bwrap_available() is True
+            assert executor._bwrap_requires_unshare_user() is False
+
+        assert len(recorded) == 1, recorded
+        assert "--unshare-user" not in recorded[0]
+
+    def test_a_plain_failure_is_retried_with_unshare_user(self, caplog):
+        recorded, ctx, executor = self._run_probes(
+            SimpleNamespace(
+                returncode=1,
+                stderr=b"bwrap: Creating new namespace failed: Operation not permitted",
+            ),
+            SimpleNamespace(returncode=0, stderr=b""),
+        )
+        with caplog.at_level("INFO"), \
+                patch("istota.executor.sys.platform", "linux"), \
+                patch("shutil.which", return_value="/usr/bin/bwrap"), ctx:
+            assert executor._bwrap_available() is True
+            assert executor._bwrap_requires_unshare_user() is True
+
+        assert len(recorded) == 2, recorded
+        assert "--unshare-user" in recorded[1]
+        # The reason the first probe gave, so a reader of the log can tell this
+        # host apart from one where bwrap simply works.
+        assert any(
+            "Operation not permitted" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_both_probes_failing_is_still_no_sandbox(self, caplog):
+        recorded, ctx, executor = self._run_probes(
+            SimpleNamespace(returncode=1, stderr=b"first reason"),
+            SimpleNamespace(returncode=1, stderr=b"second reason"),
+        )
+        with caplog.at_level("WARNING"), \
+                patch("istota.executor.sys.platform", "linux"), \
+                patch("shutil.which", return_value="/usr/bin/bwrap"), ctx:
+            assert executor._bwrap_available() is False
+            assert executor._bwrap_requires_unshare_user() is False
+
+        assert len(recorded) == 2, recorded
+        message = " ".join(record.getMessage() for record in caplog.records)
+        # Both reasons, because "it failed" is the same sentence for a kernel
+        # with user namespaces switched off and a container blocking the call.
+        assert "first reason" in message and "second reason" in message
+
+    def test_the_flag_probes_carry_it_too(self):
+        """Otherwise a supported flag reports unsupported on this host.
+
+        This is not cosmetic. `--remount-ro` is what makes the database mask
+        read-only, and its probe carries no `--unshare-user` of its own — so on
+        a host needing the flag the probe fails at namespace creation, the mask
+        stays writable, and a `sqlite3` probe against it creates a zero-byte
+        file and answers "no such table", which reads as a corrupt database
+        rather than as a boundary.
+        """
+        from istota import executor
+
+        recorded: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            recorded.append(list(cmd))
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        executor._bwrap_needs_unshare_user = True
+        with patch("istota.executor._bwrap_available", return_value=True), \
+                patch("istota.executor.subprocess.run", fake_run):
+            assert executor._bwrap_supports("--remount-ro", ["--remount-ro"]) is True
+
+        assert recorded[0][:2] == ["bwrap", "--unshare-user"], recorded
+
+    def test_it_is_not_added_twice(self):
+        """`--disable-userns`'s probe already names it."""
+        from istota import executor
+
+        recorded: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            recorded.append(list(cmd))
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        executor._bwrap_needs_unshare_user = True
+        with patch("istota.executor._bwrap_available", return_value=True), \
+                patch("istota.executor.subprocess.run", fake_run):
+            executor._bwrap_supports_disable_userns()
+
+        assert recorded[0].count("--unshare-user") == 1, recorded[0]
+
+    def test_no_probe_at_all_off_linux(self):
+        recorded, ctx, executor = self._run_probes()
+        with patch("istota.executor.sys.platform", "darwin"), ctx:
+            assert executor._bwrap_available() is False
+        assert recorded == []
+
+    def test_the_probe_performs_the_mounts_the_real_argv_performs(
+        self, iso_config, iso_task
+    ):
+        """A probe that answers for less than the command it gates is not one.
+
+        The original probe was `--ro-bind / / -- true`, which asks only whether
+        the kernel will hand out a mount namespace. A container can answer yes
+        to that and still refuse `mount("proc")` inside it — Docker's masked
+        `/proc` entries and read-only `/proc/sys` make the container's procfs
+        not "fully visible", and the kernel then blocks a fresh procfs in a
+        nested user namespace. Measured on the shipped image with
+        `seccomp:unconfined` alone: `bwrap --unshare-user --ro-bind / / -- true`
+        exits 0, and the same command carrying these mounts exits 1 at "Can't
+        mount proc on /newroot/proc".
+
+        The consequence of getting this wrong is worse than the bug it would
+        replace. `_bwrap_available` gates `ISTOTA_SANDBOXED`, the prompt's
+        "the databases are not on your filesystem" rule and `build_bwrap_cmd`
+        itself, so a False positive reports a working sandbox and then fails
+        every task — where the narrow-probe *negative* merely ran unconfined.
+        """
+        from istota import executor
+
+        argv = _bwrap(iso_config, iso_task, True)
+
+        # Pairwise rather than by set membership: `--proc /proc` and
+        # `--tmpfs /tmp` are (flag, path) pairs, and a check that only looked
+        # for the flags would pass on a probe mounting a procfs somewhere else.
+        probe = executor._BWRAP_PROBE_MOUNTS
+        for index, token in enumerate(probe):
+            if not token.startswith("--"):
+                continue
+            operand = probe[index + 1] if index + 1 < len(probe) else None
+            positions = [i for i, real in enumerate(argv) if real == token]
+            assert positions, (
+                f"the availability probe performs {token}, which "
+                f"build_bwrap_cmd does not — the probe is answering a "
+                "different question than the command it gates"
+            )
+            if operand is not None and not operand.startswith("--"):
+                assert any(argv[i + 1] == operand for i in positions), (
+                    f"the probe performs `{token} {operand}` and the real argv "
+                    f"never does"
+                )
+
+
+class TestUnshareUserReachesTheRealArgv:
+    """The probe and the command it gates have to agree.
+
+    A probe answered with `--unshare-user` and a command built without it is
+    the worst of the three outcomes: the daemon reports a working sandbox and
+    then builds one that cannot start, so every task fails where before every
+    task merely ran unconfined.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        from istota import executor
+
+        saved = executor._bwrap_needs_unshare_user
+        yield
+        executor._bwrap_needs_unshare_user = saved
+
+    def test_the_flag_is_emitted_when_the_probe_needed_it(
+        self, iso_config, iso_task
+    ):
+        with patch(
+            "istota.executor._bwrap_supports_disable_userns", return_value=False
+        ), patch(
+            "istota.executor._bwrap_requires_unshare_user", return_value=True
+        ):
+            argv = _bwrap(iso_config, iso_task, True)
+
+        assert "--unshare-user" in argv
+        assert argv.index("--unshare-user") < argv.index("--")
+        # Alone, because this branch is the one where the other probe said no —
+        # passing an unsupported flag makes bwrap exit before it runs anything,
+        # which would fail every task on the host the branch exists for.
+        assert "--disable-userns" not in argv
+
+    def test_it_is_not_emitted_where_bwrap_unshares_on_its_own(
+        self, iso_config, iso_task
+    ):
+        """The bare-metal deployment, which this change must not touch."""
+        with patch(
+            "istota.executor._bwrap_supports_disable_userns", return_value=False
+        ), patch(
+            "istota.executor._bwrap_requires_unshare_user", return_value=False
+        ):
+            argv = _bwrap(iso_config, iso_task, True)
+
+        assert "--unshare-user" not in argv
+
+    def test_the_hardening_branch_still_wins(self, iso_config, iso_task):
+        """One `--unshare-user`, not two, when both reasons apply."""
+        with patch(
+            "istota.executor._bwrap_supports_disable_userns", return_value=True
+        ), patch(
+            "istota.executor._bwrap_requires_unshare_user", return_value=True
+        ):
+            argv = _bwrap(iso_config, iso_task, True)
+
+        assert argv.count("--unshare-user") == 1
+        assert "--disable-userns" in argv
+
+
 class TestBwrapFlagProbe:
     """The probe is the only gate on whether a hardening flag is applied."""
 

@@ -147,6 +147,24 @@ def _nextcloud_service(*args, **kwargs) -> Service:
     return nextcloud.attach(*args, **kwargs)
 
 
+def _mail_service(*args, **kwargs) -> Service:
+    from . import mail
+
+    return mail.serve(*args, **kwargs)
+
+
+def _ntfy_service(*args, **kwargs) -> Service:
+    from . import ntfy
+
+    return ntfy.serve(*args, **kwargs)
+
+
+def _feeds_service(*args, **kwargs) -> Service:
+    from . import feeds
+
+    return feeds.serve(*args, **kwargs)
+
+
 #: Profile service names to the factory that produces one. A profile names
 #: services by string, so a typo is a `KeyError` at fixture setup rather than an
 #: import error; `tests/test_testbed_services.py` closes that by checking every
@@ -155,6 +173,9 @@ REGISTRY: dict[str, Callable[..., Service]] = {
     "model": _model_service,
     "gitlab": _gitlab_service,
     "nextcloud": _nextcloud_service,
+    "mail": _mail_service,
+    "ntfy": _ntfy_service,
+    "feeds": _feeds_service,
 }
 
 #: Registry names that open a listening socket in the pytest process.
@@ -166,13 +187,16 @@ REGISTRY: dict[str, Callable[..., Service]] = {
 #: binds nothing has no such hazard and no credential to publish, so a guard
 #: iterating `REGISTRY` and demanding one of every member would be asserting
 #: something false about half of it.
-HOST_STUBS = frozenset({"model", "gitlab"})
+HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds"})
 
-#: Registry names that attach to something the compose stack already runs.
+#: Registry names that attach to something a compose file already runs.
 #:
-#: One member so far, and the shape it establishes is what the spec's `mail`
-#: service will join: a real server we control rather than one we wrote.
-ATTACHED = frozenset({"nextcloud"})
+#: Both are real servers we control rather than ones we wrote, which is the
+#: distinction this package draws between a service and a stub. `nextcloud` is
+#: declared by the shipped compose file; `mail` is added by the profile's own
+#: overlay. Neither opens a socket in the pytest process, so neither has a
+#: credential to publish and the credential rule does not reach them.
+ATTACHED = frozenset({"nextcloud", "mail"})
 
 
 def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
@@ -238,6 +262,34 @@ def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
             stub.close()
             raise
         return stub
+
+    if name == "ntfy":
+        from . import ntfy
+
+        # The token is the service's own, and it is *checked* — see `serve`.
+        # The fixture reads it back off the service and seeds the same value
+        # into the container's secrets store, so the two cannot drift.
+        return ntfy.serve(host=host, credential=ntfy.NTFY_TOKEN)
+
+    if name == "feeds":
+        from . import feeds
+
+        # Nothing is registered here. A feed document is per-scenario — the
+        # test adds it and seeds the matching row — and `reset()` clears the
+        # registry between tests for the same reason `GitLabService.reset`
+        # rebuilds its repositories rather than clearing them: a stack whose
+        # documents were added at boot would lose them at the first reset.
+        return feeds.serve(host=host, credential=feeds.FEEDS_CREDENTIAL)
+
+    if name == "mail":
+        from . import mail
+
+        # Starts nothing: the profile's mail overlay runs the container inside
+        # the compose project, where the daemon reaches it as `mail` on the
+        # standard ports — which is what keeps istota's port-based TLS branch
+        # under test. What this produces is the certificate that overlay binds
+        # and the variables that point the shipped generator at the server.
+        return mail.serve(scratch / "mail")
 
     if name == "nextcloud":
         from . import nextcloud

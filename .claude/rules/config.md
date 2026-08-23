@@ -16,7 +16,37 @@ rotate: bool = True          max_size_mb: int = 10       backup_count: int = 5
 ### `NextcloudConfig`
 ```
 url: str = ""                username: str = ""          app_password: str = ""
+share_default_expire_days: int = 14
+dav_prefix: str = ""         auto_share_bot_dir: bool = True
 ```
+
+`dav_prefix` is where the daemon's storage root sits inside the *bot account's*
+Nextcloud file tree. Blank on bare metal, because they are the same directory:
+the rclone remote points at `remote.php/dav/files/<bot>/` and is mounted at
+`nextcloud_mount_path`, so `/Users/alice` on disk is `/Users/alice` over DAV. On
+the Docker shape `/mnt/shared` is an ordinary volume Nextcloud serves through a
+`files_external` mount, so the same directory is `/Shared Files/Users/alice` to
+the bot; compose owns that mount name (`x-shared-mount-name`) and hands it to
+`provision-nc.sh` and to the daemon as `ISTOTA_NEXTCLOUD_DAV_PREFIX`.
+
+**Where it is applied, and the two places it must not be.** The mapping is
+`nextcloud._http.to_remote_path`, called from the DAV URL builder, the SEARCH
+scope href and the OCS share `path`, with `dav.href_to_path` as the inverse —
+so a path coming back is logical again and `list_dir`'s own filter still
+matches. Not on `storage.BOT_USER_BASE`: `_get_mount_path` builds on-disk paths
+from the same helper and would write to `/mnt/shared/Shared Files/Users/…`. Not
+inside `resolve_scoped_path`: that is the confinement boundary keeping the skill
+in the caller's workspace, and it keeps speaking logical `/Users/{uid}`. The
+skill CLI is a subprocess with a manifest-built environment, so it carries the
+value as `NC_DAV_PREFIX` (`skills/nextcloud/skill.md`) rather than inheriting a
+Config.
+
+`auto_share_bot_dir` gates the boot-time OCS share of the bot workspace back to
+the user in `ensure_user_directories_v2`. True on bare metal, where that share
+is how the user gets the directory. False on Docker, set as a compose *literal*
+rather than an interpolation: `provision-nc.sh` already mounts the same
+directory into the user's tree at provisioning, so the share would hand them a
+second copy of it under the received-share name.
 
 ### `TalkConfig`
 ```

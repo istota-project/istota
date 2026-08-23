@@ -2,7 +2,7 @@
 
 Istota uses TDD with pytest and pytest-asyncio. The Python suite has roughly 13,900 tests across ~414 files; the frontend has its own vitest suite under `web/`.
 
-Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The five discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
+Almost all of those tests assert against Python objects on a developer's host, which for most people is macOS. That is the right default and it has one blind spot: it cannot observe what actually runs in production — a built image, a rendered `config.toml`, a `PATH`, a bubblewrap namespace. The six discretionary tiers under "Deployment tiers" below cover that, and none of them runs unless you ask for it.
 
 ## What to install
 
@@ -37,7 +37,7 @@ uv run pytest tests/ --cov=istota --cov-report=term-missing  # coverage
 
 Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their worker pool from `cpu_count()`, so each run claims the whole machine — correct for one run and pathological for several, which is what happens with work spread across parallel git worktrees. `qtest` is a `flock` semaphore holding one machine-wide slot; it queues the run rather than letting three jobs ask for 36 workers on 12 cores. Every run ends with one verdict line on stderr — `qtest: PASS exit=0 time=3m41s cmd: uv run pytest`, or `FAIL`, or `KILLED-SIGKILL`, or `NO-SLOT` — so a run read through `| tail`, which reports the pipe's exit code rather than the suite's, still says plainly how it went; stdout is left untouched. Exit code 75 means no slot came free and the command did not run, which is not a test failure. A single test file needs no slot, and neither do `ruff`, `svelte-check` or `format:check`.
 
-Seven marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
+Eight marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
 |---|---|---|
@@ -47,37 +47,43 @@ Seven marker sets are deselected by default (also via `addopts`), each with a di
 | `image` | a Docker daemon | `uv run pytest -m image -n0` |
 | `smoke` | a Docker daemon | `uv run pytest -m smoke -n0` |
 | `full` | a Docker daemon, and the network — see below | `uv run pytest -m full -n0` |
+| `testbed` | a Docker daemon, and no istota image | `uv run pytest -m testbed -n0` |
 | `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
 
 **The cgroup tests need a subtree the driver builds.** `task_cgroup.resolve_root()` reads `/proc/self/cgroup` and truncates at the `.service` / `.scope` component; under Docker's default private cgroup namespace that file reads `0::/`, so it answers `None` however writable the tree is, and the `linux`-marked cgroup tests would skip inside the one runner meant to execute them. `scripts/dev/linux-tier-cgroup.sh`, sourced by the driver, remounts `/sys/fs/cgroup` read-write, empties the container's own cgroup into a `supervisor/` leaf (the `DelegateSubgroup=` shape — cgroup v2 will not let one cgroup both hold processes and enable controllers for its children), turns on the controllers, and exports `ISTOTA_TEST_CGROUP_ROOT` only after proving a `memory.max` write succeeds. The tests treat that variable as a promise: set and unusable is a failure, unset is an honest skip. So a Docker without `SYS_ADMIN` or with a read-only cgroup2 mount loses those tests and keeps the rest of the tier.
 
-An eighth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
+A ninth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
 `image`, `smoke` and `full` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. The conftest fails the session with that reason rather than letting it happen.
 
-**Two shapes, one seam.** `smoke` and `full` are the same fixtures over different compose files. The *lean* shape (`docker/docker-compose.test.yml`) is one container with the entrypoint bypassed and the config rendered on the host: seconds to boot, right for a subsystem whose external is an HTTP endpoint. The *full* shape (`docker/docker-compose.yml` plus `testbed/compose/testbed.yml`) is the deployment as shipped — postgres, redis, nextcloud, istota, web, nginx — booted through `entrypoint.sh` with the generator running inside the container. It is the only thing that executes `provision-nc.sh` or reaches the half of `entrypoint.sh` past the config write. Read `testbed/compose/testbed.yml` before adding to it: it is a list of harness concessions, and each one is there with its reason.
+**Two shapes, one seam.** `smoke` and `full` are the same fixtures over different compose files. The *lean* shape (`docker/docker-compose.test.yml`) is one container with the entrypoint bypassed and the config rendered on the host: seconds to boot, right for a subsystem whose external is an HTTP endpoint. The *full* shape (`docker/docker-compose.yml` plus `testbed/compose/testbed.yml`) is the deployment as shipped — postgres, redis, nextcloud, istota, web, nginx — booted through `entrypoint.sh` with the generator running inside the container. It is the only thing that executes `provision-nc.sh` or reaches the half of `entrypoint.sh` past the config write. Full detail on both, and on everything below, is in `.claude/rules/testbed.md`.
 
 **The full tier needs the network, and it is worth knowing which way that fails.** `provision-nc.sh` runs `app:enable spreed`, `calendar` and `files_external`; only the last is bundled in `nextcloud:30-apache`, and the other two are fetched from the app store at first install. Every `occ` call in that script is `|| true`, so an install with no network writes its provisioning flag and reports success having enabled nothing. `tests/full/test_provisioning.py` asserts outcomes by name for exactly that reason.
 
 ## Deployment tiers
 
-Five discretionary tiers, none of them automatic, each answering "does the artifact match what the code assumes?" rather than "does the code do the right thing?".
+Six discretionary tiers, none of them automatic. Five answer "does the artifact match what the code assumes?" rather than "does the code do the right thing?"; `testbed` is the exception and is described below.
 
 ```bash
 scripts/test-linux.sh                        # the suite + the linux tests, on a real kernel
 uv run pytest -m image -n0                   # the built image's contract
 uv run pytest -m smoke -n0                   # end-to-end against the lean compose stack
 uv run pytest -m full -n0                    # end-to-end against the full stack, incl. a real Nextcloud
+uv run pytest -m testbed -n0                 # wire-level email against a real IMAP/SMTP server
 scripts/test-upgrade.sh                      # the current image over an older release's state
 ```
 
-**All four need a Docker daemon that will create and start containers, so a sandboxed agent task cannot run any of them.** A task reaches Docker through the devbox allowlist proxy, which permits ping, version, container list, and inspect, archive, restart and exec against the task's own container — and nothing that creates or starts one. The Linux tier additionally wants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and unconfined seccomp, which is the exact capability the sandbox exists to deny. This is structural, not a misconfiguration: widening the allowlist to admit it would hand every task a host escape.
+**`testbed` is the odd one and is worth one paragraph.** It builds no istota image and brings up no stack: it runs a small mail server in a container and calls `poll_emails` and the email skill directly against it, over a local SQLite database. So it is not an artifact tier — it is the only place in the tree that opens a socket to a real IMAP or SMTP server, which is what inbound email routing, thread matching and the untrusted-sender gate have repeatedly needed and never had. It is deselected because it needs Docker, and it needs `-n0` because the mail container and its two mailboxes are session-scoped.
+
+**All of them need a Docker daemon that will create and start containers, so a sandboxed agent task cannot run any of them.** A task reaches Docker through the devbox allowlist proxy, which permits ping, version, container list, and inspect, archive, restart and exec against the task's own container — and nothing that creates or starts one. The Linux tier additionally wants `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and unconfined seccomp, which is the exact capability the sandbox exists to deny. This is structural, not a misconfiguration: widening the allowlist to admit it would hand every task a host escape.
 
 The two shell drivers refuse up front when `ISTOTA_SANDBOXED` is set, and say so rather than failing later. They have to refuse *before* their daemon precheck, because `docker version` is on the proxy's allowlist — a task passes that precheck and would otherwise die minutes later inside `docker build`, reporting a buildx driver error that describes nothing about the real boundary. The `image` and `smoke` tiers precheck with `docker info`, which the proxy denies, so they skip on their own.
 
 That refusal **exits 75**, the same code `scripts/qtest` uses for "the command did not run". Every real failure in those scripts exits 1, so the two are distinguishable from the status alone: 75 means the tier was out of reach and nothing was tested, and it is not a red suite.
 
 **What an agent should do instead.** When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say in the merge request that it does, name the tier that covers it, and ask for the run before merge. That is a complete handover, not an apology: the reviewer knows which command to run and why. Do not merge a sandbox-touching change while quietly reporting the default suite as green — that suite patches `_bwrap_available` and checks argv, so it has never executed the code path in question.
+
+The tier that executes it is `smoke`. `tests/smoke/test_sandbox_in_stack.py::TestTheDatabaseMasks` reads `db_path.parent` from inside a live task in the shipped image and requires an empty read-only tmpfs there, which is the only assertion in the repository that can tell a sandbox that ran from one that was skipped — a Bash tool call whose output came back proves neither. It found the deployment running every task unsandboxed the first time it was run.
 
 When to run each:
 
@@ -86,10 +92,13 @@ When to run each:
 | `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, per-task cgroups, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container |
 | `-m image` | you touched either Dockerfile, `render-config.sh`, or anything about where a binary lives | under a minute against a warm layer cache; builds both images natively |
 | `-m image --platform amd64` | before a release, on a non-amd64 machine | about ten minutes under emulation. It checks the deployment architecture rather than reaching tests nothing else runs — since ISSUE-280 the devbox image builds natively too, so its assertions are covered by a plain `-m image` |
-| `-m smoke` | you touched the developer skill's forge chain, the entrypoint, or the compose stack | about a minute against a warm layer cache: one stack per profile rather than per test, so most of it is the three boots |
-| `-m full` | you touched `entrypoint.sh`, `provision-nc.sh`, `docker-compose.yml`, or anything about first-boot provisioning; and before a release | about a minute and a half against warm image and layer caches, most of it Nextcloud installing itself on a cold volume set |
+| `-m smoke` | you touched the developer skill's forge chain, the sandbox, the entrypoint, the compose stack, ntfy, feeds, or outbound email | about three minutes against a warm layer cache: one stack per profile rather than per test, so most of it is the six boots |
+| `-m full` | you touched `entrypoint.sh`, `provision-nc.sh`, `docker-compose.yml`, Talk, Nextcloud storage or shares, or anything about first-boot provisioning; and before a release | minutes, most of it one cold boot of six containers — 50 to 84 seconds to both healthchecks on warm base images, then the scenarios |
+| `-m testbed` | you touched inbound email — routing, threading, the confirmation gate, the DMARC canary — or anything in `skills/email/` | about half a minute, one small container |
 | `scripts/test-upgrade.sh` | you touched a migration, a config key, or `config.toml` generation | seconds against a cached capture |
 | `scripts/test-upgrade.sh --from-floor --shape volume` | before a release | seconds, plus one container the first time |
+
+The costs above were measured on one arm64 developer machine with warm caches; they are the shape of each tier rather than a threshold.
 
 Two of these carry a negative control, and the controls are not a formality — on a tier that asserts against an artifact, reading the test tells you almost nothing about whether it can fail. `scripts/test-image-negative-control.sh` covers both halves of the image tier and requires each to go red against a deliberately broken image.
 
@@ -112,6 +121,61 @@ ISTOTA_IMAGE_TAG=istota-test/no-forge:control uv run pytest -m image -n0 tests/i
 
 A clean run there is the failure.
 
+### Which shape a subsystem belongs on
+
+The rule is not real-versus-stubbed. It is what the subsystem needs in order to be exercised honestly, and cost breaks ties.
+
+| Subsystem | Shape | Why |
+|---|---|---|
+| Forge chain | lean | The forge is HTTP and git over HTTP. A stub is the real protocol; a real GitLab is a heavy container for no added fidelity |
+| ntfy | lean | A POST with headers. The assertion is about bytes on the wire, which a stub records better than a real server |
+| Feeds | lean | Static documents over HTTP, plus conditional-GET behaviour a stub can drive deliberately |
+| Sandbox masks, secret isolation | lean | Cheapest place to run them. Both shapes carry the same concessions, so this is a cost choice rather than a constraint — and `tests/full/test_provisioning.py` repeats the mask assertion, since the full shape's two `security_opt` lines are otherwise checked only by parsing a compose file |
+| Email, wire level | neither | A mail server standalone, no istota container at all. That is the `testbed` marker |
+| Email, deployed path | lean | `poll_emails` needs no Nextcloud for attachment-free mail |
+| Email attachments | full | The write lands under `/mnt/shared` on both shapes; only the full one can read the bytes back out of Nextcloud |
+| Talk, storage, shares, notifications | full | The client negotiates capabilities. A stub that answers that wrongly is worse than no test |
+| Provisioning and first boot | full | The thing under test *is* `entrypoint.sh` and `provision-nc.sh` |
+
+Seven profiles carry that split. A profile is a named shape plus the services it runs plus any extra config, declared per test as `@pytest.mark.profile("forge")` and defaulting to `base`; `StackPool` keys by name and boots each one once per session.
+
+| Profile | Shape | Services |
+|---|---|---|
+| `base` | lean | model |
+| `forge` | lean | model, gitlab |
+| `no-forge` | lean | model, gitlab, on an image with the forge binaries removed |
+| `notify` | lean | model, ntfy |
+| `feeds` | lean | model, feeds |
+| `mail` | lean | model, mail |
+| `full` | full | model, nextcloud, mail |
+
+Fine-grained on the lean shape, exactly one on the full shape. Many profiles is an argument about a thirty-second boot — a stack with every subsystem on has the daemon polling mail, feeds and Talk during every unrelated test — and it inverts at a cold six-container one, where a second full profile would be a second cold boot to run one more scenario. A test that needs a stack nobody else has touched declares `@pytest.mark.profile("full", fresh=True)` and pays for a private one.
+
+### What the full shape concedes
+
+`testbed/compose/testbed.yml` is a harness concession file, not a deployment recipe. It is the complete list of ways the stack the `full` tier boots differs from the stack an operator boots, each entry carrying its reason inline. Read it before adding to it, and add there rather than assembling a fragment in Python, so a sixth concession gets reviewed:
+
+- `extra_hosts: host.docker.internal:host-gateway`, so a host-side stub is reachable by one name on Docker Desktop and Docker Engine alike.
+- `seccomp:unconfined` **and** `systempaths=unconfined` on the `istota` service.
+- The three credential-shaped brain variables as fixed literals rather than interpolations, on `istota` and on `web`. The process environment outranks an `--env-file`, so a developer's exported `ANTHROPIC_API_KEY` would otherwise reach a test container that POSTs to a listener on their own machine.
+- A healthcheck on the `tasks` table. The shipped `istota` service has none, and `restart: unless-stopped` means a boot that dies on the 600-second provisioning timeout comes straight back, so "is the container running" reads a wedged stack as healthy.
+
+The generated passwords, the module switches derived from the profile's service list, and the ephemeral `NC_PORT` with its matching `ISTOTA_WEB_CALLBACK_URL` are in the env-file the pool writes, because a file in the repository cannot hold a value invented at boot.
+
+**The two security options are a pair and neither substitutes for the other.** Seccomp lets bubblewrap create the user namespace; it does not let it mount a procfs inside one, and `build_bwrap_cmd` emits `--proc /proc` on every sandbox. Docker's masked `/proc` entries and read-only `/proc/sys` make the container's procfs not "fully visible" to the kernel, which then refuses the mount, so with only the seccomp grant every real sandbox dies at "Can't mount proc on /newroot/proc". `--cap-add=SYS_ADMIN` is not an alternative: measured, it gets past the unshare and fails at `pivot_root`. `docker/docker-compose.test.yml` carries the same pair.
+
+**The shipped `docker/docker-compose.yml` carries neither, so a Docker deployment runs every task unsandboxed.** That is an open product decision rather than a settled state: the pair trades the container's own boundary for the task's, which is a different bargain on a shared deployment than on a single-user one, and the supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed. `docs/deployment/docker.md` has the trade written out.
+
+### The storage backend, and why it needs no stack
+
+`Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped install shapes: `local` is what the single-user install runs, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
+
+It costs no stack, because `storage.py` branches on `use_mount` rather than on the backend and `render-config.sh` writes `nextcloud_mount_path` as the literal `/mnt/shared` on every profile. Briefings, memory and the tasks file take the identical path under both. Three things differ, all of them pure functions of a `Config`: the prompt's file-tool vocabulary, the skill menu (`available_capabilities()` drops `nextcloud` on an empty URL), and whether `runtime.mount_liveness` runs. The first two are prompt content and live in the goldens as the `base_nextcloud` / `base_local` pair; the third is `tests/test_doctor.py::TestMountLiveness`; and whether `NC_URL=""` renders a config that loads as `local` at all is `tests/test_render_config.py`.
+
+Set-but-empty, not unset. The render's preflight is `[ -n "${NC_URL+x}" ]`, which tests whether the variable is set rather than whether it has a value, so an unset `NC_URL` fails the render with exit 2. `APP_PASSWORD` is required by the same preflight and takes the same treatment. Every lean profile renders this way, which is why `runtime.mount_liveness` reports `skip` there and why a `doctor` assertion in this tier names the checks it cares about instead of comparing a whole payload.
+
+What that gives up: nothing asserts a *booted* local-backend daemon, only that it is configured correctly and assembles the right prompt. Since those three rows are the whole delta, that is a distinction without a consequence today. Naming the axis anyway is what stops someone adding a Nextcloud stub to the lean shape for an unrelated reason and silently deleting the coverage.
+
 ### Shared machinery, and how to add a tier
 
 The pieces under `testbed/` are general, not forge-specific. The forge chain is the first thing to use them, and it should not be the last:
@@ -123,9 +187,43 @@ The pieces under `testbed/` are general, not forge-specific. The forge chain is 
 
 `tests/support/upgrade.py` — capturing an older release's `config.toml` and schema — deliberately stayed where it is. It belongs to the upgrade tier, and `scripts/test-upgrade.sh` reaches it by string path.
 
-`testbed/` sits beside `src/` rather than inside `tests/` because it is not part of the shipped application and two repos outside this one consume it. It has its own `pyproject.toml` and imports no pytest, so a failure surfaces as a raised `StackError` rather than as a call into a test runner that is not installed. Two rules bind anything added to it: a service may only point the daemon at itself through a variable `docker/istota/render-config.sh` reads **and** `docker/docker-compose.yml` passes through (add one to both as a reviewed product change if it is missing — never side-load config from the fixture), and a stub bound to anything but loopback must be given a credential to expect. Both are enforced in `tests/test_testbed_services.py`. So when a new subsystem needs an end-to-end tier, extend `docker/docker-compose.test.yml`, write a service, and reuse these — don't build a second stack alongside them.
+`testbed/` sits beside `src/` rather than inside `tests/` because it is not part of the shipped application and two repos outside this one consume it. It has its own `pyproject.toml` and imports no pytest, so a failure surfaces as a raised `StackError` rather than as a call into a test runner that is not installed. When a new subsystem needs an end-to-end tier, write a service and reuse these — don't build a second stack alongside them.
 
 `testbed/services/model_endpoint.py`'s wire format has its own tests in the default suite (`tests/test_model_endpoint.py`), pinned against the real provider over a real socket. That matters more than it looks: nothing in a smoke test can tell a correctly framed stream from a subtly wrong one — a stream missing its completion signal arrives as a task that failed for a reason unrelated to what the test was asserting.
+
+### Writing a new service
+
+A **service** is anything the daemon talks to that is not the daemon, real or written by us; a **stub** is one we wrote. The protocol is four members, in `testbed/services/__init__.py`: `container_url` (the address a process inside the container reaches it on, which the caller never has to know the shape of), `config_env()`, `reset()` and `close()`, plus a `name` that is its registry key. Register the factory in `REGISTRY`, list the name in `HOST_STUBS` or `ATTACHED`, and give it a profile in `testbed/profiles.py` and an entry in `profiles.ALL`.
+
+Call recording is deliberately not on the protocol. It is on `HttpStub`, the shared `ThreadingHTTPServer` base, because it does not generalize — a mail server speaks IMAP and Nextcloud is asserted through its own API. A `calls` list on the protocol would mean something different for two of six members.
+
+Four rules bind anything added. The first three are enforced in the default suite rather than left as convention — `tests/test_testbed_services.py` checks every service's and every profile's variables against the two shipped files, `HttpStub.start` raises, and `Probe.rows_above` refuses. The fourth is a judgement call and is the one to argue about before writing the stub, not after:
+
+**Wire it in through a variable the shipped generator reads and compose passes through.** Two files, `docker/istota/render-config.sh` *and* `docker/docker-compose.yml`, and they are not automatically in sync: `ISTOTA_EMAIL_AUTHSERV_ID` and `ISTOTA_EMAIL_CONFIRM_SENDER_MATCH` were read by the generator and passed by neither, so an operator who set the confirmation gate to `verify` in `docker/.env` silently got `off`. If a variable is missing, add it to both as a reviewed product change. The guard on the product side of that — `tests/test_render_config.py`'s passthrough check — is parametrized over `ISTOTA_DEVELOPER_`, `ISTOTA_EMAIL_` and `ISTOTA_NEXTCLOUD_` rather than over everything the generator reads, so a variable in a fourth family needs the prefix list widened with it. Never side-load config from the fixture: that is the property that makes the whole tier honest, and it applies to `Profile.config` exactly as it does to `config_env()`. A service with no such variable — ntfy is a per-user secret, feed URLs are DB rows — returns an empty `config_env()` and says in its docstring why, because an empty one otherwise reads as an oversight.
+
+**A stub bound to anything but loopback must be given a credential to expect.** `HttpStub.start` raises otherwise. Both compose tiers bind all interfaces so a container can reach the stub, which on a laptop on a shared network is an open listener — and in the forge stub's case one running `git http-backend` with `GIT_HTTP_EXPORT_ALL`. It also gives `tests/smoke/test_secret_isolation.py` the name of every secret the session published, which is what it sweeps the model transcript for.
+
+**A negative assertion takes a watermark and a discriminating column.** `Stack.reset` returns `Probe.watermark()`, `MAX(id)` per table, and the fixture stashes it as `stack.mark`; `Probe.rows_above(table, mark, **filters)` refuses to run with no filter. Both halves are needed. Under a session-scoped stack, "no reply was sent" against `sent_emails` reads the previous scenario's rows, because nothing truncates a framework table — and a watermark on its own still catches a row one of the daemon's background pollers made during the test. `source_type`, `conversation_token` and `to_addr` are the columns that discriminate in practice.
+
+**Do not stub a service whose client negotiates with it.** `nextcloud/capabilities.py` means the client asks before it acts, so a stub answering wrongly steers the daemon down paths no test chose; that is why the full shape runs a real Nextcloud, and why the mail service is a real IMAP/SMTP server in a container rather than something we wrote. The rule is not "never stub". `gitlab` is spoken to by a real `glab` and a real `git`, and `ntfy`'s whole assertion is about header bytes, which a recording stub sees better than a real server would.
+
+Then write the scenario. `reset()` runs before each test rather than after, so a failed test's state is still there to inspect; it must be cheap and total, because a reset that leaves one mutation behind is a cross-test dependency that gets diagnosed as flake. Anything the daemon writes *inside* the container is the service's to declare too — a host-side stub can rebuild its own state and cannot reach the checkout the model cloned into `/data/repos` on the previous test.
+
+### Prompt goldens
+
+`tests/test_prompt_golden.py` runs in the default suite against no container and no model. `execute_task(..., dry_run=True)` returns the fully assembled prompt as the second element of its four-tuple, behind a `[DRY RUN] Would execute with prompt:` line the test strips — emissaries, persona, channel guidelines, the storage vocabulary, eager skill bodies, the on-demand menu, conversation context, memory, the rules block — and twelve cases snapshot it into `tests/golden/prompts/`. The point is the failure substring assertions decay away from: a layer that silently stops being included.
+
+A diff is a failure. An intentional change is a reviewed golden update:
+
+```bash
+ISTOTA_UPDATE_GOLDEN=1 uv run pytest tests/test_prompt_golden.py -n0
+```
+
+Commit the resulting diff and review it like any other change. `-n0` is not optional: the orphan check has no ordering relationship with the writers under xdist, so a regeneration that adds or renames a case reports missing goldens from the run that was supposed to create them. The variable is parsed by an `updating()` helper that takes the same affirmative and negative words as `PRECOMMIT_SCANS_REQUIRED` and raises on anything else, so a stale `ISTOTA_UPDATE_GOLDEN=0` in a shell cannot quietly turn every golden into a rubber stamp.
+
+**`dry_run` returns after assembly rather than instead of it**, so everything assembly calls is live. The first version of this module opened two real HTTPS connections per Nextcloud-backed case while its own header said it ran against nothing — `read_user_memory_v2` returning None led to `ensure_user_directories_v2` and an OCS share POST. A golden path that reaches a network socket is a golden that lies about running against nothing, and the fix is to turn the live path off through configuration rather than to mock it. An autouse `_no_sockets` fixture records the attempt, refuses it, and asserts at teardown; recording rather than only raising, because every caller on that path swallows exceptions for graceful degradation, so a guard that merely raised would be caught and the property would revert to a claim nobody checks.
+
+Two product gaps are held here by named tests rather than fixed, so a fix arrives as a reviewed golden diff and turns them red instead of passing silently. `format_cli_skills` applies neither the capability gate nor the effective disabled set, so a Nextcloud-free install is told `istota-skill nextcloud` exists in the same prompt that omits the skill from the on-demand menu. And `custom_system_prompt` cannot change the assembled prompt at all, because it is read at brain-request assembly well past the `dry_run` return — not a defect, since that is the brain's system prompt rather than the task prompt, but the identity is asserted so that a change routing it into the task prompt is visible.
 
 ### The upgrade tier's two anchors
 

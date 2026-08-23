@@ -10,8 +10,11 @@ Usage:
 All output is JSON on stdout. A failure prints a structured envelope carrying
 the HTTP status, the OCS status code and the server's own message, and exits 1.
 
-Env vars: NC_URL, NC_USER, NC_PASS. ISTOTA_USER_ID scopes file and share paths
-to the calling user's workspace.
+Env vars: NC_URL, NC_USER, NC_PASS, NC_DAV_PREFIX. ISTOTA_USER_ID scopes file
+and share paths to the calling user's workspace. Every path this CLI takes and
+returns is a logical one (`/Users/{uid}/…`); NC_DAV_PREFIX is where that tree
+sits inside the bot's own Nextcloud storage on a deployment where the two are
+not the same directory, and it never appears in an argument or an answer.
 """
 
 import argparse
@@ -29,6 +32,7 @@ from istota.nextcloud import (
     notifications as notify_mod,
     resolve_scoped_path,
     shares as shares_mod,
+    to_remote_path,
     users as users_mod,
 )
 from istota.nextcloud_client import (
@@ -50,7 +54,20 @@ def _config_from_env() -> Config:
     if not url or not user or not password:
         print(json.dumps({"error": "NC_URL, NC_USER, NC_PASS env vars required"}), file=sys.stderr)
         sys.exit(1)
-    config = Config(nextcloud=NextcloudConfig(url=url, username=user, app_password=password))
+    # NC_DAV_PREFIX is where the daemon's storage root sits inside the bot's
+    # own Nextcloud file tree; empty on bare metal, where they coincide. The
+    # CLI is a subprocess with a manifest-built environment rather than the
+    # daemon's Config, so a key missing here is a key the skill does not have —
+    # which is how `files` and `share` 404 on a deployment whose storage root
+    # is a `files_external` mount.
+    config = Config(
+        nextcloud=NextcloudConfig(
+            url=url,
+            username=user,
+            app_password=password,
+            dav_prefix=os.environ.get("NC_DAV_PREFIX", ""),
+        )
+    )
     # Path scoping consults Config.is_admin, whose "empty file means everyone"
     # back-compat rule is the same one the sandbox and skill gates use.
     try:
@@ -612,7 +629,11 @@ def cmd_talk_send(args):
 def cmd_talk_share_file(args):
     config = _config_from_env()
     path = _scoped(config, args.path)
-    result = _talk_run(lambda c: c.share_file(args.token, path))
+    # A Talk attachment is share type 10 on the same OCS endpoint `share
+    # create` uses, so it needs the same mapping — `TalkClient` holds a base
+    # URL rather than a Config, so it is applied here. The reply keeps the
+    # logical path, which is the one the caller asked about.
+    result = _talk_run(lambda c: c.share_file(args.token, to_remote_path(config, path)))
     return {"status": "ok", "token": args.token, "path": path, "share_id": result.get("id")}
 
 

@@ -34,6 +34,27 @@ class NextcloudConfig:
     #: Default expiry applied by `nextcloud share link`. A handed-out link
     #: that never expires is the thing worth avoiding; 0 opts out.
     share_default_expire_days: int = 14
+    #: Where the daemon's storage root sits inside the bot account's own
+    #: Nextcloud file tree. Empty on bare metal, where they are the same
+    #: directory: the rclone remote points at `remote.php/dav/files/<bot>/` and
+    #: is mounted at `nextcloud_mount_path`, so `/Users/alice` on disk is
+    #: `/Users/alice` over DAV. On the Docker shape `/mnt/shared` is an ordinary
+    #: volume that Nextcloud serves through a `files_external` mount, so the
+    #: same directory is `/<mount point>/Users/alice` to the bot and every
+    #: request that skips the POSIX mount 404s without this.
+    #:
+    #: Applied in the request layer (`nextcloud/_http.py`), never to
+    #: `storage.BOT_USER_BASE` — `_get_mount_path` builds on-disk paths from
+    #: the same helper — and never inside `resolve_scoped_path`, which is the
+    #: confinement boundary and keeps speaking logical `/Users/{uid}` paths.
+    dav_prefix: str = ""
+    #: Whether `ensure_user_directories_v2` shares the bot workspace back to
+    #: the user over OCS on every boot. True on bare metal, where that share is
+    #: how the user gets the directory at all. The Docker shape sets it false:
+    #: `provision-nc.sh` already gives the user a `files_external` mount over
+    #: the very same directory, and the share would hand them a second copy of
+    #: it under a different name.
+    auto_share_bot_dir: bool = True
 
 
 @dataclass
@@ -2285,6 +2306,8 @@ def load_config(config_path: Path | None = None) -> Config:
             username=nc.get("username", ""),
             app_password=nc.get("app_password", ""),
             share_default_expire_days=int(nc.get("share_default_expire_days", 14)),
+            dav_prefix=str(nc.get("dav_prefix", "")),
+            auto_share_bot_dir=bool(nc.get("auto_share_bot_dir", True)),
         )
 
     if "talk" in data:

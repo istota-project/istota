@@ -345,7 +345,8 @@ class TestTheSeccompGrantStaysInTheTestFile:
     """
 
     @pytest.mark.parametrize(
-        "setting", ["seccomp", "privileged", "cap_add", "apparmor"]
+        "setting",
+        ["seccomp", "privileged", "cap_add", "apparmor", "systempaths"],
     )
     def test_the_production_compose_grants_no_extra_privilege(self, setting):
         lines = (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
@@ -382,6 +383,29 @@ class TestTheSeccompGrantStaysInTheTestFile:
             "the lean stack no longer relaxes seccomp; bwrap cannot create a "
             "user namespace under Docker's default profile, so every task "
             "running a Bash tool call will fail"
+        )
+
+    def test_the_test_compose_also_unmasks_the_system_paths(self):
+        """The other half, and the one whose loss is quiet rather than loud.
+
+        Without `systempaths=unconfined` bwrap creates the user namespace and
+        then cannot mount a procfs inside it: Docker's masked `/proc` entries
+        and read-only `/proc/sys` make the container's procfs not "fully
+        visible" to the kernel, and `build_bwrap_cmd` emits `--proc /proc`.
+
+        The daemon's response to a bwrap it cannot run is to disable the
+        sandbox for the process and carry on — `_bwrap_available` performs
+        those same mounts, so it answers no here — which means losing this line
+        does not fail the tier. It silently runs every scenario unconfined,
+        which is the state `TestTheDatabaseMasks` was written to catch and the
+        reason this guard is worth its three lines.
+        """
+        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
+
+        assert "systempaths=unconfined" in body, (
+            "the lean stack no longer unmasks /proc, so bwrap cannot mount a "
+            "procfs inside its user namespace and every task will run with the "
+            "sandbox skipped rather than failing"
         )
 
 
@@ -673,11 +697,12 @@ def framework_db(tmp_path) -> Path:
     connection = sqlite3.connect(path)
     connection.executescript((REPO / "schema.sql").read_text())
     connection.executemany(
-        "INSERT INTO tasks (source_type, user_id, prompt, status) VALUES (?, ?, ?, ?)",
+        "INSERT INTO tasks (source_type, user_id, prompt, status, conversation_token) "
+        "VALUES (?, ?, ?, ?, ?)",
         [
-            ("cli", "alice", "first", "completed"),
-            ("cli", "bob", "second", "pending"),
-            ("talk", "alice", "third", "failed"),
+            ("cli", "alice", "first", "completed", None),
+            ("cli", "bob", "second", "pending", None),
+            ("talk", "alice", "third", "failed", "a-room-token"),
         ],
     )
     connection.commit()
@@ -712,6 +737,24 @@ class TestProbe:
         probe = Probe(local=framework_db)
 
         assert [t["prompt"] for t in probe.tasks(task_id=2)] == ["second"]
+
+    def test_a_conversation_token_narrows_to_a_task_nobody_submitted(
+        self, framework_db
+    ):
+        """What a Talk scenario has instead of a task id.
+
+        The daemon makes the task, not the test, so `submit()` returns no
+        handle to filter on — and `source_type='talk'` alone matches every
+        earlier scenario's task in a session-scoped stack. A room the test
+        created is a room nothing else has ever posted in, which makes its
+        token as selective as an id.
+        """
+        probe = Probe(local=framework_db)
+
+        assert [
+            t["prompt"] for t in probe.tasks(conversation_token="a-room-token")
+        ] == ["third"]
+        assert probe.tasks(conversation_token="a-room-nobody-made") == []
 
     def test_wait_for_task_honours_a_task_id(self, framework_db):
         # Task 1 is completed and task 2 is pending. Without the id filter the
@@ -1393,6 +1436,50 @@ class TestStackReset:
         stack, _, _ = self._stack(monkeypatch, busy_sequence=[[], []])
 
         assert stack.reset([{"text": "answer"}]) == {"tasks": 7}
+
+    def test_a_service_that_cannot_reset_is_named_as_a_harness_condition(
+        self, monkeypatch
+    ):
+        """A service's own exception type is not one the fixture translates.
+
+        The `stack` fixture turns `StackError` and `TimeoutError` into a
+        `pytest.fail(..., pytrace=False)` naming the condition, and anything
+        else into a fixture traceback attributed to whichever test happened to
+        be next — which is precisely the wrong test. `NextcloudService.reset`
+        raises its own `NextcloudError` when a room survives, and it is the
+        first service reset that can fail at all.
+        """
+        broken = _FakeService("nextcloud", {})
+
+        def refuse():
+            raise RuntimeError("a room survived")
+
+        broken.reset = refuse
+        stack, _, _ = self._stack(
+            monkeypatch, busy_sequence=[[], []], services={"nextcloud": broken}
+        )
+
+        with pytest.raises(compose_support.StackError) as failure:
+            stack.reset([{"text": "answer"}])
+
+        assert "nextcloud" in str(failure.value)
+        assert "a room survived" in str(failure.value)
+
+    def test_a_stack_error_from_a_service_is_not_wrapped_twice(self, monkeypatch):
+        broken = _FakeService("gitlab", {})
+
+        def refuse():
+            raise compose_support.StackError("the forge said no")
+
+        broken.reset = refuse
+        stack, _, _ = self._stack(
+            monkeypatch, busy_sequence=[[], []], services={"gitlab": broken}
+        )
+
+        with pytest.raises(compose_support.StackError) as failure:
+            stack.reset([{"text": "answer"}])
+
+        assert str(failure.value) == "the forge said no"
 
     def test_a_task_appearing_after_the_swap_makes_it_try_again(self, monkeypatch):
         """The half the barrier structurally cannot see: a poller created the

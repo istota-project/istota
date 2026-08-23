@@ -3,12 +3,19 @@ name = "istota-testbed"
 version = "0.1.0"
 description = "Staging environment for istota's deployment tiers: compose stacks, service stubs, a DB probe"
 requires-python = ">=3.11"
-# Deliberately empty. Everything here is stdlib — `http.server`, `sqlite3`,
-# `subprocess` — because the two consumers outside this repo (istota-demo and
-# istota-redteam) install it beside their own pinned dependencies, and a
-# testbed that dragged in a resolver conflict would be worked around by copying
-# it again, which is the thing this package exists to stop.
-dependencies = []
+# One dependency, and the rule it bends is worth restating. Everything else
+# here is stdlib — `http.server`, `sqlite3`, `subprocess` — because the two
+# consumers outside this repo (istota-demo and istota-redteam) install it beside
+# their own pinned dependencies, and a testbed that dragged in a resolver
+# conflict would be worked around by copying it again, which is the thing this
+# package exists to stop.
+#
+# `certs.py` is the exception: the mail server needs a certificate, the stdlib
+# cannot make one, and the alternative is shelling out to `openssl` — which is
+# what both external rigs do today and is one of the things they are copying.
+# `cryptography` is already a core dependency of istota itself, so neither
+# consumer gains a resolver constraint it did not already have.
+dependencies = ["cryptography>=42.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -27,10 +34,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 only-include = [
     "__init__.py",
+    "certs.py",
     "httpstub.py",
     "probe.py",
     "profiles.py",
     "stack.py",
+    "compose",
     "services",
 ]
 
