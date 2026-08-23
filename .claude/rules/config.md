@@ -187,6 +187,7 @@ sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
 skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths: list[str] = []     # extra RO binds; keep narrow
+sandbox_cache_dir: str = ""          # disk-backed RW cache dir; empty = today's behaviour
 network: NetworkConfig = NetworkConfig()
 ```
 `skill_proxy_enabled` is **required wherever `sandbox_enabled` is true**: the DB
@@ -209,6 +210,55 @@ such an install exited "System prompt file not found". `build_bwrap_cmd` now
 binds that single file itself (`custom_system_prompt_path`), so no operator
 needs an entry here for it — and `config.toml`, its neighbour, still isn't in
 the sandbox.
+
+`sandbox_cache_dir` names a disk-backed directory for the package managers' caches.
+Empty is the default and keeps the pre-ISSUE-305 behaviour, which is that `$HOME/.cache`
+exists inside the namespace only as a directory bwrap created on its own root tmpfs: a
+`uv sync` unpacks into RAM that `host_pressure.read_tmpfs_usage` cannot attribute — the
+mount is in the task's namespace and in no table the host reads, so it lands in
+`shmem_unaccounted` — and the whole cache is discarded at task exit.
+
+**It is a root, and each user gets `{root}/{user_id}`.** A single shared directory would
+be the first RW surface a non-admin task and an admin task hold in common, and it
+persists across tasks by construction; uv's unpacked-wheel cache is trusted on read and
+never re-verified against a hash, so a planted archive is executed by the next `uv sync`
+that hardlinks out of it. Per-user costs nothing the placement argument was about —
+hardlink sharing is between one user's worktrees, which stay inside one subdirectory.
+
+Put the root under `developer.repos_dir`. uv populates a venv by hardlinking out of its
+cache and `link(2)` returns EXDEV across a mount boundary even on one device, so a cache
+on any other mount makes every worktree pay for a full copy instead of sharing one byte
+set. For the same reason `resolve_sandbox_cache_dir` returns the path **as written**
+rather than resolved: `_bind` uses the string it is handed as the sandbox destination and
+the repos bind passes `repos_dir` unresolved, so resolving here would put a symlinked
+`repos_dir` and a cache under it at two names, hence two mounts, and hardlinking between
+them fails silently.
+
+`resolve_sandbox_cache_dir` (in `executor.py`) is the single predicate behind the bind,
+the environment and `native_fs_roots`, so they cannot disagree, and it **never raises** —
+both callers are on the task path, and for NativeBrain `build_bwrap_cmd` runs per Bash
+call. Every rejection falls open to today's behaviour: a path that is relative, not an
+existing writable directory, under a database directory, or **at or above anything the
+sandbox already mounts**. That last one is the rejection that matters. bwrap applies argv
+in order and the cache bind is emitted late, so a destination above an earlier mount
+covers it: `= $HOME/.cache` overmounts the read-only huggingface bind, `= config.temp_dir`
+hands every user's workspace to every task and makes the `.developer` credential helpers
+writable again, `= $HOME/.local` gives the model write access to the `claude` binary, and
+`= developer.repos_dir` — one character off the documented shape — binds the repos RW for
+non-admins, past the admin gate the repos bind carries. `_sandbox_bind_targets` is that
+list; it is the same idea as `_mask_protected`, for the one other late mount operation.
+The database check is made here rather than left to `_validate_workspace_dir`, which skips
+a relative `db_path` (the shipped default) for a REPL-shaped reason the daemon does not
+have. Each distinct refusal warns once per process, not twice per task.
+
+The environment variables (`UV_CACHE_DIR`, `XDG_CACHE_HOME`, `npm_config_cache`, and
+`HF_HOME` pinned back to `~/.cache/huggingface` so moving XDG does not orphan the
+read-only model-cache bind) are set in `execute_task`, in the model-only block **after**
+`proxy_base_env` is snapshotted — deliberately not in `build_clean_env`. That function
+feeds the proxy's base env, which SkillProxy hands every host-side skill CLI: a process
+running unsandboxed as the daemon user has no business resolving a cache out of a
+directory the model can write, which is the same confused-deputy shape the
+`ISTOTA_PATH_PREPEND` handling guards against.
 
 `sandbox_admin_db_write` was **removed**: the framework DB is no longer bound
 into the sandbox for anyone, so there is no bind left to widen. A stale key

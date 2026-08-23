@@ -1716,6 +1716,173 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     return resolved
 
 
+_cache_dir_refusals: set[str] = set()
+
+# Cache subdirectory names, per tool. uv and npm each treat their cache
+# directory as theirs alone and prune it, so they do not share one root.
+SANDBOX_CACHE_UV = "uv"
+SANDBOX_CACHE_NPM = "npm"
+
+
+def _sandbox_bind_targets(config: Config) -> list[Path]:
+    """Paths ``build_bwrap_cmd`` mounts, that a cache must not be mounted above.
+
+    bwrap applies argv in order, so a later ``--bind`` whose destination is an
+    *ancestor* of an earlier mount covers it — the same mechanism the
+    ``.developer`` read-only re-bind and the database masks rely on, used the
+    wrong way round. The cache bind is emitted late, so without this list a
+    supported config value silently revokes boundaries the sandbox is built on:
+    ``sandbox_cache_dir = $HOME/.cache`` overmounts the read-only huggingface
+    bind, ``= config.temp_dir`` hands every user's deferred-op directory to
+    every task and makes the credential-fetch helpers under ``.developer``
+    writable again, and ``= $HOME/.local`` gives the model write access to the
+    ``claude`` binary the daemon spawns host-side.
+
+    ``_validate_workspace_dir`` does not cover this and should not be made to:
+    the REPL workspace it was written for is bound *before* all of those, so
+    ordering protects it and its blocklist never had to name them. This list is
+    the same idea as ``_mask_protected`` — what a late mount operation must not
+    swallow — for the one other late mount operation.
+
+    Equal-or-ancestor is the rule, not overlap: a cache *inside* one of these is
+    the documented shape (``developer.repos_dir`` is where it is supposed to go)
+    and covers nothing.
+    """
+    home = Path(os.environ.get("HOME", "/tmp"))
+    targets: list[Path] = [
+        Path("/"), Path("/usr"), Path("/etc"), Path("/tmp"),
+        # Every user's task workspace, and with it `.developer`.
+        config.temp_dir,
+        # The Claude CLI binary, its state, and its credentials.
+        home / ".local",
+        home / ".claude",
+        # The read-only model cache.
+        home / ".cache" / "huggingface",
+    ]
+    if config.developer.repos_dir:
+        targets.append(Path(config.developer.repos_dir))
+    if config.nextcloud_mount_path:
+        targets.append(Path(config.nextcloud_mount_path))
+    for ro_path in config.security.sandbox_ro_paths:
+        targets.append(Path(ro_path))
+    sp_path = custom_system_prompt_path(config)
+    if sp_path is not None:
+        targets.append(sp_path)
+    return targets
+
+
+def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
+    """This user's ``security.sandbox_cache_dir`` subdirectory, or None.
+
+    One predicate for two decisions — the RW bind in ``build_bwrap_cmd`` and the
+    ``UV_CACHE_DIR`` / ``XDG_CACHE_HOME`` group in ``execute_task``. They must
+    not disagree: naming a cache the sandbox did not bind points uv at a path
+    that exists inside the namespace only on bwrap's root tmpfs, which is the
+    RAM-backed cache ISSUE-305 is about, at a new name.
+
+    **Per user, not per deployment.** The configured value is a root; each user
+    gets ``{root}/{user_id}``, created here. A single shared directory would be
+    the first RW surface a non-admin task and an admin task hold in common, and
+    it persists across tasks by construction — and uv's unpacked-wheel cache is
+    trusted on read, never re-verified against a hash, so a planted archive is
+    executed by the next ``uv sync`` that hardlinks out of it. Per-user costs
+    nothing the placement argument was about: hardlink sharing is between one
+    user's worktrees, which stay inside one subdirectory.
+
+    Returned **as written**, not resolved, though every check below runs against
+    the resolved path. ``_bind`` uses the string it was handed as the sandbox
+    destination, and the developer-repos bind passes ``repos_dir`` unresolved —
+    so resolving here would put a symlinked ``repos_dir`` and a cache under it
+    at two different names inside the namespace, hence on two mounts, and
+    ``link(2)`` returns EXDEV between them. That is the exact cost the
+    recommendation to put the cache under ``repos_dir`` exists to avoid, failing
+    silently.
+
+    Never raises. Every rejection falls open to the pre-ISSUE-305 behaviour,
+    because both callers run on the task path — for NativeBrain, per Bash call —
+    and the alternative to failing open is a config typo that fails every task.
+    """
+    raw = config.security.sandbox_cache_dir
+    if not raw:
+        return None
+
+    def _refuse(message: str) -> None:
+        # Called from `build_bwrap_cmd` and from `execute_task`, on every task,
+        # for what is a fact about the config file. Warn once per process per
+        # distinct problem instead of twice per task forever.
+        if message not in _cache_dir_refusals:
+            _cache_dir_refusals.add(message)
+            logger.warning("%s", message)
+
+    try:
+        root = Path(raw)
+        if not root.is_absolute():
+            _refuse(
+                f"sandbox_cache_dir {raw!r} is not an absolute path; not binding it. "
+                "A relative path would resolve against the daemon's working directory."
+            )
+            return None
+
+        resolved_root = root.resolve()
+        if not (resolved_root.is_dir() and os.access(resolved_root, os.W_OK | os.X_OK)):
+            _refuse(
+                f"sandbox_cache_dir {resolved_root} is not a directory the daemon can "
+                "write; not binding it. Package caches stay on the sandbox's root "
+                "tmpfs, in RAM."
+            )
+            return None
+
+        # Not above anything the sandbox already mounts — see _sandbox_bind_targets.
+        for target in _sandbox_bind_targets(config):
+            try:
+                resolved_target = target.resolve()
+            except OSError:
+                continue
+            if resolved_target == resolved_root or _is_relative_to(resolved_target, resolved_root):
+                _refuse(
+                    f"sandbox_cache_dir {resolved_root} is at or above {resolved_target}, "
+                    "which the sandbox mounts; not binding it, because the cache bind "
+                    "would cover that mount. Put it inside a directory instead of above "
+                    "one — somewhere under developer.repos_dir is the intended home."
+                )
+                return None
+
+        # The database directories, checked here rather than left to
+        # `_validate_workspace_dir`: that function skips a relative `db_path`
+        # (the shipped default) because a REPL workspace would resolve it
+        # against the wrong cwd, and the daemon has no such problem. The masks
+        # are the last mount operations and are read-only, so a cache under one
+        # is a dead end uv cannot write. The cache loses that argument, never
+        # the mask.
+        db_dirs: list[Path] = []
+        if config.db_path:
+            db_dirs.append(Path(config.db_path).parent.resolve())
+        try:
+            db_dirs.append(config.module_db_root())
+        except ValueError:
+            pass
+        for db_dir in db_dirs:
+            if resolved_root == db_dir or _is_relative_to(resolved_root, db_dir):
+                _refuse(
+                    f"sandbox_cache_dir {resolved_root} is under the database directory "
+                    f"{db_dir}, which the sandbox masks read-only; not binding it."
+                )
+                return None
+
+        # The remaining protected roots — the source tree, the mount, the
+        # credential and dotfile directories — via the blocklist the REPL
+        # workspace already uses. Same posture: an operator-named RW bind.
+        _validate_workspace_dir(config, resolved_root)
+
+        cache_dir = root / user_id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(cache_dir, 0o700)
+        return cache_dir
+    except Exception as exc:  # never raise: both callers are on the task path
+        _refuse(f"sandbox_cache_dir {raw} rejected ({exc}); not binding it.")
+        return None
+
+
 def custom_system_prompt_path(config: Config) -> Path | None:
     """Absolute path of the operator's ``config/system-prompt.md``, or None.
 
@@ -1956,6 +2123,22 @@ def build_bwrap_cmd(
     hf_cache = home / ".cache" / "huggingface"
     if hf_cache.exists():
         _ro_bind(hf_cache)
+
+    # --- Package-manager cache (RW) ---
+    # Not gated on admin or on the developer skill: any task that runs a
+    # package manager writes a cache, and without this the write lands on
+    # bwrap's root tmpfs. `execute_task` points UV_CACHE_DIR and XDG_CACHE_HOME
+    # at whatever this returns, so the bind and the environment cannot disagree.
+    #
+    # `{configured root}/{user_id}`, not the root itself — see
+    # `resolve_sandbox_cache_dir` for why a shared cache is a cross-user code
+    # path. This is emitted late, after the `.developer` read-only re-bind and
+    # the huggingface bind, so a destination *above* either would cover it;
+    # `_sandbox_bind_targets` is what refuses that. Still before the masks,
+    # which stay last.
+    cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
+    if cache_dir is not None:
+        _bind(cache_dir)
 
     # --- Developer repos (RW) ---
     if is_admin and config.developer.enabled and config.developer.repos_dir:
@@ -2241,6 +2424,11 @@ def native_fs_roots(
     # No database root of any kind. The file tools are the native brain's
     # stand-in for the bwrap binds, and bwrap no longer exposes the framework
     # DB or the module DBs to anyone — see the mask block in build_bwrap_cmd.
+
+    # Package-manager cache (RW) — mirrors the bwrap bind, which is gated on
+    # neither admin nor skill selection. `_add` skips a path that does not
+    # exist, and `resolve_sandbox_cache_dir` creates it, so the two agree.
+    _add(write, resolve_sandbox_cache_dir(config, task.user_id))
 
     # Developer repos (RW, admin only).
     if is_admin and config.developer.enabled and config.developer.repos_dir:
@@ -4190,6 +4378,35 @@ def execute_task(
             and _bwrap_available()
         ):
             env["ISTOTA_SANDBOXED"] = "1"
+
+        # Package-manager caches, pointed at the disk-backed directory
+        # `build_bwrap_cmd` binds RW from the same predicate (ISSUE-305).
+        #
+        # Here, not in `build_clean_env`, for two reasons. `proxy_base_env` was
+        # snapshotted above and is what SkillProxy hands every host-side skill
+        # CLI — a process running unsandboxed as the daemon user, which has no
+        # business resolving a cache out of a directory the model can write;
+        # that is the confused-deputy shape the ISTOTA_PATH_PREPEND comment
+        # below spells out. And the cache is per user, which needs the task.
+        #
+        # Gated on effective sandboxing, matching the bind exactly: without
+        # bwrap there is no root tmpfs and nothing to move off it.
+        if native_fs_confinement_active(config):
+            _cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
+            if _cache_dir is not None:
+                env["UV_CACHE_DIR"] = str(_cache_dir / SANDBOX_CACHE_UV)
+                env["XDG_CACHE_HOME"] = str(_cache_dir)
+                # npm on Linux uses ~/.npm and ignores XDG, so XDG_CACHE_HOME
+                # alone would leave it in RAM. Inert until ISSUE-304 opens the
+                # registry, and one line now rather than a rediscovery later.
+                env["npm_config_cache"] = str(_cache_dir / SANDBOX_CACHE_NPM)
+                # HF_HOME defaults to $XDG_CACHE_HOME/huggingface, so moving XDG
+                # would silently orphan the read-only `~/.cache/huggingface`
+                # bind — a pre-warmed model cache every task would re-download.
+                # Pin it back where the bind is.
+                env["HF_HOME"] = str(
+                    Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface"
+                )
 
         # PATH entries contributed by setup_env hooks — today the developer
         # skill's .developer dir, so the model can type `gh` and reach the

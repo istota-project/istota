@@ -920,6 +920,25 @@ class SecurityConfig:
     # task. build_bwrap_cmd masks the database directories after applying this
     # list, so a re-added broad path can't undo that, but keep entries narrow.
     sandbox_ro_paths: list[str] = field(default_factory=list)
+    # Root of a disk-backed directory for the package managers' caches. Each
+    # user gets `{root}/{user_id}`, bound RW into their sandbox. Empty (the
+    # default) keeps the pre-ISSUE-305 behaviour: `$HOME/.cache` inside the
+    # namespace exists only as a parent directory bwrap created on its own root
+    # tmpfs, so a `uv sync` unpacks into RAM that `host_pressure.read_tmpfs_usage`
+    # cannot see — the mount lives in the task's namespace and appears in no
+    # table the host reads — and the whole cache is discarded at task exit.
+    #
+    # Put the root *under* `developer.repos_dir` if that is set. uv populates a
+    # venv by hardlinking out of its cache, and `link(2)` returns EXDEV across a
+    # mount boundary even on one device; a cache on any other mount makes every
+    # worktree pay for a full copy instead of sharing one byte set.
+    #
+    # Ignored, with one warning, when it is relative, missing, unwritable, under
+    # a database directory, or at or *above* anything the sandbox already mounts
+    # — the cache bind is emitted late, so a destination above an earlier mount
+    # would cover it. `executor.resolve_sandbox_cache_dir` owns every one of
+    # those rules and never raises.
+    sandbox_cache_dir: str = ""
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
 
@@ -3079,6 +3098,7 @@ def load_config(config_path: Path | None = None) -> Config:
                     sec["sandbox_ro_paths"],
                 )
             } if "sandbox_ro_paths" in sec else {}),
+            sandbox_cache_dir=str(sec.get("sandbox_cache_dir", "") or ""),
         )
         if (
             config.security.sandbox_enabled

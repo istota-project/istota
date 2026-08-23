@@ -1,5 +1,6 @@
 """Tests for security hardening: clean env, stripped env, allowed tools, config overrides."""
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,7 @@ from istota.executor import (
     build_allowed_tools,
     build_clean_env,
     build_model_cli_env,
+    resolve_sandbox_cache_dir,
     build_stripped_env,
     derive_authorized_skills,
     derive_credential_set,
@@ -153,6 +155,112 @@ class TestBuildCleanEnv:
         with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
             env = build_clean_env(config)
         assert "ISTOTA_CONFIG_PATH" not in env
+
+
+class TestSandboxCacheDirEnv:
+    """The cache environment, and the two places it must not reach.
+
+    `resolve_sandbox_cache_dir` is the single predicate behind the RW bind in
+    `build_bwrap_cmd` and these variables, so the environment can never name a
+    cache the sandbox did not mount (ISSUE-305). The variables are set in
+    `execute_task`, deliberately not in `build_clean_env`: that function also
+    feeds host-side, unsandboxed skill CLIs through the proxy's base env, and a
+    daemon-privileged process resolving a cache out of a model-writable
+    directory is the confused-deputy shape the PATH handling already guards.
+    """
+
+    def _config(self, tmp_path, cache_dir):
+        return Config(
+            db_path=tmp_path / "data" / "istota.db",
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(sandbox_cache_dir=str(cache_dir)),
+        )
+
+    def test_build_clean_env_never_names_a_cache(self, tmp_path):
+        """The proxy's base env is built from this, and hands it to host-side
+        skill CLIs running outside the sandbox as the daemon user."""
+        cache = tmp_path / "uvcache"
+        cache.mkdir()
+        config = self._config(tmp_path, cache)
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
+            env = build_clean_env(config)
+        for var in ("UV_CACHE_DIR", "XDG_CACHE_HOME", "npm_config_cache", "HF_HOME"):
+            assert var not in env, f"{var} would reach every host-side skill CLI"
+
+    def test_resolver_returns_a_per_user_directory_and_creates_it(self, tmp_path):
+        cache = tmp_path / "uvcache"
+        cache.mkdir()
+        config = self._config(tmp_path, cache)
+        alice = resolve_sandbox_cache_dir(config, "alice")
+        bob = resolve_sandbox_cache_dir(config, "bob")
+        assert alice == cache / "alice"
+        assert bob == cache / "bob"
+        assert alice.is_dir() and bob.is_dir()
+
+    def test_resolver_returns_the_path_as_written_not_resolved(self, tmp_path):
+        """`_bind` uses the string it is handed as the sandbox destination, and
+        the developer-repos bind passes `repos_dir` unresolved. Resolving here
+        would put a symlinked repos_dir and a cache under it at two names inside
+        the namespace — two mounts — and `link(2)` returns EXDEV between them,
+        which is the full-copy cost the placement recommendation exists to
+        avoid, failing silently."""
+        real = tmp_path / "realrepos"
+        real.mkdir()
+        link = tmp_path / "repos"
+        link.symlink_to(real)
+        (link / "cache").mkdir()
+
+        config = self._config(tmp_path, link / "cache")
+        resolved = resolve_sandbox_cache_dir(config, "alice")
+        assert resolved == link / "cache" / "alice"
+        assert str(real) not in str(resolved)
+
+    def test_unset_returns_none(self, tmp_path):
+        config = Config(db_path=tmp_path / "data" / "istota.db", temp_dir=tmp_path / "temp")
+        assert resolve_sandbox_cache_dir(config, "alice") is None
+
+    def test_a_missing_directory_returns_none(self, tmp_path):
+        config = self._config(tmp_path, tmp_path / "never-created")
+        assert resolve_sandbox_cache_dir(config, "alice") is None
+
+    def test_a_relative_path_returns_none(self, tmp_path):
+        config = self._config(tmp_path, "relative/cache")
+        assert resolve_sandbox_cache_dir(config, "alice") is None
+
+    def test_a_root_above_the_task_workspace_returns_none(self, tmp_path):
+        """`config.temp_dir` holds every user's workspace and the read-only
+        `.developer` credential helpers inside it."""
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        config = self._config(tmp_path, temp)
+        assert resolve_sandbox_cache_dir(config, "alice") is None
+
+    def test_a_broken_config_never_raises(self, tmp_path):
+        """Both callers are on the task path — for NativeBrain, per Bash call.
+        An exception here would fail every task, which is the outcome failing
+        open exists to prevent."""
+        cache = tmp_path / "uvcache"
+        cache.mkdir()
+        # Two shapes nothing should produce. Each makes a path helper inside the
+        # resolver raise something that is not ValueError; the contract is that
+        # the caller still gets an answer.
+        for attr in ("db_path", "temp_dir"):
+            broken = self._config(tmp_path, cache)
+            setattr(broken, attr, None)
+            assert resolve_sandbox_cache_dir(broken, "alice") is None
+
+    def test_each_refusal_warns_once_per_process(self, tmp_path, caplog):
+        """Both callers run on every task; two warnings per task forever is not
+        a log, it is noise that hides the one that matters."""
+        import istota.executor as executor_mod
+
+        executor_mod._cache_dir_refusals.clear()
+        config = self._config(tmp_path, "relative/cache")
+        with caplog.at_level(logging.WARNING, logger="istota.executor"):
+            resolve_sandbox_cache_dir(config, "alice")
+            resolve_sandbox_cache_dir(config, "alice")
+        hits = [r for r in caplog.records if "sandbox_cache_dir" in r.getMessage()]
+        assert len(hits) == 1, [r.getMessage() for r in hits]
 
 
 class TestBuildStrippedEnv:

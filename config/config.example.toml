@@ -243,6 +243,20 @@ features = []
 #                                  # agent needs to read. Keep entries narrow — a broad path sweeps
 #                                  # in whatever lives under it. (The DB directories are masked
 #                                  # after this list is applied, so they stay unreachable either way.)
+# sandbox_cache_dir = ""           # root of a disk-backed directory for the package managers'
+#                                  # caches. Each user gets {root}/{user_id}, bound RW into
+#                                  # their sandbox, with UV_CACHE_DIR, XDG_CACHE_HOME and
+#                                  # npm_config_cache pointed at it. Empty (the default) leaves
+#                                  # them on bwrap's own root tmpfs — RAM the host cannot
+#                                  # attribute, discarded at task exit, so every task downloads
+#                                  # again. Put it under developer.repos_dir when that is set:
+#                                  # uv hardlinks out of its cache and link(2) fails across a
+#                                  # mount boundary, so a cache elsewhere costs every worktree a
+#                                  # full copy. It is ignored, with a warning, when it is
+#                                  # relative, missing, unwritable, under a database directory,
+#                                  # or at or ABOVE anything the sandbox already mounts — a bind
+#                                  # above an earlier mount would cover it, so do not point this
+#                                  # at temp_dir, ~/.cache, ~/.local, or repos_dir itself.
 
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)
