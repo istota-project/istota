@@ -175,9 +175,12 @@ export interface AdminSubscriptionSpend {
 /**
  * Plan utilization for the Claude Code subscription.
  *
- * `available: false` always carries an `error`, so the card says why instead of
- * vanishing. Every field is optional because the whole section degrades to
- * `{error}` when it fails — the same best-effort shape `usage` has.
+ * `available` is true wherever this key is present at all, kept so the shape
+ * does not change under a client that still reads it. A reading the server
+ * could not obtain omits the key instead, so there is no card to draw and
+ * `runtime.subscription_usage` carries the reason as a SKIP. Every field is
+ * optional because the whole section degrades to `{error}` when it fails — the
+ * same best-effort shape `usage` has.
  */
 export interface AdminSubscription {
   available?: boolean;
