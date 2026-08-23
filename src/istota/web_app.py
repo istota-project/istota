@@ -1408,11 +1408,13 @@ def _admin_subscription_section(config, now: datetime) -> dict | None:
     different reads. They are configuration rather than credentials, and the
     only person who sees this dashboard is the one who set them.
 
-    ``available: false`` is a rendering state, not an absence — it always
-    carries an ``error``, so the card can say why instead of vanishing. Disabled,
-    no credential, a refused credential and a shape change all land here, and an
-    operator who expects the reading and does not get it has to learn the
-    reason. That is enforced below rather than taken on trust.
+    ``available`` is ``True`` wherever the key is present at all, kept so the
+    shape does not change under a client that still reads it. Disabled, no
+    credential, a refused credential and a shape change all return ``None``
+    below instead: there is no reading, so there is no card, and the operator
+    learns the reason from ``runtime.subscription_usage``, which reports it as
+    a SKIP rather than as a note that would be permanent on both server
+    shapes.
 
     ``token_source`` is the resolver's branch name (``env`` / ``file`` /
     ``keychain``) and never the token. Nothing downstream would catch a leak:

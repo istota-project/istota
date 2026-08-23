@@ -8,10 +8,10 @@ import type { AdminStats, AdminSubscription } from '$lib/api';
  *
  * It is a card of its own, above Token usage rather than inside it, and the
  * four states below are the whole of what it can be — a populated reading, an
- * unavailable one, a stale one, and one with pay-as-you-go credits enabled.
- * Each is asserted here rather than checked by eye against the dev server,
- * because three of the four are states a working deployment rarely produces on
- * demand and the fourth is off in the captured payload the mock is modelled on.
+ * absent one, a stale one, and one with pay-as-you-go credits enabled. Each is
+ * asserted here rather than checked by eye against the dev server: absent is
+ * what both server shapes actually show, and the other three a working
+ * deployment produces rarely and on nobody's schedule.
  *
  * Two properties are worth more than the rendering:
  *
@@ -19,9 +19,13 @@ import type { AdminStats, AdminSubscription } from '$lib/api';
  *   the payload so this card and `istota doctor` reach the same verdict about
  *   the same number. A literal here would silently ignore a configured
  *   threshold, so the test moves the thresholds rather than the percentages.
- * * **`available: false` still renders.** An operator who expects the reading
- *   and does not get it has to learn why. A card that vanished would report a
- *   refused credential as an absence of the feature.
+ * * **A windowless reading draws no card.** The card is the reading, so with
+ *   no window there is nothing to meter and it is absent rather than drawn as
+ *   a note saying so. That note used to be here. It became permanent on both
+ *   server shapes once the endpoint turned out not to serve the long-lived
+ *   setup-token credential they deploy, and it named nothing anyone could act
+ *   on. The reason rides `runtime.subscription_usage` now, which returns SKIP
+ *   and carries it.
  */
 
 vi.mock('$lib/api', () => ({ getAdminStats: vi.fn() }));
@@ -48,7 +52,7 @@ const usageTotals = () => ({
 
 /** The smallest payload the page will render, with the section under test on
  *  it. Every other section is present and empty — the page reads them all. */
-function stats(subscription: AdminSubscription): AdminStats {
+function stats(subscription: AdminSubscription | undefined): AdminStats {
   return {
     system: {
       version: '0.0.0-test',
@@ -128,12 +132,36 @@ async function show(subscription: AdminSubscription) {
   return container;
 }
 
-/** The card's own section, addressed by its heading rather than by position. */
-function card(container: HTMLElement): HTMLElement {
+/**
+ * Render the page with a payload that draws no card, waiting for the page
+ * instead of for the card.
+ *
+ * `show` waits on the card's own heading, which never arrives here, so it can
+ * only time out. The anchor is the refresh note: it sits at the foot of the
+ * `{:else if stats}` branch under no guard of its own, so reaching it proves
+ * the payload was applied and the page settled. That is what separates "the
+ * guard dropped the card" from "the page never rendered", which is the way an
+ * absence assertion is usually made vacuous.
+ */
+async function showAbsent(subscription: AdminSubscription | undefined) {
+  vi.mocked(getAdminStats).mockResolvedValue(stats(subscription));
+  const { container } = render(Page);
+  await screen.findByText('Auto-refreshes every 60s.');
+  return container;
+}
+
+/** The card's own section, addressed by its heading rather than by position.
+ *  Null when the page drew no card at all. */
+function findCard(container: HTMLElement): HTMLElement | null {
   const headings = Array.from(container.querySelectorAll('section.card h2'));
   const heading = headings.find((h) => h.textContent?.trim() === 'Claude Code subscription');
-  expect(heading, 'the subscription card is on the page').toBeTruthy();
-  return heading!.closest('section.card') as HTMLElement;
+  return heading ? (heading.closest('section.card') as HTMLElement) : null;
+}
+
+function card(container: HTMLElement): HTMLElement {
+  const el = findCard(container);
+  expect(el, 'the subscription card is on the page').toBeTruthy();
+  return el!;
 }
 
 /**
@@ -281,45 +309,67 @@ describe('the subscription card — tinting', () => {
   });
 });
 
-describe('the subscription card — unavailable', () => {
-  it('stays on the page and carries the reason', async () => {
-    const el = card(
-      await show({
-        available: false,
-        windows: [],
-        spend: null,
-        fetched_at: null,
-        stale: false,
-        token_source: '',
-        warn_percent: 80,
-        high_percent: 95,
-        error: 'no Claude Code OAuth credential found',
-      }),
-    );
+describe('the subscription card — absent', () => {
+  // Every payload here is one the page must render *around* rather than draw a
+  // card for. Each case asserts the page came up, because an absence assertion
+  // against a page that never rendered passes for the wrong reason.
 
-    expect(el.textContent).toContain('no Claude Code OAuth credential found');
-    expect(el.querySelector('.stat-tile')).toBeNull();
+  it('draws no card when the key is absent', async () => {
+    // The ordinary state on both server shapes, and the one the superseded
+    // tests never covered: `subscription` is optional and the backend omits it
+    // unless Claude Code is the brain or the fallback and the endpoint
+    // returned windows.
+    const el = await showAbsent(undefined);
+
+    expect(findCard(el)).toBeNull();
   });
 
-  it('does not render a tile grid for an available reading with no windows', async () => {
-    // Defensive rather than a wire state: `available` is set from
-    // `UsageSnapshot.has_data`, which is `bool(windows)`, so the server cannot
-    // emit this pair. The card must not draw an empty grid if it ever does.
-    const el = card(await show(populated({ windows: [], error: 'the endpoint named no window' })));
+  it('draws no card for a refused credential', async () => {
+    const el = await showAbsent({
+      available: false,
+      windows: [],
+      spend: null,
+      fetched_at: null,
+      stale: false,
+      token_source: '',
+      warn_percent: 80,
+      high_percent: 95,
+      error: 'no Claude Code OAuth credential found',
+    });
 
-    expect(el.textContent).toContain('the endpoint named no window');
-    expect(el.querySelector('.stat-tile')).toBeNull();
+    expect(findCard(el)).toBeNull();
+    // The reason is not dropped, it moves. `check_subscription_usage` returns
+    // SKIP carrying it; nothing on this page renders it, and the assertion
+    // that it reaches an operator lives with that check in
+    // `tests/test_doctor.py`. Asserting its absence here is what keeps the two
+    // surfaces from both claiming the job.
+    expect(el.textContent).not.toContain('no Claude Code OAuth credential found');
   });
 
-  it('gives a reason even when the payload carries none', async () => {
-    // The section itself never emits a blank reason, but the stats endpoint's
-    // best-effort catch does: it writes `{error: str(exc)}`, and `str(exc)` is
-    // empty for an exception raised with no arguments. A card reading "Plan
-    // limits unavailable: " tells an operator nothing at all.
-    const el = card(await show({ error: '' }));
+  it('draws no card for a section-level exception, and says nothing', async () => {
+    // The only windowless payload the server can still emit: the stats
+    // endpoint's outer catch writes `{error: str(exc)}` with no other key
+    // (`web_app.py`, `payload["subscription"] = {"error": str(exc)}`). The
+    // superseded test covered this shape too, asserting the card rendered the
+    // reason and fell back to "unreported reason" where `str(exc)` was empty.
+    // There is no note to fall back in now, so what is pinned instead is the
+    // decision that a failed section degrades to silence on this surface
+    // rather than to a card with an empty reason in it.
+    const el = await showAbsent({ error: 'AttributeError: boom' });
 
-    expect(el.textContent).toContain('Plan limits unavailable');
-    expect(el.textContent).toContain('unreported reason');
+    expect(findCard(el)).toBeNull();
+    expect(el.textContent).not.toContain('boom');
+  });
+
+  it('draws no card for an available reading with no windows', async () => {
+    // Defensive rather than a wire state: the section returns `None` on
+    // `not snapshot.has_data`, so it never reaches the point of emitting a
+    // windowless payload, and `available` is a hardcoded `true` below that.
+    // The guard reads the windows rather than the flag, so it covers the pair
+    // anyway.
+    const el = await showAbsent(populated({ windows: [], error: 'the endpoint named no window' }));
+
+    expect(findCard(el)).toBeNull();
   });
 });
 
