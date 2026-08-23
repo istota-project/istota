@@ -225,6 +225,10 @@ class FrameDecoder:
     A socket read hands back an arbitrary slice — half a header, three frames
     and a fragment, a single byte. Both sides need the same reassembly, and a
     pure buffer is the only version of it that can be tested without a socket.
+
+    ``max_payload`` can only lower the module's own cap, never raise it:
+    ``unpack_header`` refuses anything over ``MAX_FRAME_BYTES`` before this
+    class gets a look at it.
     """
 
     def __init__(self, max_payload: int = MAX_FRAME_BYTES) -> None:
@@ -401,8 +405,14 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
                 f"{MAX_WRITE_FILE_BYTES // (1024 * 1024)} MiB cap",
             )
         mode = payload.get("mode", 0o644)
-        if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o7777:
-            raise ProtocolError(ERR_BAD_REQUEST, "'mode' must be a file mode")
+        # Permission bits only. The setuid, setgid and sticky bits are outside
+        # what a file-transfer verb needs, and the server applies this mode with
+        # an explicit chmod that defeats the umask, so `04755` would otherwise
+        # arrive under the repos root exactly as asked for.
+        if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+            raise ProtocolError(
+                ERR_BAD_REQUEST, "'mode' must be permission bits in the range 0-0o777"
+            )
         payload["mode"] = mode
 
     elif action == ACTION_READ_FILE:

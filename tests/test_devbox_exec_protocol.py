@@ -254,6 +254,9 @@ class TestMalformedRequests:
             {"action": "read_file"},
             {"action": "write_file", "path": "/x", "size": -1},
             {"action": "write_file", "path": "/x", "size": 1, "mode": "0644"},
+            {"action": "write_file", "path": "/x", "size": 1, "mode": 0o4755},
+            {"action": "write_file", "path": "/x", "size": 1, "mode": 0o2755},
+            {"action": "write_file", "path": "/x", "size": 1, "mode": -1},
         ],
     )
     def test_a_malformed_shape_is_refused(self, payload):
@@ -283,6 +286,16 @@ class TestTheCaps:
         with pytest.raises(p.ProtocolError) as e:
             p.encode_write_file_request(path="/home/dev/big", size=p.MAX_WRITE_FILE_BYTES + 1)
         assert e.value.code == p.ERR_TOO_LARGE
+
+    def test_a_mode_is_permission_bits_and_nothing_else(self):
+        """The server applies this mode with an explicit chmod that defeats the
+        umask, so a setuid bit asked for here would arrive under the repos root
+        exactly as asked for."""
+        assert 0o777 == json.loads(
+            p.encode_write_file_request(path="/home/dev/x", size=1, mode=0o777)
+        )["mode"]
+        with pytest.raises(p.ProtocolError):
+            p.encode_write_file_request(path="/home/dev/x", size=1, mode=0o4755)
 
     def test_the_caps_are_the_ones_the_design_names(self):
         assert p.MAX_REQUEST_BYTES == 1024 * 1024

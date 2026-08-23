@@ -16,9 +16,10 @@ one is a named test here, and the two lists are meant to stay in step.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import re
+import struct
 import signal
 import socket
 import subprocess
@@ -202,6 +203,7 @@ def _start_server(
     *,
     idle_timeout: float | None = None,
     kill_grace: float | None = None,
+    drain_grace: float | None = None,
     env: dict[str, str] | None = None,
 ) -> Server:
     # A Unix socket path is capped at ~104 bytes on darwin, and pytest's tmp_path
@@ -232,6 +234,8 @@ def _start_server(
         argv += ["--idle-timeout-seconds", str(idle_timeout)]
     if kill_grace is not None:
         argv += ["--kill-grace-seconds", str(kill_grace)]
+    if drain_grace is not None:
+        argv += ["--drain-grace-seconds", str(drain_grace)]
 
     log = base / "server.log"
     child_env = dict(os.environ)
@@ -239,7 +243,19 @@ def _start_server(
     if env:
         child_env.update(env)
     with open(log, "wb") as handle:
-        proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT, env=child_env)
+        # An open pipe on the server's own stdin, never written to and never
+        # closed until teardown. Without it the server inherits pytest's null
+        # fd 0, a child that inherited it would see EOF at once, and every
+        # assertion that stdin is off unless requested would pass against a
+        # server that handed the child its own descriptor. Verified by mutation:
+        # with a null fd 0 those tests stay green against exactly that server.
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=child_env,
+        )
 
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
@@ -305,6 +321,11 @@ def server_factory():
     finally:
         for srv in started:
             _stop_server(srv)
+
+
+def _temp_files(root):
+    """The write verb's in-flight temp files under a root, by name."""
+    return sorted(q.name for q in root.rglob(".istota-exec-*.tmp"))
 
 
 def _alive(pid: int) -> bool:
@@ -456,6 +477,47 @@ class TestStdin:
         assert out.stdout == b"done\n"
         assert out.terminal["exit_code"] == 0
 
+    def test_a_stdin_frame_after_the_eof_marker_is_dropped(self, server):
+        """The other half of the same guard, and the only shape where the
+        `want_stdin` test and the closed-pipe test are doing separate work."""
+        with server.connect() as conn:
+            conn.send(
+                encode_exec_request(
+                    argv=["sh", "-c", "cat; echo done"],
+                    cwd=str(server.repos),
+                    stdin=True,
+                )
+            )
+            assert conn.read_ack()["status"] == "ok"
+            conn.send(pack_frame(STREAM_STDIN, b"first"))
+            conn.send(encode_stdin_eof())
+            conn.send(pack_frame(STREAM_STDIN, b"-after-the-end"))
+            out = conn.collect()
+        assert out.stdout == b"firstdone\n"
+        assert out.terminal["exit_code"] == 0
+
+    def test_a_child_that_closes_its_own_stdin_is_not_a_disconnect(self, server):
+        """`head -c 5` reads what it wants and closes. The write that follows
+        fails with EPIPE, which must stop the pump rather than kill the command
+        as a client that went away — and must be retrieved rather than left on
+        the loop's floor as an unretrieved-exception warning."""
+        with server.connect() as conn:
+            conn.send(
+                encode_exec_request(
+                    argv=["sh", "-c", "head -c 5; sleep 0.3; echo ok"],
+                    cwd=str(server.repos),
+                    stdin=True,
+                )
+            )
+            assert conn.read_ack()["status"] == "ok"
+            for _ in range(16):
+                conn.send(pack_frame(STREAM_STDIN, b"x" * 65536))
+            conn.send(encode_stdin_eof())
+            out = conn.collect()
+        assert out.terminal["exit_code"] == 0
+        assert out.stdout.endswith(b"ok\n")
+        assert "Future exception was never retrieved" not in server.log_text()
+
 
 # --------------------------------------------------------------------------- #
 # The server is the boundary
@@ -569,7 +631,7 @@ class TestTheFileVerbsAreChecked:
     def test_a_missing_file_says_so_rather_than_refusing_the_path(self, server):
         ack = server.refusal(encode_read_file_request(path=str(server.repos / "nope")))
         assert ack["code"] == ERR_BAD_REQUEST
-        assert ERR_PATH_REFUSED not in ack["code"]
+        assert "refused" not in ack["message"]
 
 
 class TestTheTwoDirectoriesRefusedByName:
@@ -743,6 +805,268 @@ class TestReaping:
         assert out.stdout.count(b"tick") == 6
 
 
+class TestNothingACommandStartedOutlivesIt:
+    """Design 11's other half, and the one that is easy to ship broken: the
+    disconnect path gets all the attention, while the common case is a command
+    that simply finishes."""
+
+    def test_a_completed_command_reports_at_once_and_takes_its_orphan_with_it(
+        self, server
+    ):
+        """asyncio's `Process.wait()` returns when the output pipes disconnect,
+        not when the child exits, so a backgrounded process holding stdout kept
+        it pending — the terminal frame arrived an hour later, if at all, and
+        carried `reason: idle` for a command that had exited cleanly."""
+        started = time.monotonic()
+        with server.connect() as conn:
+            conn.send(
+                encode_exec_request(
+                    argv=["sh", "-c", "sleep 300 & echo $!; exit 0"],
+                    cwd=str(server.repos),
+                )
+            )
+            assert conn.read_ack()["status"] == "ok"
+            out = conn.collect()
+        elapsed = time.monotonic() - started
+        assert out.terminal["exit_code"] == 0
+        assert "reason" not in out.terminal, "a finished command was reaped as idle"
+        assert elapsed < 10, f"the terminal frame took {elapsed:.1f}s"
+
+        orphan = int(out.stdout.strip())
+        gone_by = time.monotonic() + 10.0
+        while time.monotonic() < gone_by and _alive(orphan):
+            time.sleep(0.05)
+        assert not _alive(orphan), f"{orphan} outlived the command that started it"
+
+    def test_a_client_that_closes_before_the_ack_still_gets_its_group_reaped(
+        self, server
+    ):
+        """The narrowest window there is, and the daemon's cancel path produces
+        it: a SIGKILL of the client between the request and the answer. The ack
+        write then fails, and without a `finally` around the whole exec the
+        command runs on with nothing watching it — measured, indefinitely."""
+        survived = server.repos / "survived"
+        conn = server.connect()
+        conn.send(
+            encode_exec_request(
+                argv=["sh", "-c", f"sleep 3; touch {survived}"],
+                cwd=str(server.repos),
+            )
+        )
+        conn.close()
+
+        # The reap is the witness, not the first marker: the group is killed
+        # within microseconds of the failed acknowledgement, usually before the
+        # shell has run its first command, so `started` is a race. The log line
+        # is written only when something was still alive to kill, and without
+        # the `finally` there is no line at all and `survived` appears at +3s.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline and "at exit" not in server.log_text():
+            time.sleep(0.05)
+        assert "reaping process group" in server.log_text()
+        time.sleep(5.0)
+        assert not survived.exists(), "the command outlived the connection that asked"
+
+
+class TestShutdown:
+    def test_a_stopping_server_kills_the_commands_it_started(self, server_factory):
+        """The container outlives this process — the supervisor restarts it a
+        second later. A shutdown that forgot its children would accumulate a
+        build tree per restart, running against the repos mount with nothing
+        watching it."""
+        srv = server_factory()
+        conn = srv.connect()
+        conn.send(
+            encode_exec_request(
+                argv=["sh", "-c", "echo $$; sleep 300"], cwd=str(srv.repos)
+            )
+        )
+        assert conn.read_ack()["status"] == "ok"
+        decoder = FrameDecoder()
+        pid = None
+        deadline = time.monotonic() + READ_TIMEOUT
+        while pid is None and time.monotonic() < deadline:
+            for stream, payload in decoder.feed(conn.sock.recv(65536)):
+                if stream == STREAM_STDOUT and payload.strip():
+                    pid = int(payload.split()[0])
+        assert pid and _alive(pid)
+
+        stopping = time.monotonic()
+        srv.proc.terminate()
+        srv.proc.wait(timeout=20)
+        stopped_in = time.monotonic() - stopping
+        conn.close()
+
+        # Promptly, not eventually. From 3.12 `wait_closed` waits for live
+        # handlers, so a server that leaves its commands running holds the
+        # shutdown open — and the supervisor restarts a second later, which
+        # makes that stall an outage on a box where the whole point is that a
+        # crash costs one second.
+        assert stopped_in < 4.0, f"the shutdown took {stopped_in:.1f}s"
+
+        gone_by = time.monotonic() + 10.0
+        while time.monotonic() < gone_by and _alive(pid):
+            time.sleep(0.05)
+        assert not _alive(pid), f"{pid} survived the server that started it"
+
+
+class TestOutputIsNeverSilentlyLost:
+    """The drain grace exists for a pipe nobody will close, not for a client
+    that has not got round to reading yet. Bounding it naively dropped 80 KiB of
+    a 400 KiB run on Linux and still reported exit 0.
+
+    The rule is unit-tested rather than driven through a socket, deliberately.
+    Reaching the state end to end — child exited, pump still pushing bytes at a
+    stalled reader — depends on the pipe buffer, the socket buffer and asyncio's
+    own high-water mark, and the sizes that hit it on Linux do not on darwin. A
+    scenario test for it passes on this machine whatever the rule says, which is
+    the one thing a test must not do."""
+
+    def test_the_drain_gives_up_on_a_pipe_nobody_will_close(self):
+        module = _load_server_module()
+
+        async def go():
+            server = module.ExecServer(
+                module.Roots("/tmp", "/tmp", "/tmp"), drain_grace=0.3
+            )
+            states = (module._PumpState(), module._PumpState())
+            pumps = tuple(
+                asyncio.ensure_future(asyncio.sleep(30)) for _ in range(len(states))
+            )
+            begun = time.monotonic()
+            drained = await server._drain(pumps, states)
+            elapsed = time.monotonic() - begun
+            for pump in pumps:
+                pump.cancel()
+            return drained, elapsed
+
+        drained, elapsed = asyncio.run(go())
+        assert drained is False
+        assert 0.3 <= elapsed < 5.0
+
+    def test_the_drain_waits_out_a_pump_that_is_writing_to_the_client(self):
+        module = _load_server_module()
+
+        async def go():
+            server = module.ExecServer(
+                module.Roots("/tmp", "/tmp", "/tmp"), drain_grace=0.2
+            )
+            states = (module._PumpState(), module._PumpState())
+            states[0].writing = True
+            gates = [asyncio.get_running_loop().create_future() for _ in states]
+            pumps = tuple(asyncio.ensure_future(gate) for gate in gates)
+            drain = asyncio.ensure_future(server._drain(pumps, states))
+            # Five times the grace, and it must still be waiting.
+            await asyncio.sleep(1.0)
+            still_waiting = not drain.done()
+            states[0].writing = False
+            for gate in gates:
+                gate.set_result(None)
+            return still_waiting, await drain
+
+        still_waiting, drained = asyncio.run(go())
+        assert still_waiting, "a slow reader was treated as a truncation"
+        assert drained is True
+
+    def test_output_that_could_not_be_read_is_reported_as_truncated(
+        self, server_factory
+    ):
+        """A process that `setsid`s out of the group survives the reap and holds
+        the descriptor. Nothing can be done about that; what can be done is not
+        reporting a clean status over the hole it leaves."""
+        srv = server_factory(drain_grace=1.0)
+        holder = (
+            "import os, sys, time\n"
+            "sys.stdout.write('start\\n'); sys.stdout.flush()\n"
+            "if os.fork() == 0:\n"
+            "    os.setsid()\n"
+            "    time.sleep(4)\n"
+            "    os._exit(0)\n"
+            "sys.exit(0)\n"
+        )
+        out = srv.run(argv=[sys.executable, "-c", holder], cwd=str(srv.repos))
+        assert out.terminal["exit_code"] == 0
+        assert out.terminal["truncated"] is True
+        assert "truncated" in srv.log_text()
+
+
+class TestAFramingErrorIsNotADisconnect:
+    def test_a_malformed_frame_after_the_ack_gets_an_answer(self, server):
+        """The peer is still there. Treating it as a disconnect killed the
+        command and closed the connection with nothing said, which a client
+        reads as "the container died mid-build"."""
+        with server.connect() as conn:
+            conn.send(
+                encode_exec_request(
+                    argv=["sh", "-c", "sleep 30"], cwd=str(server.repos)
+                )
+            )
+            assert conn.read_ack()["status"] == "ok"
+            conn.send(struct.pack(">BxxxI", 7, 0))  # no such stream id
+            out = conn.collect()
+        assert out.terminal["error"] == ERR_BAD_REQUEST
+        assert out.terminal["signal"] == "SIGKILL"
+
+    def test_a_post_acknowledgement_failure_never_invents_an_exit_code(self, server):
+        """A server fault is not a command that exited 1. `exit_code` is null,
+        and the code says what actually happened."""
+        target = server.repos / "short.bin"
+        with server.connect() as conn:
+            conn.send(encode_write_file_request(path=str(target), size=100))
+            assert conn.read_ack()["status"] == "ok"
+            conn.send(pack_frame(STREAM_STDIN, b"only ten!!"))
+            conn.send(encode_stdin_eof())
+            out = conn.collect()
+        assert out.terminal["exit_code"] is None
+        assert out.terminal["error"] == ERR_BAD_REQUEST
+        assert not target.exists()
+        assert _temp_files(server.repos) == [], "a partial transfer left a temp file"
+
+
+class TestTheWriteVerbCleansUpAfterItself:
+    def test_a_body_longer_than_declared_is_refused(self, server):
+        target = server.repos / "over.bin"
+        with server.connect() as conn:
+            conn.send(encode_write_file_request(path=str(target), size=4))
+            assert conn.read_ack()["status"] == "ok"
+            conn.send(pack_frame(STREAM_STDIN, b"far too many bytes"))
+            out = conn.collect()
+        assert out.terminal["error"] == ERR_TOO_LARGE
+        assert not target.exists()
+        assert _temp_files(server.repos) == []
+
+    def test_a_directory_destination_is_refused_before_the_acknowledgement(
+        self, server
+    ):
+        """Everything that can refuse refuses before the caller is told to send,
+        which is the ordering `exec` uses for its spawn."""
+        ack = server.refusal(encode_write_file_request(path=str(server.repos), size=4))
+        assert ack["code"] == ERR_BAD_REQUEST
+
+    def test_a_stalled_body_times_out_and_leaves_nothing_behind(self, server_factory):
+        """The temp file lands under the repos mount, where `worktree_reaper`
+        counts an untracked file as dirt and pins the worktree holding it for
+        good. A stall must not be able to leave one."""
+        srv = server_factory(idle_timeout=1.0)
+        target = srv.repos / "stalled.bin"
+        with srv.connect() as conn:
+            conn.send(encode_write_file_request(path=str(target), size=100))
+            assert conn.read_ack()["status"] == "ok"
+            out = conn.collect()
+        assert out.terminal["error"] == ERR_BAD_REQUEST
+        assert not target.exists()
+        assert _temp_files(srv.repos) == []
+
+
+class TestTheIdleTimeoutCoversEveryRead:
+    def test_a_connection_that_never_asks_for_anything_is_let_go(self, server_factory):
+        srv = server_factory(idle_timeout=1.0)
+        with srv.connect() as conn:
+            ack = conn.read_ack()
+        assert ack["status"] == "error"
+        assert ack["code"] == ERR_BAD_REQUEST
+
+
 class TestConcurrency:
     def test_ten_concurrent_execs_each_get_their_own_status(self, server):
         results: dict[int, int] = {}
@@ -912,6 +1236,37 @@ class TestTheScriptItself:
         assert module.DEFAULT_STAGING == "/home/dev/.istota-exec"
         assert module.REFUSED_BY_NAME == ("/run/istota-cred", "/run/istota-exec")
 
+    def test_a_root_that_is_not_an_absolute_path_is_refused_rather_than_answered(
+        self,
+    ):
+        """`os.path.realpath("")` is the process's own working directory, and
+        `is_under(path, "")` is True for every absolute path. An unset variable
+        in the supervisor's command line would otherwise scope every exec to
+        wherever the server happened to be started, silently."""
+        module = _load_server_module()
+        for bad in ("", "repos", "./repos"):
+            with pytest.raises(ValueError):
+                module.is_under("/etc/shadow", bad)
+            with pytest.raises(ValueError):
+                module.Roots(bad, "/home/dev", "/home/dev/.istota-exec")
+
+    def test_the_server_refuses_to_start_on_a_relative_root(self, tmp_path):
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(SERVER),
+                "--socket",
+                str(tmp_path / "exec.sock"),
+                "--repos-root",
+                "repos",
+            ],
+            capture_output=True,
+            timeout=30,
+            text=True,
+        )
+        assert done.returncode != 0
+        assert "absolute path" in (done.stderr + done.stdout)
+
     def test_the_root_test_is_a_prefix_test_on_components(self):
         """`/srv/repos/alice-evil` is not under `/srv/repos/alice`, and a naive
         startswith says it is."""
@@ -939,9 +1294,9 @@ def _load_server_module():
     return module
 
 
-def test_the_json_the_server_writes_is_the_json_the_protocol_decodes(server):
-    """A last guard against a server that hand-rolls its own framing: every
-    control frame it sent parses as JSON and nothing arrived on stream 0."""
+def test_the_terminal_frame_is_the_last_thing_on_the_connection(server):
+    """A client stops reading at the terminal frame, so anything the server
+    sends after one is invisible."""
     out = server.run(argv=["sh", "-c", "echo hi"], cwd=str(server.repos))
-    assert all(isinstance(json.dumps(c), str) for c in out.controls)
     assert out.terminal is out.controls[-1]
+    assert out.stdout == b"hi\n"
