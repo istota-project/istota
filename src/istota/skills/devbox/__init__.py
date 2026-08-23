@@ -89,9 +89,10 @@ _SIGPIPE_NOTE = SIGPIPE_NOTE
 # This is a permanent property of `docker cp`, not a bug to wait out, so the
 # only honest answer is to refuse the path.
 #
-# Hand-maintained mirror of the ``tmpfs:`` keys in the devbox compose files
-# (deploy/ansible/templates/docker-compose.devbox.yml.j2 and
-# docker/docker-compose.yml); tests/test_skills_devbox.py pins the two together.
+# Hand-maintained mirror of the ``tmpfs:`` keys in the devbox compose file
+# (deploy/ansible/templates/docker-compose.devbox.yml.j2);
+# tests/test_skills_devbox.py pins the two together. There is one such file:
+# docker/docker-compose.yml ships no devbox, so it declares no tmpfs either.
 _COMPOSE_TMPFS_MOUNTS = ("/workspace",)
 
 # The mount that produced a report and appears in no compose file, so the pin
