@@ -10,6 +10,7 @@
     KebabMenu,
     Chip,
     ConfirmDialog,
+    CountPill,
   } from '$lib/components/ui';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
@@ -706,11 +707,7 @@
         >
           <Circle size={12} />
           <span class="view-name">Unread</span>
-          {#if unreadTotal > 0}
-            <span class="unread-chip" title={`${unreadTotal} unread`}>
-              {unreadTotal > 99 ? '99+' : unreadTotal}
-            </span>
-          {/if}
+          <CountPill count={unreadTotal} title={`${unreadTotal} unread`} />
         </button>
         <button
           class="view-btn"
@@ -776,9 +773,7 @@
               <span class="room-line">
                 <span class="room-name" class:unread>{room.name}</span>
                 {#if unread}
-                  <span class="unread-chip" title={`${unreadCount} unread`}>
-                    {unreadCount > 99 ? '99+' : unreadCount}
-                  </span>
+                  <CountPill count={unreadCount} title={`${unreadCount} unread`} />
                 {/if}
               </span>
             </span>
@@ -1291,23 +1286,6 @@
   .room-name.unread {
     font-weight: 700;
     color: var(--text-primary);
-  }
-  /* Count chip in its own non-shrink slot so the name's ellipsis can't clip it
-	   (same fixed-slot pattern as .room-origin). */
-  .unread-chip {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 1.15rem;
-    height: 1.15rem;
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    color: var(--surface-base);
-    font-size: 0.7rem;
-    font-weight: 600;
-    line-height: 1;
   }
   /* Leading origin glyph. Fixed slot before the title so a long room name
 	   still gets the full row width and the icon never enters the title's

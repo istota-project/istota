@@ -141,10 +141,10 @@ describe('CountPill', () => {
     // jsdom does not apply a Svelte component's `<style>`, so a computed-style
     // check reads nothing whether the rule is there or not.
     //
-    // The token matters. `.unread-chip` is 0.7rem and this is due to replace
-    // it, so `--text-xs` makes that a true substitution with no visual change.
-    // `--text-2xs` is 0.55rem and would shrink the chip by a fifth while a
-    // "one fewer baselined violation" check still passed.
+    // The token matters. `.unread-chip` was 0.7rem and now renders through
+    // this component, so `--text-xs` is what made that a true substitution
+    // with no visual change. `--text-2xs` is 0.55rem and would shrink both
+    // chat chips by a fifth, which no lint or type check would catch.
     const here = dirname(fileURLToPath(import.meta.url));
     const src = readFileSync(resolve(here, 'CountPill.svelte'), 'utf8');
     const style = src.slice(src.indexOf('<style'), src.lastIndexOf('</style>'));

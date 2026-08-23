@@ -4,11 +4,11 @@
    *
    * Renders **nothing at zero**, so no call site needs its own `{#if}` — "no
    * badge" is part of what a count pill means rather than a decision each
-   * caller re-makes. Chat's `.unread-chip` is the shape this is lifted from and
-   * is byte-identical to it apart from sizing on `--text-xs` (0.7rem) instead of
-   * hardcoding the number, so migrating it is a token substitution with no
-   * visual change. Note `--text-2xs` is 0.55rem and would shrink that chip by a
-   * fifth while a "one fewer baselined violation" check still passed.
+   * caller re-makes. Chat's `.unread-chip` was the shape this was lifted from,
+   * byte-identical apart from sizing on `--text-xs` (0.7rem) instead of
+   * hardcoding the number, and now uses this component (both chips in
+   * `routes/chat/+page.svelte`). Keep the token: `--text-2xs` is 0.55rem and
+   * would shrink both of those chips by a fifth.
    */
   interface Props {
     count: number;
