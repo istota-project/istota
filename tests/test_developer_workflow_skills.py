@@ -614,9 +614,20 @@ class TestLoadBudget:
     further means dropping either the criteria, and then uncommitted work in a
     worktree looks safe when it is not, or the `--main` warning, which is the
     recurrence guard for the stray checkout that prompted the entry.
+
+    760 -> 761 for ISSUE-304, one net line and the smallest raise there can be,
+    by the same procedure: the rules file first, then this. npm, PyPI and
+    crates.io are now reachable from a task and nothing else is, so an install
+    that fetches from elsewhere -- `node-gyp` headers, Playwright browsers, a
+    GitHub release asset -- is refused at the CONNECT boundary. From where the
+    model sits that is indistinguishable from a flaky network, and the recipe
+    directly above the new line tells it to install per worktree, so without it
+    the model retries an install that cannot succeed until the task's budget is
+    gone. `docs/deployment/security.md` carries the operator-facing half; the
+    model never reads that file.
     """
 
-    BUDGET_LINES = 760
+    BUDGET_LINES = 761
 
     def test_three_bodies_fit_the_budget(self):
         total = 0

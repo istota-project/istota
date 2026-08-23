@@ -1322,6 +1322,49 @@ _PYPI_HOSTS = frozenset({
     "files.pythonhosted.org:443",
 })
 
+# Package registries reached by an install inside a developer worktree
+# (ISSUE-304). Gated on the developer skill rather than a config flag of their
+# own: the registries arrive with the skill, which is already opt-in through
+# ``developer.enabled``.
+#
+# **Authorized, not selected**, and the difference is worth stating because the
+# two read alike. ``authorized_skills`` is the union of the selected skills and
+# the ones ``derive_authorized_skills`` auto-authorizes on credential presence,
+# and ``developer`` auto-authorizes as soon as *either* forge token resolves.
+# So on a deployment where the user has configured a GitLab or GitHub token,
+# these hosts are on the allowlist for every one of that user's tasks — a Talk
+# reply, a cron job, a briefing — and not only for tasks that chose the skill.
+# That is the same gate the forge hosts have always ridden, deliberately (the
+# symmetry `derive_authorized_skills` exists for), so this adds reach to an
+# existing door rather than opening a new one. It is a door onto a registry
+# anyone may publish to, which is the argument this file uses below to refuse
+# ``*.blob.core.windows.net`` — the difference is that a package registry is
+# what an install *is*, and ``allow_pypi`` already concedes the same property
+# deployment-wide and on by default.
+#
+# Every hostname here was measured through a logging CONNECT proxy that
+# permitted everything and recorded each target, the same method that
+# established the GitHub Actions log host above. A guessed name fails silently
+# at the boundary and reads as a broken install, because the proxy matches
+# ``host:port`` exactly and supports no wildcards.
+#
+# npm: a complete `npm ci` of this repo's own web/package-lock.json — 213
+# packages — made 15 CONNECTs, all to this one host. Metadata and tarballs
+# share it.
+#
+# cargo: `cargo fetch` on serde and its transitive dependencies contacted the
+# sparse index and the download host. `crates.io` itself is the API — publish,
+# search, yank — and was never contacted, so it is not here.
+#
+# PyPI is absent deliberately: it is global (``allow_pypi``) rather than
+# developer-gated, because ad-hoc Python runs in every task and not only in
+# development ones.
+_REGISTRY_HOSTS = frozenset({
+    "registry.npmjs.org:443",
+    "index.crates.io:443",
+    "static.crates.io:443",
+})
+
 
 def _build_network_allowlist(
     config: Config,
@@ -1344,6 +1387,10 @@ def _build_network_allowlist(
     # Developer skill: add git remote hosts from config
     if "developer" in authorized_skills and config.developer.enabled:
         from urllib.parse import urlparse
+
+        # Package registries. Independent of the forge URLs below — a
+        # deployment with neither configured still installs dependencies.
+        hosts |= _REGISTRY_HOSTS
 
         for url in [config.developer.gitlab_url, config.developer.github_url]:
             if url:
