@@ -4670,11 +4670,12 @@ class TestGarminSyncInProcess:
         task = self._task(["garmin-sync", "--days-back", "3"])
         captured = {}
 
-        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz, config=None):
             captured["ctx_user_id"] = ctx.user_id
             captured["framework_db_path"] = framework_db_path
             captured["days_back"] = days_back
             captured["user_tz"] = user_tz
+            captured["config"] = config
             return self._fake_sync_result()
 
         fake_ctx = MagicMock(user_id="alice")
@@ -4693,6 +4694,8 @@ class TestGarminSyncInProcess:
         assert captured["framework_db_path"] == Path(db_path)
         assert captured["days_back"] == 3
         assert captured["user_tz"] == "Pacific/Auckland"
+        # Daemon-side, so an auth failure can raise the reconnect notification.
+        assert captured["config"] is config
         payload = json.loads(result)
         assert payload["status"] == "ok"
         assert payload["inserted"] == 3
@@ -4702,7 +4705,7 @@ class TestGarminSyncInProcess:
         task = self._task(["garmin-sync"])
         captured = {}
 
-        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz):
+        def _fake_sync(ctx, framework_db_path, *, days_back, user_tz, config=None):
             captured["days_back"] = days_back
             return self._fake_sync_result()
 
@@ -5951,7 +5954,14 @@ class TestDeferredOperations:
             assert db.find_sent_email_by_message_id(conn, "<m2@x.com>") is not None
 
     def test_process_deferred_user_alerts_posts_to_alerts_channel(self, db_path, tmp_path):
-        """Alert JSON should post each alert to the user's alerts channel."""
+        """Alert JSON posts to the user's alerts channel, one push per alert type.
+
+        Both entries here are the default `security` type, so they collapse onto
+        one notification — the array is model-authored with no bound on its
+        length, and one push per entry is how a single task turns into a flood.
+        Both messages still reach the user; they are in the one body.
+        `tests/test_notification_task_alerts.py` covers the collapse in full.
+        """
         from istota.scheduler import _process_deferred_user_alerts
         config = self._make_config(db_path, tmp_path)
         config.users["alice"] = UserConfig(alerts_channel="alerts-room")
@@ -5973,13 +5983,14 @@ class TestDeferredOperations:
             count = _process_deferred_user_alerts(config, task, user_temp)
 
         assert count == 2
-        assert mock_notify.call_count == 2
+        assert mock_notify.call_count == 1
         # Routed by purpose="alert" — resolve_destinations maps it to the
         # user's alerts channel (legacy alerts_channel field).
         call_args = mock_notify.call_args_list[0]
         assert call_args[0][0] is config
         assert call_args[0][1] == "alice"
         assert "attacker@evil.com" in call_args[0][2]
+        assert "prompt injection" in call_args[0][2]
         assert call_args[1]["purpose"] == "alert"
 
         # File should be cleaned up

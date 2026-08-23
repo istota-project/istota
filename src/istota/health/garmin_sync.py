@@ -358,6 +358,42 @@ def _gather_for_day(adapter: gm.GarminAdapter, day: _date) -> dict[str, float]:
     return out
 
 
+def _note_token_expired(
+    ctx: HealthContext,
+    framework_db_path: Path,
+    config: Any | None,
+    reason: str,
+) -> None:
+    """Mark the token dead **and** put a row in the user's notification inbox.
+
+    Both halves at one call site because forgetting the second is the bug this
+    exists to fix: `mark_token_error` wipes the OAuth blob so the settings card
+    stops saying "Connected", and until now that was the entire user-facing
+    signal — nothing was pushed anywhere. Worse, `health/jobs.py` renders this
+    sync job only for a user who has stored tokens, so the scheduler's next sync
+    pass deletes the job row and the failure stops recurring. There is no second
+    chance to tell them.
+
+    `config` decides only whether the row is *delivered*, never whether it is
+    written. Absent, the caller is the skill CLI — a short-lived host-side
+    process the skill proxy spawns, where `send_notification`'s Talk and ntfy
+    fan-out does not belong; the row is still written there, because the whole
+    point of this source is that there is no second chance to notice. Same split
+    the email skill CLI takes for a held outbound draft.
+    """
+    from istota.notification_resolvers import connected_service
+
+    gm.mark_token_error(framework_db_path, ctx.user_id, reason)
+    if config is None:
+        connected_service.write_for_service(
+            framework_db_path, ctx.user_id, gm.SECRET_SERVICE, reason=reason,
+        )
+        return
+    connected_service.raise_for_service(
+        config, ctx.user_id, gm.SECRET_SERVICE, reason=reason,
+    )
+
+
 def sync_garmin(
     ctx: HealthContext,
     framework_db_path: Path,
@@ -366,6 +402,7 @@ def sync_garmin(
     today: _date | None = None,
     adapter: gm.GarminAdapter | None = None,
     user_tz: str | None = None,
+    config: Any | None = None,
 ) -> SyncResult:
     """Pull Garmin daily summaries and insert into the per-user health DB.
 
@@ -389,6 +426,12 @@ def sync_garmin(
     user_tz:
         IANA timezone name (e.g. ``"Pacific/Auckland"``). Optional —
         falls back to UTC.
+    config:
+        The framework :class:`~istota.config.Config`, passed by the two
+        daemon-side callers (the scheduler's in-process sync and the web
+        ``/garmin/sync`` endpoint) so an auth failure can raise a notification
+        the user will actually see. Omitted by the skill CLI — see
+        :func:`_note_token_expired`.
     """
     result = SyncResult()
     if today is None:
@@ -400,7 +443,7 @@ def sync_garmin(
         except gm.GarminAuthError as exc:
             result.auth_error = True
             result.errors.append(str(exc))
-            gm.mark_token_error(framework_db_path, ctx.user_id, "token_expired")
+            _note_token_expired(ctx, framework_db_path, config, "token_expired")
             return result
         except gm.GarminNotInstalled as exc:
             result.errors.append(str(exc))
@@ -420,7 +463,7 @@ def sync_garmin(
         except gm.GarminAuthError as exc:
             result.auth_error = True
             result.errors.append(f"{day.isoformat()}: {exc}")
-            gm.mark_token_error(framework_db_path, ctx.user_id, "token_expired")
+            _note_token_expired(ctx, framework_db_path, config, "token_expired")
             break
         except gm.GarminRateLimited as exc:
             # Compliant backoff. If Garmin sent a Retry-After, sleep
@@ -472,7 +515,18 @@ def sync_garmin(
     # Persist any rotated SDK state (H1) — garth's refresh can rotate
     # the OAuth tokens mid-run. Doing this on success only avoids
     # overwriting a previously-good blob with a transiently-broken one.
-    if result.inserted or result.skipped:
+    #
+    # `not auth_error` is the other half of that, and it was missing: a sync
+    # that pulled day 1 and then hit an expired token on day 2 satisfies
+    # `inserted or skipped`, so the write-back ran anyway and undid the
+    # `mark_token_error` from four statements earlier — the wiped blob restored,
+    # the `error` flag cleared, `last_sync` stamped to now. The settings card
+    # then read "Connected" with no error over credentials the remote had just
+    # refused, and since the notification inbox now closes its reconnect row on
+    # the same call, the user was pushed a warning the bell then denied all
+    # knowledge of. A token the remote rejected mid-run is exactly the
+    # "transiently-broken blob" this branch already says it will not write.
+    if (result.inserted or result.skipped) and not result.auth_error:
         try:
             new_tokens = adapter.serialize_tokens()
         except Exception as exc:  # noqa: BLE001

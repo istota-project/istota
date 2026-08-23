@@ -510,13 +510,14 @@ async def cmd_confirm(ctx: CommandContext):
     # was answered is the whole point of having typed it.
     label = confirmations.describe(conn, task)
     if verb == "decline":
-        confirmations.decline(conn, task)
+        confirmations.decline(conn, task, by=ctx.surface)
         return _record_confirm_exchange(
             ctx, f"Declined #{task.id} — {label}. Nothing was run.",
         )
 
     trusted = confirmations.approve(
         conn, task, trust_sender=(verb == "trust"), config=ctx.config,
+        by=ctx.surface,
     )
     if trusted:
         return _record_confirm_exchange(
@@ -1424,11 +1425,18 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
+        from .notification_resolvers import cron_job as cron_job_source
+
         if update_job_enabled_in_cron_md(config, user_id, job_name, True):
             db.enable_scheduled_job(conn, job.id)
+            # The counter this resets is the inbox row's close predicate, so the
+            # row would go `stale` on the next panel read either way. Closing it
+            # here makes it `resolved` by the surface that ended the condition.
+            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
             return f"Enabled scheduled job '{job_name}' (failure count reset)."
         # Fallback: no CRON.md file, update DB directly
         db.enable_scheduled_job(conn, job.id)
+        cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
         return f"Enabled scheduled job '{job_name}' (failure count reset). Note: no CRON.md file found — change is DB-only and may not persist."
 
     if subcmd == "disable" and job_name:
@@ -1436,11 +1444,20 @@ async def cmd_cron(ctx: CommandContext):
         if not job:
             return f"No scheduled job named '{job_name}' found."
         # Write to CRON.md (source of truth); DB updated on next sync
+        from .notification_resolvers import cron_job as cron_job_source
+
+        # Closed here too, and `disable` is the case the resolver cannot cover:
+        # disabling by hand leaves `consecutive_failures` where it was, so an
+        # inbox row raised by an earlier auto-disable would keep telling the
+        # user to re-enable a job they have just switched off on purpose —
+        # forever, since object-backed rows are never age-swept.
         if update_job_enabled_in_cron_md(config, user_id, job_name, False):
             db.disable_scheduled_job(conn, job.id)
+            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
             return f"Disabled scheduled job '{job_name}'."
         # Fallback: no CRON.md file, update DB directly
         db.disable_scheduled_job(conn, job.id)
+        cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
         return f"Disabled scheduled job '{job_name}'. Note: no CRON.md file found — change is DB-only and may not persist."
 
     # Default: list all jobs
@@ -2783,7 +2800,7 @@ async def cmd_drafts(ctx: CommandContext):
     recipients = _visible_recipients(draft)
     if verb == "discard":
         try:
-            drafts.discard(conn, draft.id)
+            drafts.discard(conn, draft.id, by=ctx.surface)
         except drafts.DraftError as e:
             return f"Couldn't discard #{draft.id}: {e}"
         # Commit before we say it happened. The Talk poller wraps its whole
@@ -2821,7 +2838,9 @@ async def cmd_drafts(ctx: CommandContext):
     # thread rather than stalling Talk for an SMTP conversation plus the IMAP
     # append to Sent.
     try:
-        message_id = await asyncio.to_thread(drafts.release, ctx.config, draft.id)
+        message_id = await asyncio.to_thread(
+            drafts.release, ctx.config, draft.id, by=ctx.surface,
+        )
     except drafts.DraftSentButUnrecorded as e:
         # Checked before the DraftError branch it belongs to. The mail is gone;
         # calling this "failed, try again" would be the one wrong thing to say.

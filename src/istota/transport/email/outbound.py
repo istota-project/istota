@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 
 from ... import db
 from ...email_support import get_email_config
+from ...notification_resolvers import outbound_draft as draft_source
+from ...notification_store import RaiseResult, deliver_pending
 from ...skills.email import reply_to_email, send_email
 
 # NOTE: the briefing skill's body helpers (``strip_markdown`` /
@@ -297,6 +299,21 @@ def _hold_if_unapproved(
                     origin_target=origin,
                     hold_reason=reason,
                 )
+                # The durable record, on the gate's own connection inside the
+                # transaction that just wrote the draft. Not inside
+                # `drafts.hold`: its other caller is the email skill CLI, a
+                # short-lived host-side subprocess the skill proxy spawns, and a
+                # raise there would put `send_notification`'s Talk and ntfy
+                # fan-out in that child process.
+                held_notification = draft_source.write(
+                    conn, task.user_id, draft_id=draft_id,
+                    title=draft_source.title_for(to_addr),
+                    body=draft_source.delivery_body_for(
+                        subject, draft_id,
+                        draft_source.visible_recipients([to_addr]),
+                    ),
+                    room_token=room,
+                )
             except drafts.DraftError as e:
                 # The decision was made and only the recording failed — an
                 # unparseable recipient, most likely, since this leg's address
@@ -322,13 +339,17 @@ def _hold_if_unapproved(
         "Outbound gate: held task %d's reply to %s as draft %d (%s)",
         task.id, to_addr, draft_id, reason,
     )
-    _announce_hold(config, task, to_addr=to_addr, subject=subject, draft_id=draft_id)
+    _announce_hold(
+        config, task, to_addr=to_addr, subject=subject, draft_id=draft_id,
+        notification=held_notification,
+    )
     return False, draft_id
 
 
 def _announce_hold(
     config: "Config", task: db.Task, *,
     to_addr: str, subject: str, draft_id: int,
+    notification: "RaiseResult | None" = None,
 ) -> None:
     """Tell the user their reply is waiting, at the moment it is held.
 
@@ -346,16 +367,31 @@ def _announce_hold(
     block on the write lock we were still holding. Best-effort — the draft is
     stored either way, and failing the hold because the notice failed would be
     the worse outcome.
+
+    **This is the inbox row's delivery, not a second notice beside it.** The
+    row was written inside the gate's transaction and says the same thing to the
+    same routing table; sending both would put two messages in the user's alerts
+    channel for one held reply. `deliver_pending` also stamps
+    `last_delivered_at`, which a hand-rolled `send_notification` here could not.
+    The old direct send survives as the fallback for a row that failed to write
+    — the notice predates the inbox (ISSUE-246) and must not be lost with it.
     """
     from ...notifications import send_notification
-    line = f"Email reply to {to_addr} is waiting for your approval"
-    if subject:
-        line += f" (subject: {subject})"
+
+    if notification is not None:
+        deliver_pending(config, [notification])
+        return
+
+    # Built from the same helpers as the row above, not hand-rolled: the
+    # subject on this leg comes from an inbound header, delivery renders
+    # markdown, and two branches of one function disagreeing about whether to
+    # flatten is how the unflattened one survives.
     try:
         send_notification(
             config, task.user_id,
-            f"{line}. Nothing was sent. Review it with `!drafts`, then "
-            f"`!drafts send {draft_id}` or `!drafts discard {draft_id}`.",
+            draft_source.title_for(to_addr) + ". " + draft_source.delivery_body_for(
+                subject, draft_id, draft_source.visible_recipients([to_addr]),
+            ),
             purpose="alert",
         )
     except Exception as e:  # noqa: BLE001 — the draft is already safely stored

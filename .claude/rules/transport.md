@@ -293,7 +293,7 @@ messages are re-polled rather than silently lost.
   against a live Talk or web turn in the same room — they are on different
   queues, so the per-room single-active rule does not see across them. Not introduced here — a gated `sender_match` reply that also
   matched a thread has always landed there, which is the case `web_app`'s cancel
-  comment describes and the user-scoped `/chat/confirmations` banner mitigates —
+  comment describes and the user-scoped notification inbox mitigates —
   but this route widens who reaches it. Pinned by an assertion on
   `conversation_token` in `TestThreadMatchConfirmationGate`.
 
@@ -623,9 +623,10 @@ messages are re-polled rather than silently lost.
   `!confirm <id> trust` work from any surface with a composer
   (`commands.cmd_confirm`, aliases `!yes` / `!no`), and the verbs themselves
   live in `istota.confirmations` so the Talk poller, the command and the web
-  endpoints cannot drift. Web chat additionally gets
-  `GET /chat/confirmations` + a banner above the transcript — deliberately not
-  a widening of the room history query, since the aux gap-fill renders
+  endpoints cannot drift. Web chat additionally gets the
+  notification inbox (`GET /notifications`, the bell in the app nav; formerly
+  `GET /chat/confirmations` and a banner above the transcript) — deliberately
+  not a widening of the room history query, since the aux gap-fill renders
   `tasks.prompt`, i.e. the untrusted body the gate is holding back —
   `_AUX_ROOM_SCOPE` reaches an email task only through its mirrored
   `role='user'` row, and a gated turn has none. The card
