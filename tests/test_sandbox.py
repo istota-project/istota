@@ -848,6 +848,104 @@ class TestBuildNetworkAllowlist:
         hosts = _build_network_allowlist(config, ["developer"])
         assert "gitlab.example.com:8443" in hosts
 
+    def test_developer_npm_registry_host(self):
+        """A complete `npm ci` of this repo's web/package-lock.json (213
+        packages) made 15 CONNECTs through a logging proxy, every one of them
+        to registry.npmjs.org. Metadata and tarballs share the host, so one
+        entry is the whole of npm's reach."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "registry.npmjs.org:443" in hosts
+
+    def test_developer_cargo_registry_hosts(self):
+        """`cargo fetch` on serde and its transitive dependencies contacted the
+        sparse index and the download host, and nothing else."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "index.crates.io:443" in hosts
+        assert "static.crates.io:443" in hosts
+
+    def test_crates_io_itself_is_not_allowlisted(self):
+        """`crates.io` is the API host — publish, search and yank. The measured
+        fetch never contacted it, and building does not need it, so it stays
+        out rather than arriving as a guess alongside the two that do.
+
+        Asserted together with the two hosts that *are* expected, so a revert
+        turns this red. On its own the negative holds against an unmodified
+        tree and could only ever fail if someone later added the host."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "index.crates.io:443" in hosts
+        assert "static.crates.io:443" in hosts
+        assert "crates.io:443" not in hosts
+
+    def test_registry_hosts_absent_when_developer_not_authorized(self):
+        """The registries are gated on `developer` being in `authorized_skills`,
+        which is why no separate `allow_npm` flag exists."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=True, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["calendar"])
+        assert "registry.npmjs.org:443" not in hosts
+        assert "index.crates.io:443" not in hosts
+        assert "static.crates.io:443" not in hosts
+
+    def test_registry_hosts_ride_authorization_not_selection(self):
+        """`authorized_skills` is not the selected set. `derive_authorized_skills`
+        adds any skill whose credentials resolve, and `developer` auto-authorizes
+        as soon as either forge token is configured — so on such a deployment
+        these hosts are present for *every* task of that user, including one that
+        never chose the skill. That is the same gate the forge hosts already ride
+        and it is deliberate, but it is a wider reach than "the developer skill
+        was selected" and the test says so rather than leaving it to be
+        rediscovered."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True, repos_dir="/tmp/repos",
+                gitlab_url="https://gitlab.example.com",
+            ),
+        )
+        # What execute_task passes when the user has a forge token but the task
+        # selected something else entirely.
+        hosts = _build_network_allowlist(config, ["developer", "browse"])
+        assert "registry.npmjs.org:443" in hosts
+        assert "gitlab.example.com:443" in hosts
+
+    def test_registry_hosts_absent_when_developer_disabled(self):
+        """`developer.enabled` is the operator's switch, and it gates the
+        registries the same way it gates the forge hosts."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(enabled=False, repos_dir="/tmp/repos"),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "registry.npmjs.org:443" not in hosts
+
+    def test_registries_do_not_depend_on_a_configured_forge(self):
+        """The forge URLs and the registries are independent: a deployment with
+        no gitlab_url or github_url still installs dependencies."""
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True, repos_dir="/tmp/repos",
+                gitlab_url="", github_url="",
+            ),
+        )
+        hosts = _build_network_allowlist(config, ["developer"])
+        assert "registry.npmjs.org:443" in hosts
+
+
 class TestNetworkConfigParsing:
     def test_defaults(self):
         nc = NetworkConfig()

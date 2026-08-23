@@ -94,6 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coding tasks can now install JavaScript and Rust dependencies. The bot is told to give every checkout its own `node_modules`, but npm's registry was on no allowlist, so the install it was instructed to run could not reach the network at all. A private registry or a company mirror still needs adding by hand under `extra_hosts`, and the deployment docs now list the ecosystems that remain out of reach so a refused connection reads as a boundary rather than a broken install.
+
 - A checkout that had installed its dependencies was never cleaned up again. The sweep that removes finished coding checkouts counted `node_modules` and `.venv` as work worth keeping, so any checkout that had ever run an install was pinned to disk for good — one on the live server was already 941 MB, nearly all of it a virtualenv. Rebuildable directories are now discounted from a fixed list of names; `.env` and anything else hidden from git is protected exactly as before, and `dist`, `build` and `target` are deliberately absent because in some projects those hold real source.
 
 - The test suite no longer fails because of the machine it is running on. It read whatever configuration the surrounding shell exported, so a dozen tests that check a default value saw the real one instead, and nineteen more sent their local test servers through a configured web proxy. A shell carrying that configuration is what a server, a scheduled job and a task sandbox all have, so the suite was unrunnable in the places the code actually runs. Each test now starts from a known environment, and `uv sync` installs the linter the documented check needs and used to leave out.
