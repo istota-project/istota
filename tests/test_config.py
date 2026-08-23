@@ -2804,14 +2804,13 @@ class TestValidateForgeClis:
         assert "not found" not in messages
 
     def test_delivers_only_the_three_facts_it_owned(self, caplog, tmp_path):
-        """The registry has grown four other checks. This path runs once per
+        """The registry has grown three other checks. This path runs once per
         *call* in a skill CLI, so a warning from here repeats for as long as the
         condition holds; the boot run and the hourly sweep say each one once."""
         config = Config(developer=self._dev(tmp_path))
         messages = " ".join(self._warnings(caplog, config))
         assert "forge_config_drift" not in messages
         assert "forge_wrapper_shadowing" not in messages
-        assert "forge_versions" not in messages
         assert "security.skill_proxy:" not in messages
 
     def test_proxy_off_with_tokens_warns_about_the_posture(self, caplog, tmp_path):

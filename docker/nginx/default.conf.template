@@ -39,6 +39,21 @@ server {
     set $upstream_web      web:${WEB_PORT};
     set $upstream_nextcloud nextcloud:80;
 
+    # Every location below forwards `Host: $http_host`, not `$host`. The two
+    # differ in exactly one way that matters here: `$host` is normalized with
+    # the **port stripped**, so a stack published on anything but :80 hands the
+    # upstream `localhost` and every absolute URL that upstream builds from the
+    # Host header loses the port. The visible case is the SPA's own directory
+    # redirect — Starlette answers `/istota/chat` with a 307 to
+    # `{scheme}://{Host header}/istota/chat/`, so on a stack at :8282 a direct
+    # navigation lands on `http://localhost/istota/chat/`, which is nothing.
+    # Clicking through the app never hits it, which is why this survived.
+    #
+    # `$http_host` is the client's header verbatim. It is empty only for an
+    # HTTP/1.0 request that sent no Host at all — HTTP/1.1 requires one and
+    # nginx answers 400 without it — and nginx omits a header whose value is
+    # empty, which is the HTTP/1.0-correct outcome anyway.
+
     # Task event SSE stream — must stream, not buffer. Longest-prefix match wins
     # over /istota/. The web app also sets `X-Accel-Buffering: no`; this block
     # turns buffering off explicitly and lifts the read timeout so a long idle
@@ -47,7 +62,7 @@ server {
         proxy_pass http://$upstream_web;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -62,7 +77,7 @@ server {
     location /istota/ {
         proxy_pass http://$upstream_web;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -75,7 +90,7 @@ server {
     location ~ ^/(remote\.php/(dav|webdav)|public\.php/dav) {
         proxy_pass http://$upstream_nextcloud;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -91,7 +106,7 @@ server {
     location / {
         proxy_pass http://$upstream_nextcloud;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;

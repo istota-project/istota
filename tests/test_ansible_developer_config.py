@@ -10,6 +10,8 @@ code, both of which have happened:
     and the host silently runs the code default — which is how `gh_bin_path`
     came to point at `/usr/local/bin/gh` on a host where `apt` had installed
     `/usr/bin/gh`, warning at every start and failing every forge command.
+    (The role now installs to `/usr/local/bin` itself, so those two agree; the
+    drift this file exists to catch does not depend on their having differed.)
 
 Both are invisible from the Python side alone, which is why this parses the
 template rather than testing the loader again.
@@ -170,13 +172,18 @@ def test_every_referenced_var_has_an_ansible_default(block):
 
 
 def test_binary_paths_default_to_where_the_role_installs_them():
-    """The role installs `gh` and `glab` from the Debian archive, which puts
-    both in /usr/bin. The code default is /usr/local/bin, for the install
-    shapes that render no config.toml — so the Ansible default has to differ,
-    and a change to either one here should be a deliberate one."""
+    """The role extracts `gh` and `glab` from the vendors' release .debs into
+    /usr/local/bin, which is also the code default — so the two agree, where
+    they used to differ because the archive's packages landed in /usr/bin.
+
+    Kept as an assertion on both sides rather than dropped now that they match:
+    the agreement is the thing worth holding, and a change to either one should
+    be a deliberate one. `tests/test_ansible_forge_cli_install.py` holds the
+    Ansible half against the install destination the task file actually uses.
+    """
     defaults = DEFAULTS.read_text()
-    assert 'istota_developer_gh_bin_path: "/usr/bin/gh"' in defaults
-    assert 'istota_developer_glab_bin_path: "/usr/bin/glab"' in defaults
+    assert 'istota_developer_gh_bin_path: "/usr/local/bin/gh"' in defaults
+    assert 'istota_developer_glab_bin_path: "/usr/local/bin/glab"' in defaults
     assert DeveloperConfig().gh_bin_path == "/usr/local/bin/gh"
     assert DeveloperConfig().glab_bin_path == "/usr/local/bin/glab"
 

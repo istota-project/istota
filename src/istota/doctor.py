@@ -110,27 +110,6 @@ Check = Callable[["Config", bool], "CheckResult | list[CheckResult]"]
 # ---------------------------------------------------------------------------
 
 
-def parse_version(text: str) -> tuple[int, int, int] | None:
-    """First ``N.N.N`` (or ``N.N``) triple in `text`, or None if there is none.
-
-    Written against the real output shapes rather than a guessed grammar::
-
-        gh version 2.98.0 (2026-01-01)
-        glab 1.114.0
-        glab version 1.114.0 (2026-01-01)
-
-    Returning None rather than raising is deliberate: an unparseable banner is a
-    ``WARN`` about a CLI we cannot judge, not a crash in a diagnostic.
-    """
-    if not text:
-        return None
-    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
-    if match is None:
-        return None
-    major, minor, patch = match.group(1), match.group(2), match.group(3)
-    return (int(major), int(minor), int(patch or 0))
-
-
 def _run(argv: list[str], *, timeout: int = PROBE_TIMEOUT) -> subprocess.CompletedProcess | None:
     """Run `argv`, returning None on anything that stops it producing output.
 
@@ -930,117 +909,6 @@ def check_forge_config_drift(config: "Config", probe: bool) -> list[CheckResult]
     return results
 
 
-def check_forge_versions(config: "Config", probe: bool) -> list[CheckResult]:
-    """The observed version against the version this deployment was exercised at.
-
-    Deliberately not a floor. No floor has ever been derived from the verbs the
-    developer skill uses, and inventing one would fail a working host on a CLI
-    that does everything asked of it. ``WARN`` naming both numbers is more
-    actionable than a failure against a threshold nobody established — and a
-    genuinely too-old CLI announces itself as a command error within one task.
-    """
-    from .forge_cli import GH_KNOWN_GOOD, GLAB_KNOWN_GOOD
-
-    known_good = {"gh": GH_KNOWN_GOOD, "glab": GLAB_KNOWN_GOOD}
-
-    dev, reason = _dev_gate(config)
-    if dev is None:
-        return [
-            CheckResult(f"developer.forge_versions.{n}", SKIP, reason, scope=IMAGE)
-            for n in _FORGE_BINARIES
-        ]
-    token_reason = _forge_token_gate(dev)
-    if token_reason:
-        return [
-            CheckResult(f"developer.forge_versions.{n}", SKIP, token_reason, scope=IMAGE)
-            for n in _FORGE_BINARIES
-        ]
-    if not probe:
-        return [
-            CheckResult(
-                f"developer.forge_versions.{n}",
-                SKIP,
-                "a version cannot be observed without running the binary (probe disabled)",
-                scope=IMAGE,
-            )
-            for n in _FORGE_BINARIES
-        ]
-
-    results: list[CheckResult] = []
-    for name in _FORGE_BINARIES:
-        resolved = _resolved_forge_bin(dev, name)
-        expected = known_good[name]
-        expected_text = ".".join(str(part) for part in expected)
-        if not _executable(resolved):
-            results.append(
-                CheckResult(
-                    f"developer.forge_versions.{name}",
-                    SKIP,
-                    f"{resolved} is not runnable; developer.forge_binaries carries that",
-                    scope=IMAGE,
-                )
-            )
-            continue
-        result = _run([resolved, "--version"])
-        if result is not None and result.returncode != 0:
-            # Don't parse usage text. A binary that exits nonzero while printing
-            # a help screen containing any dotted pair would otherwise be
-            # reported as a healthy version.
-            results.append(
-                CheckResult(
-                    f"developer.forge_versions.{name}",
-                    WARN,
-                    f"{resolved} exited {result.returncode} on --version",
-                    remedy=(
-                        f"Confirm by hand that `{resolved} --version` works; this "
-                        f"deployment is exercised against {name} {expected_text}."
-                    ),
-                    scope=IMAGE,
-                )
-            )
-            continue
-        banner = "" if result is None else (result.stdout or result.stderr or "").strip()
-        observed = parse_version(banner)
-        if observed is None:
-            results.append(
-                CheckResult(
-                    f"developer.forge_versions.{name}",
-                    WARN,
-                    f"{resolved} reported a version we could not parse: {banner.splitlines()[0] if banner else '(no output)'}",
-                    remedy=(
-                        f"Confirm by hand that `{resolved} --version` looks sane; "
-                        f"this deployment is exercised against {name} {expected_text}."
-                    ),
-                    scope=IMAGE,
-                )
-            )
-            continue
-        observed_text = ".".join(str(part) for part in observed)
-        if observed[: len(expected)] < expected:
-            results.append(
-                CheckResult(
-                    f"developer.forge_versions.{name}",
-                    WARN,
-                    f"{name} {observed_text}, exercised against {expected_text}",
-                    remedy=(
-                        f"Install a newer {name} if a verb misbehaves; this is not a known "
-                        f"floor, only the version the deployment has been run against."
-                    ),
-                    scope=IMAGE,
-                )
-            )
-            continue
-        results.append(
-            CheckResult(
-                f"developer.forge_versions.{name}",
-                OK,
-                f"{name} {observed_text} (exercised against {expected_text})",
-                scope=IMAGE,
-            )
-        )
-    return results
-
-
 # The sentinel `forge_cli.py` carries for exactly this purpose. Matching on a
 # deliberate marker rather than on docstring text: the wrapper is a verbatim
 # copy of that file, whose prose happens to contain "istota" today, and an
@@ -1074,8 +942,8 @@ def check_forge_wrapper_shadowing(config: "Config", probe: bool) -> list[CheckRe
 
     The question is not "is a real forge binary on PATH" — that is true by
     design on the Ansible shape, which is what production runs: the role
-    installs from the Debian archive into ``/usr/bin`` and renders those paths
-    into ``config.toml``. Asserting the image's off-PATH layout everywhere
+    installs the vendors' binaries into ``/usr/local/bin`` and renders those
+    paths into ``config.toml``. Asserting the image's off-PATH layout everywhere
     reports a correct bare-metal host as broken, and since a ``FAIL`` alerts the
     admin allowlist, it would do so on every boot and every sweep.
 
@@ -1101,7 +969,7 @@ def check_forge_wrapper_shadowing(config: "Config", probe: bool) -> list[CheckRe
             for n in _FORGE_BINARIES
         ]
     # The token gate applies here too, which the spec's gating sentence assigns
-    # only to the binary / drift / version checks. Both of the things a shadowing
+    # only to the binary and drift checks. Both of the things a shadowing
     # binary bypasses — the deny policy and the per-call token injection — exist
     # to govern a credential, so with no credential configured there is nothing
     # being bypassed. Without this gate a tokenless deployment on any host with a
@@ -2067,7 +1935,6 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
-    ("developer.forge_versions", check_forge_versions),
     ("developer.forge_wrapper_shadowing", check_forge_wrapper_shadowing),
     ("developer.forge_policy", check_forge_policy),
     ("developer.gitlab_reviewer", check_gitlab_reviewer),
@@ -2102,7 +1969,6 @@ CHECK_SCOPES: dict[str, str] = {
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,
-    "developer.forge_versions": IMAGE,
     "developer.forge_wrapper_shadowing": IMAGE,
     "developer.forge_policy": DEPLOYMENT,
     "developer.gitlab_reviewer": DEPLOYMENT,

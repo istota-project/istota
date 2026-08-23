@@ -53,16 +53,6 @@ _ARGV0_MAP = {
 
 _TOKEN_VAR = {FORGE_GITHUB: "GITHUB_TOKEN", FORGE_GITLAB: "GITLAB_TOKEN"}
 
-# The versions this deployment has actually been exercised against — the pins in
-# docker/istota/Dockerfile and docker/devbox/Dockerfile. Not a floor: no floor has
-# ever been derived from the verbs the developer skill uses, and deriving one
-# would mean changelog archaeology across ~25 verbs that goes stale on the next
-# skill.md edit. Below these, `istota doctor` WARNs and names both numbers; a
-# genuinely too-old CLI announces itself as a command error within one task
-# anyway. Bump when the Dockerfile pins move.
-GH_KNOWN_GOOD = (2, 98)
-GLAB_KNOWN_GOOD = (1, 114)
-
 # The devbox-proxy action the ISTOTA_CRED_SOCK branch sends. Duplicated from
 # devbox_proxy_protocol.ALL_ACTIONS because this module cannot import istota;
 # test_devbox_proxy_protocol asserts the two spellings still agree.
