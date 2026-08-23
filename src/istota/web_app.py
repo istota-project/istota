@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
@@ -108,12 +109,52 @@ def _static_cache_control(path: str) -> str:
     return "no-cache"
 
 
+def _relative_location(location: str) -> str | None:
+    """A path-relative rewrite of an absolute `Location`, or None to leave it.
+
+    `StaticFiles(html=True)` answers a directory URL with a redirect that adds
+    the trailing slash, and it builds that Location as
+    `{scope['scheme']}://{Host header}{path}/` — an absolute URL whose authority
+    is entirely whatever the proxy in front of us chose to forward. Both halves
+    have been wrong: nginx forwarding `$host` drops the port (a stack published
+    on :8282 redirects to `http://localhost/istota/chat/`, which is nothing),
+    and `scope['scheme']` is always `http` because no deployment starts uvicorn
+    with `--proxy-headers`, so a TLS deployment answers with a plaintext URL and
+    recovers only via the port-80 redirect back to https.
+
+    A relative reference has no authority to get wrong: the client resolves it
+    against the URL it actually asked for. RFC 7231 §7.1.2 permits it and has
+    since 2014. The nginx configs forward `$http_host` as well — this is the
+    half that does not depend on the proxy being configured correctly.
+
+    Returns None when there is nothing to do (already relative) or when
+    rewriting would change meaning: a path starting with `//` is a
+    protocol-relative reference, so its first segment would be read as a
+    hostname.
+    """
+    parsed = urlsplit(location)
+    if not parsed.scheme and not parsed.netloc:
+        return None
+    if parsed.path.startswith("//"):
+        return None
+    return urlunsplit(("", "", parsed.path or "/", parsed.query, parsed.fragment))
+
+
 class _CacheHeaderStatics(StaticFiles):
     """`StaticFiles` that stamps the cache policy above onto every response."""
 
     def file_response(self, full_path, stat_result, scope, status_code=200):
         response = super().file_response(full_path, stat_result, scope, status_code)
         response.headers["Cache-Control"] = _static_cache_control(scope.get("path", ""))
+        return response
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        location = response.headers.get("location")
+        if location:
+            relative = _relative_location(location)
+            if relative is not None:
+                response.headers["location"] = relative
         return response
 
 
