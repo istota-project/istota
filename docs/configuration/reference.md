@@ -275,6 +275,21 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 
 `[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file. Full annotations in the [native brain runbook](native-brain.md).
 
+### `[brain.claude_code]`
+
+Today this block is the **subscription usage poll only**. The brain's model selection still comes from `[brain]` and `[models]`, and its subprocess behaviour is not configurable here. Every field defaults in code, so an absent block is the shipping behaviour. See [the subscription reading](../features/usage.md#the-subscription-reading) for what it does and why.
+
+| Setting | Default | Description |
+|---|---|---|
+| `subscription_usage` | `true` | Poll `api.anthropic.com` for plan utilization at all. Off = the doctor check SKIPs and the admin card is absent rather than showing a reason |
+| `subscription_usage_cache_ttl_seconds` | `1800` | One deployment-wide fetch per this window, and the **minimum** backoff after a failure. A server-stated `Retry-After` overrides it, capped at six hours. Floored at 1 — a 0 would fetch on every read. 30 minutes rather than 5 because the shortest window reported is five hours, so polling faster buys no accuracy for the requests it spends, and the endpoint rate-limits a deployment that tries |
+| `subscription_usage_timeout_seconds` | `10.0` | Matches `doctor.PROBE_TIMEOUT`. Floored at 1 |
+| `subscription_usage_warn_percent` | `80.0` | Doctor WARNs and the tile turns amber at or above this |
+| `subscription_usage_high_percent` | `95.0` | The tile turns red at or above this — still a WARN, **never a FAIL** at any utilization, since a busy plan is a fact about the plan rather than a defect in the host. Both clamp to `[0, 100]`; a warn above high is lowered to high and logged, because an inverted pair leaves no amber band |
+| `subscription_usage_stale_after_seconds` | `3600` | A cached reading older than this is reported SKIP rather than as a current number |
+
+The credential is not configured here. It is read — never written, never refreshed — from `CLAUDE_CODE_OAUTH_TOKEN`, then `~/.claude/.credentials.json`, then the macOS keychain.
+
 `[brain.tmux]` (used when `kind = "tmux_claude"` or routed-to): every field defaults in code to the prototype's pinned values, so an absent block is behavioral parity. Knobs include `fallback_trip_threshold`, `fallback_cooldown_seconds`, `ready_timeout_seconds`, `tmux_command_timeout`, `cli_version_pin`, and the pane-text marker lists (`ready_markers`, `trust_markers`, `theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`, `usage_limit_markers` — the last is what drives `stop_reason=usage_limit` and therefore failover) — heuristics pinned to a `claude` CLI version, so a CLI reword that breaks readiness detection is a config hotfix, not a code release. See `config.example.toml` for the full annotated block.
 
 ## `[sleep_cycle]`

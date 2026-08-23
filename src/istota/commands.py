@@ -914,11 +914,11 @@ _USAGE_BAR_WIDTH = 20
 
 # A reading younger than this gets no age footer; past it, the reply says how
 # old the number is. Note what this does *not* mean: the module's default cache
-# TTL is 300s and a warm cache is shared with the dashboard and the doctor
+# TTL is 1800s and a warm cache is shared with the dashboard and the doctor
 # sweep, so a reading the module considers perfectly current is routinely one to
-# five minutes old and the footer is therefore common rather than exceptional.
+# thirty minutes old and the footer is therefore common rather than exceptional.
 # That is the intent — the alternative reading of "only when something is wrong"
-# would leave an admin unable to tell a live percentage from a four-minute-old
+# would leave an admin unable to tell a live percentage from a half-hour-old
 # one, which is the pair that matters when deciding whether to start a long run.
 # What the threshold buys is only that a reply rendered off a fetch this second
 # does not carry a pointless "0s old".

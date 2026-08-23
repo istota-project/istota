@@ -1,6 +1,6 @@
 # Token usage and cost
 
-Every model call the daemon makes writes a usage record: token counts, cost where cost is a real number, and enough identity to answer "who spent this, on what, through which brain". The record is operator-facing. It is read from the shell with `istota usage` and from the admin dashboard; no user-facing surface shows anyone's spend.
+Every model call the daemon makes writes a usage record: token counts, cost where cost is a real number, and enough identity to answer "who spent this, on what, through which brain". It is read from the shell with `istota usage`, from the admin dashboard, and in chat with [`!usage`](../reference/commands.md#usage-and-plan-limits) — where anyone sees their own totals and an admin additionally sees the fleet's and the plan's rate-limit windows.
 
 ## What is recorded
 
@@ -13,12 +13,13 @@ An attempt is not a task. A task that was retried, or that failed over from the 
 | Identity | `user_id`, `task_id` (nullable), `attempt_seq`, `origin`, `source_type`, `brain_kind`, `is_fallback` |
 | Model | `model` (the largest cost share), `effort`, `stop_reason`, `success` |
 | Tokens | `billed_input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, guarded by `has_totals` |
-| Cost | `cost_usd`, `cost_basis` |
+| Cost | `cost_usd`, `cost_basis`, `totals_source` — `model_usage` where the brain reported a per-model split, `derived` where the totals were computed from an OpenAI-compatible response. The two must not be mixed in a cost-per-token figure |
+| Rate limit | `rate_limit_type`, `rate_limit_status`, `rate_limit_resets_at`, where the brain reported one |
 | Shape | `turns`, `model_requests`, `subagent_requests`, `compacted_requests` |
 | Context | `initial_context_tokens`, `peak_context_tokens`, `context_window` — NULL, never 0, when unmeasured |
 | Timing | `duration_ms`, `duration_api_ms`, `service_tier`, `session_id` |
 
-`has_totals` matters. A run killed before its result frame arrives has real context columns and meaningless zeroes in the token columns, so every token aggregate filters on it. The rows that report nothing are counted and named rather than averaged in as zero — `istota usage` prints how many tasks in the window recorded no usage, and the dashboard shows the same count.
+`has_totals` matters. A run killed before its result frame arrives has real context columns and meaningless zeroes in the token columns, so every token aggregate filters on it. The rows that report nothing are counted and named rather than averaged in as zero — `istota usage` prints how many tasks in the window recorded no usage, and the dashboard shows that count plus a second one: how many rows recorded no context measurement. Two different gaps, so two different counters.
 
 The context columns are NULL rather than 0 when unmeasured, because SQL `AVG` skips NULL and a zero would halve a mixed-brain mean. The native brain does not track per-request prompt sizes, so its rows are unmeasured here by design.
 
@@ -32,6 +33,7 @@ The context columns are NULL rather than 0 when unmeasured, because SQL `AVG` sk
 | `sleep_cycle` | The nightly memory pass |
 | `shared_blocks` | Generating a module-owned shared briefing block |
 | `code_review` | The `code_review` skill's reviewers |
+| `context_triage` | Selecting conversation context for a task. The most frequent non-task origin, and it carries no `task_id` |
 | `health_ocr` | Reading an uploaded health document |
 | `health_encounter_ocr` | Reading an uploaded encounter document |
 | `health_immunization_ocr` | Reading an uploaded immunization record |
@@ -76,7 +78,43 @@ The command is operator-facing and runs from the operator's shell, so `--user` i
 
 The admin dashboard carries the same figures. A **Token usage** card shows 24-hour and 30-day totals, cache hit rate and the two context averages, then per-model, per-brain and per-origin breakdowns. Per-user tokens and cost sit on the Users rows beside that user's task counts, rather than being repeated in the usage card where the two copies could disagree.
 
-On a subscription deployment the cost column is all dashes by the rule above, so a separate **Claude Code subscription** card above it carries the plan's rate-limit windows — the budget the cost column cannot report. The same reading backs the `runtime.subscription_usage` doctor check and the admin-only plan section of [`!usage`](../reference/commands.md#usage-and-plan-limits).
+## The subscription reading
+
+On a subscription deployment the cost column is all dashes by the rule above. That is correct — pricing plan tokens at list rates would be inventing an invoice — but it leaves the deployment with no budget to watch. The plan's own rate-limit windows are that budget, and without them the first sign of running out was a task failing over.
+
+One fetch, one parser, one cache, three surfaces:
+
+- the **Claude Code subscription** card on `/admin`
+- the `runtime.subscription_usage` doctor check
+- the plan block in `!usage`, admin-only
+
+None of them holds a second copy of the endpoint's shape, and the dashboard's 60-second refresh costs nothing, because all three read one deployment-wide reading cached on disk beside the database.
+
+### What it costs, and what it refuses to do
+
+**The cache TTL is also the retry interval.** A failed reading is recorded next to the cache rather than in it, so a rejected credential does not turn an open dashboard into roughly 1,400 live failures a day. A success clears that timer immediately, so recovery is never delayed. Where the server states a `Retry-After`, that wins over the TTL — capped at six hours, so a bad header cannot silence the reading for good.
+
+The default poll interval is **30 minutes**, not five. The shortest window the endpoint reports is five hours, so a faster poll buys no accuracy for the requests it spends. A real reading that has gone stale outranks a fresh failure: the card keeps showing the old number with its age and the error beside it.
+
+**The credential is read, never written and never refreshed.** It comes from `CLAUDE_CODE_OAUTH_TOKEN`, then `~/.claude/.credentials.json`, then the macOS keychain. Three independent reasons not to touch it: the token a server installs carries a sentinel expiry in a different type from the one the keychain holds, so arithmetic on it raises on exactly the deployment shape this has to work on; it carries no refresh token; and a daemon rewriting that file would race the `claude` subprocesses it spawns for the same file. An expired token is reported, not repaired.
+
+"No credential here" is deliberately **not** written to the shared failure record. That is a fact about the calling process's environment and home, not about the deployment — the units read the token from a systemd `EnvironmentFile` and an operator's shell usually does not, so a read-only `istota doctor` run would otherwise tell the dashboard for a full TTL that there is no credential while the daemon was happily using one.
+
+### What it will not show you
+
+The payload offers two overlapping views of the same fact. The richer one is preferred, because it carries a display-ready name for each window. The fallback reads the top-level keys through an **allowlist** and drops anything else silently: that namespace is shared with unreleased codenames, and an unshipped feature name must not appear on a public project's dashboard.
+
+A window whose percentage cannot be parsed is dropped rather than rendered as zero — a fabricated 0% against a full quota is the worst error this could make. The one exception is the spend figure, which is not clamped: 150% of a spend cap is real money already committed.
+
+### The health check never fails
+
+`runtime.subscription_usage` warns and never fails, at any utilization. A failing check sets the process exit code and messages every admin, and a plan at 97% is a fact about the plan, not a defect in the host. It reports SKIP rather than WARN where there is nothing to check — the check disabled, no credential, or a reading too old to report as current — because on a server shape a persistently unreadable endpoint is the steady state rather than a fault, and a permanent warning naming nothing actionable is noise.
+
+Nothing here raises. Every entry point returns a snapshot, and a failure is a snapshot carrying an error, because one of the callers is the daemon's boot sequence.
+
+### Configuration
+
+All six live in `[brain.claude_code]`. See the [configuration reference](../configuration/reference.md#brainclaude_code).
 
 ## Retention
 
