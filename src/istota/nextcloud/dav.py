@@ -315,14 +315,20 @@ def build_search_body(
     # makes Sabre look for a collection literally named "remote.php" and answer
     # 404 for every search.
     #
-    # Percent-encoded, like the URL builder does, and not only XML-escaped. An
-    # href is a URI reference: a raw space in one is invalid, and `#` or `?`
-    # would truncate it at the fragment or query. This went unnoticed while the
-    # only way to get such a character in was a user's own file name; the
-    # `dav_prefix` mount point puts one in *every* search on a deployment whose
-    # mount is named "Shared Files".
+    # XML-escaped and nothing more, which is not what it looks like it should
+    # be. An href is nominally a URI reference, so a raw space in one is invalid
+    # and percent-encoding is what the URL builder next door does to its path —
+    # but Sabre does not decode this href, and encoding it is what breaks the
+    # search. Measured against `nextcloud:30-apache` once the `dav_prefix` mount
+    # point put a space in every scope: `Shared%20Files` answers 404 naming a
+    # collection called literally that, while the raw form resolves. Two
+    # reviewers and the author all read the encoding as the fix; the server
+    # settled it, which is why `tests/full/test_storage_e2e.py` now drives this
+    # verb against a real one. The residual is a mount point containing a
+    # literal `%`, which would then be read as the start of an escape — and no
+    # encoding fixes that, because there is no decoding step to feed.
     tail = scope if scope.startswith("/") else "/" + scope
-    scope_href = _escape_xml(quote(f"{_dav_scope_prefix(config)}{tail}", safe="/"))
+    scope_href = _escape_xml(f"{_dav_scope_prefix(config)}{tail}")
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'

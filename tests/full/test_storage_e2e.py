@@ -286,12 +286,22 @@ class TestASharedFile:
         """`files search` is the one verb whose path is an href in an XML body
         rather than a URL, and the shipped mount point has a space in it.
 
-        A raw space in a `<d:href>` is not a valid URI reference, and until this
-        change the scope was XML-escaped and nothing more — a gap that could not
-        bite while the only way to get such a character in was a user naming a
-        file with one. Sabre resolves the scope relative to the SEARCH request
-        URL, so the whole verb either works here or answers 404 for everything;
-        nothing short of the real server settles which.
+        **This test is why the scope href is not percent-encoded.** An href is
+        nominally a URI reference, so the raw space looks wrong and encoding it
+        looks like the fix — that is what both reviewers said and what was
+        written first. Against the real server, `Shared%20Files` answers 404
+        naming a collection called literally that. Sabre does not decode this
+        href. Nothing below the tier can tell the two apart: the request is
+        well-formed either way and every mock answers whatever it was told to.
+
+        The PROPFIND first is load-bearing and not a warm-up. SEARCH is served
+        out of Nextcloud's file cache, and a file written POSIX-side onto the
+        volume is not in it until something makes the server look — which is
+        the same fact `test_it_is_served_over_webdav_from_the_external_mount`
+        establishes one class up. Without it this searches an unindexed
+        directory and reports zero hits, which is indistinguishable from a
+        scope that failed to resolve. Measured: the raw form returned zero
+        before the listing was added and one after.
         """
         name = _unique("searchable") + ".txt"
 
@@ -301,6 +311,10 @@ class TestASharedFile:
             "p.write_text('indexed by the server, not walked over the mount');"
             "print('REMOTE', storage.upload_file_to_inbox_v2(c, 'testuser', p))"
         ))
+        nextcloud = stack.service("nextcloud")
+        assert f"{BOT_MOUNT_POINT}/Users/testuser/inbox/{name}" in nextcloud.files(
+            f"{BOT_MOUNT_POINT}/Users/testuser/inbox"
+        )
 
         answer = json.loads(_tagged(_run(stack, (
             "import os, subprocess;"

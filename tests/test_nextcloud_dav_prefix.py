@@ -265,39 +265,44 @@ class TestTheReturnTrip:
 
 
 class TestTheSearchScope:
-    def test_the_scope_href_carries_the_prefix_percent_encoded(self):
-        """An href is a URI reference, and the URL builder next door already
-        quotes its path. The scope did not, which went unnoticed while the only
-        way in was a user's own file name — the mount point puts a space in
-        every search on the shipped Docker shape."""
+    """The scope href goes on the wire unencoded, and that is measured.
+
+    It reads like a bug — an href is nominally a URI reference and the URL
+    builder next door percent-encodes its path — and it was written up as one
+    by two reviewers before the full tier settled it: Sabre does not decode
+    this href, so `Shared%20Files` answers 404 naming a collection called
+    literally that while the raw form resolves. These assertions pin the
+    behaviour the server actually wants, and
+    `tests/full/test_storage_e2e.py::TestASharedFile` is the evidence, since
+    nothing at this level can tell the two apart.
+    """
+
+    def test_the_scope_href_carries_the_prefix_unencoded(self):
         from istota.nextcloud.dav import build_search_body
 
         body = build_search_body(_config(PREFIX), scope="/Users/alice", name="*.md")
 
-        assert "<d:href>/files/istota/Shared%20Files/Users/alice</d:href>" in body
+        assert "<d:href>/files/istota/Shared Files/Users/alice</d:href>" in body
+        assert "%20" not in body, (
+            "percent-encoding the scope makes Sabre look for a collection "
+            "named with the escape and answer 404 for every search"
+        )
 
-    def test_a_caller_scope_is_encoded_too(self):
-        from istota.nextcloud.dav import build_search_body
-
-        body = build_search_body(_config(), scope="/Users/alice/my notes", name="*.md")
-
-        assert "<d:href>/files/istota/Users/alice/my%20notes</d:href>" in body
-
-    def test_a_query_marker_cannot_truncate_the_href(self):
-        """`?` and `#` are legal in a Nextcloud external-mount display name and
-        in a file name, and raw in an href each ends the path."""
-        from istota.nextcloud.dav import build_search_body
-
-        body = build_search_body(_config(), scope="/Users/alice/q?x#y", name="*.md")
-
-        assert "<d:href>/files/istota/Users/alice/q%3Fx%23y</d:href>" in body
-
-    def test_without_a_prefix_a_plain_scope_is_unchanged(self):
+    def test_without_a_prefix_the_scope_href_is_unchanged(self):
         from istota.nextcloud.dav import build_search_body
 
         body = build_search_body(_config(), scope="/Users/alice", name="*.md")
 
         assert "<d:href>/files/istota/Users/alice</d:href>" in body
+
+    def test_xml_escaping_still_applies(self):
+        """Not encoding the path does not mean handing the parser raw text — an
+        `&` in a file name would otherwise open an entity reference."""
+        from istota.nextcloud.dav import build_search_body
+
+        body = build_search_body(_config(), scope="/Users/alice/a&b", name="*.md")
+
+        assert "<d:href>/files/istota/Users/alice/a&amp;b</d:href>" in body
 
 
 class TestTheOcsSharePath:
