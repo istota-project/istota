@@ -1181,6 +1181,31 @@ class TestForgeBinaries:
         assert str(tmp_path / "bin" / "gh") in results["developer.forge_binaries.gh"].detail
         assert results["developer.forge_binaries.gh"].remedy
 
+    def test_a_binary_that_exits_nonzero_fails(self, make_config, tmp_path):
+        """The half of this check that actually runs the thing. `check_forge_versions`
+        used to do this too and was deleted as redundant, which is only true while
+        `_binary_status` keeps executing `--version` under probe — so pin it here
+        rather than leaving the property resting on a docstring."""
+        _fake_bin(tmp_path / "bin" / "gh", "boom", exit_code=1)
+        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
+        config = _dev_config(make_config, tmp_path)
+        results = _by_name(run_checks(config, only=("developer.forge_binaries",)))
+        assert results["developer.forge_binaries.gh"].status == FAIL
+        assert "exited 1" in results["developer.forge_binaries.gh"].detail
+        assert results["developer.forge_binaries.glab"].status == OK
+
+    def test_a_binary_is_not_executed_when_probe_is_off(self, make_config, tmp_path):
+        """Nothing may shell out on the probe-disabled path; an operator reading
+        the result has to be able to tell that nothing ran."""
+        _fake_bin(tmp_path / "bin" / "gh", "boom", exit_code=1)
+        _fake_bin(tmp_path / "bin" / "glab", "glab 1.114.0")
+        config = _dev_config(make_config, tmp_path)
+        results = _by_name(
+            run_checks(config, only=("developer.forge_binaries",), probe=False)
+        )
+        assert results["developer.forge_binaries.gh"].status == OK
+        assert "not executed" in results["developer.forge_binaries.gh"].detail
+
     def test_present_but_not_executable_fails(self, make_config, tmp_path):
         path = tmp_path / "bin" / "gh"
         path.parent.mkdir(parents=True, exist_ok=True)

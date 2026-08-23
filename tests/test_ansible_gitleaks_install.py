@@ -135,6 +135,15 @@ class TestThePinnedVersionClearsTheFloor:
             "commit would be refused"
         )
 
+    def test_the_tasks_file_reads_the_name_the_defaults_define(self, tasks):
+        """The rename from the old `istota_developer_cli_floors['gitleaks']` had
+        to land in two files. Miss one and Ansible raises "undefined variable" on
+        the operator's host, on the play that installs the credential scanner —
+        while the Python suite stays green, because nothing else here reads the
+        tasks file for this name."""
+        assert "istota_developer_gitleaks_min_version" in _gitleaks_block(tasks)
+        assert "istota_developer_cli_floors" not in tasks
+
     def test_the_floor_is_asserted_at_deploy_time(self, defaults):
         """A floor stated in the defaults and checked against the binary the
         hook will actually resolve, rather than assumed from the version this

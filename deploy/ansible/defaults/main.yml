@@ -1141,12 +1141,25 @@ istota_developer_gitleaks_release_arch:
 # `gitleaks git --staged` replaced `detect` / `protect` in 8.19, and the hook
 # calls the new spelling — so below this the scan does not merely run old, it
 # does not run at all, and `.githooks/pre-commit` refuses every unattended
-# commit on the host (ISSUE-291). Asserted post-install through PATH rather
-# than by absolute path, because the hook resolves `command -v gitleaks`: an
-# apt-installed 8.16 shadowing /usr/local/bin is the case worth catching, and
-# trixie ships exactly that. gh and glab carry no equivalent, deliberately —
-# any floor low enough to be true of the verbs the skill uses is also cleared
-# by the archive versions it would be meant to catch.
+# commit on the host (ISSUE-291).
+#
+# What it catches, precisely: gitleaks absent from PATH entirely, which the
+# assert's `default('0.0.0', true)` turns into a failure naming the consequence,
+# and this pin edited down below what the hook calls. Not an apt-installed 8.16
+# shadowing ours, despite the obvious reading — the role installs to
+# /usr/local/bin, which *precedes* /usr/bin on Debian's default PATH, so the
+# archive's copy loses. It is still resolved through PATH rather than by
+# absolute path, because `command -v gitleaks` is what the hook itself runs and
+# a check should ask the question its consumer asks.
+#
+# gh and glab carry no equivalent, deliberately. Their floors were 2.40 and
+# 1.36 against a trixie shipping 2.46 and 1.53, so the stale-install case they
+# named cleared them; and no floor was ever derived from the verbs the skill
+# uses, so any honest number would be a guess. The consequence, stated rather
+# than hidden: nothing stops those two pins being edited *down*, since the
+# parity test is satisfied by lowering all three files together. gitleaks is
+# guarded against that by tests/test_ansible_gitleaks_install.py, because 8.19
+# is a real derived number; the forge CLIs have none to derive.
 istota_developer_gitleaks_min_version: "8.19.0"
 # GitLab settings
 istota_developer_gitlab_url: "https://gitlab.com"
