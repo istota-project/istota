@@ -50,9 +50,28 @@ from istota.skill_host_paths import resolve_host_path, validate_host_path
 
 DEFAULT_TIMEOUT = 300
 DEFAULT_MAX_OUTPUT_BYTES = 102_400
-MAX_COMMAND_BYTES = 32 * 1024  # bash -c argv length cap
+MAX_COMMAND_BYTES = 32 * 1024  # `bash -o pipefail -c` argv length cap
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 _OWNER_LABEL = "com.istota.user_id"
+
+# 128 + SIGPIPE(13). `pipefail` newly colours a pipeline in two cases, and this
+# is the one that can be annotated: a downstream `head` or `grep -q` closes the
+# pipe early and kills a producer that was doing nothing wrong. It has a fixed
+# code, so it can be recognised.
+#
+# The other case cannot be, and is named in skill.md instead: a non-final stage
+# that exits non-zero to *report* something rather than to fail — `grep` with no
+# match, `diff`, `cmp`, `git diff --quiet`. `grep -c x f | wc -l` now returns 1
+# where it returned 0, and nothing distinguishes that from a real failure, here
+# or anywhere else. It is the price of the option rather than a defect in it.
+_SIGPIPE_EXIT = 141
+_SIGPIPE_NOTE = (
+    "exit 141 usually means SIGPIPE: a command in the pipeline was killed "
+    "because the next one closed the pipe (`| head`, `| grep -q`), and with "
+    "pipefail on that becomes the pipeline's status. If the consumer's output "
+    "is what you wanted, this is not a failure — re-run without the early-exit "
+    "consumer to get a status you can act on."
+)
 
 # Container paths `docker cp` cannot reach. The daemon resolves a container
 # path against the container's rootfs on the host and mounts only the
@@ -268,9 +287,22 @@ def cmd_exec(args) -> dict:
     if ownership_err:
         return _err(ownership_err)
 
+    # `-o pipefail`, because the envelope below tells its reader that
+    # `exit_code` is the result (ISSUE-307). `bash -c` starts with the option
+    # off, so a pipeline reports its *last* command's status and
+    # `<runner> … | tail` — which the output cap actively pushes toward — came
+    # back 0 on a run that failed. That is the failure this whole surface
+    # exists to make impossible: a green test suite that was not green.
+    #
+    # The cost is real and is paid deliberately. `yes | head -5` reports 141
+    # where it used to report 0, and a non-final stage that exits non-zero as
+    # information — `grep` with no match — now colours the pipeline too. Both
+    # are stated at `_SIGPIPE_EXIT` above and in `skill.md`. A status that is
+    # wrong in the alarming direction makes a reader look; one wrong in the
+    # reassuring direction is acted on, which is what settles the trade.
     cmd = [
         "exec", "-i", "-u", "dev", "-w", _DEFAULT_WORKDIR,
-        container, "bash", "-c", args.command,
+        container, "bash", "-o", "pipefail", "-c", args.command,
     ]
     start = time.monotonic()
     try:
@@ -282,13 +314,16 @@ def cmd_exec(args) -> dict:
         _kill_stragglers(container, timeout)
         return _err(f"Command timed out after {timeout}s")
     duration_ms = int((time.monotonic() - start) * 1000)
-    return {
+    result = {
         "status": "ok",
         "exit_code": rc,
         "stdout": _truncate(stdout, cap),
         "stderr": _truncate(stderr, cap),
         "duration_ms": duration_ms,
     }
+    if rc == _SIGPIPE_EXIT:
+        result["note"] = _SIGPIPE_NOTE
+    return result
 
 
 def _kill_stragglers(container: str, timeout: int) -> None:
@@ -597,7 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="subcommand", required=True)
 
     p_exec = sub.add_parser("exec", help="Run a command inside the devbox")
-    p_exec.add_argument("command", help="Shell command to run (executed via bash -c)")
+    p_exec.add_argument("command", help="Shell command to run (executed via bash -o pipefail -c)")
     p_exec.add_argument("--timeout", type=int, help="Per-exec timeout (s)")
 
     p_xf = sub.add_parser("exec-file", help="Copy a local script in and run it")

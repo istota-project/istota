@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -236,7 +237,7 @@ class TestExec:
         exec_argv = invocations[-1]
         assert exec_argv[0] == "exec"
         assert "devbox-bob" in exec_argv
-        assert exec_argv[-3] == "bash"
+        assert exec_argv[exec_argv.index("devbox-bob") + 1] == "bash"
         assert exec_argv[-2] == "-c"
         assert exec_argv[-1] == "echo hi"
         # The working directory must be somewhere `docker cp` can reach, or a
@@ -265,6 +266,144 @@ class TestExec:
         result = devbox.cmd_exec(args)
         assert result["status"] == "error"
         assert "timed out" in result["error"]
+
+
+class TestExecKeepsThePipelineStatus:
+    """ISSUE-307: `bash -c` starts with `pipefail` off, so a pipeline reported
+    its *last* command's status and `<runner> … | tail` came back
+    `exit_code: 0` on a run that failed.
+
+    The envelope tells its reader that `exit_code` is the result, so the shell
+    has to make that claim true. Asserting the flag is merely present in the
+    argv would be satisfied by `-o pipefail` sitting somewhere the shell
+    ignores it, so the second test runs the argv the skill actually built.
+    """
+
+    def _exec_argv(self, monkeypatch, command: str) -> list[str]:
+        invocations = []
+        seq = iter([*_ownership_sequence(), (0, b"", b"")])
+
+        def fake_run(argv, timeout):
+            invocations.append(argv)
+            return next(seq)
+
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        devbox.cmd_exec(type("A", (), {"command": command, "timeout": None})())
+        return invocations[-1]
+
+    def _shell_argv(self, argv: list[str]) -> list[str]:
+        """Everything after the container name — the argv docker hands to exec.
+
+        Anchored on `-w <workdir>`, which the code chooses, rather than on the
+        container name, which the fixture chooses: a command string containing
+        the container name would slice at the wrong `index` and the failure
+        would read as a pipefail regression.
+        """
+        return argv[argv.index(devbox._DEFAULT_WORKDIR) + 2:]
+
+    def test_the_shell_argv_turns_pipefail_on(self, monkeypatch):
+        shell = self._shell_argv(self._exec_argv(monkeypatch, "echo hi"))
+        assert shell == ["bash", "-o", "pipefail", "-c", "echo hi"], shell
+
+    def test_the_argv_the_skill_builds_really_fails_a_failing_pipeline(self, monkeypatch):
+        """Run the shell argv `cmd_exec` produced, on this machine.
+
+        No container is needed to answer the question — the option belongs to
+        bash, not to the image — and this is the assertion a flag check cannot
+        make: that the status handed back is the failing command's. The passing
+        case is the control; without it a shell that failed everything would
+        satisfy the first half.
+        """
+        if not shutil.which("bash"):
+            pytest.skip("no bash on this host")
+
+        shell = self._shell_argv(self._exec_argv(monkeypatch, "false | tail -1"))
+        assert subprocess.run(shell, capture_output=True, timeout=30).returncode != 0, (
+            f"{shell} reported success for a pipeline whose first command failed"
+        )
+
+        shell_ok = self._shell_argv(self._exec_argv(monkeypatch, "true | tail -1"))
+        assert subprocess.run(shell_ok, capture_output=True, timeout=30).returncode == 0, (
+            f"{shell_ok} reported failure for a pipeline that succeeded"
+        )
+
+    def test_a_reporting_stage_now_colours_the_pipeline(self, monkeypatch):
+        """The cost `skill.md` promises, measured rather than asserted.
+
+        `pipefail` changes two things, not one. SIGPIPE is the recognisable
+        half; this is the other — a non-final stage that exits non-zero to
+        *report* something (`grep` with no match, `diff`, `cmp`) rather than to
+        fail. Nothing distinguishes it from a real failure, which is why it is
+        documented instead of annotated, and why it is pinned here: the docs
+        now make a claim about it that a future argv change could falsify.
+        """
+        if not shutil.which("bash"):
+            pytest.skip("no bash on this host")
+
+        shell = self._shell_argv(
+            self._exec_argv(monkeypatch, "grep -c nonexistent-needle /etc/hosts | wc -l"),
+        )
+        assert subprocess.run(shell, capture_output=True, timeout=30).returncode == 1, (
+            "a no-match grep mid-pipeline no longer colours the pipeline — "
+            "skill.md tells the reader it does"
+        )
+
+    def test_a_sigpipe_status_is_named_in_the_envelope(self, monkeypatch):
+        """The one cost of the option, answered where the reader is.
+
+        `pipefail` surfaces SIGPIPE, so `yes | head -5` now reports 141 where it
+        used to report 0. That is a true status rather than a bug, but nothing
+        else on the page would tell a reader so.
+        """
+        seq = iter([*_ownership_sequence(), (141, b"y\n", b"")])
+        monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: next(seq))
+        result = devbox.cmd_exec(type("A", (), {"command": "yes | head -1", "timeout": None})())
+        assert result["exit_code"] == 141
+        assert "SIGPIPE" in result["note"]
+        assert "pipefail" in result["note"]
+
+    def test_an_ordinary_status_carries_no_note(self, monkeypatch):
+        seq = iter([*_ownership_sequence(), (1, b"", b"nope\n")])
+        monkeypatch.setattr(devbox, "_run_docker", lambda argv, timeout: next(seq))
+        result = devbox.cmd_exec(type("A", (), {"command": "false", "timeout": None})())
+        assert result["exit_code"] == 1
+        assert "note" not in result
+
+    def test_exec_file_does_not_impose_pipefail_on_the_script(self, monkeypatch, tmp_path):
+        """Deliberate, and pinned so a change of mind arrives as a reviewed diff.
+
+        `exec` takes a command string with nowhere to put shell options; a
+        script has a shebang line, where `set -euo pipefail` is the idiom, and
+        the no-interpreter branch runs whatever interpreter the file names — so
+        imposing the option here would cover one of the two branches and change
+        the meaning of a file the caller wrote.
+        """
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/bash\necho hi\n")
+        invocations = []
+        seq = iter([
+            *_ownership_sequence(),
+            (0, b"", b""),   # mkdir staging dir
+            (0, b"", b""),   # docker cp
+            (0, b"", b""),   # chmod
+            (0, b"", b""),   # the run
+            (0, b"", b""),   # cleanup rm
+        ])
+
+        def fake_run(argv, timeout):
+            invocations.append(argv)
+            return next(seq)
+
+        monkeypatch.setattr(devbox, "_run_docker", fake_run)
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        devbox.cmd_exec_file(
+            type("A", (), {"path": str(script), "interpreter": None, "timeout": None})(),
+        )
+        run_argv = [a for a in invocations if "-w" in a and "bash" in a][-1]
+        # Substring, not element membership: `["bash", "-c", "set -o pipefail;
+        # exec " + remote]` is how someone would most likely impose the option
+        # on the interpreter branch, and `"pipefail" not in run_argv` accepts it.
+        assert not any("pipefail" in a for a in run_argv), run_argv
 
 
 class TestExecFile:
