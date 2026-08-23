@@ -343,6 +343,30 @@ class TestCheckShellCommand:
         result = _check_shell_command(check, config)
         assert result.healthy is False
 
+    def test_a_failing_stage_of_a_pipeline_is_unhealthy(self, tmp_path):
+        """`shell=True` is `/bin/sh -c`, which starts with `pipefail` off, so a
+        probe ending in a pipe reported the last stage and a broken check read
+        as healthy forever. The counterpart of ISSUE-307 on this surface."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "false | tail -1"},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is False
+
+    def test_a_succeeding_pipeline_is_still_healthy(self, tmp_path):
+        """Control — a piped probe that works must not start alerting."""
+        config = Config(nextcloud_mount_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo 50 | tail -1", "condition": "< 90"},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is True
+
     def test_less_than_condition_pass(self, tmp_path):
         config = Config(nextcloud_mount_path=tmp_path)
         check = HeartbeatCheck(
