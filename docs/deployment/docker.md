@@ -69,6 +69,18 @@ docker compose exec -u www-data nextcloud php /var/www/html/occ files_external:o
 
 Restart `istota` afterwards. Without the config keys the `nextcloud` skill's `files` and `share` verbs answer 404 and the bot logs `Failed to share folder` on every boot; without the mount option every share of anything in the workspace is refused.
 
+A second patch is outstanding for any install created before the model-alias rename. `[models.roles]` was renamed to `[models.aliases]` and the old key is now read by nothing, so a config generated under the old name has its per-role map dropped and logs a warning naming the retired key on every process start. In `/data/config/config.toml`:
+
+```toml
+# was [models.roles]
+[models.aliases]
+fast = "..."
+general = "..."
+smart = "..."
+```
+
+Restart `istota` afterwards. This only changes behaviour if you pointed a role at something other than `ISTOTA_BRAIN_NATIVE_MODEL` — an unmapped role already falls back to the single configured model, so an install that left all three the same loses only the warning.
+
 ## Optional profiles
 
 ```bash

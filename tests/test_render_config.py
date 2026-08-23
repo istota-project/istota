@@ -715,3 +715,192 @@ class TestTheEntrypointStillOwnsWhatItKept:
         for marker in ("Upgrade path:", "backfill"):
             assert marker in entrypoint, f"{marker} left the entrypoint"
         assert "Upgrade path:" not in rendered, "a backfill pass moved into the render"
+
+
+ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"
+
+
+def _credential_block() -> str:
+    """The entrypoint's credential if/elif chain, lifted out to be run.
+
+    Nothing in the suite can execute ``entrypoint.sh`` — it provisions against
+    a live Nextcloud before reaching this point — but the chain itself only
+    reads environment variables and echoes, so it runs standalone. Extracted by
+    text, which fails loudly (no match, no test) rather than silently drifting.
+    """
+    source = ENTRYPOINT.read_text()
+    match = re.search(
+        r'^if \[ -n "\$\{CLAUDE_CODE_OAUTH_TOKEN:-\}" \]; then\n.*?^fi$',
+        source,
+        re.M | re.S,
+    )
+    assert match, "the credential chain moved; this extraction needs updating"
+    return match.group(0)
+
+
+def _run_credential_block(tmp_path: Path, **env: str) -> str:
+    proc = subprocess.run(
+        ["bash", "-c", _credential_block()],
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "CLAUDE_DIR": str(tmp_path),
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"chain exited {proc.returncode}: {proc.stderr}"
+    return proc.stdout
+
+
+class TestTheCredentialCheckKnowsWhichBrainIsRunning:
+    """A native deployment has credentials; it just doesn't have Claude Code's.
+
+    The chain only knew the two Claude Code credentials, so every native-brain
+    boot — with a working ``ISTOTA_BRAIN_NATIVE_API_KEY`` and tasks completing
+    fine — printed "No Claude Code credentials found". A warning that fires on
+    a healthy deployment is one an operator learns to scroll past.
+    """
+
+    def test_the_native_key_is_recognised_as_a_credential(self, tmp_path):
+        out = _run_credential_block(
+            tmp_path,
+            ISTOTA_BRAIN_KIND="native",
+            ISTOTA_BRAIN_NATIVE_API_KEY="a-key",
+        )
+
+        assert "WARNING" not in out
+        assert "ISTOTA_BRAIN_NATIVE_API_KEY" in out
+
+    def test_a_native_deployment_with_no_key_is_told_which_one_it_needs(self, tmp_path):
+        out = _run_credential_block(tmp_path, ISTOTA_BRAIN_KIND="native")
+
+        assert "WARNING" in out
+        assert "ISTOTA_BRAIN_NATIVE_API_KEY" in out
+        # Naming Claude Code's variables here sends the operator to set a
+        # credential the native brain will never read.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in out
+
+    def test_the_claude_code_default_still_warns_about_its_own_credentials(self, tmp_path):
+        out = _run_credential_block(tmp_path)
+
+        assert "WARNING" in out
+        assert "CLAUDE_CODE_OAUTH_TOKEN" in out
+
+    def test_a_shared_anthropic_key_satisfies_either_brain(self, tmp_path):
+        for kind in ("claude_code", "native"):
+            out = _run_credential_block(
+                tmp_path, ISTOTA_BRAIN_KIND=kind, ANTHROPIC_API_KEY="a-key",
+            )
+            assert "WARNING" not in out, kind
+
+    def test_the_oauth_branch_still_writes_a_locked_down_credentials_file(self, tmp_path):
+        out = _run_credential_block(tmp_path, CLAUDE_CODE_OAUTH_TOKEN="tok")
+
+        assert "WARNING" not in out
+        written = tmp_path / ".credentials.json"
+        assert written.exists()
+        assert oct(written.stat().st_mode)[-3:] == "600"
+
+    def test_the_variables_it_branches_on_reach_the_container(self):
+        """Read by the entrypoint, so compose has to pass both through."""
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+
+        for name in ("ISTOTA_BRAIN_KIND", "ISTOTA_BRAIN_NATIVE_API_KEY"):
+            assert re.search(rf"^\s*{name}:", compose, re.M), name
+
+
+class TestTheContainerCliFindsTheSameConfig:
+    """`docker compose exec istota istota <verb>` has to reach the daemon's config.
+
+    ``entrypoint.sh`` hands the daemon ``-c /data/config/config.toml``, which is
+    on none of ``load_config``'s four search paths. Without the environment
+    variable an operator following ``docs/deployment/docker.md`` got a raw
+    ``sqlite3.OperationalError`` traceback from every CLI call. Worse than
+    failing would be resolving a *different* config from the daemon's, so what
+    is asserted is that the two name one file.
+    """
+
+    def _istota_service_env(self) -> dict:
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+        # The istota service's environment block: from its `environment:` key
+        # to the start of the next top-level service. Parsed by hand rather
+        # than with a YAML loader because the file is full of `${VAR:-default}`
+        # and anchors that a plain load would not resolve the way compose does.
+        body = compose.split("\n  istota:\n", 1)[1].split("\n  web:\n", 1)[0]
+        return dict(
+            re.findall(r"^      ([A-Z][A-Z0-9_]*): (.*)$", body, re.M)
+        )
+
+    def test_the_service_names_a_config_path_for_the_cli(self):
+        env = self._istota_service_env()
+
+        assert env.get("ISTOTA_CONFIG_PATH") == "/data/config/config.toml"
+
+    def test_it_is_the_file_the_entrypoint_hands_the_daemon(self):
+        entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text()
+        declared = re.search(r'^CONFIG_FILE="([^"]+)"', entrypoint, re.M)
+        assert declared, "entrypoint.sh no longer declares CONFIG_FILE"
+
+        assert self._istota_service_env()["ISTOTA_CONFIG_PATH"] == declared.group(1)
+
+    def test_the_variable_is_the_one_load_config_reads(self):
+        """A typo here fails open — the CLI keeps its old traceback."""
+        from istota import config as config_module
+
+        source = Path(config_module.__file__).read_text()
+        assert 'os.environ.get("ISTOTA_CONFIG_PATH")' in source
+
+
+class TestTheModelAliasTable:
+    """The per-role model map has to land under the key the loader reads.
+
+    ``config.py`` calls ``[models.roles]`` a HARD RENAME to ``[models.aliases]``
+    — parsed by nothing, warned about once per process. The render kept writing
+    the old spelling, so ``ISTOTA_BRAIN_NATIVE_MODEL_{FAST,GENERAL,SMART}``
+    were documented in ``.env.example``, passed through by compose, and then
+    silently dropped on the floor. Nothing pointed a role anywhere.
+    """
+
+    NATIVE = {
+        **REQUIRED,
+        "ISTOTA_BRAIN_KIND": "native",
+        "ISTOTA_BRAIN_NATIVE_MODEL": "vendor/base-model",
+    }
+
+    def test_the_per_role_overrides_survive_into_the_loaded_config(self, tmp_path):
+        config = load_config(render(
+            tmp_path,
+            **self.NATIVE,
+            ISTOTA_BRAIN_NATIVE_MODEL_FAST="vendor/cheap-model",
+            ISTOTA_BRAIN_NATIVE_MODEL_SMART="vendor/big-model",
+        ))
+
+        assert config.models.aliases["fast"] == "vendor/cheap-model"
+        assert config.models.aliases["smart"] == "vendor/big-model"
+        # Unset roles fall back to the single configured model.
+        assert config.models.aliases["general"] == "vendor/base-model"
+
+    def test_each_role_defaults_to_the_one_configured_model(self, tmp_path):
+        config = load_config(render(tmp_path, **self.NATIVE))
+
+        assert config.models.aliases == {
+            "fast": "vendor/base-model",
+            "general": "vendor/base-model",
+            "smart": "vendor/base-model",
+        }
+
+    def test_the_retired_key_is_not_written(self, tmp_path):
+        rendered = tomllib.loads(render(tmp_path, **self.NATIVE).read_text())
+
+        assert "roles" not in rendered.get("models", {}), (
+            "[models.roles] is parsed by nothing and logs a migration warning "
+            "on every process start"
+        )
+
+    def test_no_model_table_without_a_configured_model(self, tmp_path):
+        """The table is the native brain's; nothing to map without one."""
+        rendered = tomllib.loads(render(tmp_path, **REQUIRED).read_text())
+
+        assert "models" not in rendered

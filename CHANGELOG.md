@@ -111,6 +111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Docker install that points one model role at a different model now has that setting honoured. The generated config wrote the per-role map under a key that was renamed a few releases ago and is read by nothing since, so the settings for aiming the quick, general and heavyweight roles at different models were parsed and dropped — every role quietly fell back to the single configured model, and each start logged a warning about a key the operator never wrote.
+
+- Running the bot's own command-line tools inside the Docker container works now. The container keeps its config somewhere none of the four places those tools look, so every `docker compose exec` call the deployment guide suggests — submitting a task, adding a user, listing secrets — died on a raw Python traceback about a database it could not open. The container now tells the tools where its config is.
+
+- A deployment using the in-process model brain is no longer told at every boot that it has no credentials. The startup check knew only the two Claude Code credentials, so an install that was working fine on its own endpoint key printed a warning naming two settings it will never read. It now checks the credential the configured brain actually uses, and names that one when it really is missing.
+
+- **Upgrade note.** The first of those three is in the generated config, which is written only when absent — so it lands on new installs, and an existing one keeps the old key. If you set a per-role model, rename the `[models.roles]` table in `/data/config/config.toml` to `[models.aliases]` and restart. Leaving it alone costs nothing beyond the warning if every role was pointed at the same model, which is the default.
+
 - Asking to see a task's prompt without running it no longer runs it. `istota task --dry-run` created the task row first and consulted the flag only on the path that executes immediately, so on a live deployment the scheduler picked the row up within seconds — the flag whose whole promise is that nothing happens was the one that queued a real, billed model call and delivered its answer. It now prints the assembled prompt and leaves nothing behind.
 
 - The notification panel behind the bell now sits centred on a phone, with an even margin down each side, instead of pressing against the left edge of the screen with all of the gap stranded on the right. It was sized to the width of the screen less a single margin and then pushed as far left as it would go, so the margin it did keep only ever appeared on one side.
