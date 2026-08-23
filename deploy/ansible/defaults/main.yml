@@ -1276,7 +1276,14 @@ istota_security_sandbox_ro_paths: []
 istota_security_sandbox_cache_dir: ""
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
-istota_security_network_extra_hosts: []            # operator-specific additions
+# Operator-specific additions to the CONNECT allowlist, as "host:port" strings.
+# The public npm and crates.io registries are already added for a task holding
+# the developer skill, so an install inside a worktree needs nothing here; this
+# is for a private registry, a company mirror, or an ecosystem that is not npm,
+# PyPI or cargo. It applies to *every* task rather than only developer ones —
+# there is no per-skill operator list. Matching is exact with no wildcards, so
+# a missing entry fails at the boundary and reads as a broken install.
+istota_security_network_extra_hosts: []
 # When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
 # and omitted from config.toml (config.py reads them from env vars)
 istota_use_environment_file: true
