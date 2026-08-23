@@ -4250,12 +4250,19 @@ class TestAuthservIdDiscovery:
 
     def test_the_advice_still_rides_along_with_an_alert(self, make_config):
         """Where an operator is already being interrupted, tell them the check can
-        be scoped — just without a value read off the header under suspicion."""
+        be scoped — just without a value read off the header under suspicion.
+
+        Spelled ``email.authserv_id``, not ``[email] authserv_id``: the alert is
+        flattened before it is pushed (ISSUE-310) and the square brackets do not
+        survive that. The advice has to name something an operator can act on
+        after the flattening, not before it. The log lines asserted elsewhere in
+        this class keep the TOML section form — they are not flattened.
+        """
         config = self._config(make_config)
 
         alert = self._poll(config, "mx.test; dmarc=fail header.from=test.com")
 
-        assert "[email] authserv_id" in alert.call_args.args[2]
+        assert "email.authserv_id" in alert.call_args.args[2]
 
     def test_setting_the_id_silences_both_halves_for_good(self, make_config, caplog):
         """The nag terminates on the one action it asks for, which is why it needs
