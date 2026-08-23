@@ -198,15 +198,19 @@ TOML
         if [ -n "${ISTOTA_BRAIN_NATIVE_MODEL:-}" ]; then
             # Internal subsystems (conversation selection, sleep-cycle
             # extraction, OCR, …) request models by ROLE — "fast" / "general" /
-            # "smart". The claude_code brain maps those to Haiku/Sonnet/Opus;
-            # a native brain has no built-in mapping, so without [models.roles]
-            # the role name passes through to the endpoint as a bogus model id.
-            # Each role defaults to the one configured model; set
-            # ISTOTA_BRAIN_NATIVE_MODEL_{FAST,GENERAL,SMART} to point a role at a
+            # "smart". The claude_code brain maps those to Haiku/Sonnet/Opus.
+            # A native brain speaks to one endpoint, so an unmapped role
+            # already falls back to the single configured model; what this
+            # table buys is pointing one role somewhere else. Set
+            # ISTOTA_BRAIN_NATIVE_MODEL_{FAST,GENERAL,SMART} to aim a role at a
             # different model served by the same endpoint.
+            #
+            # The key is [models.aliases]. [models.roles] is a hard rename that
+            # config.py parses into nothing — writing it dropped every override
+            # here and logged a migration warning on every process start.
             cat >> "$CONFIG_FILE" <<TOML
 
-[models.roles]
+[models.aliases]
 fast = "${ISTOTA_BRAIN_NATIVE_MODEL_FAST:-$ISTOTA_BRAIN_NATIVE_MODEL}"
 general = "${ISTOTA_BRAIN_NATIVE_MODEL_GENERAL:-$ISTOTA_BRAIN_NATIVE_MODEL}"
 smart = "${ISTOTA_BRAIN_NATIVE_MODEL_SMART:-$ISTOTA_BRAIN_NATIVE_MODEL}"

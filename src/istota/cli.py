@@ -120,6 +120,37 @@ def cmd_task(args):
     else:
         source_type = "cli"
 
+    use_context = not args.no_context
+
+    # A dry run assembles the prompt, prints it, and leaves nothing behind.
+    # It must short-circuit BEFORE create_task: a persisted `pending` row is
+    # picked up by any running scheduler within a tick, so creating one and
+    # only then consulting `--dry-run` meant the flag whose whole promise is
+    # that nothing executes was queueing real, billed model work. `id=0` is
+    # this codebase's marker for a task with no row behind it (the heartbeat
+    # builds one the same way).
+    if args.dry_run:
+        with db.get_db(config.db_path) as conn:
+            task = db.Task(
+                id=0,
+                status="pending",
+                source_type=source_type,
+                user_id=args.user,
+                prompt=prompt,
+                conversation_token=args.conversation_token,
+            )
+            user_resources = db.get_user_resources(conn, args.user)
+            _success, result, _actions, _trace = execute_task(
+                task,
+                config,
+                user_resources,
+                dry_run=True,
+                use_context=use_context,
+                conn=conn,
+            )
+        print(result)
+        return
+
     with db.get_db(config.db_path) as conn:
         task_id = db.create_task(
             conn,
@@ -137,12 +168,12 @@ def cmd_task(args):
             task = db.get_task(conn, task_id)
             if task:
                 user_resources = db.get_user_resources(conn, args.user)
-                use_context = not args.no_context
+                # Not `dry_run=args.dry_run`: a dry run returned above, so the
+                # only way to reach here is a real execution.
                 success, result, _actions, _trace = execute_task(
                     task,
                     config,
                     user_resources,
-                    dry_run=args.dry_run,
                     use_context=use_context,
                     conn=conn,
                 )

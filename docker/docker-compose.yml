@@ -202,6 +202,15 @@ services:
       # directly to add more admins; the same path is shared with the web
       # and webhooks services.
       ISTOTA_ADMINS_FILE: /data/config/admins
+      # Where `istota <verb>` finds its config. The daemon does not need this —
+      # entrypoint.sh passes `-c` explicitly — but an operator running the CLI
+      # in this container does: /data/config/config.toml is on none of the four
+      # search paths, so `docker compose exec istota istota task ...` died with
+      # a raw "unable to open database file" traceback. The web and webhooks
+      # services solve the same problem by symlinking the file onto the
+      # cwd-relative candidate; this service has no such entrypoint. An
+      # explicit `-c` still wins over the variable.
+      ISTOTA_CONFIG_PATH: /data/config/config.toml
       # Scheduler — polling intervals
       ISTOTA_SCHEDULER_POLL_INTERVAL: ${ISTOTA_SCHEDULER_POLL_INTERVAL:-5}
       ISTOTA_SCHEDULER_DISPATCH_INTERVAL: ${ISTOTA_SCHEDULER_DISPATCH_INTERVAL:-0.5}
