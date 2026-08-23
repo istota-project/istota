@@ -10,15 +10,18 @@ Run them with `scripts/test-linux.sh`. They carry the `linux` marker, which
 pyproject's addopts deselects, so `uv run pytest` on a host without Docker or
 bubblewrap is unaffected — that is deliberate, not an oversight.
 
-**Do not add an assertion that a nested user namespace cannot lift a mask.**
-`build_bwrap_cmd` passes `--disable-userns` where bwrap supports it, and inside
-the test runner bwrap does not: the flag needs `/proc/sys/user/max_user_namespaces`,
-which is read-only in a container, so `_bwrap_supports_disable_userns()` probes
-false and the flag is omitted. A nested `unshare -Urm` *can* unmount a mask
-here. That is the container's limitation, not the product's behaviour, and a
-test asserting it would be asserting the wrong system. What these tests assert
-is the mask's own properties — present, empty, unwritable — which hold either
-way.
+**An assertion that a nested user namespace cannot lift a mask must probe for
+`--disable-userns` rather than assume it.** `build_bwrap_cmd` passes the flag
+where bwrap supports it. In container mode bwrap does not: the flag needs
+`/proc/sys/user/max_user_namespaces`, which is read-only in a container, so
+`_bwrap_supports_disable_userns()` probes false, the flag is omitted, and a
+nested `unshare -Urm` *can* unmount a mask there. That is the container's
+limitation rather than the product's behaviour, and an unconditional assertion
+would be asserting the wrong system. Native mode (ISSUE-314) runs on a real
+host where the flag is supported and the assertion holds — so the guard is the
+same probe the product uses, not the driver's mode. What these tests assert
+today is the mask's own properties — present, empty, unwritable — which hold
+either way.
 """
 
 import functools
