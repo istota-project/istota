@@ -67,7 +67,7 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import db
+from . import confirmations, db
 from .brain import make_brain
 from .build_info import build_description
 from .consumers import (
@@ -96,6 +96,16 @@ from .executor import (
 from .async_runtime import reset_async_runtime, run_coro
 from .nextcloud_api import hydrate_user_configs
 from .modules import MODULE_NAMES
+from .notification_resolvers import confirmation as confirmation_source
+from .notification_resolvers import cron_job as cron_job_source
+from .notification_resolvers import task_alert as task_alert_source
+from .notification_store import (
+    RaiseResult,
+    deliver_pending,
+    mark_delivered,
+    sweep_expired_alerts,
+    sweep_retention,
+)
 from .notifications import effective_log_destinations, send_notification
 from .process_group import kill_process_group
 from .transport import (
@@ -1721,6 +1731,11 @@ def _run_garmin_sync_inprocess(
         res = gs.sync_garmin(
             ctx, Path(config.db_path),
             days_back=days_back, user_tz=user_tz,
+            # Daemon-side, so an auth failure can raise (and deliver) the
+            # reconnect notification. This is the caller that most needs it: the
+            # module job removes itself once the tokens are gone, so this run is
+            # the last one that will ever notice.
+            config=config,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("garmin sync (in-process) raised for user=%s", task.user_id)
@@ -2156,6 +2171,57 @@ def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
         return False
 
 
+def _note_job_auto_disabled(
+    conn, job_id: int, fail_count: int,
+) -> RaiseResult | None:
+    """The inbox row for a scheduled job the scheduler has just switched off.
+
+    Three sites disable a job — the policy-refusal branch, the ordinary failure
+    branch, and `_record_publish_failure` — and all three previously wrote a
+    `task_logs` warning and told nobody. Each now buffers the result of this and
+    hands it to `deliver_pending` after its `with` block closes; the write rides
+    the caller's already-open transaction, which is the whole point of the split.
+
+    Re-reads the job rather than taking the caller's copy: `last_error` and
+    `consecutive_failures` were both written by the increment a few statements
+    earlier, so a `ScheduledJob` fetched before it carries the previous run's
+    error. `job.user_id` is the owner of the row, not `task.user_id` — they are
+    the same today and only one of them is the authority.
+
+    **Guarded, and that is not belt-and-braces.** Everything here except
+    `write_notification` itself runs in the caller's frame, inside a transaction
+    that has just recorded the task as failed and charged the job a failure — so
+    an exception escaping would skip `db.get_db`'s commit and roll all of that
+    back, leaving the task stuck `running` and the job enabled. An inbox row is
+    not worth that.
+    """
+    try:
+        job = db.get_scheduled_job(conn, job_id)
+        if job is None:
+            return None
+        if not cron_job_source.should_notify(job.name):
+            return None
+        return cron_job_source.write(
+            conn, job.user_id,
+            job_id=job_id,
+            job_name=job.name,
+            fail_count=fail_count,
+            cron_expression=job.cron_expression,
+            # Provenance only. Nothing reads `notifications.room_token` on the
+            # send path — `deliver_pending` routes by purpose through the user's
+            # routing table — so a job with `output_target` set still pushes to
+            # their alert destination, not into that room.
+            room_token=job.conversation_token,
+            last_error=job.last_error,
+        )
+    except Exception:
+        logger.warning(
+            "could not raise the auto-disable notification for job %s",
+            job_id, exc_info=True,
+        )
+        return None
+
+
 def process_one_task(
     config: Config, dry_run: bool = False, user_id: str | None = None,
     queue: str | None = None,
@@ -2451,6 +2517,14 @@ def process_one_task(
     # whose delivery opens a second connection to the database this function is
     # holding a write transaction on.
     failure_alert = None
+    # The short label the same notice carries into the inbox row and into an
+    # ntfy header. Set beside every `failure_alert` assignment.
+    failure_alert_title = None
+    # Inbox rows raised inside the transaction below and delivered after it, for
+    # the same reason `failure_alert` is buffered: `deliver_pending` sends
+    # through `send_notification`, which routes by purpose and can land on the
+    # web surface, which opens a second connection to this database.
+    notification_results: list[RaiseResult | None] = []
 
     # Guard: detect API errors masquerading as successful results
     # (Claude Code may exit 0 with API error text as output).
@@ -2555,6 +2629,27 @@ def process_one_task(
                     _talk_is_mirror and (task.source_type or "") in ROOM_SURFACES
                 ):
                     post_talk_message = result
+
+                # The durable record of the question, written on this connection
+                # inside the transaction that just parked the task — always,
+                # whatever else carries it, because the row is what makes the
+                # question recoverable when the push is missed.
+                #
+                # It is *delivered* only when nothing else is carrying the
+                # question. `post_talk_message` above is that push for a Talk
+                # task, and raising there too would put the same question in the
+                # room twice. A web-origin confirmation has only its own SSE
+                # stream, which reaches a client that happens to be watching and
+                # nobody else, so there this is the first push the user gets on
+                # any surface they are not currently looking at.
+                held_notification = confirmation_source.write(
+                    conn, task.user_id, task_id=task_id,
+                    title=confirmations.describe_prompt(result),
+                    body=confirmation_source.body_for(result),
+                    room_token=transcript_token,
+                )
+                if post_talk_message is None:
+                    notification_results.append(held_notification)
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
@@ -2736,9 +2831,23 @@ def process_one_task(
                     if job and job.publish_shared_kv:
                         publish_ok = _publish_result_to_shared_kv(
                             conn, config, task, job, result,
+                            notifications=notification_results,
                         )
                     if publish_ok:
                         db.reset_scheduled_job_failures(conn, task.scheduled_job_id)
+                        # The counter is back to zero, which is the resolver's
+                        # close predicate, so the row would go `stale` on the
+                        # next panel read anyway. Closing it here makes it
+                        # `resolved` by the thing that actually ended the
+                        # condition, and does it without waiting for a read.
+                        # `job.user_id`, matching `_note_job_auto_disabled`: the
+                        # row was written under the job's owner, so closing it
+                        # under anyone else matches nothing, silently.
+                        if job is not None:
+                            cron_job_source.resolve_for_job(
+                                conn, job.user_id, task.scheduled_job_id,
+                                by="system",
+                            )
                     # Auto-remove one-time jobs after successful execution
                     if job and job.once:
                         db.delete_scheduled_job(conn, task.scheduled_job_id)
@@ -2795,6 +2904,9 @@ def process_one_task(
                             "Scheduled job %d auto-disabled after %d failures",
                             task.scheduled_job_id, fail_count,
                         )
+                        notification_results.append(_note_job_auto_disabled(
+                            conn, task.scheduled_job_id, fail_count,
+                        ))
             elif is_shutdown_collateral:
                 # Not a task failure — the daemon is going away and took the
                 # subprocess with it. Requeue without charging an attempt or
@@ -2885,6 +2997,7 @@ def process_one_task(
                         f"{_format_error_for_user(result)}\n\n"
                         "Nothing was sent in reply. Resend the mail to try again."
                     )
+                    failure_alert_title = f"Your emailed request failed — task #{task.id}"
                 # NOTE: We intentionally do NOT email errors to users.
                 # Failed tasks routed to email/ntfy only log the error.
                 # Receiving error emails is confusing; users can check Talk or retry.
@@ -2907,6 +3020,15 @@ def process_one_task(
                             "Scheduled job %d auto-disabled after %d failures",
                             task.scheduled_job_id, fail_count,
                         )
+                        notification_results.append(_note_job_auto_disabled(
+                            conn, task.scheduled_job_id, fail_count,
+                        ))
+
+    # The transaction above has closed, so the inbox rows raised inside it can
+    # be sent. First thing after the `with`, deliberately: everything below it
+    # opens further connections of its own, and a buffer that outlives them is a
+    # buffer somebody eventually forgets to flush.
+    deliver_pending(config, notification_results)
 
     # Emit terminal task events + notify subscribers (brain path only). On a
     # retry-eligible failure the task isn't done — emit nothing terminal; the
@@ -3205,6 +3327,7 @@ def process_one_task(
                     "The answer is below so it is not lost:\n\n"
                     f"{email_transcript_body(email_result)}"
                 )
+                failure_alert_title = f"Could not send the email reply — task #{task.id}"
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"
@@ -3247,13 +3370,37 @@ def process_one_task(
         # construction: this is the recovery path for a task that already has
         # nowhere to deliver, so a failure here leaves things exactly as they
         # were before ISSUE-255 rather than making them worse.
+        #
+        # The row goes first and stands whatever the send does. `alert` is the
+        # last channel a task with no room leg has, and `send_notification`
+        # returns False when the user configured no destination for it — which is
+        # how this notice used to disappear entirely, on the one path whose whole
+        # purpose is that the answer is not lost. The send itself is unchanged:
+        # it carries the full unflattened body, because the point of the second
+        # branch is to hand the user their answer, and the row carries the
+        # flattened, capped record of it (the full text stays in `tasks.result`).
+        notification_id = _write_undelivered_row(
+            config, task, failure_alert_title, failure_alert,
+        )
         try:
-            send_notification(config, task.user_id, failure_alert, purpose="alert")
+            delivered = send_notification(
+                config, task.user_id, failure_alert, purpose="alert",
+            )
         except Exception as e:
+            delivered = False
             logger.warning(
                 "Failed to alert user about task %d (user=%s): %s",
                 task_id, task.user_id, e,
             )
+        if delivered and notification_id is not None:
+            try:
+                with db.get_db(config.db_path) as conn:
+                    mark_delivered(conn, [notification_id])
+            except Exception:
+                logger.debug(
+                    "could not stamp the undelivered-result notification",
+                    exc_info=True,
+                )
 
     return task_id, success
 
@@ -3737,7 +3884,10 @@ def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     return SHARED_BLOCK_NAMESPACE, target
 
 
-def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: str) -> bool:
+def _publish_result_to_shared_kv(
+    conn, config: Config, task, job, result_text: str,
+    *, notifications: list[RaiseResult | None] | None = None,
+) -> bool:
     """Publish a completed job's result text into ``shared_kv`` (gated).
 
     A post-success gated write in the ``_process_deferred_*`` genre — NOT an
@@ -3760,7 +3910,10 @@ def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: s
             "publish_shared_kv job=%s has no key in target %r; skipping",
             job.name, job.publish_shared_kv,
         )
-        _record_publish_failure(conn, config, task, job, "publish_shared_kv missing key")
+        _record_publish_failure(
+            conn, config, task, job, "publish_shared_kv missing key",
+            notifications=notifications,
+        )
         return False
 
     if not config.is_shared_kv_writer(task.user_id):
@@ -3771,6 +3924,7 @@ def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: s
         _record_publish_failure(
             conn, config, task, job,
             f"publish_shared_kv unauthorized for user {task.user_id}",
+            notifications=notifications,
         )
         try:
             user = _operator_alert_user(config)
@@ -3807,15 +3961,29 @@ def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: s
         logger.error("publish_shared_kv write failed job=%s key=%s/%s: %s",
                      job.name, ns, key, e)
         try:
-            _record_publish_failure(conn, config, task, job, f"shared_kv write failed: {e}")
+            _record_publish_failure(
+                conn, config, task, job, f"shared_kv write failed: {e}",
+                notifications=notifications,
+            )
         except Exception:  # noqa: BLE001
             pass
         return False
 
 
-def _record_publish_failure(conn, config: Config, task, job, error: str) -> None:
+def _record_publish_failure(
+    conn, config: Config, task, job, error: str,
+    *, notifications: list[RaiseResult | None] | None = None,
+) -> None:
     """Increment a job's failure counter for an unauthorized/failed publish, and
-    auto-disable after the configured threshold (mirrors the normal failure path)."""
+    auto-disable after the configured threshold (mirrors the normal failure path).
+
+    ``notifications`` is `process_one_task`'s buffer. Threaded down rather than
+    delivered here because this runs inside that function's write transaction —
+    the third of the three auto-disable sites, and the one whose distance from
+    the `with` block makes it easiest to forget. A caller that passes nothing
+    still disables the job; it just tells nobody, which is the behaviour this
+    parameter exists to end.
+    """
     fail_count = db.increment_scheduled_job_failures(conn, job.id, error)
     max_failures = config.scheduler.scheduled_job_max_consecutive_failures
     if max_failures > 0 and fail_count >= max_failures:
@@ -3824,6 +3992,10 @@ def _record_publish_failure(conn, config: Config, task, job, error: str) -> None
             "Scheduled job %d auto-disabled after %d consecutive publish failures",
             job.id, fail_count,
         )
+        if notifications is not None:
+            notifications.append(
+                _note_job_auto_disabled(conn, job.id, fail_count),
+            )
 
 
 def check_briefing_triggers(db_path, config: Config) -> list[int]:
@@ -5188,6 +5360,42 @@ def _confirmation_notice_token(task_info: dict) -> str | None:
     return token
 
 
+def _write_undelivered_row(
+    config: Config, task: db.Task, title: str | None, message: str,
+) -> int | None:
+    """Record a task result that reached nobody, on a connection of its own.
+
+    Safe to open one here: this runs at the tail of `process_one_task`, after
+    every write transaction the function held has closed — the same invariant
+    the `send_notification` call beside it already depends on.
+
+    Fire-and-forget by construction. Nothing will ever change to close this row,
+    so `task_alert` closes it on being seen, and `sweep_expired_alerts` catches
+    the ones nobody looks at.
+    """
+    try:
+        with db.get_db(config.db_path) as conn:
+            result = task_alert_source.write(
+                conn, task.user_id,
+                dedup_key=task_alert_source.undelivered_key(task.id),
+                title=title or f"A task result could not be delivered — task #{task.id}",
+                body=message,
+                severity="warning",
+                # There is no in-app action: the answer is in the row and in
+                # `tasks.result`, and resending the mail is the user's move.
+                actionable=False,
+                params={"task_id": task.id, "source_type": task.source_type},
+                room_token=task.conversation_token,
+            )
+        return result.notification_id if result is not None else None
+    except Exception:
+        logger.warning(
+            "could not record the undelivered-result notification for task %s",
+            task.id, exc_info=True,
+        )
+        return None
+
+
 def _expired_confirmation_notice(conn, task_info: dict) -> str:
     """Say *which* request expired, not just that one did.
 
@@ -5235,7 +5443,13 @@ def run_cleanup_checks(config: Config) -> None:
     # delivery opens a second connection to this database — inline it would
     # block on the write lock `expire_stale_confirmations` takes, for the full
     # busy timeout, per expired task, on the dispatch loop.
-    expiry_notices: list[tuple[str, str, str | None]] = []
+    # `(user_id, message, conversation_token, notification_id)`. The id is the
+    # inbox row raised in the same transaction that expired the task; the send
+    # below stamps `last_delivered_at` on it only where a destination accepted.
+    # The send is kept here rather than moved onto `deliver_pending` because it
+    # carries a `conversation_token` override the store deliberately does not
+    # model — `room_token` on a row is provenance, not routing.
+    expiry_notices: list[tuple[str, str, str | None, int | None]] = []
     # The ancient-pending notice, buffered for the same reason. It used to be
     # sent inline because a bare `talk` route touched no database; the ISSUE-242
     # transcript mirror made that untrue.
@@ -5249,10 +5463,39 @@ def run_cleanup_checks(config: Config) -> None:
                 f"Expired stale confirmation: task {task_info['id']} "
                 f"(user: {task_info['user_id']})"
             )
+            notice = _expired_confirmation_notice(conn, task_info)
+            # The question is gone, so the inbox item is answered — by the
+            # clock, which is what `resolved_by='system'` records. On this
+            # connection, inside the transaction the expiry itself ran in.
+            # Closing it is what stops the panel offering a Confirm button for a
+            # task that has already been cancelled.
+            confirmation_source.resolve_for_task(
+                conn, task_info["user_id"], task_info["id"], by="system",
+            )
+            # And a fire-and-forget row takes its place, saying what was
+            # dropped. A separate row rather than a reuse of the confirmation
+            # one: they are different items with different lifecycles — the
+            # confirmation closed, this one closes when the user reads it — and
+            # reopening a resolved row under the old key would put a Confirm
+            # button back on a cancelled task the moment a resolver lagged.
+            expired_row = task_alert_source.write(
+                conn, task_info["user_id"],
+                dedup_key=task_alert_source.expired_key(task_info["id"]),
+                title=f"A request timed out — task #{task_info['id']}",
+                body=notice,
+                severity="warning",
+                # Nothing to press. Resubmitting the request happens wherever it
+                # came from, which the notice text names.
+                actionable=False,
+                params={"task_id": task_info["id"],
+                        "source_type": task_info.get("source_type")},
+                room_token=_confirmation_notice_token(task_info),
+            )
             expiry_notices.append((
                 task_info["user_id"],
-                _expired_confirmation_notice(conn, task_info),
+                notice,
                 _confirmation_notice_token(task_info),
+                expired_row.notification_id if expired_row is not None else None,
             ))
 
         # 1b. Recover stuck locked/running tasks (mirrors claim_task recovery
@@ -5346,16 +5589,68 @@ def run_cleanup_checks(config: Config) -> None:
         # silently failing for weeks looks exactly like one that is working.
         logger.warning(f"Usage prune skipped: {e}")
 
+    # 4e. The two notification-inbox sweeps, in a transaction of their own and
+    # for the same reason 4c is: the block above is one long write transaction,
+    # and the retention delete on the day it first bites clears a whole backlog.
+    #
+    # `sweep_expired_alerts` is the backstop for the fire-and-forget class.
+    # `task_alert` rows have no object to watch, so the only thing that closes
+    # one is being seen — and a row below the render limit, or one belonging to a
+    # user who never opens the bell, is never seen. Without this pass, "open rows
+    # are never swept" plus "only rendered rows auto-resolve" means the badge
+    # climbs monotonically forever. Open rows of the *object-backed* sources are
+    # untouched at any age: their close condition is the object.
+    #
+    # `sweep_retention` is the other end — a closed row is kept for reopen and
+    # for post-hoc debugging, then deleted.
+    #
+    # A transaction each, not one shared between them. `db.get_db` commits once
+    # on exit, so a shared block would hold the write lock from the first row
+    # the age sweep closes right through the retention delete — and the
+    # retention delete is the larger of the two by far on the day it first
+    # bites. Splitting them is the same move 4c makes for the usage prune.
+    try:
+        with db.get_db(config.db_path) as conn:
+            closed_alerts = sweep_expired_alerts(conn)
+        with db.get_db(config.db_path) as conn:
+            deleted_notifications = sweep_retention(conn)
+        if closed_alerts or deleted_notifications:
+            logger.info(
+                "Notification sweeps: closed %d aged alert(s), deleted %d "
+                "retired row(s)",
+                closed_alerts, deleted_notifications,
+            )
+    except Exception as e:
+        # Both sweeps swallow their own failures already; this catches a failure
+        # to open the connection at all. Warning rather than debug for the reason
+        # the usage prune is: these are the only things bounding a table that
+        # gains a row per alert, and one silently failing for weeks looks exactly
+        # like one that is working.
+        logger.warning(f"Notification sweeps skipped: {e}")
+
     # 4d. Tell users about the confirmations that just expired. Outside the
     # transaction on purpose — see `expiry_notices` above.
-    for user_id, message, token in expiry_notices:
+    expiry_delivered: list[int] = []
+    for user_id, message, token, notification_id in expiry_notices:
         try:
-            send_notification(
+            delivered = send_notification(
                 config, user_id, message,
                 purpose="alert", conversation_token=token,
             )
         except Exception as e:
             logger.error(f"Failed to notify user about expired confirmation: {e}")
+            continue
+        if delivered and notification_id is not None:
+            expiry_delivered.append(notification_id)
+    if expiry_delivered:
+        try:
+            with db.get_db(config.db_path) as conn:
+                mark_delivered(conn, expiry_delivered)
+        except Exception:
+            logger.debug(
+                "could not stamp expired-confirmation notification delivery",
+                exc_info=True,
+            )
 
     # 4d. And about the ancient pending tasks that were just auto-failed.
     for user_id, message, token in ancient_notices:

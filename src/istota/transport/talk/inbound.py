@@ -681,8 +681,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # Cancel any pending confirmations in this conversation —
                 # the user has moved on by sending a new message
-                cancelled = db.cancel_pending_confirmations(
-                    conn, conversation_token, actor_id,
+                cancelled = confirmations.cancel_for_conversation(
+                    conn, conversation_token, actor_id, by="talk",
                 )
                 if cancelled:
                     logger.info(
@@ -765,7 +765,7 @@ async def handle_confirmation_reply(
     if res.task is None:
         return False
 
-    ack = confirmations.apply_answer(conn, res.task, answer, config)
+    ack = confirmations.apply_answer(conn, res.task, answer, config, by="talk")
     await _post_ack(config, conversation_token, ack)
     confirmations.record_exchange(
         conn, room_token, answer_text=content, ack=ack, origin_surface="talk",

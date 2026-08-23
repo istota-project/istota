@@ -10,13 +10,12 @@
     KebabMenu,
     Chip,
     ConfirmDialog,
+    CountPill,
   } from '$lib/components/ui';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
   import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
-  import PendingConfirmations from '$lib/components/chat/PendingConfirmations.svelte';
-  import DraftCard from '$lib/components/chat/DraftCard.svelte';
   import {
     isTap,
     nextActivation,
@@ -44,7 +43,6 @@
     scrollTarget,
     sendSettled,
     sendReturned,
-    pendingConfirmations,
     outboundDrafts,
     externalTurnDisplay,
   } = session;
@@ -64,11 +62,14 @@
   // Where each held draft's card goes. A draft belongs to the turn that
   // composed it, so it renders under that turn when the turn is on screen —
   // that is where the drafted text and "this task also created a calendar
-  // event" are legible together. Everything else falls to the list above the
-  // transcript: a task with no room at all (a cron job mailing an external
-  // address), a turn paged out of view, a turn whose task row retention has
-  // deleted, and a stub that has not been filled in yet. The fallback is what
-  // makes the placement safe — no draft can be hidden by not finding a home.
+  // event" are legible together.
+  //
+  // Everything else — a task with no room at all (a cron job mailing an
+  // external address), a turn paged out of view, a turn whose task row
+  // retention has deleted — is in the notification bell. There used to be a
+  // fallback strip above the transcript, and the invariant it carried still
+  // holds: no draft can be hidden by not finding a home here. The inbox is
+  // where it goes instead, which is also reachable from every other route.
   const draftsByTask = $derived.by(() => {
     const byTask = new Map<number, typeof $outboundDrafts>();
     if (inViewMode) return byTask; // aggregate panes are read-only surfaces
@@ -88,26 +89,6 @@
     if (message.role !== 'assistant' || message.taskId == null) return [];
     return draftsByTask.get(message.taskId) ?? [];
   }
-  // Gated on `!inViewMode` for exactly the reason `draftsByTask` is. An
-  // aggregate pane renders through the same `messages` store, so its rows carry
-  // task ids too — but the per-turn cards are withheld there (the panes are
-  // read-only and pass no `draftActions`). Without this guard a draft whose
-  // turn happened to be in the All pane was excluded from the fallback list and
-  // drawn by no row either, which is the one outcome the fallback exists to
-  // make impossible.
-  const onScreenTaskIds = $derived(
-    inViewMode
-      ? new Set<number>()
-      : new Set(
-          $messages
-            .filter((m) => m.role === 'assistant')
-            .map((m) => m.taskId)
-            .filter((id): id is number => id != null),
-        ),
-  );
-  const looseDrafts = $derived(
-    $outboundDrafts.filter((d) => d.task_id == null || !onScreenTaskIds.has(d.task_id)),
-  );
   const draftActions = {
     approve: (id: number) => session.answerDraft(id, 'approve'),
     discard: (id: number) => session.answerDraft(id, 'discard'),
@@ -726,11 +707,7 @@
         >
           <Circle size={12} />
           <span class="view-name">Unread</span>
-          {#if unreadTotal > 0}
-            <span class="unread-chip" title={`${unreadTotal} unread`}>
-              {unreadTotal > 99 ? '99+' : unreadTotal}
-            </span>
-          {/if}
+          <CountPill count={unreadTotal} title={`${unreadTotal} unread`} />
         </button>
         <button
           class="view-btn"
@@ -796,9 +773,7 @@
               <span class="room-line">
                 <span class="room-name" class:unread>{room.name}</span>
                 {#if unread}
-                  <span class="unread-chip" title={`${unreadCount} unread`}>
-                    {unreadCount > 99 ? '99+' : unreadCount}
-                  </span>
+                  <CountPill count={unreadCount} title={`${unreadCount} unread`} />
                 {/if}
               </span>
             </span>
@@ -819,29 +794,6 @@
   {/snippet}
 
   <div class="chat-pane" style:--composer-h="{composerH}px">
-    <!-- Above the transcript, not inside it: these questions belong to no room
-         (a gated email's token is a synthetic thread hash), and one of them
-         being unanswered is what holds its task. Rendered in every view for the
-         same reason — an aggregate pane is still where the user is looking. -->
-    <PendingConfirmations items={$pendingConfirmations} onAnswer={session.answerConfirmation} />
-    <!-- Held drafts whose turn is not on this screen. Rendered in every view,
-         like the confirmations above: an aggregate pane is still where the user
-         is looking, and outbound mail waiting on an approval is not something
-         to hide behind a room selection. -->
-    {#if looseDrafts.length > 0}
-      <section class="loose-drafts" aria-label="Email held for approval">
-        {#each looseDrafts as draft (draft.id)}
-          <DraftCard
-            {draft}
-            placement="banner"
-            onApprove={draftActions.approve}
-            onDiscard={draftActions.discard}
-            onEdit={draftActions.edit}
-            onNeedsFullRow={draftActions.refresh}
-          />
-        {/each}
-      </section>
-    {/if}
     <div class="messages-wrap">
       <div
         class="messages"
@@ -1112,19 +1064,6 @@
   .composer-reserve {
     height: calc(var(--composer-h, 0px) + 1rem);
   }
-  /* Held drafts with no turn on screen, above the transcript beside the pending
-     confirmations. Capped in height and scrolled: a card carries a whole email
-     body, and several of them would otherwise push the transcript off the pane
-     entirely. */
-  .loose-drafts {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    max-height: 40vh;
-    overflow-y: auto;
-  }
-
   /* Wrapper anchors the floating jump-to-latest button to the bottom of the
 	   scroll area; the button offsets itself above the docked composer. */
   .messages-wrap {
@@ -1347,23 +1286,6 @@
   .room-name.unread {
     font-weight: 700;
     color: var(--text-primary);
-  }
-  /* Count chip in its own non-shrink slot so the name's ellipsis can't clip it
-	   (same fixed-slot pattern as .room-origin). */
-  .unread-chip {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 1.15rem;
-    height: 1.15rem;
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    color: var(--surface-base);
-    font-size: 0.7rem;
-    font-weight: 600;
-    line-height: 1;
   }
   /* Leading origin glyph. Fixed slot before the title so a long room name
 	   still gets the full row width and the icon never enters the title's

@@ -1233,8 +1233,8 @@
   /* A held draft is another block in the same slot, so it takes the chip
 	   slot's neighbour gap above — which also separates two cards when a turn
 	   holds more than one. Written here rather than in `DraftCard.svelte`
-	   because that component is also rendered into the loose-drafts list, which
-	   is a flex column already spacing its own children; a margin on the
+	   because that component also takes a `banner` placement, whose container is
+	   a flex column already spacing its own children; a margin on the
 	   component would stack with that gap. `:global()` because Svelte prunes a
 	   selector whose subject it cannot see in this file, and the `.content`
 	   scope is what keeps the rule from leaking past this row. */
@@ -1242,9 +1242,9 @@
     margin-top: var(--space-3);
     /* The readable-width cap belongs to this placement rather than to the
        component: here the card is one block in a turn's content column and has
-       to stop where the prose body above it stops. In the page's own
-       loose-drafts list it is pane chrome beside `PendingConfirmations`, which
-       spans the pane — so the cap travels with the slot, not the card. */
+       to stop where the prose body above it stops. In `banner` placement it is
+       pane chrome spanning its container instead — so the cap travels with the
+       slot, not the card. */
     max-width: var(--chat-body-max);
   }
 

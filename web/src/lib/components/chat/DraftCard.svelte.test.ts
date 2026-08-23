@@ -273,9 +273,10 @@ describe('the readable-width cap belongs to the slot, not the card', () => {
    *
    * The invariant: `--chat-body-max` is what makes a draft card stop where the
    * prose body above it stops, which is right inline under a turn and wrong in
-   * the page's own list, where the card is chrome beside a `PendingConfirmations`
-   * card that spans the pane. Carried on the component it applied in both, and
-   * the banner draft stopped 134px short of the confirmation directly above it.
+   * `banner` placement, where the card is chrome spanning its container.
+   * Carried on the component it applied in both, and in the chat pane's own
+   * strip the banner draft stopped 134px short of the confirmation card
+   * directly above it. That strip is gone; the placement is still a prop.
    */
   const here = dirname(fileURLToPath(import.meta.url));
   const styleOf = (file: string) => {
