@@ -1,0 +1,850 @@
+#!/usr/bin/env python3
+"""The devbox exec server: the boundary, inside the container.
+
+Listens on a Unix socket in a directory shared with the istota side, one
+connection per action. A client sends one JSON request line, the server checks
+it, runs it, streams the result back in frames, and reports what ``waitpid``
+said. That replaces ``docker exec`` through the Docker-API proxy, which runs the
+command and loses its exit status: the CLI's flow is create, start, *inspect*,
+the proxy evicts the exec id before relaying the start so a replay is denied,
+and by inspect time the id is gone. Every shimmed command would report failure
+regardless of what it did.
+
+**This process is the boundary.** Not the socket, which is reachable by anything
+in the namespace it is bound into, including twenty lines of Python the model
+writes itself; not the client, which is a file the model's own shell executes;
+and not a list of container paths kept on the daemon side, which is a guess
+about what the container's mount table looks like. Every containment decision is
+made here, at the moment of use, by the process whose view of the filesystem is
+the one the command will actually get:
+
+* a command's ``cwd`` is refused unless it resolves under the repos root
+* ``read_file`` / ``write_file`` are refused unless the ``realpath`` lands under
+  the repos root, the home directory or the exec staging directory
+* ``/run/istota-cred`` and ``/run/istota-exec`` are refused by name as well,
+  even though both fail the root test anyway, because a credential directory
+  and this transport's own socket directory each deserve their own message
+* symlinks are resolved *before* the test, never after
+
+What it deliberately does not check is which container the peer is in. A Unix
+socket carries no such label, and it needs none: the socket is per user by
+construction and the directory holding it is mounted only into that user's
+container.
+
+Runs as ``dev``, whose uid the image build matches to the daemon's, so a file
+either side writes into the shared mount is writable by the other. Supervised by
+``istota-exec-run``, which restarts it after a crash — nothing here tries to
+survive its own bugs.
+
+stdlib only, and it imports nothing from ``istota``: this runs in a container
+with no such package. The one module it needs travels as a vendored, byte-
+identical copy of ``src/istota/devbox_exec_protocol.py``, kept in step by
+``scripts/sync-devbox-lib.sh``.
+
+Driven end to end by ``tests/test_devbox_exec_server.py``, on the host, with no
+Docker at all — every root is an argument rather than a constant, which is what
+makes that possible and is also the honest shape for a boundary whose roots are
+per user.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import itertools
+import logging
+import os
+import signal
+import stat as stat_module
+import sys
+import time
+
+# In the image the vendored protocol module is installed under
+# /usr/local/lib/istota_devbox_exec/. In a checkout it sits at
+# docker/devbox/lib/, two levels up from this script — the same self-locating
+# trick forge_cli uses for its policy file, and deliberately not an environment
+# variable: a path this process reads out of its environment is one more thing
+# to reason about in a process whose whole job is refusing paths.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _candidate in (
+    "/usr/local/lib/istota_devbox_exec",
+    os.path.join(os.path.dirname(_HERE), "lib"),
+):
+    if os.path.isdir(_candidate) and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
+
+from istota_devbox_exec_protocol import (  # noqa: E402
+    ACTION_EXEC,
+    ACTION_PING,
+    ACTION_READ_FILE,
+    ACTION_STAT,
+    ACTION_WRITE_FILE,
+    CHUNK_BYTES,
+    ERR_BAD_REQUEST,
+    ERR_INTERNAL,
+    ERR_NO_SUCH_CWD,
+    ERR_PATH_REFUSED,
+    ERR_SPAWN_FAILED,
+    ERR_TOO_LARGE,
+    FRAME_HEADER_BYTES,
+    MAX_READ_FILE_BYTES,
+    MAX_REQUEST_BYTES,
+    PROTOCOL_VERSION,
+    STREAM_CONTROL,
+    STREAM_STDERR,
+    STREAM_STDIN,
+    STREAM_STDOUT,
+    ProtocolError,
+    decode_control,
+    decode_request,
+    encode_ack_error,
+    encode_ack_ok,
+    encode_control,
+    is_stdin_eof,
+    pack_frame,
+    sigpipe_note,
+    unpack_header,
+)
+
+logger = logging.getLogger("istota-exec-serve")
+
+# ---- Defaults the deployment relies on -------------------------------------
+
+DEFAULT_HOME = "/home/dev"
+DEFAULT_STAGING = "/home/dev/.istota-exec"
+
+# A backstop for a connection whose peer went away without a FIN, not a command
+# timeout. It is longer than most values of scheduler.task_timeout_minutes on
+# purpose, so in practice it only ever fires on an orphan whose task is already
+# gone. Do not "fix" this to something aggressive enough to kill a long link
+# step: the caller's own `timeout` is the per-command budget.
+DEFAULT_IDLE_TIMEOUT_SECONDS = 3600.0
+
+# What a client's disconnect buys the process group before it is killed.
+KILL_GRACE_SECONDS = 5.0
+
+# How long output is drained after the command has already exited.
+DRAIN_GRACE_SECONDS = 5.0
+
+# Refused on the file verbs whatever the roots say, each with its own message.
+REFUSED_BY_NAME = ("/run/istota-cred", "/run/istota-exec")
+
+_REFUSAL_REASONS = {
+    "/run/istota-cred": "the credential socket directory",
+    "/run/istota-exec": "this transport's own socket directory",
+}
+
+# Both sides run as the same uid, so the socket needs no group ceremony — and
+# 0666 would open the transport to anything running in the container.
+SOCKET_MODE = 0o600
+
+# Named rather than probed: this always runs in the image, where bash is
+# installed, and a missing one is a loud spawn_failed rather than a silent
+# fallback to a shell with no pipefail.
+BASH = "bash"
+
+
+# ---- Path rules ------------------------------------------------------------
+
+
+def is_under(path: str, root: str) -> bool:
+    """True when ``path`` is ``root`` or sits beneath it.
+
+    A component-wise test, not a string prefix: ``/srv/repos/alice-evil`` is not
+    under ``/srv/repos/alice``, and a naive ``startswith`` says it is.
+    """
+    if root == os.sep:
+        return path.startswith(os.sep)
+    root = root.rstrip(os.sep)
+    return path == root or path.startswith(root + os.sep)
+
+
+class Roots:
+    """The paths this server will let a request touch, resolved once at start."""
+
+    def __init__(self, repos_root: str, home: str, staging: str) -> None:
+        self.repos_root = os.path.realpath(repos_root)
+        self.home = os.path.realpath(home)
+        self.staging = os.path.realpath(staging)
+        # The repos mount is the work root; /home/dev and the staging directory
+        # are what the devbox skill's ad-hoc verbs write into.
+        self.file_roots = (self.repos_root, self.home, self.staging)
+
+    def check_cwd(self, raw: str) -> str:
+        """Resolve and authorize a working directory.
+
+        Scoped to the repos root alone, which turns the dangerous case into the
+        loud one: ``/tmp``, ``/home/…`` and ``/usr/src`` all exist in both
+        namespaces and mean different things, so a passed-through ``cwd`` would
+        silently run the command somewhere the model cannot see.
+        """
+        resolved = self._resolve(raw)
+        if not is_under(resolved, self.repos_root):
+            raise ProtocolError(
+                ERR_PATH_REFUSED,
+                f"cwd {raw} resolves to {resolved}, which is not under "
+                f"{self.repos_root}",
+            )
+        if not os.path.isdir(resolved):
+            raise ProtocolError(ERR_NO_SUCH_CWD, f"no such directory: {resolved}")
+        return resolved
+
+    def check_file(self, raw: str) -> str:
+        """Resolve and authorize a path for ``read_file`` / ``write_file``."""
+        resolved = self._resolve(raw)
+        if not any(is_under(resolved, root) for root in self.file_roots):
+            raise ProtocolError(
+                ERR_PATH_REFUSED,
+                f"{raw} resolves to {resolved}, which is not under any of: "
+                + ", ".join(self.file_roots),
+            )
+        return resolved
+
+    def _resolve(self, raw: str) -> str:
+        if not os.path.isabs(raw):
+            raise ProtocolError(
+                ERR_PATH_REFUSED,
+                f"path must be absolute, got {raw!r} — a relative path means "
+                "something different in each namespace",
+            )
+        resolved = os.path.realpath(raw)
+        _refuse_by_name(raw, resolved)
+        return resolved
+
+
+def _refuse_by_name(raw: str, resolved: str) -> None:
+    """Refuse the two directories that get their own message.
+
+    The resolved path is checked as well as the given one, so a symlink under a
+    root pointing at the credential directory is caught by the same rule.
+    """
+    for refused in REFUSED_BY_NAME:
+        for candidate in (raw, resolved):
+            if is_under(candidate, refused):
+                raise ProtocolError(
+                    ERR_PATH_REFUSED,
+                    f"{refused} is refused by name: it is "
+                    f"{_REFUSAL_REASONS[refused]}, and this transport never "
+                    "reads or writes it on a caller's behalf",
+                )
+
+
+# ---- Small helpers ---------------------------------------------------------
+
+
+class _Activity:
+    """Last time anything moved in either direction on one connection."""
+
+    def __init__(self) -> None:
+        self.last = time.monotonic()
+
+    def touch(self) -> None:
+        self.last = time.monotonic()
+
+
+def kill_group(pgid: int, sig: int) -> None:
+    """Signal a whole process group, tolerating one that has already gone."""
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def signal_name(number: int) -> str:
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return f"SIG{number}"
+
+
+def terminal_frame(returncode: int | None, started: float, reason: str | None) -> dict:
+    """Build the last control frame from what ``waitpid`` reported.
+
+    ``signal`` is set only for a child the kernel actually signalled — asyncio
+    reports that as a negative returncode, the same ``WIFSIGNALED`` distinction
+    the C API makes. It is never inferred from ``128+N``.
+    """
+    body: dict = {}
+    if returncode is not None and returncode < 0:
+        number = -returncode
+        body["exit_code"] = 128 + number
+        body["signal"] = signal_name(number)
+    else:
+        body["exit_code"] = returncode
+        body["signal"] = None
+    note = sigpipe_note(body["exit_code"], body["signal"])
+    if note:
+        body["note"] = note
+    if reason:
+        body["reason"] = reason
+    body["duration_ms"] = int((time.monotonic() - started) * 1000)
+    return body
+
+
+class Connection:
+    """One connection's mutable state: whether it has been acknowledged yet."""
+
+    _ids = itertools.count(1)
+
+    def __init__(self, writer: asyncio.StreamWriter) -> None:
+        self.id = next(Connection._ids)
+        self.writer = writer
+        self.acked = False
+        self.started = time.monotonic()
+
+    async def send(self, data: bytes) -> None:
+        self.writer.write(data)
+        await self.writer.drain()
+
+    async def ack(self) -> None:
+        await self.send(encode_ack_ok(PROTOCOL_VERSION))
+        self.acked = True
+
+    async def fail(self, code: str, message: str) -> None:
+        """Report a refusal, before or after the acknowledgement.
+
+        Before, it is an error acknowledgement and nothing is streamed. After,
+        it is a terminal control frame carrying the same code — a client that
+        has been told the command is running is owed a last frame either way,
+        because the alternative reads to it as a lost connection.
+        """
+        if self.acked:
+            body = terminal_frame(1, self.started, None)
+            body["error"] = code
+            body["message"] = message
+            await self.send(encode_control(body))
+        else:
+            await self.send(encode_ack_error(code, message))
+
+
+# ---- The server ------------------------------------------------------------
+
+
+class ExecServer:
+    def __init__(
+        self,
+        roots: Roots,
+        *,
+        idle_timeout: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
+        kill_grace: float = KILL_GRACE_SECONDS,
+        drain_grace: float = DRAIN_GRACE_SECONDS,
+    ) -> None:
+        self.roots = roots
+        self.idle_timeout = idle_timeout
+        self.kill_grace = kill_grace
+        self.drain_grace = drain_grace
+        self.started_at = time.time()
+        self.served = 0
+        self._temp_ids = itertools.count(1)
+
+    # -- dispatch ------------------------------------------------------------
+
+    async def handle(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        """One connection, in its own task, whose failures reach nothing else."""
+        conn = Connection(writer)
+        self.served += 1
+        try:
+            line = await self._read_request_line(reader)
+            if line is None:
+                return
+            request = decode_request(line)
+            await self._dispatch(request, reader, conn)
+        except ProtocolError as e:
+            logger.info("connection %s refused: %s", conn.id, e)
+            with contextlib.suppress(Exception):
+                await conn.fail(e.code, e.message)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            logger.info("connection %s: peer went away", conn.id)
+        except Exception:
+            logger.exception("connection %s failed", conn.id)
+            with contextlib.suppress(Exception):
+                await conn.fail(ERR_INTERNAL, "internal server error")
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    async def _dispatch(
+        self, request: dict, reader: asyncio.StreamReader, conn: Connection
+    ) -> None:
+        action = request["action"]
+        if action == ACTION_EXEC:
+            await self._do_exec(request, reader, conn)
+        elif action == ACTION_WRITE_FILE:
+            await self._do_write_file(request, reader, conn)
+        elif action == ACTION_READ_FILE:
+            await self._do_read_file(request, conn)
+        elif action == ACTION_PING:
+            await conn.ack()
+            await conn.send(encode_control({"pong": True, "protocol": PROTOCOL_VERSION}))
+            await conn.send(encode_control(terminal_frame(0, conn.started, None)))
+        elif action == ACTION_STAT:
+            await conn.ack()
+            await conn.send(encode_control(self._stat_reply()))
+            await conn.send(encode_control(terminal_frame(0, conn.started, None)))
+        else:  # pragma: no cover - validate_request already refused it
+            raise ProtocolError(ERR_BAD_REQUEST, f"unhandled action '{action}'")
+
+    def _stat_reply(self) -> dict:
+        return {
+            "protocol": PROTOCOL_VERSION,
+            "hostname": os.uname().nodename,
+            "uid": os.getuid(),
+            "gid": os.getgid(),
+            "pid": os.getpid(),
+            "repos_root": self.roots.repos_root,
+            "home": self.roots.home,
+            "staging": self.roots.staging,
+            "idle_timeout_seconds": self.idle_timeout,
+            "started_at": int(self.started_at),
+            "connections": self.served,
+        }
+
+    async def _read_request_line(self, reader: asyncio.StreamReader) -> bytes | None:
+        try:
+            return await reader.readuntil(b"\n")
+        except asyncio.LimitOverrunError as e:
+            raise ProtocolError(
+                ERR_TOO_LARGE,
+                f"request line exceeds the {MAX_REQUEST_BYTES // (1024 * 1024)} MiB cap",
+            ) from e
+        except asyncio.IncompleteReadError:
+            # Connected and closed without asking for anything. Nothing to say.
+            return None
+
+    # -- exec ----------------------------------------------------------------
+
+    async def _do_exec(
+        self, request: dict, reader: asyncio.StreamReader, conn: Connection
+    ) -> None:
+        cwd = self.roots.check_cwd(request["cwd"])
+        shell = request.get("shell")
+        if shell is not None:
+            argv = [BASH, "-o", "pipefail", "-c", shell]
+        else:
+            argv = list(request["argv"])
+        want_stdin = request["stdin"]
+        timeout = float(request["timeout"])
+
+        started = time.monotonic()
+        try:
+            # start_new_session makes the child a session and process-group
+            # leader, so its pid is the pgid and one killpg reaches everything
+            # it forked. No env argument: the child's environment is this
+            # process's own, and there is no request field that can alter it.
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=cwd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as e:
+            raise ProtocolError(
+                ERR_SPAWN_FAILED, f"{argv[0]}: {e.strerror or e}"
+            ) from e
+
+        # Only now, after the path checks and a successful spawn. An `ok` means
+        # the command is running; that ordering is what the guarantee rests on.
+        await conn.ack()
+        logger.info(
+            "connection %s: exec %s (%d args) in %s, pid %s",
+            conn.id,
+            argv[0],
+            len(argv),
+            cwd,
+            proc.pid,
+        )
+
+        pgid = proc.pid
+        activity = _Activity()
+        disconnected = asyncio.Event()
+
+        if not want_stdin and proc.stdin is not None:
+            # An explicit closed pipe rather than the server's own stdin: the
+            # child never gets a descriptor the request did not ask for.
+            proc.stdin.close()
+
+        out_task = asyncio.ensure_future(
+            self._pump_output(proc.stdout, STREAM_STDOUT, conn, activity, disconnected)
+        )
+        err_task = asyncio.ensure_future(
+            self._pump_output(proc.stderr, STREAM_STDERR, conn, activity, disconnected)
+        )
+        in_task = asyncio.ensure_future(
+            self._pump_input(reader, proc, want_stdin, activity, disconnected)
+        )
+        wait_task = asyncio.ensure_future(proc.wait())
+        disc_task = asyncio.ensure_future(disconnected.wait())
+
+        reason = await self._await_command(
+            wait_task, disc_task, started, timeout, activity
+        )
+
+        if reason == "disconnect":
+            logger.info(
+                "connection %s: client disconnect, reaping process group %s",
+                conn.id,
+                pgid,
+            )
+            kill_group(pgid, signal.SIGTERM)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(wait_task), self.kill_grace)
+            kill_group(pgid, signal.SIGKILL)
+            # No terminal frame: there is nobody to send it to.
+            await self._cancel(out_task, err_task, in_task, wait_task, disc_task)
+            return
+
+        if reason:
+            logger.info(
+                "connection %s: %s, killing process group %s", conn.id, reason, pgid
+            )
+            kill_group(pgid, signal.SIGKILL)
+
+        returncode = None
+        with contextlib.suppress(asyncio.TimeoutError):
+            returncode = await asyncio.wait_for(asyncio.shield(wait_task), 30)
+        unreaped = returncode is None
+
+        # Nothing a command started outlives it: one connection per exec, so a
+        # process backgrounded inside it is an orphan the moment the command
+        # returns. Also what stops an orphan holding the output pipe open from
+        # wedging the drain below. (The leader has been reaped by now, so this
+        # races pid reuse in theory; that needs the whole pid space to wrap
+        # between two adjacent statements.)
+        kill_group(pgid, signal.SIGKILL)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(out_task, err_task), self.drain_grace
+            )
+        await self._cancel(out_task, err_task, in_task, wait_task, disc_task)
+
+        body = terminal_frame(returncode, started, reason)
+        if unreaped:
+            # A child that survived SIGKILL for 30 seconds is stuck in the
+            # kernel. There is no status to report and inventing one is the
+            # thing this whole file refuses to do, so the terminal frame says
+            # so in the two fields a client already reads.
+            body["error"] = ERR_INTERNAL
+            body["message"] = f"process group {pgid} did not exit after SIGKILL"
+        logger.info(
+            "connection %s: exit_code=%s signal=%s reason=%s",
+            conn.id,
+            body["exit_code"],
+            body["signal"],
+            reason,
+        )
+        await conn.send(encode_control(body))
+
+    async def _await_command(
+        self,
+        wait_task: asyncio.Future,
+        disc_task: asyncio.Future,
+        started: float,
+        timeout: float,
+        activity: _Activity,
+    ) -> str | None:
+        """Wait for the child, the client, the timeout or the idle backstop."""
+        deadline = started + timeout if timeout > 0 else None
+        while True:
+            now = time.monotonic()
+            waits = []
+            if deadline:
+                waits.append(deadline - now)
+            if self.idle_timeout > 0:
+                waits.append(activity.last + self.idle_timeout - now)
+            slice_ = max(0.05, min(waits)) if waits else None
+            done, _ = await asyncio.wait(
+                {wait_task, disc_task},
+                timeout=slice_,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if wait_task in done:
+                return None
+            if disc_task in done:
+                return "disconnect"
+            now = time.monotonic()
+            if deadline and now >= deadline:
+                return "timeout"
+            if self.idle_timeout > 0 and now - activity.last >= self.idle_timeout:
+                return "idle"
+
+    async def _pump_output(
+        self,
+        stream: asyncio.StreamReader | None,
+        stream_id: int,
+        conn: Connection,
+        activity: _Activity,
+        disconnected: asyncio.Event,
+    ) -> None:
+        if stream is None:  # pragma: no cover - both pipes are always created
+            return
+        while True:
+            try:
+                chunk = await stream.read(CHUNK_BYTES)
+            except (ConnectionError, OSError, ValueError):
+                return
+            if not chunk:
+                return
+            activity.touch()
+            try:
+                await conn.send(pack_frame(stream_id, chunk))
+            except (ConnectionError, OSError):
+                disconnected.set()
+                return
+
+    async def _pump_input(
+        self,
+        reader: asyncio.StreamReader,
+        proc: asyncio.subprocess.Process,
+        want_stdin: bool,
+        activity: _Activity,
+        disconnected: asyncio.Event,
+    ) -> None:
+        """Feed the child's stdin, and notice when the client goes away.
+
+        End of stream here is the one reap signal in the design: an operator's
+        Ctrl-C kills the client, the daemon's cancel path SIGKILLs it, and both
+        arrive as the same close.
+        """
+        try:
+            while True:
+                header = await reader.readexactly(FRAME_HEADER_BYTES)
+                stream_id, length = unpack_header(header)
+                payload = await reader.readexactly(length) if length else b""
+                activity.touch()
+                if stream_id == STREAM_STDIN:
+                    if not want_stdin or proc.stdin is None or proc.stdin.is_closing():
+                        continue
+                    proc.stdin.write(payload)
+                    await proc.stdin.drain()
+                elif stream_id == STREAM_CONTROL and is_stdin_eof(
+                    decode_control(payload)
+                ):
+                    if proc.stdin is not None and not proc.stdin.is_closing():
+                        proc.stdin.close()
+        except (
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            ProtocolError,
+        ):
+            pass
+        finally:
+            disconnected.set()
+
+    @staticmethod
+    async def _cancel(*tasks: asyncio.Future) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # -- file verbs ----------------------------------------------------------
+
+    async def _do_write_file(
+        self, request: dict, reader: asyncio.StreamReader, conn: Connection
+    ) -> None:
+        path = self.roots.check_file(request["path"])
+        size = request["size"]
+        mode = request["mode"]
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent):
+            raise ProtocolError(ERR_BAD_REQUEST, f"no such directory: {parent}")
+
+        await conn.ack()
+        tmp = os.path.join(
+            parent, f".istota-exec-{os.getpid()}-{next(self._temp_ids)}.tmp"
+        )
+        received = 0
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            with os.fdopen(fd, "wb") as handle:
+                while received < size:
+                    header = await reader.readexactly(FRAME_HEADER_BYTES)
+                    stream_id, length = unpack_header(header)
+                    payload = await reader.readexactly(length) if length else b""
+                    if stream_id == STREAM_STDIN:
+                        if received + length > size:
+                            raise ProtocolError(
+                                ERR_TOO_LARGE, "body is longer than the declared size"
+                            )
+                        handle.write(payload)
+                        received += length
+                    elif stream_id == STREAM_CONTROL and is_stdin_eof(
+                        decode_control(payload)
+                    ):
+                        break
+            if received != size:
+                raise ProtocolError(
+                    ERR_BAD_REQUEST,
+                    f"body ended after {received} of {size} declared bytes",
+                )
+            # O_CREAT's mode is masked by the umask; the request's mode is not a
+            # suggestion, so set it explicitly before the rename.
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+
+        logger.info("connection %s: wrote %d bytes to %s", conn.id, received, path)
+        body = terminal_frame(0, conn.started, None)
+        body["size"] = received
+        await conn.send(encode_control(body))
+
+    async def _do_read_file(self, request: dict, conn: Connection) -> None:
+        path = self.roots.check_file(request["path"])
+        if os.path.isdir(path):
+            raise ProtocolError(ERR_BAD_REQUEST, f"not a regular file: {path}")
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            raise ProtocolError(ERR_BAD_REQUEST, f"{path}: {e.strerror or e}") from e
+        if size > MAX_READ_FILE_BYTES:
+            # Refused, not truncated: a caller reading half a tarball and being
+            # told it succeeded is the failure mode this cap exists against.
+            raise ProtocolError(
+                ERR_TOO_LARGE,
+                f"{path} is {size} bytes, over the "
+                f"{MAX_READ_FILE_BYTES // (1024 * 1024)} MiB read cap",
+            )
+        try:
+            # O_NOFOLLOW on a path that is already fully resolved: the only way
+            # the last component is a symlink now is that it was swapped between
+            # the realpath above and this open. Narrow, but free.
+            handle = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb")
+        except OSError as e:
+            raise ProtocolError(ERR_BAD_REQUEST, f"{path}: {e.strerror or e}") from e
+
+        await conn.ack()
+        sent = 0
+        with handle:
+            while True:
+                chunk = handle.read(CHUNK_BYTES)
+                if not chunk:
+                    break
+                sent += len(chunk)
+                await conn.send(pack_frame(STREAM_STDOUT, chunk))
+        logger.info("connection %s: read %d bytes from %s", conn.id, sent, path)
+        body = terminal_frame(0, conn.started, None)
+        body["size"] = sent
+        await conn.send(encode_control(body))
+
+
+# ---- Entry point -----------------------------------------------------------
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="istota-exec-serve",
+        description="Run commands and move files inside the devbox, over a Unix socket.",
+    )
+    parser.add_argument("--socket", required=True, help="the socket to listen on")
+    parser.add_argument(
+        "--repos-root",
+        required=True,
+        help="the per-user repos mount; the only root a command may run in",
+    )
+    parser.add_argument("--home", default=DEFAULT_HOME)
+    parser.add_argument("--staging", default=DEFAULT_STAGING)
+    parser.add_argument(
+        "--idle-timeout-seconds", type=float, default=DEFAULT_IDLE_TIMEOUT_SECONDS
+    )
+    parser.add_argument("--kill-grace-seconds", type=float, default=KILL_GRACE_SECONDS)
+    parser.add_argument(
+        "--drain-grace-seconds", type=float, default=DRAIN_GRACE_SECONDS
+    )
+    parser.add_argument("--log-level", default="info")
+    return parser.parse_args(argv)
+
+
+def prepare_socket_path(path: str) -> None:
+    """Refuse a socket path that is not ours to take, and clear a stale inode."""
+    parent = os.path.dirname(path) or "."
+    if not os.path.isdir(parent):
+        raise SystemExit(f"istota-exec-serve: no such directory: {parent}")
+    if os.path.lexists(path):
+        if not stat_module.S_ISSOCK(os.lstat(path).st_mode):
+            raise SystemExit(
+                f"istota-exec-serve: {path} exists and is not a socket; refusing"
+            )
+        # The supervisor restarts this process after a crash, and a leftover
+        # inode must not turn that into a permanent outage.
+        os.unlink(path)
+
+
+async def serve(args: argparse.Namespace) -> int:
+    roots = Roots(args.repos_root, args.home, args.staging)
+    for label, root in (
+        ("repos root", roots.repos_root),
+        ("home", roots.home),
+        ("staging", roots.staging),
+    ):
+        if not os.path.isdir(root):
+            logger.warning(
+                "%s %s does not exist; requests for it will be refused", label, root
+            )
+
+    server_obj = ExecServer(
+        roots,
+        idle_timeout=args.idle_timeout_seconds,
+        kill_grace=args.kill_grace_seconds,
+        drain_grace=args.drain_grace_seconds,
+    )
+    prepare_socket_path(args.socket)
+
+    # Create it private rather than widening it afterwards, so there is no
+    # window in which the socket is more reachable than it should ever be.
+    old_umask = os.umask(0o177)
+    try:
+        server = await asyncio.start_unix_server(
+            server_obj.handle,
+            path=args.socket,
+            limit=MAX_REQUEST_BYTES + CHUNK_BYTES,
+        )
+    finally:
+        os.umask(old_umask)
+    os.chmod(args.socket, SOCKET_MODE)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop.set)
+
+    logger.info(
+        "listening on %s, repos root %s, uid %s, protocol %s",
+        args.socket,
+        roots.repos_root,
+        os.getuid(),
+        PROTOCOL_VERSION,
+    )
+    async with server:
+        await stop.wait()
+    logger.info("shutting down")
+    with contextlib.suppress(OSError):
+        os.unlink(args.socket)
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        stream=sys.stderr,
+        format="%(asctime)s istota-exec-serve %(levelname)s %(message)s",
+    )
+    try:
+        return asyncio.run(serve(args))
+    except KeyboardInterrupt:  # pragma: no cover
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
