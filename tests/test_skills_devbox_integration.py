@@ -115,6 +115,35 @@ class TestCopyRoundTrip:
         assert _exec("test -e /workspace/probe.txt")["exit_code"] != 0
 
 
+class TestExecPipelineStatus:
+    """ISSUE-307, in the shell that actually runs the command.
+
+    The unit tier fakes `_run_docker`, so the shell whose options are the whole
+    question never exists there; it compensates by running the argv locally,
+    which proves bash honours the flag but not that this image's `bash` is the
+    one being reached. These two are the end of that chain.
+    """
+
+    def test_a_failing_pipeline_is_not_reported_as_success(self, container):
+        result = _exec("false | tail -1")
+        assert result["status"] == "ok", result
+        assert result["exit_code"] != 0, (
+            "the container's shell reported success for a failing pipeline — "
+            "`exit_code` in this envelope does not mean what it says"
+        )
+
+    def test_a_succeeding_pipeline_is_still_success(self, container):
+        """Control: the option must not turn every pipeline red."""
+        result = _exec("echo hi | tail -1")
+        assert result["exit_code"] == 0, result
+        assert result["stdout"] == "hi\n"
+
+    def test_the_option_is_on_inside_the_container(self, container):
+        result = _exec("set -o | grep pipefail")
+        assert result["exit_code"] == 0, result
+        assert result["stdout"].split() == ["pipefail", "on"], result["stdout"]
+
+
 class TestExecFile:
     @pytest.mark.parametrize("name,body,expected", [
         ("probe.sh", "#!/bin/bash\necho shell-ok\n", "shell-ok\n"),
