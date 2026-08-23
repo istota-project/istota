@@ -36,7 +36,8 @@ from ...email_support import (
     sender_claims_to_be_user,
 )
 from ...notification_resolvers import confirmation as confirmation_source
-from ...notification_store import RaiseResult, deliver_pending
+from ...notification_resolvers import task_alert as task_alert_source
+from ...notification_store import RaiseResult, deliver_pending, mark_delivered
 from ...outbound_policy import effective_policy
 from ...skills.email import download_attachments, list_emails, read_email
 from ...storage import ensure_user_directories_v2, upload_file_to_inbox_v2
@@ -672,10 +673,22 @@ def _note_observed_authserv_id(
 
 @dataclass(frozen=True)
 class _DmarcAlert:
-    """An operator alert the canary decided on, awaiting delivery after the poll."""
+    """An operator alert the canary decided on, awaiting delivery after the poll.
+
+    `sender` and `verdict` are carried separately from `key` because the two are
+    keyed differently on purpose. The in-process dedup window keys on
+    ``(user_id, sender, verdict)`` and is safe doing so — it is a dict that
+    clears on restart. The durable inbox row keys on the **verdict alone**: the
+    canary fires on mail that routed on the user's own address without a
+    ``dmarc=pass``, which is forged mail, so the sender is attacker-chosen and as
+    a `dedup_key` would be an unbounded axis — N forged senders, N durable rows,
+    N pushes. The sender goes in the row's `params` and `body` instead.
+    """
     key: tuple[str, str, str]
     user_id: str
     message: str
+    sender: str = ""
+    verdict: str = ""
 
 
 def _check_dmarc_canary(
@@ -790,7 +803,10 @@ def _check_dmarc_canary(
     # can be scoped, and a healthy path stays silent on this channel.
     if authserv_hint:
         message += authserv_hint
-    return _DmarcAlert(key=key, user_id=user_id, message=message)
+    return _DmarcAlert(
+        key=key, user_id=user_id, message=message,
+        sender=sender, verdict=verdict,
+    )
 
 
 @dataclass
@@ -906,6 +922,16 @@ def _deliver_dmarc_alerts(config: Config, alerts: "dict[tuple[str, str, str], _D
     # other `notifications` imports in this file.
     from ...notifications import send_notification
 
+    # The durable row first, and whether or not the send below succeeds. That is
+    # the point of the row: `send_notification` returns False when the user has
+    # no alert destination configured, and this used to log a warning and leave
+    # nothing behind at all. The window stays the delivery gate — an occurrence
+    # it already suppressed never reaches this function, so it neither sends nor
+    # bumps, which keeps the row's `occurrences` a count of alerts raised rather
+    # than of messages seen.
+    row_ids = _write_dmarc_rows(config, alerts)
+
+    stamp: list[int] = []
     for alert in alerts.values():
         try:
             delivered = send_notification(config, alert.user_id, alert.message, purpose="alert")
@@ -916,12 +942,64 @@ def _deliver_dmarc_alerts(config: Config, alerts: "dict[tuple[str, str, str], _D
             continue
         if delivered:
             _dmarc_alerted[alert.key] = time.time()
+            notification_id = row_ids.get(alert.key)
+            if notification_id is not None:
+                stamp.append(notification_id)
         else:
             logger.warning(
                 "DMARC canary alert for user %s reached no destination; "
-                "it will be retried on the next occurrence.",
+                "it will be retried on the next occurrence. The notification "
+                "row stands either way.",
                 alert.user_id,
             )
+
+    if stamp:
+        # `last_delivered_at` records a send that reached somebody, never one
+        # that returned False — the same rule the window above keeps, and the
+        # reason both are stamped after the send rather than at decision time.
+        try:
+            with db.get_db(config.db_path) as conn:
+                mark_delivered(conn, stamp)
+        except Exception:
+            logger.debug("could not stamp DMARC notification delivery", exc_info=True)
+
+
+def _write_dmarc_rows(
+    config: Config, alerts: "dict[tuple[str, str, str], _DmarcAlert]",
+) -> "dict[tuple[str, str, str], int]":
+    """One inbox row per (user, verdict), with the forged senders in `params`.
+
+    Deliberately coarser than the alerts dict, which is keyed on the sender too:
+    two forged senders producing the same verdict share one row. Opening its own
+    connection is safe here — `poll_emails` calls this from its `finally`, after
+    every per-message transaction has closed, which is the same reason the sends
+    below happen here rather than inline.
+    """
+    out: dict[tuple[str, str, str], int] = {}
+    try:
+        with db.get_db(config.db_path) as conn:
+            for alert in alerts.values():
+                dedup_key = task_alert_source.dmarc_key(alert.verdict)
+                params = task_alert_source.merge_param_list(
+                    conn, alert.user_id, dedup_key, "senders", alert.sender,
+                )
+                params["verdict"] = alert.verdict
+                result = task_alert_source.write(
+                    conn, alert.user_id,
+                    dedup_key=dedup_key,
+                    title=f"Inbound mail authentication check failed — dmarc={alert.verdict}",
+                    body=alert.message,
+                    severity="warning",
+                    # Nothing in the app can fix a mail path. The action is on
+                    # the MTA and the DNS record, which the body names.
+                    actionable=False,
+                    params=params,
+                )
+                if result is not None:
+                    out[alert.key] = result.notification_id
+    except Exception:
+        logger.warning("could not record DMARC canary notifications", exc_info=True)
+    return out
 
 
 def _uid_int(email_id: str) -> int | None:
@@ -1205,6 +1283,13 @@ def _deliver_throttle_notices(
     from ...notifications import send_notification
 
     now = time.time()
+    # The durable rows first, for every notice this poll produced — including the
+    # ones the window is about to suppress. The window is the *delivery* gate and
+    # stays exactly as it was; the row is the record, so a suppressed occurrence
+    # bumps the row the user can still see rather than vanishing into a log line.
+    row_ids = _write_throttle_rows(config, notices, window_seconds)
+
+    stamp: list[int] = []
     for notice in notices.values():
         for kind in notice.kinds():
             key = (notice.user_id, kind)
@@ -1231,12 +1316,72 @@ def _deliver_throttle_notices(
                 # Stamped only on a delivered notice, for the reason the DMARC
                 # dedup is: one failed send must not swallow the next window's.
                 _throttle_alerted[key] = now
+                notification_id = row_ids.get(key)
+                if notification_id is not None:
+                    stamp.append(notification_id)
             else:
                 logger.warning(
                     "The %s notice for user %s reached no destination; %d "
-                    "message(s) filed, %d held",
+                    "message(s) filed, %d held. The notification row stands.",
                     kind, notice.user_id, notice.filed, notice.held,
                 )
+
+    if stamp:
+        try:
+            with db.get_db(config.db_path) as conn:
+                mark_delivered(conn, stamp)
+        except Exception:
+            logger.debug("could not stamp throttle notification delivery", exc_info=True)
+
+
+# Held mail is on a two-hour clock and asks the user to answer `!confirm`;
+# throttled mail is filed, recoverable and asks nothing. Only the first is
+# actionable, and `actionable` is per row precisely so the two can differ.
+_THROTTLE_TITLES = {
+    "throttled": "Inbound mail filed unread",
+    "held": "Held mail waiting for your confirmation",
+}
+
+
+def _write_throttle_rows(
+    config: Config,
+    notices: "dict[str, _ThrottleNotice]",
+    window_seconds: int,
+) -> "dict[tuple[str, str], int]":
+    """One inbox row per (user, notice kind), keyed the way the window is.
+
+    Its own connection, which is safe for the reason the sends below are:
+    `poll_emails` calls this from its `finally`, after every per-message
+    transaction has closed.
+    """
+    out: dict[tuple[str, str], int] = {}
+    try:
+        with db.get_db(config.db_path) as conn:
+            for notice in notices.values():
+                for kind in notice.kinds():
+                    senders = (
+                        notice.held_senders if kind == "held" else notice.filed_senders
+                    )
+                    result = task_alert_source.write(
+                        conn, notice.user_id,
+                        dedup_key=task_alert_source.throttle_key(kind),
+                        title=_THROTTLE_TITLES.get(kind, "Inbound mail notice"),
+                        body=notice.message(window_seconds, kind),
+                        severity="warning",
+                        actionable=(kind == "held"),
+                        params={
+                            "kind": kind,
+                            "filed": notice.filed,
+                            "held": notice.held,
+                            "senders": sorted(senders)[:task_alert_source.MAX_PARAM_ENTRIES],
+                            "window_seconds": window_seconds,
+                        },
+                    )
+                    if result is not None:
+                        out[(notice.user_id, kind)] = result.notification_id
+    except Exception:
+        logger.warning("could not record throttle notifications", exc_info=True)
+    return out
 
 
 def _newest_uid(config: Config, email_config) -> int:

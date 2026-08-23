@@ -26,6 +26,7 @@ from typing import Any
 
 from . import db
 from .config import Config
+from .notification_store import deliver_pending
 
 # Use the parent scheduler's logger name so log lines remain identical to
 # pre-extraction output and any operator-side log routing keeps working.
@@ -469,35 +470,120 @@ def _process_deferred_user_alerts(
     file. The scheduler posts them to the user's alerts channel after task
     completion.
 
-    Returns count of alerts posted.
+    **Collapsed onto one row per (task, alert type), and capped.** The array is
+    model-authored and nothing bounds its length, so one durable notification per
+    entry would let a single task leave hundreds of rows in the user's bell, each
+    firing its own push. The entries a type accumulates become that row's body and
+    its ``params``; past ``MAX_DEFERRED_ALERTS_PER_TASK`` they are dropped with a
+    warning naming the count, the same shape ``max_subtasks_per_task`` uses.
+
+    Delivery goes through the notification store rather than a bare
+    ``send_notification``, so the push and the durable row cannot disagree: this
+    used to send and then unlink the file, which meant a user with no alert
+    destination configured had the model's security finding deleted with nothing
+    anywhere to show for it.
+
+    Returns the number of alert entries accepted.
     """
     loaded = _load_deferred_json(user_temp_dir, task.id, "user_alerts")
     if loaded is None:
         return 0
     path, data = loaded
 
+    from .notification_resolvers import task_alert
+
+    # Insertion-ordered, so the first type seen leads the log line.
+    by_type: dict[str, list[str]] = {}
     count = 0
+    dropped = 0
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        message = entry.get("message", "").strip()
+        raw = entry.get("message")
+        message = task_alert.flatten(raw if isinstance(raw, str) else "")
         if not message:
             continue
+        if count >= task_alert.MAX_DEFERRED_ALERTS_PER_TASK:
+            dropped += 1
+            continue
+        by_type.setdefault(task_alert.normalize_alert_type(entry.get("type")), []).append(
+            message
+        )
+        count += 1
 
-        alert_type = entry.get("type", "security")
-        if alert_type == "action_needed":
-            formatted = f"**Action needed** (task #{task.id})\n\n{message}"
-        else:
-            formatted = f"⚠️ **Security alert** (task #{task.id})\n\n{message}"
+    if dropped:
+        logger.warning(
+            "Task %d wrote %d deferred user alert(s) over the cap of %d; the "
+            "rest were dropped",
+            task.id, dropped, task_alert.MAX_DEFERRED_ALERTS_PER_TASK,
+        )
 
-        from .notifications import send_notification
-        if send_notification(config, task.user_id, formatted, purpose="alert"):
-            count += 1
+    if by_type:
+        # Guarded as a whole. `write_notification` and `deliver_pending` never
+        # raise, but `db.get_db` can — and `_drain_deferred_ops` calls its nine
+        # handlers in sequence with nothing between them, so an exception
+        # escaping here would silently skip `_deliver_deferred_email_output` and
+        # the unconsumed-file warning. The same reasoning `_load_deferred_json`
+        # records for its `UnicodeDecodeError` catch.
+        try:
+            results = []
+            # A connection of this function's own, and that is safe here rather
+            # than asserted to be: `_drain_deferred_ops` runs after
+            # `process_one_task`'s status-writing transaction has closed, from
+            # function-body scope in both of its callers. Nothing holds a write
+            # lock on the framework DB.
+            with db.get_db(config.db_path) as conn:
+                for alert_type, messages in by_type.items():
+                    results.append(task_alert.write(
+                        conn, task.user_id,
+                        dedup_key=task_alert.deferred_key(task.id, alert_type),
+                        title=_deferred_alert_title(alert_type, task.id),
+                        body="\n".join(f"- {m}" for m in messages)
+                        if len(messages) > 1 else messages[0],
+                        severity=(
+                            "danger"
+                            if alert_type == task_alert.ALERT_TYPE_SECURITY
+                            else "warning"
+                        ),
+                        # Actionable by name, both of them — an "action needed"
+                        # notice says so and a security finding the model raised
+                        # is something to look at. The panel renders no button
+                        # because there is no in-app object to act on;
+                        # `status_note` says so.
+                        actionable=True,
+                        params={"messages": messages, "alert_type": alert_type,
+                                "task_id": task.id},
+                        room_token=task.conversation_token,
+                    ))
+            deliver_pending(config, results)
+        except Exception:
+            logger.warning(
+                "Could not record the deferred user alerts for task %d",
+                task.id, exc_info=True,
+            )
 
     if count:
-        logger.info("Posted %d deferred user alerts for task %d", count, task.id)
+        logger.info(
+            "Recorded %d deferred user alert(s) for task %d in %d notification(s)",
+            count, task.id, len(by_type),
+        )
     path.unlink(missing_ok=True)
     return count
+
+
+def _deferred_alert_title(alert_type: str, task_id: int) -> str:
+    """The bot's own framing around the model's text.
+
+    An em dash rather than parentheses because the title is flattened before it
+    is stored and delivered, and `confirmations._MARKUP_CHARS` takes brackets of
+    every kind — `Security alert (task #3)` would arrive as `Security alert task
+    #3`.
+    """
+    from .notification_resolvers import task_alert
+
+    if alert_type == task_alert.ALERT_TYPE_ACTION_NEEDED:
+        return f"Action needed — task #{task_id}"
+    return f"Security alert — task #{task_id}"
 
 
 def _process_deferred_kg_ops(
