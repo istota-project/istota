@@ -5,11 +5,16 @@ Today's date: <DATE>
 User timezone: UTC
 Current UTC: <UTC>
 Current task ID: <TASK_ID>
-Conversation token: none
-Source: cli
-Output target: text
+Conversation token: thread-token
+Source: email
+Output target: email
 Database: reachable only through skill CLIs (no file access)
 Privileges: admin
+
+
+EMISSARIES TEXT
+
+The constitutional layer.
 
 
 PERSONA TEXT for Istota.
@@ -62,9 +67,22 @@ You have access to:
 10. When computing elapsed time between two timestamps ("X ago", "merged N hours ago", etc.), normalize both to ISO 8601 UTC first and subtract the full timestamps. Do not subtract clock-face hours/minutes by hand — that gives the wrong answer when the timestamps straddle a UTC midnight, end-of-month, or DST boundary. The `Current UTC` line above is your reference for "now".
 11. Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper.
 
+## Conversation context
+
+The following are relevant previous messages from this conversation:
+
+[2026-01-05 09:15] alice: What did the release notes say about the migration?
+[2026-01-05 09:15] Bot: The migration runs on first boot and is idempotent.
+
+
 ## User's request
 
 Summarize what changed in my notes this week.
+
+
+## Response format (email)
+
+EMAIL GUIDELINES for alice.
 
 
 ## Skills Reference (v: 52fc381db6fa)
