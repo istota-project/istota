@@ -172,6 +172,59 @@ class TestTheRenderedConfigLoads:
         assert profile.timezone == "Europe/Warsaw"
 
 
+class TestTheStorageBackend:
+    """`NC_URL` decides which of the two shipped storage backends is rendered.
+
+    `Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and it routes
+    `storage_backend`, the prompt's file-tool vocabulary, the `nextcloud` entry
+    in `available_capabilities()` and `doctor`'s `runtime.mount_liveness`. Both
+    values are shipped install shapes — the Nextcloud-free one is what
+    `istota setup` produces and what every lean testbed profile runs — so the
+    render has to reach both.
+    """
+
+    def test_a_url_renders_the_nextcloud_backend(self, tmp_path):
+        config = load_config(render(tmp_path, **REQUIRED))
+
+        assert config.storage_is_nextcloud is True
+        assert config.storage_backend == "nextcloud"
+
+    def test_an_empty_url_renders_the_local_backend(self, tmp_path):
+        """Set-but-empty, not unset, and the difference is the whole test.
+
+        The preflight is `[ -n "${NC_URL+x}" ]` (`render-config.sh:68`), which
+        tests whether the variable is *set*. An unset `NC_URL` therefore fails
+        the render outright with exit 2 — asserted one class down in
+        `TestTheInputContract` — while the empty string passes it and reaches
+        the `url = ""` line the local install needs.
+        """
+        env = {**REQUIRED, "NC_URL": "", "APP_PASSWORD": ""}
+        config = load_config(render(tmp_path, **env))
+
+        assert config.nextcloud.url == ""
+        assert config.storage_is_nextcloud is False
+        assert config.storage_backend == "local"
+        # The mount path is a hardcoded literal in the generator, so it is
+        # rendered under both backends and `use_mount` stays true — the local
+        # install is a plain directory at the same place, with nothing mounted
+        # on it. This is why `doctor.check_mount_liveness` gates on the backend
+        # rather than on the path being configured.
+        assert config.nextcloud_mount_path == Path("/mnt/shared")
+        assert config.use_mount is True
+
+    def test_the_local_backend_drops_the_nextcloud_capability(self, tmp_path):
+        """The prompt-visible half, at the point the render produces it.
+
+        A skill declaring `requires_capability: [nextcloud]` is folded into the
+        effective disabled set when the capability is absent, so it leaves both
+        eager selection and the on-demand menu.
+        """
+        env = {**REQUIRED, "NC_URL": "", "APP_PASSWORD": ""}
+
+        assert "nextcloud" in load_config(render(tmp_path / "nc", **REQUIRED)).available_capabilities()
+        assert "nextcloud" not in load_config(render(tmp_path / "local", **env)).available_capabilities()
+
+
 class TestQuotingSurvivesTheRender:
     """A generated TOML file is a quoting problem wearing a config's clothes.
 
