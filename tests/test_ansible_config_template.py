@@ -245,34 +245,40 @@ def _nested_dataclass(annotation):
 class TestTheForgePathsMatchWhatTheRoleInstalls:
     """Where 30bb7c83 lived.
 
-    The role installs `gh` and `glab` from the Debian archive with `apt`, which
-    puts them in `/usr/bin`. The rendered config has to name that. A change to
-    either side alone — switching the install to a vendor tarball under
-    `/usr/local`, or editing the default path — leaves a config naming a binary
-    that is not there, and `os.execve` exits 6 mid-task with `ENOENT`.
+    The rendered config has to name the path the role actually installs to. A
+    change to either side alone leaves a config naming a binary that is not
+    there, and `os.execve` exits 6 mid-task with `ENOENT`.
+
+    Rewritten when the role stopped using apt: it now extracts both binaries
+    from the vendors' release .debs into `/usr/local/bin`, so the old `/usr/bin`
+    inference no longer holds. The previous premise test asserted `"apt:" in
+    tasks` over the *whole* task file, which several other sections also
+    satisfy — so it would have gone on passing against exactly this change.
+    That is why the premise below names the install task and its method rather
+    than a substring the file is never without.
     """
 
-    def test_the_role_installs_the_forge_clis_with_apt(self):
-        # The premise of the assertion below. If the role stops using apt, the
-        # /usr/bin inference stops holding and this test should be rewritten
-        # rather than quietly kept.
+    def test_the_role_installs_the_forge_clis_from_the_vendor_releases(self):
+        # The premise of the assertion below. `tests/test_ansible_forge_cli_
+        # install.py` is where the install itself is held to its contract; this
+        # only establishes that the inference about *where* it lands is sound.
         tasks = TASKS_FILE.read_text()
 
-        assert "Install forge CLIs for the developer skill" in tasks
-        assert "apt:" in tasks
+        assert "Install the forge CLIs from the vendors' releases" in tasks
+        assert "dpkg-deb -x" in tasks
 
     @pytest.mark.parametrize(
         "key,binary",
         [("gh_bin_path", "gh"), ("glab_bin_path", "glab")],
     )
-    def test_the_rendered_path_is_where_apt_puts_the_binary(self, key, binary):
+    def test_the_rendered_path_is_where_the_role_puts_the_binary(self, key, binary):
         config = load_config_from(render(istota_developer_enabled=True))
 
-        assert getattr(config.developer, key) == f"/usr/bin/{binary}"
+        assert getattr(config.developer, key) == f"/usr/local/bin/{binary}"
 
     def test_the_developer_block_is_absent_when_the_skill_is_off(self, parsed):
         # The role default is off, and an off skill should render no paths at
-        # all rather than paths to binaries apt was never asked to install.
+        # all rather than paths to binaries the role was never asked to install.
         assert "developer" not in parsed
 
 

@@ -24,8 +24,9 @@ import shutil
 
 # Last-resort defaults, used only when nothing is configured and the binary is
 # not on the daemon's PATH either. They are the conventional manual-install
-# location; the Ansible role installs from the Debian archive into /usr/bin and
-# renders that path into config.toml.
+# location, and since the role stopped taking these two from the Debian archive
+# they are also where the Ansible role installs them and what it renders into
+# config.toml — so the configured path and this default now normally agree.
 FALLBACK_BIN = {"gh": "/usr/local/bin/gh", "glab": "/usr/local/bin/glab"}
 
 # Where the docker image puts them (`docker/istota/Dockerfile`). Deliberately
@@ -51,11 +52,19 @@ def resolve_real_bin(configured: str, name: str) -> str:
     pinned as before.
 
     The fallback exists because the two halves of this setting ship
-    separately. The Ansible role installs the binaries into ``/usr/bin``, but
-    only a full play run rewrites ``config.toml``, and the auto-update cron
-    pulls code without running Ansible at all. In that window ``gh_bin_path``
-    is absent from the file, the dataclass default stands, and every forge
-    command would otherwise exec a path that does not exist.
+    separately. The Ansible role installs the binaries and renders the path in
+    the same play, but only a *full* play run rewrites ``config.toml``, and the
+    auto-update cron pulls code without running Ansible at all. In that window
+    ``gh_bin_path`` is absent from the file, the dataclass default stands, and
+    every forge command would otherwise exec a path that does not exist.
+
+    A host deployed before the role moved off the Debian archive is the same
+    case from the other side: its ``config.toml`` names ``/usr/bin/gh``, which
+    is an explicit choice and returned as given, so it keeps exec'ing the stale
+    apt binary until a full play rewrites the file. That is the intended
+    behaviour rather than an oversight — the play that installs the new binary
+    is the play that repoints the config, so the two never disagree for longer
+    than one run.
 
     The docker image has the same gap and cannot close it from its side: the
     entrypoint writes ``config.toml`` only on a first boot with a fresh volume,
