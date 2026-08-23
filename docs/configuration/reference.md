@@ -394,6 +394,8 @@ output = "talk"
 | `worktree_reap_enabled` | `true` | Remove a task worktree under `repos_dir` once every commit on it is upstream, the checkout is clean and it has been idle for the retention window (ISSUE-288). The sweep runs on `[scheduler] worktree_reap_interval` |
 | `worktree_retention_hours` | `24.0` | Idle hours before a worktree is a reap candidate. This is what protects a task running right now, not just a stale checkout. Clamped to a one-hour floor — anything shorter reaps a worktree a task is still setting up |
 
+How the wrapper behind `gh_bin_path` / `glab_bin_path` actually works — where it takes its policy and trust anchors from, and why it refuses rather than falling back to a public host — is written out under [`[devbox]`](#devbox), since one file serves both the sandbox and the container.
+
 ### `[developer.review]`
 
 The `code_review` skill's models, caps and budget. There is no separate feature flag — the skill is already gated by `developer.enabled` and an admin check, so `enabled = false` here is the off switch.

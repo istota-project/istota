@@ -55,7 +55,11 @@ Linux-only and merged-usr compatible for Debian 13+. See [Supported deployment](
 
 ### The `.developer` carve-out
 
-Each task's scratch space holds a `.developer` directory, written by the `developer` skill's `setup_env` hook. It contains the helper scripts that fetch that task's credentials: `credential-fetch`, the git credential helper, and the `gh` / `glab` wrappers. A task that could replace one of them could intercept a forge token on its next use.
+Each task's scratch space holds a `.developer` directory, written by the `developer` skill's `setup_env` hook. It holds two kinds of thing, and both need the same protection.
+
+The **credential plumbing**: `credential-fetch`, the git credential helper, and the `gh` / `glab` wrappers. A task that could replace one of them could intercept a forge token on its next use.
+
+The **policy the wrappers enforce**, which is the half that is easy to overlook: `forge-policy.json` — which carries the deny rules, the real binary path and the forge URL, precisely so the wrapper reads none of them from an environment the model's own shell can set — plus the seeded per-forge config dirs and the pinned-empty data dirs. Those last two are not incidental. `gh` expands aliases from `config.yml` *before* command dispatch, so a writable config dir is a complete bypass of the deny list; and it dispatches an unknown first argument to `gh-<name>` under the data dir, which no argv rule can see. A writable `.developer` would leave the deny list decorative rather than merely leaking a token.
 
 `build_bwrap_cmd` therefore re-binds `.developer` read-only *after* the read-write bind of its parent, so the sandboxed path has always been covered. The in-process agent loop (the native brain) runs without bwrap, and its confinement is a list of writable roots — pure containment, which cannot express a hole inside a root. Every path under the task's temp directory, `.developer` included, was writable there.
 
