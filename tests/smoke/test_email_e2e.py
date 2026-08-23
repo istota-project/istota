@@ -34,9 +34,10 @@ pytestmark = pytest.mark.smoke
 #: mail server funnels every recipient outside `bot.test` into one mailbox.
 OUTSIDE = mail.EXTERNAL_ADDRESS
 
-#: The address the profile gives the stack's one user. Matches
-#: `testbed.profiles.MAIL_CONFIG`, which is what the generator renders into
-#: `[users.testuser] email_addresses`.
+#: The stack's one user, and the address the profile gives them. The address
+#: matches `testbed.profiles.MAIL_CONFIG`, which is what the generator renders
+#: into `[users.testuser] email_addresses`.
+USER_ID = "testuser"
 USER_ADDRESS = "testuser@ext.test"
 
 ANSWER = "the scripted answer to your message"
@@ -126,7 +127,7 @@ class TestAReplyGoesBackOnTheThread:
         # the gate — `TestTheConfirmationGateInTheDeployment` covers that.
         inbound_id = service.send(
             from_addr=USER_ADDRESS,
-            to_addr=f"bot+testuser@{mail.BOT_ADDRESS.split('@')[1]}",
+            to_addr=mail.tagged(USER_ID),
             subject="a question for you",
             body="please answer this",
         )
@@ -199,7 +200,7 @@ class TestTheConfirmationGateInTheDeployment:
         service = _mail(stack)
         service.send(
             from_addr=sender,
-            to_addr=f"bot+testuser@{mail.BOT_ADDRESS.split('@')[1]}",
+            to_addr=mail.tagged(USER_ID),
             subject="do something for me",
             body="I am nobody you know",
         )
@@ -240,15 +241,25 @@ class TestTheConfirmationGateInTheDeployment:
         service = _mail(stack)
         service.send(
             from_addr="stranger@ext.test",
-            to_addr=f"bot+testuser@{mail.BOT_ADDRESS.split('@')[1]}",
+            to_addr=mail.tagged(USER_ID),
             subject="another request",
             body="also nobody you know",
         )
 
         task = _wait_for_task(stack, status="pending_confirmation")
 
+        # One *line* carrying both, not two searches over a shared log. The
+        # daemon's log is session-scoped and has no watermark: the test before
+        # this one parks a task through the same path, so "could not be
+        # delivered" is already in it, and the scheduler writes several lines
+        # naming any task id. Two independent `in` checks would be satisfied by
+        # two lines from two tests — the same both-halves rule `rows_above`
+        # states one table over.
         logs = stack.logs(400)
-        assert f"Task {task['id']}" in logs and "could not be delivered" in logs, (
+        assert any(
+            f"Task {task['id']}" in line and "could not be delivered" in line
+            for line in logs.splitlines()
+        ), (
             "the prompt went nowhere and the daemon did not say so\n"
             f"--- last 400 log lines ---\n{logs}"
         )
@@ -276,7 +287,7 @@ class TestAttachmentsWithoutNextcloud:
         service = _mail(stack)
         service.send(
             from_addr=USER_ADDRESS,
-            to_addr=f"bot+testuser@{mail.BOT_ADDRESS.split('@')[1]}",
+            to_addr=mail.tagged(USER_ID),
             subject="here is a file",
             body="see attached",
             attachments=[("notes.txt", "text/plain", b"the attached bytes\n")],

@@ -731,6 +731,19 @@ def render_config(
 
 # -- the full shape's environment ------------------------------------------
 
+#: The interpolation variables the *lean* env-file owns.
+#:
+#: `docker-compose.test.yml` preflights the first with `${…:?}` and reads the
+#: other two as image tags. Reserved against a service's `compose_env()`, since
+#: both are written into one env-file where a later assignment wins — a service
+#: naming one would silently redirect the rendered config directory or run
+#: somebody else's image.
+LEAN_ENV_KEYS = (
+    "ISTOTA_TEST_CONFIG_DIR",
+    "ISTOTA_TEST_LEAN_IMAGE",
+    "ISTOTA_TEST_IMAGE",
+)
+
 #: Services the spec's later stages add, named here so `FULL_MODULE_SWITCHES`
 #: can point at them before they exist.
 #:
@@ -1228,8 +1241,11 @@ class Stack:
 
         `docker compose port` answers `0.0.0.0:54321` or `127.0.0.1:54321`, and
         may answer with more than one line when a port is published on several
-        interfaces; the first is taken and the address discarded, since the
-        caller reaches it on loopback either way.
+        interfaces. **The IPv4 line is preferred rather than the first**, and
+        that is not cosmetic: Docker binds v4 and v6 separately and does not
+        always give them the same host port, while every caller pairs the answer
+        with a hardcoded loopback address. Taking whichever line came first
+        would then hand back a port nothing is listening on at `127.0.0.1`.
         """
         result = subprocess.run(
             self.args + ["port", service, str(container_port)],
@@ -1237,18 +1253,25 @@ class Stack:
             text=True,
             timeout=60,
         )
-        first = (result.stdout or "").strip().splitlines()
-        if result.returncode != 0 or not first:
+        lines = (result.stdout or "").strip().splitlines()
+        if result.returncode != 0 or not lines:
             raise StackError(
                 f"compose could not say which host port {service}:"
                 f"{container_port} is published on (exit {result.returncode})\n"
                 f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
             )
-        _, _, port = first[0].rpartition(":")
-        if not port.isdigit():
+        # A v6 binding is bracketed (`[::1]:54321`); a v4 one is not.
+        chosen = next(
+            (line for line in lines if not line.strip().startswith("[")), lines[0]
+        )
+        _, _, port = chosen.rpartition(":")
+        # Zero is refused as well as a non-number: compose has printed
+        # `0.0.0.0:0` for a port it did not map, which parses cleanly and then
+        # fails several layers later as a refused connection to port 0.
+        if not port.isdigit() or int(port) == 0:
             raise StackError(
-                f"compose answered {first[0]!r} for {service}:{container_port}, "
-                "which does not end in a port number"
+                f"compose answered {chosen!r} for {service}:{container_port}, "
+                "which is not a host port anything is listening on"
             )
         return int(port)
 
@@ -2149,7 +2172,14 @@ class StackPool:
             overlays.append(self.lean.prebuilt_overlay)
         # Whatever the profile's own overlays need to resolve their binds. Empty
         # on every profile that names no overlay, which is most of them.
-        for variable, value in compose_env(services or {}).items():
+        #
+        # The three names above are reserved, and the guard is not decorative:
+        # these lines are appended to the same env-file and a later assignment
+        # wins, so a service naming one of them would redirect the rendered
+        # config directory or the image with nothing said anywhere.
+        for variable, value in compose_env(
+            services or {}, reserved=set(LEAN_ENV_KEYS)
+        ).items():
             lines.append(f"{variable}={value}")
         env_file.write_text("\n".join(lines) + "\n")
         return compose_args(

@@ -121,11 +121,27 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 #
 # And it carries mail, because a second full profile would be a second cold
 # boot of the same six containers to run one attachment scenario.
+#: And it runs the self-claim gate in `verify`, which the lean profile does not.
+#:
+#: Two reasons, and the first is about being able to fail. `render-config.sh`
+#: defaults `confirm_sender_match` to `off`, so a profile that also asked for
+#: `off` would render the same line whether or not `docker-compose.yml` passed
+#: the variable through — and the assertion that the passthrough works would
+#: hold against the reverted compose file. `verify` is a value the shell default
+#: is not.
+#:
+#: The second is that `verify` is the mode worth exercising on the shape that
+#: has a real boot behind it: it needs `authserv_id` set, refuses to start
+#: without it, and decides between a message that runs and one that is held on
+#: the strength of a header. That is two of this stage's settings interacting,
+#: which is exactly what neither could do before compose passed them.
+FULL_CONFIG = {**MAIL_CONFIG, "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify"}
+
 FULL = Profile(
     "full",
     shape="full",
     services=("model", "nextcloud", "mail"),
-    config=MAIL_CONFIG,
+    config=FULL_CONFIG,
     compose_overlays=(MAIL_OVERLAY,),
 )
 

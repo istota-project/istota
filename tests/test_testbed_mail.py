@@ -15,6 +15,7 @@ own wiring is only checked behind a marker rots.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from cryptography import x509
 from testbed import certs, profiles
 from testbed import stack as stack_support
 from testbed.services import gitlab, mail
+
+REPO = Path(__file__).resolve().parents[1]
 
 #: A stand-in for what `StackPool` generates on the full shape. Obviously fake,
 #: so a reader never wonders whether these are real and a scan never flags them.
@@ -194,6 +197,108 @@ class TestTheMailService:
             assert mail.OVERLAY in profile.compose_overlays, profile.name
 
 
+class _RefusingConnection:
+    """An IMAP connection that answers `NO` to one command and `OK` to the rest.
+
+    Stands in for a real server because the behaviour under test is one imaplib
+    hands back rather than raises: `_command_complete` raises on `BAD` and
+    returns on `NO`, so every "the mailbox is empty" and "the purge worked"
+    reading in the tier is one a refused command produces for free.
+    """
+
+    def __init__(self, refuse: str, *, uids: bytes = b"1 2 3") -> None:
+        self.refuse = refuse
+        self.uids = uids
+        self.expunged = False
+
+    def _answer(self, command: str, payload):
+        return ("NO", [b"refused"]) if command == self.refuse else ("OK", payload)
+
+    def select(self, folder):
+        return self._answer("select", [b"3"])
+
+    def uid(self, command, *args):
+        if command == "search":
+            return self._answer("search", [b"" if self.expunged else self.uids])
+        if command == "store":
+            return self._answer("store", [b"1"])
+        raise AssertionError(f"unexpected UID {command}")  # pragma: no cover
+
+    def expunge(self):
+        answer = self._answer("expunge", [b"1"])
+        if answer[0] == "OK":
+            self.expunged = True
+        return answer
+
+
+def _session(connection) -> mail.ImapSession:
+    """An `ImapSession` wired to a stub, skipping the socket."""
+    session = mail.ImapSession(
+        mail.MailServer(host="127.0.0.1", imap_port=1, smtp_port=2)
+    )
+    session._conn = connection
+    return session
+
+
+class TestARefusedCommandIsNotAnEmptyMailbox:
+    """The trap `_expect_ok` closes, in both directions.
+
+    imaplib raises on `BAD` and *returns* on `NO`. Left unchecked, a refused
+    `SEARCH` reads as an empty folder and a refused `STORE` reads as a
+    successful purge — so "no reply was sent" and "the next test starts clean"
+    would both hold against a server that did nothing.
+    """
+
+    def test_a_refused_search_raises_rather_than_answering_empty(self):
+        with pytest.raises(mail.MailUnavailable, match="UID SEARCH"):
+            _session(_RefusingConnection("search")).uids()
+
+    def test_a_working_search_still_answers(self):
+        assert _session(_RefusingConnection("none")).uids() == [1, 2, 3]
+
+    def test_a_refused_store_fails_the_purge(self):
+        with pytest.raises(mail.MailUnavailable, match="STORE"):
+            _session(_RefusingConnection("store")).purge()
+
+    def test_a_refused_expunge_fails_the_purge(self):
+        with pytest.raises(mail.MailUnavailable, match="EXPUNGE"):
+            _session(_RefusingConnection("expunge")).purge()
+
+    def test_a_purge_that_left_messages_behind_is_refused(self):
+        """Read back rather than trusted. A server may accept both commands and
+        still hold the messages — a shared mailbox, a `\\Deleted` flag it
+        declines to honour — and the count `purge` returns would say otherwise.
+        """
+        connection = _RefusingConnection("none")
+        connection.expunge = lambda: ("OK", [b"0"])  # accepts, removes nothing
+
+        with pytest.raises(mail.MailUnavailable, match="left 3 message"):
+            _session(connection).purge()
+
+    def test_a_working_purge_reports_what_it_removed(self):
+        assert _session(_RefusingConnection("none")).purge() == 3
+
+    def test_a_refused_select_raises(self):
+        """`SELECT` too, and it is the one that would be worst: a mailbox that
+        does not exist answers `NO`, which `wait_reachable` would have read as a
+        server that is ready."""
+        with pytest.raises(mail.MailUnavailable, match="SELECT"):
+            _session(_RefusingConnection("select")).uids("Archive")
+
+
+class TestTheSessionReadsTheFolderItWasOpenedOn:
+    def test_a_method_with_no_folder_uses_the_sessions_own(self):
+        """Not a hardcoded INBOX. A session opened on another folder would
+        otherwise read — and `purge` would expunge — the wrong one, and then
+        retarget itself, since `_select` reassigns."""
+        connection = _RefusingConnection("select")
+        session = _session(connection)
+        session.folder = "Archive"
+
+        assert session.uids() == [1, 2, 3]
+        assert session.folder == "Archive"
+
+
 class TestComposeEnvIsSeparateFromConfigEnv:
     """Two maps, two rules, and conflating them would cost the tier its honesty.
 
@@ -203,6 +308,34 @@ class TestComposeEnvIsSeparateFromConfigEnv:
     about istota and appear in no shipped file. The guards below are what keep
     one from being smuggled in as the other.
     """
+
+    def test_no_compose_env_name_is_one_either_shipped_file_knows(self, tmp_path):
+        """The other direction of the two-file rule, which nothing checked.
+
+        `TestConfigEnvNamesOnlyShippedVariables` requires every `config_env()`
+        name to be read by `render-config.sh` *and* passed by
+        `docker-compose.yml`. Nothing stopped the inverse: a name placed in
+        `compose_env()` also lands in the full shape's env-file, where compose
+        interpolates it into the container just as effectively — so a config
+        variable smuggled through that map would reach the daemon while skipping
+        the check that makes the tier honest. Both halves have to hold.
+        """
+        service = mail.serve(tmp_path / "mail")
+        generator = (REPO / "docker" / "istota" / "render-config.sh").read_text()
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+
+        for variable in service.compose_env():
+            assert not re.search(r"\$\{" + re.escape(variable) + r"[:}+-]", generator), (
+                f"{variable} is in compose_env() and the shipped generator reads "
+                "it; a variable that configures istota belongs in config_env(), "
+                "where the two-file guard can see it"
+            )
+            assert not re.search(
+                r"^\s+" + re.escape(variable) + r":", compose, re.MULTILINE
+            ), (
+                f"{variable} is in compose_env() and docker-compose.yml passes "
+                "it into the container; same reason"
+            )
 
     def test_a_service_may_not_claim_a_variable_another_already_set(self, tmp_path):
         service = mail.serve(tmp_path / "mail")
@@ -272,15 +405,24 @@ class TestPublishedPort:
 
         assert self._stack().published_port("mail", 993) == 54321
 
-    def test_it_takes_the_first_of_several_interfaces(self, monkeypatch):
-        """A port published on more than one interface answers with a line each.
-        Either reaches the same container, so the first will do — but reading
-        the whole block as one string would not."""
-        monkeypatch.setattr(
-            stack_support.subprocess,
-            "run",
-            self._answering("127.0.0.1:54321\n[::1]:54321\n"),
-        )
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "127.0.0.1:54321\n[::1]:60000\n",
+            "[::1]:60000\n127.0.0.1:54321\n",
+        ],
+    )
+    def test_it_takes_the_ipv4_binding_whichever_line_it_is_on(
+        self, monkeypatch, answer
+    ):
+        """A port published on more than one interface answers with a line each,
+        and Docker does not always give them the same host port.
+
+        Every caller pairs the answer with a hardcoded `127.0.0.1`, so picking
+        the v6 line hands back a port nothing is listening on there. The two
+        orderings are both here because "take the first" passes one of them.
+        """
+        monkeypatch.setattr(stack_support.subprocess, "run", self._answering(answer))
 
         assert self._stack().published_port("mail", 993) == 54321
 
@@ -294,10 +436,15 @@ class TestPublishedPort:
         with pytest.raises(stack_support.StackError, match="which host port"):
             self._stack().published_port("mail", 993)
 
-    def test_an_answer_that_is_not_an_address_is_refused(self, monkeypatch):
-        monkeypatch.setattr(
-            stack_support.subprocess, "run", self._answering("no such service\n")
-        )
+    @pytest.mark.parametrize("answer", ["no such service\n", "0.0.0.0:0\n"])
+    def test_an_answer_that_is_not_a_usable_port_is_refused(self, monkeypatch, answer):
+        """A non-number, and zero.
 
-        with pytest.raises(stack_support.StackError, match="does not end in a port"):
+        Compose has printed `0.0.0.0:0` for a port it did not map. That parses,
+        and the caller then connects to port 0 — a refused connection several
+        layers from the overlay that forgot to publish it.
+        """
+        monkeypatch.setattr(stack_support.subprocess, "run", self._answering(answer))
+
+        with pytest.raises(stack_support.StackError, match="not a host port"):
             self._stack().published_port("mail", 993)

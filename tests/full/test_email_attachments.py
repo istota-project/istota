@@ -48,6 +48,21 @@ SCRIPT = [{"text": json.dumps({"body": ANSWER, "format": "plain"})}] * 4
 
 ATTACHMENT_BODY = b"the bytes that arrived by email\n"
 
+#: A clean verdict from the authserv-id this profile configured, and a failing
+#: one.
+#:
+#: The `full` profile runs `confirm_sender_match = "verify"`, so a sender
+#: claiming the user's own address is proof only when the receiving MTA says so.
+#: Every scenario here writes `From: testuser@ext.test`, which is that claim, so
+#: without a passing stamp the mail is held for confirmation and never
+#: completes. Maddy passes an inbound `Authentication-Results` through verbatim,
+#: which is what makes writing one from a test mean anything.
+PASSING_STAMP = {
+    "Authentication-Results": "mail; spf=pass smtp.mailfrom=ext.test; "
+    "dkim=pass; dmarc=pass header.from=ext.test"
+}
+FAILING_STAMP = {"Authentication-Results": "mail; dmarc=fail header.from=ext.test"}
+
 
 def _wait_for_email_task(stack, *, status: str = "completed", timeout: float = 300):
     """The newest email task above this test's watermark.
@@ -64,19 +79,27 @@ def _wait_for_email_task(stack, *, status: str = "completed", timeout: float = 3
     )
 
 
-def _wait_for_dav(nextcloud, path: str, *, timeout: float = 60) -> list[str]:
-    """Poll a WebDAV collection until it is non-empty, or give up.
+def _wait_for_dav(
+    nextcloud, path: str, name: str, *, timeout: float = 60
+) -> list[str]:
+    """Poll a WebDAV collection until it holds `name`, and answer the listing.
 
     Nextcloud serves a file written underneath it by the next PROPFIND of the
     parent, with no rescan — measured in Stage 5. The poll is for the write
     itself: the task is terminal before the daemon has necessarily finished
     every transaction around it.
+
+    **The exit condition is the file, not "the collection is non-empty."** That
+    directory is not cleared between tests and `/mnt/shared` survives a session
+    under `ISTOTA_TESTBED_KEEP`, so an earlier scenario's file makes a
+    non-empty check return on the first poll — turning the wait into a no-op
+    and the assertion into a race that happens to pass on the ordering.
     """
     deadline = time.monotonic() + timeout
     listing: list[str] = []
     while True:
         listing = nextcloud.files(path, user=nextcloud.bot_user)
-        if listing:
+        if any(entry.endswith(name) for entry in listing):
             return listing
         if time.monotonic() >= deadline:
             return listing
@@ -93,9 +116,10 @@ class TestAnAttachmentReachesTheUsersInboxTree:
 
         service.send(
             from_addr=USER_ADDRESS,
-            to_addr=f"bot+{USER_ID}@bot.test",
+            to_addr=mail.tagged(USER_ID),
             subject="the quarterly numbers",
             body="attached, as promised",
+            headers=PASSING_STAMP,
             attachments=[(name, "text/plain", ATTACHMENT_BODY)],
         )
         task = _wait_for_email_task(stack)
@@ -105,7 +129,7 @@ class TestAnAttachmentReachesTheUsersInboxTree:
         # Nextcloud's side. The on-disk path and the DAV path differ by exactly
         # that prefix.
         inbox = f"{BOT_MOUNT_POINT}/Users/{USER_ID}/inbox"
-        listing = _wait_for_dav(nextcloud, inbox)
+        listing = _wait_for_dav(nextcloud, inbox, name)
         stored = [entry for entry in listing if entry.endswith(name)]
         assert stored, (
             f"nothing named {name!r} under {inbox!r}; the directory holds "
@@ -131,9 +155,10 @@ class TestAnAttachmentReachesTheUsersInboxTree:
 
         service.send(
             from_addr=USER_ADDRESS,
-            to_addr=f"bot+{USER_ID}@bot.test",
+            to_addr=mail.tagged(USER_ID),
             subject="one invoice",
             body="attached",
+            headers=PASSING_STAMP,
             attachments=[(name, "application/pdf", b"%PDF-1.4 not really\n")],
         )
         task = _wait_for_email_task(stack)
@@ -158,6 +183,12 @@ class TestTheEmailSettingsCompose:
     host and every variable it reads is reachable, so the gap this closes does
     not exist there. `render-config.sh` read both and compose passed neither, so
     an operator setting either in `docker/.env` silently got the default.
+
+    **Both values are ones the shell default is not**, and that is the point of
+    choosing them. `authserv_id` defaults to empty and `confirm_sender_match` to
+    `off`, so a profile asking for `off` would render the same line with the
+    compose hunk reverted and this class would pass against the defect it exists
+    to catch. The profile asks for `verify`, which nothing else can produce.
     """
 
     @pytest.mark.profile("full")
@@ -166,12 +197,70 @@ class TestTheEmailSettingsCompose:
         assert rendered.returncode == 0, rendered.stderr
 
         assert 'authserv_id = "mail"' in rendered.stdout, (
-            "the container rendered no authserv_id, so ISTOTA_EMAIL_AUTHSERV_ID "
-            "did not reach the generator"
+            "the container rendered an empty authserv_id, so "
+            "ISTOTA_EMAIL_AUTHSERV_ID did not reach the generator"
         )
-        assert 'confirm_sender_match = "off"' in rendered.stdout, (
-            "the container rendered no confirm_sender_match, so "
+        assert 'confirm_sender_match = "verify"' in rendered.stdout, (
+            "the container rendered the shell default, so "
             "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH did not reach the generator"
+        )
+
+
+class TestTheSelfClaimGateOnTheDeployedShape:
+    """`verify`, doing the thing it exists for, in the artifact.
+
+    The behavioural half of the class above, and the stronger of the two: it
+    cannot pass with the compose hunk reverted for a reason that has nothing to
+    do with reading a file. Under the shell default (`off`) a `From:` naming the
+    user's own address is proof on its own, so both messages below would run.
+    Under `verify` the verdict decides, and the pair differs only in the header
+    the receiving MTA wrote.
+
+    Neither claim is reachable on the lean shape: `verify` refuses to start
+    without an `authserv_id`, and that is the other variable compose was
+    dropping.
+    """
+
+    @pytest.mark.profile("full")
+    @pytest.mark.script(SCRIPT)
+    def test_a_self_claim_the_mta_did_not_authenticate_is_held(self, stack):
+        service: mail.MailService = stack.service("mail")
+        service.send(
+            from_addr=USER_ADDRESS,
+            to_addr=mail.tagged(USER_ID),
+            subject="unauthenticated self-claim",
+            body="I am you, honestly",
+            headers=FAILING_STAMP,
+        )
+
+        task = _wait_for_email_task(stack, status="pending_confirmation")
+
+        assert task["status"] == "pending_confirmation", (
+            "a self-claiming message with a dmarc=fail stamp ran without being "
+            f"asked about; the gate is not in `verify`\n{stack.diagnostics(task)}"
+        )
+        assert task["confirmation_prompt"]
+
+    @pytest.mark.profile("full")
+    @pytest.mark.script(SCRIPT)
+    def test_a_self_claim_the_mta_authenticated_runs(self, stack):
+        """The other half of the pair, and the reason the first one means
+        something: `verify` that held everything would be indistinguishable from
+        `gate`, and the failing case above would pass under it."""
+        service: mail.MailService = stack.service("mail")
+        service.send(
+            from_addr=USER_ADDRESS,
+            to_addr=mail.tagged(USER_ID),
+            subject="authenticated self-claim",
+            body="I am you, and the MTA agrees",
+            headers=PASSING_STAMP,
+        )
+
+        task = _wait_for_email_task(stack, status="completed")
+
+        assert task["status"] == "completed", (
+            "a self-claiming message with a clean dmarc=pass stamp was held; "
+            f"`verify` is behaving like `gate`\n{stack.diagnostics(task)}"
         )
 
     @pytest.mark.profile("full")

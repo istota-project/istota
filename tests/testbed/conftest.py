@@ -31,6 +31,7 @@ covers.
 from __future__ import annotations
 
 import os
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,7 +54,7 @@ USER_ADDRESS = "testuser@ext.test"
 
 #: The plus-address the bot publishes for that user. Maddy rewrites every
 #: recipient `*@bot.test` to the single bot mailbox, so this needs no account.
-USER_TAG_ADDRESS = f"bot+{USER_ID}@bot.test"
+USER_TAG_ADDRESS = mail.tagged(USER_ID)
 
 
 @pytest.fixture(scope="session")
@@ -72,6 +73,16 @@ def mail_server(pytestconfig, tmp_path_factory):
     supplied from outside the application rather than by adding a knob inside
     it. `create_default_context` reads the variable at call time, so setting it
     here reaches every context any code under test builds afterwards.
+
+    **`SSL_CERT_DIR` goes with it**, for the reason `testbed/compose/mail/
+    mail.yml` records after measuring it in the container: `SSL_CERT_FILE`
+    alone *replaces* the trust store rather than adding to it, so everything
+    else in the same process loses every public CA. Nothing in this tier makes
+    an outbound HTTPS request today, but the variable is process-wide and the
+    session is not isolated — one `-m "testbed or smoke"` invocation, or a
+    future case that fetches anything, and the symptom is `UnknownIssuer` from
+    somewhere unrelated. The platform default keeps the rest of the store
+    reachable by subject hash.
     """
     _require_no_xdist(pytestconfig)
     require_docker()
@@ -81,15 +92,20 @@ def mail_server(pytestconfig, tmp_path_factory):
     except mail.MailUnavailable as exc:
         pytest.skip(str(exc))
 
-    previous = os.environ.get("SSL_CERT_FILE")
-    os.environ["SSL_CERT_FILE"] = str(running.server.ca_file)
+    added = {"SSL_CERT_FILE": str(running.server.ca_file)}
+    capath = ssl.get_default_verify_paths().capath
+    if capath:
+        added["SSL_CERT_DIR"] = capath
+    previous = {name: os.environ.get(name) for name in added}
+    os.environ.update(added)
     try:
         yield running.server
     finally:
-        if previous is None:
-            os.environ.pop("SSL_CERT_FILE", None)
-        else:
-            os.environ["SSL_CERT_FILE"] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         running.close()
 
 
@@ -104,7 +120,7 @@ class Wire:
     def send(self, **kwargs) -> str:
         """Put a message into the bot's mailbox. Returns its `Message-ID`.
 
-        Defaults to `To: bot+testuser@bot.test`, the plus-address rung, because
+        Defaults to the plus-address rung (`bot+testuser@bot.test`), because
         that is what most cases want as their *background*; a case about a
         different rung overrides it.
         """

@@ -606,10 +606,18 @@ class TestOutboundReplyHeaders:
 
     Asserting on the returned `Message-ID` alone would prove nothing about the
     headers, and those are what a correspondent's client threads on.
+
+    Accumulation is *not* this function's job and the cases say so. The caller
+    concatenates the parent's `References` and `Message-ID` — `outbound.py:543`
+    on the scheduler path, `cmd_reply` on the skill path — and hands the result
+    down. What is pinned here is that whatever it was handed reaches the wire
+    intact, plus the one thing this function does decide for itself: what
+    `References` is when the caller supplies none.
     """
 
-    def test_a_reply_carries_in_reply_to_and_an_accumulated_references(self, wire):
-        email_config = EmailConfig(
+    @pytest.fixture
+    def email_config(self, wire) -> EmailConfig:
+        return EmailConfig(
             imap_host=wire.server.host,
             imap_port=wire.server.imap_starttls_port,
             imap_user=mail.BOT_ADDRESS,
@@ -618,6 +626,16 @@ class TestOutboundReplyHeaders:
             smtp_port=wire.server.smtp_starttls_port,
         )
 
+    def test_the_chain_the_caller_built_reaches_the_wire_intact(
+        self, wire, email_config
+    ):
+        """A `References` that does *not* already contain the `In-Reply-To`.
+
+        Deliberately not the shape a caller usually builds, where the last
+        reference and the in-reply-to are the same id: with that input a
+        function that dropped one of the two headers, or that recomputed
+        `References` from `In-Reply-To`, would still look right.
+        """
         new_id = reply_to_email(
             to_addr=STRANGER,
             subject="Quarterly",
@@ -625,7 +643,7 @@ class TestOutboundReplyHeaders:
             config=email_config,
             from_addr=mail.BOT_ADDRESS,
             in_reply_to="<theirs@x.test>",
-            references="<first@x.test> <theirs@x.test>",
+            references="<first@x.test> <second@x.test>",
         )
 
         with wire.outbox() as session:
@@ -634,7 +652,48 @@ class TestOutboundReplyHeaders:
         reply = delivered[0]
         assert reply.message_id == new_id
         assert reply.in_reply_to == "<theirs@x.test>"
-        assert reply.references == "<first@x.test> <theirs@x.test>"
+        assert reply.references == "<first@x.test> <second@x.test>"
+        assert reply.subject == "Re: Quarterly"
+
+    def test_an_absent_references_falls_back_to_the_in_reply_to(
+        self, wire, email_config
+    ):
+        """The branch this function owns.
+
+        A first reply on a thread has nothing to accumulate, and a message with
+        `In-Reply-To` and no `References` threads in fewer clients than one with
+        both. So the fallback is behaviour rather than tidiness, and it has no
+        witness anywhere else.
+        """
+        reply_to_email(
+            to_addr=STRANGER,
+            subject="Quarterly",
+            body="answered",
+            config=email_config,
+            from_addr=mail.BOT_ADDRESS,
+            in_reply_to="<theirs@x.test>",
+        )
+
+        with wire.outbox() as session:
+            reply = session.fetch_new_since(0)[0]
+        assert reply.in_reply_to == "<theirs@x.test>"
+        assert reply.references == "<theirs@x.test>"
+
+    def test_a_subject_that_is_already_a_reply_gains_no_second_prefix(
+        self, wire, email_config
+    ):
+        """`Re: Re: Quarterly` is what a naive prefix produces on a long thread,
+        and it is what the ledger's `normalize_subject` then has to undo."""
+        reply_to_email(
+            to_addr=STRANGER,
+            subject="Re: Quarterly",
+            body="answered",
+            config=email_config,
+            from_addr=mail.BOT_ADDRESS,
+        )
+
+        with wire.outbox() as session:
+            reply = session.fetch_new_since(0)[0]
         assert reply.subject == "Re: Quarterly"
 
 

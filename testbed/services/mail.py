@@ -109,7 +109,11 @@ OVERLAY = CONF_DIR / "mail.yml"
 LOOPBACK = "127.0.0.1"
 
 READY_TIMEOUT = 60.0
-IMAP_TIMEOUT = 30.0
+
+#: Socket timeout for both protocols. Named for neither, because it bounds an
+#: IMAP fetch and an SMTP submission alike and a name claiming one would be
+#: wrong at the other call site.
+NETWORK_TIMEOUT = 30.0
 
 
 class MailUnavailable(RuntimeError):
@@ -125,6 +129,22 @@ class MailUnavailable(RuntimeError):
 def mail_image() -> str:
     """The image to run, honouring the override."""
     return os.environ.get(MAIL_IMAGE_ENV) or MAIL_IMAGE
+
+
+def tagged(user_id: str) -> str:
+    """The plus-address the bot publishes for one user.
+
+    Derived from `BOT_ADDRESS` rather than spelled out at each call site, so a
+    change to the bot's domain does not leave a scenario mailing an address the
+    server funnels into the catch-all — which presents as mail that produced no
+    task, i.e. as a routing defect.
+
+    Needs no account: the server rewrites every recipient at the bot's domain to
+    the one real mailbox, and only the envelope recipient is rewritten, so the
+    `To:` header istota routes on arrives exactly as written.
+    """
+    local, _, domain = BOT_ADDRESS.partition("@")
+    return f"{local}+{user_id}@{domain}"
 
 
 # -- the driver -------------------------------------------------------------
@@ -288,11 +308,33 @@ def send(
     # refused by a conforming server, and the 8-bit body is one of the cases.
     options = [] if raw.isascii() else ["BODY=8BITMIME"]
     with smtplib.SMTP_SSL(
-        server.host, server.smtp_port, context=server.context(), timeout=IMAP_TIMEOUT
+        server.host, server.smtp_port, context=server.context(), timeout=NETWORK_TIMEOUT
     ) as client:
         client.login(*auth)
         client.sendmail(from_addr, [to_addr], raw, mail_options=options)
     return message["Message-ID"]
+
+
+def _expect_ok(answer, what: str, account: str):
+    """Raise unless the server said `OK`, and return the payload.
+
+    **imaplib raises on `BAD` and returns on `NO`**, which is the trap this
+    module has to close in five places. A `NO` to `SEARCH` reads as an empty
+    mailbox, a `NO` to `STORE` reads as a successful purge, and a `NO` to
+    `SELECT` reads as a mailbox that exists — so every negative assertion in the
+    wire tier ("no reply was sent", "the mailbox still holds three messages")
+    would pass against a server that refused the command. That is the exact
+    shape of failure this whole tier exists to stop: a probe whose success is
+    indistinguishable from a no-op.
+    """
+    typ, data = answer
+    if typ != "OK":
+        raise MailUnavailable(
+            f"{what} as {account} answered {typ}: {data!r}. imaplib returns "
+            "rather than raising on a NO, so this would otherwise read as an "
+            "empty or successfully-emptied mailbox."
+        )
+    return data
 
 
 class ImapSession:
@@ -319,14 +361,27 @@ class ImapSession:
         self._conn: imaplib.IMAP4_SSL | None = None
 
     def __enter__(self) -> "ImapSession":
-        self._conn = imaplib.IMAP4_SSL(
+        conn = imaplib.IMAP4_SSL(
             self.server.host,
             self.server.imap_port,
             ssl_context=self.server.context(),
-            timeout=IMAP_TIMEOUT,
+            timeout=NETWORK_TIMEOUT,
         )
-        self._conn.login(self.account, self.password)
-        self._conn.select(self.folder)
+        # Closed by hand on a failure after the socket is open, because
+        # `__exit__` never runs when `__enter__` raises. `wait_reachable` can
+        # drive this path a hundred times over its wait, and leaving each socket
+        # to refcount collection is the kind of thing that works on CPython
+        # right up until it does not.
+        try:
+            conn.login(self.account, self.password)
+            _expect_ok(conn.select(self.folder), f"SELECT {self.folder}", self.account)
+        except BaseException:
+            try:
+                conn.shutdown()
+            except Exception:  # pragma: no cover - cleanup is best effort
+                logger.debug("closing a half-open IMAP session raised")
+            raise
+        self._conn = conn
         return self
 
     def __exit__(self, *exc) -> None:
@@ -344,22 +399,37 @@ class ImapSession:
             raise RuntimeError("ImapSession is not entered")
         return self._conn
 
-    def _select(self, folder: str) -> imaplib.IMAP4_SSL:
+    def _select(self, folder: str | None) -> imaplib.IMAP4_SSL:
+        """Switch folders if asked to, and answer the connection.
+
+        `None` means "the one this session was opened on". Every public method
+        defaults to `None` rather than to `"INBOX"`, which is the difference
+        between a session constructed as `ImapSession(server, folder="Archive")`
+        reading what it was told to and silently expunging INBOX on its first
+        call — and then retargeting itself, since this reassigns `self.folder`.
+        """
         conn = self._connection()
-        if folder != self.folder:
-            conn.select(folder)
-            self.folder = folder
+        wanted = self.folder if folder is None else folder
+        if wanted != self.folder:
+            _expect_ok(conn.select(wanted), f"SELECT {wanted}", self.account)
+            self.folder = wanted
         return conn
 
-    def uids(self, folder: str = "INBOX") -> list[int]:
-        """Every UID in the folder, ascending."""
+    def uids(self, folder: str | None = None) -> list[int]:
+        """Every UID in the folder, ascending.
+
+        A refused `SEARCH` raises rather than answering `[]`. Every negative
+        assertion in the wire tier reads through this — "no reply was sent",
+        "the throttled message is still in the mailbox" — and an empty list on
+        a server error makes all of them pass for free.
+        """
         conn = self._select(folder)
-        typ, data = conn.uid("search", None, "ALL")
-        if typ != "OK" or not data or not data[0]:
+        data = _expect_ok(conn.uid("search", None, "ALL"), "UID SEARCH", self.account)
+        if not data or not data[0]:
             return []
         return sorted(int(raw) for raw in data[0].split())
 
-    def latest_uid(self, folder: str = "INBOX") -> int:
+    def latest_uid(self, folder: str | None = None) -> int:
         """The highest UID present, or 0 for an empty folder.
 
         0 rather than `None`, because every caller uses it as "everything after
@@ -368,7 +438,9 @@ class ImapSession:
         found = self.uids(folder)
         return found[-1] if found else 0
 
-    def fetch_new_since(self, uid: int, folder: str = "INBOX") -> list[ReceivedMessage]:
+    def fetch_new_since(
+        self, uid: int, folder: str | None = None
+    ) -> list[ReceivedMessage]:
         """Every message with a UID strictly greater than `uid`."""
         conn = self._select(folder)
         return [self._fetch(conn, found) for found in self.uids(folder) if found > uid]
@@ -379,7 +451,7 @@ class ImapSession:
         *,
         timeout: float,
         poll_interval: float = 1.0,
-        folder: str = "INBOX",
+        folder: str | None = None,
     ) -> list[ReceivedMessage]:
         """Block until something arrives after `uid`, or return empty at timeout.
 
@@ -396,7 +468,7 @@ class ImapSession:
                 return []
             time.sleep(poll_interval)
 
-    def purge(self, folder: str = "INBOX") -> int:
+    def purge(self, folder: str | None = None) -> int:
         """Mark every message `\\Deleted` and expunge. Returns the count.
 
         What makes the wire suite order-independent without recreating the
@@ -404,13 +476,33 @@ class ImapSession:
         still gets a higher one — so a poll cursor stored against this mailbox
         stays valid across a purge, which is exactly the property a session
         holding both a mailbox and a database needs.
+
+        **Both commands' answers are checked, and the result is read back.**
+        This is the only isolation mechanism the mail tiers have — the wire
+        fixture and `MailService.reset()` both come through here — so a purge
+        that reported success having removed nothing hands the next test the
+        previous one's mailbox, and the symptom is a scenario asserting on a
+        message it did not send. `STORE` is legal in `SELECTED`, so a refusal
+        arrives as a `NO` rather than an exception.
         """
         conn = self._select(folder)
         present = self.uids(folder)
         if not present:
             return 0
-        conn.uid("store", ",".join(str(uid) for uid in present), "+FLAGS", "(\\Deleted)")
-        conn.expunge()
+        _expect_ok(
+            conn.uid(
+                "store", ",".join(str(uid) for uid in present), "+FLAGS", "(\\Deleted)"
+            ),
+            "UID STORE +FLAGS (\\Deleted)",
+            self.account,
+        )
+        _expect_ok(conn.expunge(), "EXPUNGE", self.account)
+        remaining = self.uids(folder)
+        if remaining:
+            raise MailUnavailable(
+                f"purging {self.account} left {len(remaining)} message(s) "
+                f"behind ({remaining}); the next test would read them as its own"
+            )
         return len(present)
 
     def _fetch(self, conn: imaplib.IMAP4_SSL, uid: int) -> ReceivedMessage:
@@ -445,11 +537,16 @@ class ImapSession:
             in_reply_to=headers.get("In-Reply-To"),
             references=headers.get("References"),
             sender=headers.get("From", ""),
+            # `getaddresses`, not a comma split: a display name may legally
+            # contain one (`"Doe, John" <j@x.test>`), and a split turns one
+            # recipient into two bogus ones. Nothing reads this yet, which is
+            # the argument for getting it right before something does.
             recipients=[
-                address.strip()
-                for header in ("To", "Cc")
-                for address in headers.get(header, "").split(",")
-                if address.strip()
+                address
+                for _, address in email.utils.getaddresses(
+                    [headers.get(header, "") for header in ("To", "Cc")]
+                )
+                if address
             ],
             subject=str(parsed.get("Subject", "")),
             body_text=_text_body(parsed),
@@ -457,8 +554,6 @@ class ImapSession:
         )
 
 
-def _optional(value) -> str | None:
-    return None if value is None else str(value)
 
 
 def _text_body(message) -> str:
@@ -520,16 +615,30 @@ class StandaloneMail:
     _closed: bool = False
 
     def close(self) -> None:
-        """Remove the container. Idempotent."""
+        """Remove the container. Idempotent, and never raises.
+
+        Two orderings that look like details and are not. The flag is set
+        *after* a successful removal, so a `docker` that timed out can be
+        retried rather than being recorded as closed with the container still
+        running. And nothing propagates: `run_standalone` calls this from an
+        `except BaseException: … raise` block, so a raise here would replace the
+        `MailUnavailable` the fixture translates into a skip with an unrelated
+        teardown error — turning "Docker is not available" into a red run.
+        """
         if self._closed:
             return
+        try:
+            subprocess.run(
+                ["docker", "rm", "--force", "--volumes", self.container],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001 - teardown never raises
+            logger.warning("could not remove the mail container %s: %s",
+                           self.container, exc)
+            return
         self._closed = True
-        subprocess.run(
-            ["docker", "rm", "--force", "--volumes", self.container],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
 
     def __enter__(self) -> "StandaloneMail":
         return self
