@@ -25,15 +25,13 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
     The NC app reads ``config/status.json`` from the bot user's file tree
     (via ``IRootFolder::getUserFolder``), so we PUT it there directly.
 
-    ``config`` here is a path at the *storage root*, alongside ``Users/`` and
-    ``Channels/``, so ``[nextcloud] dav_prefix`` applies to it like any other.
-    On the rclone-mount deploy the storage root and the account's file tree are
-    the same directory and the two readings coincide. Where they do not — a
-    deployment whose storage root is an external-storage mount — this lands on
-    the mount rather than at the account root, and an NC app resolving the path
-    through ``getUserFolder`` would not find it. Stated rather than special-cased:
-    no such deployment installs that app today, and the alternative is a second
-    path vocabulary in the one place that would need it.
+    That is why it is one of the two callers passing ``prefixed=False``. The
+    subject here is the *account* root, not the daemon's storage root, and on a
+    deployment where those differ — one reaching its storage through an
+    external-storage mount — the prefixed path lands on the mount, where
+    ``getUserFolder`` does not look, and ``MKCOL config`` leaves a stray
+    directory on the volume next to ``Users/`` and ``Channels/``. On the
+    rclone-mount deploy the two are the same directory and nothing changes.
     """
     nc = config.nextcloud
     if not nc.url or not nc.username:
@@ -65,14 +63,14 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
         dav_request(
             config,
             "MKCOL",
-            dav_files_url(config, "config"),
+            dav_files_url(config, "config", prefixed=False),
             timeout=10.0,
             ok_statuses=(201, 405),
         )
         dav_request(
             config,
             "PUT",
-            dav_files_url(config, "config/status.json"),
+            dav_files_url(config, "config/status.json", prefixed=False),
             content=json.dumps(status, indent=2),
             headers={"Content-Type": "application/json"},
             timeout=10.0,

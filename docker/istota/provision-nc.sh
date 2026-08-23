@@ -70,7 +70,8 @@ if [ -n "$MOUNT_ID" ] && [ "$MOUNT_ID" -gt 0 ] 2>/dev/null; then
     # share of everything under /mnt/shared — the bot's whole workspace. Without
     # this the bot cannot share a file it produced with anyone and the nextcloud
     # skill's `share link` verb is dead on this deployment.
-    $OCC files_external:option "${MOUNT_ID}" enable_sharing true
+    $OCC files_external:option "${MOUNT_ID}" enable_sharing true \
+        || echo "[istota-provision] Warning: could not enable sharing on mount ${MOUNT_ID}; the bot will not be able to share its own files."
     echo "[istota-provision] External storage mount ${MOUNT_ID} created for ${BOT_USER}"
 else
     echo "[istota-provision] Warning: could not create external storage mount for bot."
@@ -90,7 +91,8 @@ if [ -n "$USER_MOUNT_ID" ] && [ "$USER_MOUNT_ID" -gt 0 ] 2>/dev/null; then
     $OCC files_external:applicable --add-user "${USER_NAME}" "${USER_MOUNT_ID}"
     # Same default, same reason, other direction: without it the user cannot
     # share anything out of their own view of the bot workspace.
-    $OCC files_external:option "${USER_MOUNT_ID}" enable_sharing true
+    $OCC files_external:option "${USER_MOUNT_ID}" enable_sharing true \
+        || echo "[istota-provision] Warning: could not enable sharing on mount ${USER_MOUNT_ID}; ${USER_NAME} will not be able to share out of the workspace."
     echo "[istota-provision] External storage mount ${USER_MOUNT_ID} created for ${USER_NAME}"
 fi
 

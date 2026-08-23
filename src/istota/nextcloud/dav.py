@@ -24,6 +24,7 @@ from ._http import (
     dav_files_url,
     dav_prefix,
     dav_request,
+    from_remote_path,
     nc_base_url,
     nc_configured,
 )
@@ -93,38 +94,52 @@ def uploads_url(config: Config, upload_id: str, part: str = "") -> str:
     return f"{base}/{quote(part, safe='')}" if part else base
 
 
-def _prefix_tail(config: Config) -> str:
-    """``/<dav_prefix>`` when one is configured, otherwise nothing.
-
-    Both callers below name the root of the bot's *logical* storage, which is
-    the account's own file tree plus the mount the storage root sits in. So
-    both take the prefix, and `href_to_path` strips it back off for free —
-    which is what keeps a listing in the logical `/Users/{uid}` vocabulary the
-    skill and `resolve_scoped_path` speak.
-    """
-    prefix = dav_prefix(config)
-    return f"/{prefix}" if prefix else ""
-
-
 def _files_prefix(config: Config) -> str:
-    """Absolute path prefix of the bot's file tree, as it appears in a href."""
-    return f"/remote.php/dav/files/{config.nextcloud.username}{_prefix_tail(config)}"
+    """Absolute path prefix of the bot's *account* tree, as a href carries it.
+
+    Deliberately without `dav_prefix`: `href_to_path` takes this off first and
+    then hands the remainder to `from_remote_path`, so the "is it inside our
+    mount?" question is asked once, in the one place that answers it.
+    """
+    return f"/remote.php/dav/files/{config.nextcloud.username}"
 
 
 def _dav_scope_prefix(config: Config) -> str:
-    """The same tree, relative to the DAV root — what a SEARCH scope wants."""
-    return f"/files/{config.nextcloud.username}{_prefix_tail(config)}"
+    """The bot's *storage* root, relative to the DAV root — what SEARCH wants.
+
+    This one does carry the prefix. A scope is an outbound path, so it names
+    where the logical tree actually lives.
+    """
+    prefix = dav_prefix(config)
+    root = f"/files/{config.nextcloud.username}"
+    return f"{root}/{prefix}" if prefix else root
 
 
 def href_to_path(config: Config, href: str) -> str:
-    """A multistatus href back to a Nextcloud path (``/Users/alice/a.txt``)."""
+    """A multistatus href back to a Nextcloud path (``/Users/alice/a.txt``).
+
+    Two steps, because they answer different questions. The account segment
+    comes off first, leaving a path in the bot's own file tree; then
+    ``from_remote_path`` takes off the storage-root prefix, if the path is
+    under it. A href that is *not* under the mount — a sibling collection, a
+    file at the account root — keeps its account-tree path rather than being
+    half-stripped into nonsense.
+
+    Both matches are boundary-aware. A bare ``startswith`` strips the prefix off
+    anything whose name merely begins with it: an href under a collection named
+    ``Shared Files Backup`` came back as ``/ Backup/…``, a plausible-looking
+    wrong path rather than an error. That mattered less while the only prefix
+    was the account name; the mount point is a value an operator types.
+    """
     raw = unquote(urlparse(href).path)
     prefix = _files_prefix(config)
-    if raw.startswith(prefix):
+    if raw == prefix:
+        raw = "/"
+    elif raw.startswith(prefix + "/"):
         raw = raw[len(prefix):]
     if not raw.startswith("/"):
         raw = "/" + raw
-    return raw.rstrip("/") or "/"
+    return from_remote_path(config, raw.rstrip("/") or "/")
 
 
 # --- PROPFIND parsing ---
@@ -299,8 +314,15 @@ def build_search_body(
     # URL (/remote.php/dav/), so it must NOT repeat that prefix — including it
     # makes Sabre look for a collection literally named "remote.php" and answer
     # 404 for every search.
+    #
+    # Percent-encoded, like the URL builder does, and not only XML-escaped. An
+    # href is a URI reference: a raw space in one is invalid, and `#` or `?`
+    # would truncate it at the fragment or query. This went unnoticed while the
+    # only way to get such a character in was a user's own file name; the
+    # `dav_prefix` mount point puts one in *every* search on a deployment whose
+    # mount is named "Shared Files".
     tail = scope if scope.startswith("/") else "/" + scope
-    scope_href = _escape_xml(f"{_dav_scope_prefix(config)}{tail}")
+    scope_href = _escape_xml(quote(f"{_dav_scope_prefix(config)}{tail}", safe="/"))
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -585,13 +607,22 @@ def set_favorite(
 
 
 def quota(config: Config, timeout: float = DAV_TIMEOUT) -> dict[str, Any]:
+    """Storage quota for the bot *account*, which is why it skips the prefix.
+
+    Every other verb here names a file, and `dav_prefix` maps a logical path to
+    where that file lives. This one names no file: it asks Nextcloud what the
+    account has left. Prefixed, it would PROPFIND the external-storage mount
+    instead and answer with the underlying filesystem's free space, or with the
+    `-3` a mount reports when it does not know — a different question, silently
+    substituted.
+    """
     if not nc_configured(config):
         raise OcsError("Nextcloud is not configured", None, None, "quota")
 
     resp = dav_request(
         config,
         "PROPFIND",
-        dav_files_url(config, ""),
+        dav_files_url(config, "", prefixed=False),
         content=QUOTA_BODY,
         headers={"Content-Type": "application/xml", "Depth": "0"},
         timeout=timeout,

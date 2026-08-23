@@ -211,8 +211,13 @@ class TestASharedFile:
 
         assert share["share_with"] == nextcloud.test_user, share
         assert share["uid_owner"] == nextcloud.bot_user, share
-        assert share["path"] == f"/{BOT_MOUNT_POINT}/{name}", (
-            "the share was created somewhere other than the shared volume", share
+        # The server names the file inside the mount; the client hands the row
+        # back in the vocabulary its callers speak. Both halves matter — the
+        # `on_volume` check above is what proves it really is on the mount, and
+        # this is what proves the answer can be fed to another verb.
+        assert share["path"] == f"/{name}", (
+            "the share row leaked the mount point into a path the skill's own "
+            "verbs would then refuse", share
         )
 
         received = {
@@ -276,6 +281,49 @@ class TestASharedFile:
             "the skill did not find the file at its logical path, or answered "
             f"with a prefixed one: {listing}"
         )
+
+    def test_the_indexed_search_resolves_a_scope_inside_the_mount(self, stack):
+        """`files search` is the one verb whose path is an href in an XML body
+        rather than a URL, and the shipped mount point has a space in it.
+
+        A raw space in a `<d:href>` is not a valid URI reference, and until this
+        change the scope was XML-escaped and nothing more — a gap that could not
+        bite while the only way to get such a character in was a user naming a
+        file with one. Sabre resolves the scope relative to the SEARCH request
+        URL, so the whole verb either works here or answers 404 for everything;
+        nothing short of the real server settles which.
+        """
+        name = _unique("searchable") + ".txt"
+
+        _run(stack, (
+            "from istota import storage;"
+            f"p = pathlib.Path('/tmp/{name}');"
+            "p.write_text('indexed by the server, not walked over the mount');"
+            "print('REMOTE', storage.upload_file_to_inbox_v2(c, 'testuser', p))"
+        ))
+
+        answer = json.loads(_tagged(_run(stack, (
+            "import os, subprocess;"
+            "env = dict(os.environ,"
+            " NC_URL=c.nextcloud.url, NC_USER=c.nextcloud.username,"
+            " NC_PASS=c.nextcloud.app_password,"
+            " NC_DAV_PREFIX=c.nextcloud.dav_prefix,"
+            " ISTOTA_USER_ID='testuser');"
+            "env.pop('ISTOTA_SANDBOXED', None);"
+            "out = subprocess.run(['uv', 'run', 'python', '-m',"
+            " 'istota.skills.nextcloud', 'files', 'search',"
+            f" '--scope', '/Users/testuser', '--name', '{name}'],"
+            " capture_output=True, text=True, env=env);"
+            "print('SEARCH', json.dumps({'code': out.returncode,"
+            " 'stdout': out.stdout, 'stderr': out.stderr}))"
+        )), "SEARCH"))
+
+        assert answer["code"] == 0, answer
+        found = json.loads(answer["stdout"])
+        assert found["scope"] == "/Users/testuser", found
+        assert [
+            row["path"] for row in found["results"] if row["name"] == name
+        ] == [f"/Users/testuser/inbox/{name}"], found
 
 
 @FULL

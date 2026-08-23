@@ -39,6 +39,7 @@ from .nextcloud._http import (
     ocs_headers as _ocs_headers,
     to_remote_path as _to_remote_path,
 )
+from .nextcloud.shares import relabel as _relabel_share
 
 logger = logging.getLogger("istota.nextcloud_client")
 
@@ -157,7 +158,12 @@ def ocs_list_shares(
         params["path"] = _to_remote_path(config, path)
     if reshares:
         params["reshares"] = "true"
-    return ocs_get(config, _SHARES_PATH, params=params, timeout=timeout)
+    rows = ocs_get(config, _SHARES_PATH, params=params, timeout=timeout)
+    if rows is None:
+        return None
+    # Inverted on the way back for the same reason `shares.list_shares` does
+    # it: the skill reads these rows and speaks logical paths.
+    return [_relabel_share(config, row) for row in rows]
 
 
 def ocs_create_share(
@@ -187,7 +193,8 @@ def ocs_create_share(
         data["expireDate"] = expire_date
     if label is not None:
         data["label"] = label
-    return ocs_post(config, _SHARES_PATH, data=data, timeout=timeout)
+    result = ocs_post(config, _SHARES_PATH, data=data, timeout=timeout)
+    return _relabel_share(config, result) if isinstance(result, dict) else result
 
 
 def ocs_delete_share(config: Config, share_id: int, timeout: float = 10.0) -> bool:

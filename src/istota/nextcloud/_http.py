@@ -318,7 +318,14 @@ def to_remote_path(config: Config, path: str) -> str:
 
     The single mapping. Everything that hands Nextcloud a *file* path — the
     WebDAV URL builder below, the SEARCH scope href, the OCS share ``path``
-    field — goes through here, and ``dav.href_to_path`` is the inverse.
+    field — goes through here, and :func:`from_remote_path` is the inverse.
+
+    Two things it deliberately does not do. It does not normalize when no
+    prefix is configured: bare metal has to be byte-identical to what it sent
+    before this existed, and an OCS path filter matches literally. And it does
+    not resolve ``..`` on either branch — confining a caller-supplied path is
+    ``resolve_scoped_path``'s job, and everything that takes one from the model
+    has already been through it.
     """
     prefix = dav_prefix(config)
     if not prefix:
@@ -327,17 +334,52 @@ def to_remote_path(config: Config, path: str) -> str:
     return f"/{prefix}/{clean}" if clean else f"/{prefix}"
 
 
-def dav_files_url(config: Config, path: str = "", *, username: str | None = None) -> str:
+def from_remote_path(config: Config, path: str) -> str:
+    """The inverse: a path the server named, back in logical terms.
+
+    Needed wherever a path *returned* by Nextcloud is handed onwards, because
+    the client's callers speak one vocabulary. A share row saying
+    ``/Shared Files/Users/alice/x`` cannot be fed back to any verb
+    ``resolve_scoped_path`` guards — it is outside ``/Users/alice`` — and an
+    admin caller, for whom that check passes, would get it prefixed twice.
+
+    Anything not under the prefix is returned untouched, and the match is
+    boundary-aware: a sibling collection named ``Shared Files Backup`` is a
+    different directory, not a long ``Shared Files``.
+    """
+    prefix = dav_prefix(config)
+    if not prefix or not path:
+        return path
+    root = f"/{prefix}"
+    if path == root:
+        return "/"
+    if path.startswith(root + "/"):
+        return path[len(root):]
+    return path
+
+
+def dav_files_url(
+    config: Config,
+    path: str = "",
+    *,
+    username: str | None = None,
+    prefixed: bool = True,
+) -> str:
     """Absolute WebDAV URL for a path in the bot account's file tree.
 
     ``username`` addresses somebody else's tree, where the bot's own mount
-    point does not exist, so the prefix applies only to the bot's.
+    point does not exist, so the prefix applies only to the bot's — decided by
+    comparing the account rather than by whether the argument was passed, so
+    threading the bot's own name through explicitly still produces a prefixed
+    URL rather than a silently unprefixed one.
+
+    ``prefixed=False`` is for the two callers whose subject really is the
+    account root rather than the storage root: the quota query, and the status
+    file an in-Nextcloud app reads through ``getUserFolder``.
     """
-    if not username:
-        user = config.nextcloud.username
+    user = username or config.nextcloud.username
+    if prefixed and user == config.nextcloud.username:
         path = to_remote_path(config, path)
-    else:
-        user = username
     clean = (path or "").strip().lstrip("/")
     encoded = quote(clean, safe="/")
     base = f"{nc_base_url(config)}/remote.php/dav/files/{quote(user, safe='')}"

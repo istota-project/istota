@@ -28,6 +28,7 @@ what keeps bare metal and Ansible unchanged.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from pathlib import Path
@@ -129,6 +130,67 @@ class TestTheDavUrl:
             "https://cloud.example.com/remote.php/dav/files/alice/x.txt"
         )
 
+    def test_naming_the_bot_explicitly_still_prefixes(self):
+        """The rule is which account, not whether the argument was passed.
+        Threading the bot's own name through — the natural thing to write — must
+        not silently produce an unprefixed URL."""
+        from istota.nextcloud._http import dav_files_url
+
+        assert dav_files_url(_config(PREFIX), "/x.txt", username="istota") == (
+            "https://cloud.example.com/remote.php/dav/files/istota/"
+            "Shared%20Files/x.txt"
+        )
+
+    def test_the_account_root_can_be_addressed_on_purpose(self):
+        """`prefixed=False` is the opt-out the two account-level callers take."""
+        from istota.nextcloud._http import dav_files_url
+
+        assert dav_files_url(_config(PREFIX), "", prefixed=False) == (
+            "https://cloud.example.com/remote.php/dav/files/istota"
+        )
+
+
+class TestTheAccountLevelCallers:
+    """Two callers whose subject is the account, not the storage root.
+
+    Both were silently redirected onto the mount by a blanket prefix, and
+    neither would have failed loudly: the quota query answers with the
+    underlying filesystem's numbers, and the status file writes successfully to
+    a place nothing reads.
+    """
+
+    def test_quota_asks_the_account_not_the_mount(self):
+        from istota.nextcloud import dav
+
+        resp = MagicMock(status_code=207, text=(
+            '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response>'
+            "<d:propstat><d:prop><d:quota-available-bytes>10</d:quota-available-bytes>"
+            "<d:quota-used-bytes>5</d:quota-used-bytes></d:prop></d:propstat>"
+            "</d:response></d:multistatus>"
+        ))
+        with patch("istota.nextcloud._http.httpx.request", return_value=resp) as request:
+            assert dav.quota(_config(PREFIX))["total_bytes"] == 15
+
+        assert request.call_args[0][1] == (
+            "https://cloud.example.com/remote.php/dav/files/istota"
+        )
+
+    def test_the_status_file_goes_to_the_account_root(self):
+        """An in-Nextcloud app reads it through `getUserFolder`, which does not
+        look inside the mount — and a prefixed MKCOL would also leave a stray
+        `config/` on the shared volume beside `Users/` and `Channels/`."""
+        from istota import status_writer
+
+        resp = MagicMock(status_code=201, text="")
+        with patch("istota.nextcloud._http.httpx.request", return_value=resp) as request:
+            status_writer.write_status(_config(PREFIX), 0, 0, 0)
+
+        urls = [call[0][1] for call in request.call_args_list]
+        assert urls == [
+            "https://cloud.example.com/remote.php/dav/files/istota/config",
+            "https://cloud.example.com/remote.php/dav/files/istota/config/status.json",
+        ]
+
 
 class TestTheReturnTrip:
     """A path the server names has to come back as the logical one.
@@ -163,6 +225,24 @@ class TestTheReturnTrip:
             "/remote.php/dav/files/istota/Shared%20Files/Users/alice/a.txt",
         ) == "/Users/alice/a.txt"
 
+    def test_a_sibling_whose_name_merely_starts_with_it_is_left_alone(self):
+        """A bare `startswith` turned `Shared Files Backup/x` into `/ Backup/x`
+        — a plausible-looking wrong path, not an error. Tolerable while the
+        prefix was only the account name; the mount point is operator-typed."""
+        from istota.nextcloud.dav import href_to_path
+
+        assert href_to_path(
+            _config(PREFIX),
+            "/remote.php/dav/files/istota/Shared%20Files%20Backup/x",
+        ) == "/Shared Files Backup/x"
+
+    def test_the_prefix_itself_comes_back_as_the_root(self):
+        from istota.nextcloud.dav import href_to_path
+
+        assert href_to_path(
+            _config(PREFIX), "/remote.php/dav/files/istota/Shared%20Files"
+        ) == "/"
+
     def test_without_a_prefix_the_href_is_read_the_way_it_always_was(self):
         from istota.nextcloud.dav import href_to_path
 
@@ -185,14 +265,34 @@ class TestTheReturnTrip:
 
 
 class TestTheSearchScope:
-    def test_the_scope_href_carries_the_prefix(self):
+    def test_the_scope_href_carries_the_prefix_percent_encoded(self):
+        """An href is a URI reference, and the URL builder next door already
+        quotes its path. The scope did not, which went unnoticed while the only
+        way in was a user's own file name — the mount point puts a space in
+        every search on the shipped Docker shape."""
         from istota.nextcloud.dav import build_search_body
 
         body = build_search_body(_config(PREFIX), scope="/Users/alice", name="*.md")
 
-        assert "<d:href>/files/istota/Shared Files/Users/alice</d:href>" in body
+        assert "<d:href>/files/istota/Shared%20Files/Users/alice</d:href>" in body
 
-    def test_without_a_prefix_the_scope_href_is_unchanged(self):
+    def test_a_caller_scope_is_encoded_too(self):
+        from istota.nextcloud.dav import build_search_body
+
+        body = build_search_body(_config(), scope="/Users/alice/my notes", name="*.md")
+
+        assert "<d:href>/files/istota/Users/alice/my%20notes</d:href>" in body
+
+    def test_a_query_marker_cannot_truncate_the_href(self):
+        """`?` and `#` are legal in a Nextcloud external-mount display name and
+        in a file name, and raw in an href each ends the path."""
+        from istota.nextcloud.dav import build_search_body
+
+        body = build_search_body(_config(), scope="/Users/alice/q?x#y", name="*.md")
+
+        assert "<d:href>/files/istota/Users/alice/q%3Fx%23y</d:href>" in body
+
+    def test_without_a_prefix_a_plain_scope_is_unchanged(self):
         from istota.nextcloud.dav import build_search_body
 
         body = build_search_body(_config(), scope="/Users/alice", name="*.md")
@@ -252,6 +352,121 @@ class TestTheOcsSharePath:
 
         assert post.call_args.kwargs["data"]["path"] == "/Shared Files/Users/alice/istota"
         assert get.call_args.kwargs["params"]["path"] == "/Shared Files/Users/alice/istota"
+
+
+class TestTheOcsShareResponse:
+    """The mapping has to be inverted, not just applied.
+
+    The skill reads these rows and speaks logical paths in every other verb, so
+    a prefixed `path` coming out of `share list` is a value none of them
+    accepts: `resolve_scoped_path` refuses it as outside the caller's
+    workspace, and for an admin — whom it lets through — it is prefixed a
+    second time on the way back out.
+    """
+
+    def test_a_row_the_bot_owns_comes_back_logical(self):
+        from istota.nextcloud import shares
+
+        row = {"id": 1, "uid_owner": "istota", "path": "/Shared Files/Users/alice/a.txt"}
+        with patch("istota.nextcloud._http.httpx.get", return_value=_ocs_ok([row])):
+            listed = shares.list_shares(_config(PREFIX))
+
+        assert listed[0]["path"] == "/Users/alice/a.txt"
+
+    def test_a_created_share_reports_the_logical_path(self):
+        from istota.nextcloud import shares
+
+        created = {"id": 2, "uid_owner": "istota", "path": "/Shared Files/Users/alice/a.txt"}
+        with patch("istota.nextcloud._http.httpx.post", return_value=_ocs_ok(created)):
+            answer = shares.create_share(
+                _config(PREFIX), path="/Users/alice/a.txt", share_type=0
+            )
+
+        assert answer["path"] == "/Users/alice/a.txt"
+
+    def test_a_row_somebody_else_owns_is_left_exactly_as_it_came(self):
+        """A `shared_with_me` row names a path in the *recipient's* tree, which
+        the bot's mount point has nothing to do with. Stripping a coincidental
+        match there would corrupt it."""
+        from istota.nextcloud import shares
+
+        row = {"id": 3, "uid_owner": "alice", "path": "/Shared Files/notes.md"}
+        with patch("istota.nextcloud._http.httpx.get", return_value=_ocs_ok([row])):
+            listed = shares.list_shares(_config(PREFIX), shared_with_me=True)
+
+        assert listed[0]["path"] == "/Shared Files/notes.md"
+
+    def test_the_round_trip_is_stable(self):
+        """The property the inversion exists for: what `share list` hands back
+        is what `share revoke --path` can be given."""
+        from istota.nextcloud._http import from_remote_path, to_remote_path
+
+        config = _config(PREFIX)
+        logical = "/Users/alice/a.txt"
+        remote = to_remote_path(config, logical)
+
+        assert remote == "/Shared Files/Users/alice/a.txt"
+        assert from_remote_path(config, remote) == logical
+        assert from_remote_path(config, logical) == logical
+
+    def test_the_legacy_shim_inverts_too(self):
+        from istota.nextcloud_client import ocs_create_share, ocs_list_shares
+
+        row = {"id": 4, "uid_owner": "istota", "path": "/Shared Files/Users/alice/istota"}
+        with patch("istota.nextcloud._http.httpx.get", return_value=_ocs_ok([row])):
+            listed = ocs_list_shares(_config(PREFIX))
+        with patch("istota.nextcloud._http.httpx.post", return_value=_ocs_ok(row)):
+            created = ocs_create_share(_config(PREFIX), "/Users/alice/istota", 0)
+
+        assert listed[0]["path"] == "/Users/alice/istota"
+        assert created["path"] == "/Users/alice/istota"
+
+    def test_nothing_is_rewritten_without_a_prefix(self):
+        from istota.nextcloud import shares
+
+        row = {"id": 5, "uid_owner": "istota", "path": "/Users/alice/a.txt"}
+        with patch("istota.nextcloud._http.httpx.get", return_value=_ocs_ok([row])):
+            listed = shares.list_shares(_config())
+
+        assert listed[0]["path"] == "/Users/alice/a.txt"
+
+
+class TestTheTalkAttachment:
+    def test_share_file_sends_the_prefixed_path(self, monkeypatch):
+        """A Talk attachment is share type 10 on the same OCS endpoint `share
+        create` uses, posted by `TalkClient` rather than by `shares.py` — so it
+        needed the mapping separately, and was the one writer of an OCS share
+        path the first pass missed."""
+        from istota.skills import nextcloud as skill
+
+        monkeypatch.setenv("NC_URL", "https://cloud.example.com")
+        monkeypatch.setenv("NC_USER", "istota")
+        monkeypatch.setenv("NC_PASS", "secret")
+        monkeypatch.setenv("NC_DAV_PREFIX", PREFIX)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        seen = {}
+
+        def _fake_run(fn):
+            class _Client:
+                async def share_file(self, token, path):
+                    seen["token"] = token
+                    seen["path"] = path
+                    return {"id": 7}
+
+            import asyncio
+
+            return asyncio.run(fn(_Client()))
+
+        monkeypatch.setattr(skill, "_talk_run", _fake_run)
+        args = argparse.Namespace(token="room1", path="a.txt")
+
+        answer = skill.cmd_talk_share_file(args)
+
+        assert seen["path"] == "/Shared Files/Users/alice/a.txt"
+        assert answer["path"] == "/Users/alice/a.txt", (
+            "the reply must name the path the caller asked about"
+        )
 
 
 class TestWhatThePrefixMustNotTouch:
