@@ -110,6 +110,13 @@ def _age(path: Path, hours: float) -> None:
     checkout. Backdating the checkout alone leaves a worktree the reaper still
     considers active, which is how the first version of this helper produced a
     suite that passed against a reaper with no age guard at all.
+
+    Directories are backdated too, not just files. `_touched_since` stats every
+    directory it walks, and creating a child updates its parent's mtime — so a
+    test that builds `web/node_modules` leaves `web/` looking freshly touched
+    and the worktree is held on `recent` no matter what the dirty check says.
+    Backdating a directory does not disturb its parent, so the order here is
+    irrelevant.
     """
     when = time.time() - hours * 3600
     targets = [path]
@@ -117,8 +124,8 @@ def _age(path: Path, hours: float) -> None:
     if dotgit.is_file():
         gitdir = Path(dotgit.read_text().split(":", 1)[1].strip())
         targets.append(gitdir)
-        targets.extend(p for p in gitdir.rglob("*") if p.is_file())
-    targets.extend(p for p in path.rglob("*") if not p.is_dir())
+        targets.extend(gitdir.rglob("*"))
+    targets.extend(path.rglob("*"))
     for target in targets:
         os.utime(target, (when, when))
 
@@ -208,6 +215,106 @@ class TestReaps:
         a commit on origin/HEAD, carrying no commits of its own."""
         repos_dir, bare, _ = repos
         path = _worktree(bare, "project--main", "origin/main")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--main"}
+        assert not path.exists()
+
+    def test_reaps_a_worktree_holding_only_a_node_modules(self, repos):
+        """The reported case. An install is the whole reason a worktree gets
+        big, and before this the install was also what pinned it forever: the
+        `--ignored` half of the dirty check saw `node_modules` and held."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("node_modules/\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore node_modules")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "node_modules" / "pkg" / "nested").mkdir(parents=True)
+        (path / "node_modules" / "pkg" / "nested" / "index.js").write_text("x\n")
+        (path / "node_modules" / ".package-lock.json").write_text("{}\n")
+        assert _git(path, "status", "--porcelain", "-uall").strip() == "", (
+            "precondition: only --ignored can see this tree"
+        )
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--main"}
+        assert not path.exists()
+
+    def test_reaps_a_worktree_holding_the_caches_production_actually_had(self, repos):
+        """Measured, not guessed. The one worktree held on the production host
+        was 941 MB, 882 MB of it `.venv`, and its entire ignored listing was
+        `.venv/`, `.pytest_cache/`, `.ruff_cache/` and 30-odd `__pycache__/`
+        directories — no `.env` and nothing untracked. That worktree is what
+        this test is, and before the fix it was unreapable for good."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text(
+            ".venv/\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.mypy_cache/\n"
+        )
+        (upstream / "src").mkdir()
+        (upstream / "src" / "mod.py").write_text("x = 1\n")
+        _git(upstream, "add", ".gitignore", "src/mod.py")
+        _git(upstream, "commit", "-q", "-m", "ignore caches")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        for name in (".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"):
+            (path / name).mkdir()
+            (path / name / "content").write_text("x\n")
+        (path / "src" / "__pycache__").mkdir()
+        (path / "src" / "__pycache__" / "mod.pyc").write_text("x\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--main"}
+        assert not path.exists()
+
+    def test_reaps_a_node_modules_nested_below_the_worktree_root(self, repos):
+        """This repository keeps its frontend in `web/`, so the install lands
+        at `web/node_modules` rather than the root. The entry git reports is
+        the whole path, so the check reads its last component."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("node_modules/\n")
+        (upstream / "web").mkdir()
+        (upstream / "web" / "package.json").write_text("{}\n")
+        _git(upstream, "add", ".gitignore", "web/package.json")
+        _git(upstream, "commit", "-q", "-m", "web")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "web" / "node_modules" / "pkg").mkdir(parents=True)
+        (path / "web" / "node_modules" / "pkg" / "index.js").write_text("x\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--main"}
+        assert not path.exists()
+
+    def test_reaps_a_node_modules_ignored_by_a_glob_pattern(self, repos):
+        """`node_modules/**` and `node_modules/*` are both common, and neither
+        matches the directory itself — so git collapses at the *children* and
+        reports `!! node_modules/pkg/`. A check reading only the last component
+        sees `pkg`, holds the worktree, and leaves the reported bug in place for
+        every repository whose gitignore is written that way."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("node_modules/**\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore node_modules glob")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "node_modules" / "pkg").mkdir(parents=True)
+        (path / "node_modules" / "pkg" / "index.js").write_text("x\n")
+        assert _git(path, "status", "--porcelain", "-uall").strip() == "", (
+            "precondition: only --ignored can see this tree"
+        )
         _age(path, 48)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
@@ -369,6 +476,185 @@ class TestHoldsBack:
 
         assert _names(outcomes) == set()
         assert (path / ".env").exists()
+
+    def test_keeps_an_ignored_file_beside_a_reconstructible_directory(self, repos):
+        """The discount is per-entry, not a mode the worktree enters. A `.env`
+        sitting next to a `node_modules` is still the only copy of itself, and
+        one discountable entry must not carry the rest of the listing with it.
+        """
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text(".env\nnode_modules/\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore env and node_modules")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "node_modules" / "pkg").mkdir(parents=True)
+        (path / "node_modules" / "pkg" / "index.js").write_text("x\n")
+        (path / ".env").write_text("SECRET=x\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert (path / ".env").exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
+
+    def test_keeps_a_worktree_with_a_staged_rename_beside_a_node_modules(self, repos):
+        """Porcelain v1 `-z` emits a rename as *two* NUL-separated fields —
+        `R  <new>\\0<orig>\\0` — so the parse sees a record that is a bare path
+        with no status prefix at all. It is safe only because the `R ` record
+        settles the answer first, and nothing else in the suite pins that
+        ordering; a rewrite that classified records independently would read
+        the bare origin path as unrecognized and could regress silently."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("node_modules/\n")
+        (upstream / "original.txt").write_text("content\n")
+        _git(upstream, "add", ".gitignore", "original.txt")
+        _git(upstream, "commit", "-q", "-m", "seed")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "node_modules").mkdir()
+        (path / "node_modules" / "index.js").write_text("x\n")
+        _git(path, "mv", "original.txt", "renamed.txt")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert (path / "renamed.txt").exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
+
+    def test_keeps_an_ignored_file_whose_name_matches_a_discounted_directory(self, repos):
+        """The discount is for directories. A *file* called `node_modules` is
+        not a package tree, and git distinguishes the two with the trailing
+        slash — so the check must too, rather than matching on the name alone.
+        """
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("node_modules\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore node_modules")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "node_modules").write_text("not a directory\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert (path / "node_modules").read_text() == "not a directory\n"
+        assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
+
+    def test_keeps_a_worktree_holding_an_ignored_dist_directory(self, repos):
+        """`dist`, `build` and `target` are deliberately not on the list. Each
+        is an ordinary source directory name in some projects, and the cost of
+        a false positive here is deleting real work, not re-running a build."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("dist/\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore dist")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "dist").mkdir()
+        (path / "dist" / "index.html").write_text("<html>\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert (path / "dist" / "index.html").exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
+
+    def test_keeps_a_worktree_whose_ignored_directory_is_unrecognized(self, repos):
+        """An explicit list of names, never "ignore every `!!` line". The
+        gitignore of this very repository hides `data/` and `lib/`, so a rule
+        that discounted ignored directories as a class would delete the real
+        thing on the first repository that keeps one."""
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("data/\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore data")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "data").mkdir()
+        (path / "data" / "captured.sqlite").write_text("rows\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert (path / "data" / "captured.sqlite").exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
+
+    def test_keeps_a_worktree_whose_only_untracked_file_is_named_a_space(self, repos):
+        """A filename may legally be a single space, which git renders as the
+        four-character `-z` record `"??  "` — a path that is entirely
+        whitespace, immediately after the discount made this parse care where
+        a record ends. It holds the worktree like any other untracked file."""
+        repos_dir, bare, _ = repos
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / " ").write_text("the only copy\n")
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert (path / " ").read_text() == "the only copy\n"
+        assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
+
+    def test_keeps_a_worktree_whose_only_activity_is_inside_a_discounted_dir(self, repos):
+        """The regression the ISSUE-304 discount opens if the two name lists
+        are allowed to overlap, and the reason `_WALK_SKIP` subtracts
+        `_RECONSTRUCTIBLE_DIRS`.
+
+        `os.walk` prunes by name *before* anything stats the directory, so a
+        name on both lists is invisible to both guards at once: the activity
+        walk never reads it and the dirty check discounts it. An `npm install`,
+        a `uv sync` into an existing `.venv`, or a pytest run writing only
+        `__pycache__` touches nothing else in the checkout — so the worktree
+        would read as idle and clean, and be deleted with the install still
+        running. Before the discount the dirty check held it, which is what
+        made pruning it free.
+        """
+        repos_dir, bare, upstream = repos
+        (upstream / ".gitignore").write_text("node_modules/\n")
+        _git(upstream, "add", ".gitignore")
+        _git(upstream, "commit", "-q", "-m", "ignore node_modules")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--main", "origin/main")
+        (path / "node_modules" / "pkg").mkdir(parents=True)
+        (path / "node_modules" / "pkg" / "index.js").write_text("x\n")
+        _age(path, 48)
+
+        # The install is in flight: only paths inside `node_modules` are fresh.
+        now = time.time()
+        for target in (
+            path / "node_modules",
+            path / "node_modules" / "pkg",
+            path / "node_modules" / "pkg" / "index.js",
+        ):
+            os.utime(target, (now, now))
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert path.exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["recent"]
+
+    def test_the_two_name_lists_are_disjoint(self):
+        """The invariant behind the test above, asserted directly so a future
+        edit to either list cannot quietly reintroduce the overlap. A name the
+        dirty check discounts must stay in the activity walk, because the walk
+        is then the only guard left."""
+        import istota.worktree_reaper as mod
+
+        assert not (mod._WALK_SKIP & mod._RECONSTRUCTIBLE_DIRS)
+        assert ".git" in mod._WALK_SKIP
 
     def test_keeps_a_locked_worktree(self, repos):
         repos_dir, bare, _ = repos
