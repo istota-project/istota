@@ -111,6 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The notification panel behind the bell now sits centred on a phone, with an even margin down each side, instead of pressing against the left edge of the screen with all of the gap stranded on the right. It was sized to the width of the screen less a single margin and then pushed as far left as it would go, so the margin it did keep only ever appeared on one side.
+
 - The same pipeline blindness is fixed in the three other places a command's exit status is treated as the answer: the shell the bot runs commands in when it is working on its own, scheduled jobs defined as a `command:` in `CRON.md`, and heartbeat checks defined as a shell command. All three ran under a shell that reports only the last stage of a pipeline, so a job whose real work failed was recorded as healthy — indefinitely, since nothing else looks. Scheduled jobs and heartbeat checks now run under `bash` where it is available and fall back to the previous shell where it is not.
 
 - **Upgrade note, and this one can change what your deployment does.** A scheduled job that was failing silently now reports the failure, which means it can reach the five-consecutive-failure threshold and switch itself off — worth a look at your job list after upgrading. Separately, a pipeline containing a command that exits non-zero to *report* something rather than to fail — `grep` finding no match is the common one — now fails where it used to pass, in scheduled jobs, heartbeat checks and the bot's own shell alike. Both changes are the intended behaviour: the status now says what happened.
