@@ -195,15 +195,22 @@ class TestValidateHostPathWrapper:
 
 
 class TestDevboxStillDelegates:
-    """The devbox skill keeps its private wrapper names, but must not keep a
-    second copy of the rule."""
+    """The devbox skill keeps its private wrapper name, but must not keep a
+    second copy of the rule.
+
+    There was a second wrapper here, `_validate_host_path`, which returned the
+    error alone. It went when the file verbs moved onto the exec transport: all
+    three call sites send the resolved path over the wire, so none of them had a
+    use for a variant that threw it away."""
 
     def test_wrapper_delegates_to_the_shared_validator(self, mount):
         from istota.skills import devbox
-        assert devbox._validate_host_path(Path("/etc/passwd"), must_exist=True) is not None
+        _, err = devbox._resolve_host_path(Path("/etc/passwd"), must_exist=True)
+        assert err is not None
         p = mount / "Users" / "alice" / "ok.txt"
         p.write_text("x")
-        assert devbox._validate_host_path(p, must_exist=True) is None
+        _, err = devbox._resolve_host_path(p, must_exist=True)
+        assert err is None
 
     def test_resolving_wrapper_returns_the_approved_path(self, mount):
         from istota.skills import devbox
