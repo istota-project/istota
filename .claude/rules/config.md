@@ -218,6 +218,8 @@ skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths: list[str] = []     # extra RO binds; keep narrow
 sandbox_cache_dir: str = ""          # disk-backed RW cache dir; empty = today's behaviour
+sandbox_cache_sweep_enabled: bool = True   # bound what that dir grows to (ISSUE-317)
+sandbox_cache_max_gb: float = 10.0         # per user; clamped to a 1 GiB floor
 network: NetworkConfig = NetworkConfig()
 ```
 `skill_proxy_enabled` is **required wherever `sandbox_enabled` is true**: the DB
@@ -289,6 +291,44 @@ feeds the proxy's base env, which SkillProxy hands every host-side skill CLI: a 
 running unsandboxed as the daemon user has no business resolving a cache out of a
 directory the model can write, which is the same confused-deputy shape the
 `ISTOTA_PATH_PREPEND` handling guards against.
+
+`sandbox_cache_sweep_enabled` / `sandbox_cache_max_gb` / `[scheduler] sandbox_cache_sweep_interval`
+bound what that directory grows to (ISSUE-317, `src/istota/sandbox_cache_sweeper.py`). Moving the
+caches onto disk is what makes them **persist**, and nothing pruned them, so the fix for a bounded
+RAM burn was an unbounded disk leak on the volume the worktree reaper is already fighting for. The
+Ansible default for `sandbox_cache_dir` is still blank, and that is now a recorded decision rather
+than an oversight: the placement the reference doc recommends — under `developer.repos_dir` — cannot
+be made a default as it stands, because `build_bwrap_cmd` binds `{root}/{user_id}` and *then* binds
+all of `repos_dir` read-write for an admin developer task, so the later bind covers the earlier one
+and every other user's cache is writable inside the sandbox. uv trusts its unpacked wheels on read
+and re-verifies them against no hash, so that is exactly the cross-user code path the per-user split
+exists to close. Reordering the binds does not fix it (only `{root}/{user_id}` would be covered back
+up), and neither does the 0700 mode (every task runs as the same daemon uid). The open options are a
+root on the same filesystem but outside `repos_dir` — hard where `repos_dir` is its own mount, since
+a sibling then costs `EXDEV` and the full copy the placement advice exists to avoid — carving the
+root back out inside `build_bwrap_cmd` after the repos bind, or accepting the exposure and saying so
+in `resolve_sandbox_cache_dir`'s docstring. `deploy/ansible/defaults/main.yml` carries the long form,
+and `tests/test_ansible_config_template.py::TestThePackageCacheRoot` asserts both the blank default
+and the bind order that forces it, so a future change has to turn those red deliberately.
+
+**A size ceiling, not an age rule.** One `uv sync --all-extras` writes about 1.8 GB in a single
+command, so a window phrased in days either keeps everything or throws away a cache minutes old and
+about to be reused. Every visited cache gets the package managers' own cheap reclaim first
+(`uv cache prune`, `npm cache verify`), which keeps the warm entries; only one still over its
+ceiling afterwards is wiped with their `clean` verbs. **The sweeper deletes no file itself** — not
+the root, not a per-user directory, not a cache entry. A tool that is missing, that fails or that
+times out is reported and the cache is left alone, because the difference between "uv's cache" and
+"everything the model put in this directory" is what uv knows and the sweeper does not.
+
+**Three guards stand between a running task and a wipe**, since unlinking a cache entry under a
+`uv sync` turns its next `link(2)` into `ENOENT`. `scheduler.check_sandbox_cache_sweep` reads the
+users with a `locked` or `running` task and passes them in; a user in that set is skipped entirely,
+including the cheap reclaim, since `prune` unlinks too, and an *unreadable* task table cancels the
+whole sweep rather than arriving as an empty set that reads as "nobody is working". Behind that, an
+idle window on the cache tree's newest mtime catches a writer the task table never knew about. Behind
+that, `--force` is never passed to uv, so uv's own in-use check still stands — which is the only one
+of the three that sees a sync against a fully warm cache, since that writes nothing and merely
+hardlinks out. npm's `--force` on `cache clean` is a different flag with no in-use check behind it.
 
 `sandbox_admin_db_write` was **removed**: the framework DB is no longer bound
 into the sandbox for anyone, so there is no bind left to widen. A stale key

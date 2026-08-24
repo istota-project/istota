@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The setting that moves a task's package downloads out of memory and onto disk now has something that prunes what it leaves behind. It runs on a timer and gives each user's cache the package managers' own cleanup first, which keeps the entries still in use; a cache still over its size limit afterwards is emptied. Nothing is deleted by hand, and a user with a task running is skipped rather than raced. The setting itself is still off by default while where the directory should live is settled.
+
 - A deploy can now be told to rebuild the dev container and recreate it from scratch, with `-e istota_devbox_force_recreate=true`. It normally rebuilds on its own when the container's definition or any file inside it changes, which covers the ordinary case; this is for the case it cannot see, such as a container someone changed by hand or an image left half-built by a failed run. It reuses cached build layers, so a stale base image still needs one build by hand.
 
 - A bell in the app bar now shows what is waiting on you, from every page rather than only from the chat. Two things could be held for your answer — an email from an unknown sender, and a reply the bot drafted but has not sent — and both were only visible if you happened to open the chat, so a message held while you were on the money pages sat there until you did. Clicking the bell lists what is open, with the same Confirm and Discard buttons as before, and a "Needs action" filter for the items that want a decision rather than a look.

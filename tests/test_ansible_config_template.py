@@ -289,3 +289,105 @@ def load_config_from(rendered: str) -> Config:
         path = Path(tmp) / "config.toml"
         path.write_text(rendered)
         return load_config(path)
+
+
+class TestThePackageCacheRoot:
+    """ISSUE-317 — the sweep keys, and why the root itself is still blank.
+
+    The placement the reference doc recommends (under `developer.repos_dir`)
+    cannot be made the default as it stands: `build_bwrap_cmd` binds
+    `{root}/{user_id}` and then binds all of `repos_dir` read-write for an admin
+    developer task, in that order, so the later bind covers the earlier one and
+    every other user's cache becomes writable inside the sandbox. That is the
+    cross-user path `resolve_sandbox_cache_dir`'s per-user split exists to close.
+    The sweep that bounds the caches is finished and ships; the flip waits on a
+    decision recorded in `defaults/main.yml`.
+    """
+
+    def test_the_root_is_still_blank_by_default(self, parsed):
+        """Held deliberately, so this is an assertion and not an omission.
+
+        A future change that sets it should turn this red and be made to read
+        the reasoning in `defaults/main.yml` first.
+        """
+        assert "sandbox_cache_dir" not in parsed["security"]
+
+    def test_the_bind_order_that_holds_the_flip_back_is_still_what_it_was(self, tmp_path):
+        """The reason the default is blank, asserted rather than described.
+
+        If `build_bwrap_cmd` ever binds `repos_dir` *before* the cache — or
+        carves the root back out — this goes red and the placement question can
+        be reopened on evidence.
+        """
+        from unittest.mock import patch
+
+        from istota.config import Config, DeveloperConfig, SecurityConfig
+        from istota.db import Task
+        from istota.executor import build_bwrap_cmd
+
+        repos = tmp_path / "repos"
+        cache_root = repos / ".package-caches"
+        (cache_root / "bob").mkdir(parents=True)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        config = Config()
+        config.temp_dir = tmp_path / "temp"
+        config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        config.security = SecurityConfig(sandbox_cache_dir=str(cache_root))
+        task = Task(id=1, prompt="x", user_id="alice", source_type="cli", status="running")
+
+        with patch("istota.executor._bwrap_available", return_value=True):
+            argv = build_bwrap_cmd(["claude"], config, task, True, [], user_temp)
+
+        binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+        assert str(cache_root / "alice") in binds
+        assert str(repos) in binds
+        assert binds.index(str(repos)) > binds.index(str(cache_root / "alice")), (
+            "the repos bind no longer covers the cache bind — re-read the "
+            "placement note in deploy/ansible/defaults/main.yml"
+        )
+
+    def test_the_sweep_keys_render_when_an_operator_sets_the_root(self):
+        rendered = tomllib.loads(
+            render(istota_security_sandbox_cache_dir="/srv/example/repos/.caches")
+        )
+
+        assert rendered["security"]["sandbox_cache_dir"] == "/srv/example/repos/.caches"
+        assert rendered["security"]["sandbox_cache_sweep_enabled"] is True
+        assert rendered["security"]["sandbox_cache_max_gb"] > 0
+        assert rendered["scheduler"]["sandbox_cache_sweep_interval"] > 0
+
+    def test_the_role_creates_the_root_the_resolver_requires(self):
+        """`resolve_sandbox_cache_dir` refuses a root that does not already exist.
+
+        It falls open on every refusal — a warning in the log and the caches back
+        on bubblewrap's root tmpfs — so a `sandbox_cache_dir` whose directory
+        nothing creates is the same no-op the key was before, with the appearance
+        of a fix. Nothing else in the tree creates it.
+        """
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        creators = [
+            t for t in tasks
+            if isinstance(t.get("file"), dict)
+            and "istota_security_sandbox_cache_dir" in str(
+                [t["file"].get("path"), t.get("loop")]
+            )
+        ]
+
+        assert creators, "tasks/main.yml creates no package-cache root"
+        task = creators[0]
+        assert task["file"]["owner"] == "{{ istota_user }}"
+
+        # 0700, because each subdirectory holds package archives uv trusts on
+        # read and re-verifies against no hash.
+        modes = [entry["mode"] for entry in task["loop"]
+                 if "sandbox_cache_dir" in entry["path"]]
+        assert modes == ["0700"]
+
+        # Skipped entirely when the key is blank, which is the shipped default,
+        # so no deployment gets a stray directory out of this.
+        assert any(
+            "istota_security_sandbox_cache_dir" in str(cond)
+            for cond in task["when"]
+        )

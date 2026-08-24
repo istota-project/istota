@@ -4362,6 +4362,54 @@ def check_worktree_reap(config: Config) -> list:
         return []
 
 
+def check_sandbox_cache_sweep(config: Config) -> list:
+    """Bound the per-user package caches under `security.sandbox_cache_dir`.
+
+    Here rather than on a task's setup path, for the reason `check_worktree_reap`
+    above gives: `dispatch_setup_env_hooks` calls every skill's hook whatever the
+    task selected, so a sweep there runs before every Talk reply and every
+    heartbeat tick. A delete path belongs on a cadence somebody chose.
+
+    **The busy set is fail-closed and this function owns that.** The sweeper is
+    a leaf that reads no database, so the set of users with a task in flight has
+    to arrive as an argument — and an unreadable task table would arrive as an
+    empty set, which reads as "nobody is working" and is the one wrong answer
+    that costs a running task its cache. So a failed read returns without
+    sweeping at all. Disk is what the sweep protects and one more interval of it
+    is cheap; a `uv sync` losing its cache mid-resolution is not.
+
+    Re-checks its own gate rather than trusting the loop's, matching the reaper:
+    the loop's gate exists to skip the thread spawn cheaply, and a delete path
+    should be safe to call on its own.
+    """
+    from .sandbox_cache_sweeper import sweep_and_report
+
+    sec = config.security
+    if not (sec.sandbox_cache_dir and sec.sandbox_cache_sweep_enabled):
+        return []
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            busy_users = db.get_users_with_live_tasks(conn)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sandbox_cache_sweep_skipped reason=task_table_unreadable err=%s "
+            "— the set of users with work in flight is unknown, so nothing is swept.",
+            exc,
+        )
+        return []
+
+    try:
+        return sweep_and_report(
+            Path(sec.sandbox_cache_dir),
+            max_bytes=int(sec.sandbox_cache_max_gb * 1024 ** 3),
+            busy_users=busy_users,
+        )
+    except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
+        logger.error("sandbox_cache_sweep_failed err=%s", exc, exc_info=True)
+        return []
+
+
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
@@ -6944,6 +6992,7 @@ def run_daemon(
     # this clears is the state a restart usually arrives into, and there is no
     # boot run to double up with.
     last_worktree_reap = 0.0
+    last_cache_sweep = 0.0
     # Seeded to now, not 0: the boot run above already swept, so a 0 here would
     # re-run the whole registry on the first tick seconds later.
     last_doctor_check = time.time()
@@ -7205,6 +7254,25 @@ def run_daemon(
                 "worktree-reap", lambda: check_worktree_reap(config), background_checks,
             )
             last_worktree_reap = now
+
+        # Bound the package caches the sandbox writes to disk (ISSUE-317).
+        # Moving them off bwrap's root tmpfs is what makes them persist, and
+        # nothing pruned them, so the fix for a RAM leak was a disk leak on the
+        # volume the reap above is already fighting for. Backgrounded like the
+        # sweeps around it: it walks every cache tree and shells to `uv` and
+        # `npm`, either of which can take minutes on a cold cache, so on the
+        # loop thread it would starve dispatch.
+        if (
+            config.security.sandbox_cache_dir
+            and config.security.sandbox_cache_sweep_enabled
+            and config.scheduler.sandbox_cache_sweep_interval
+            and now - last_cache_sweep >= config.scheduler.sandbox_cache_sweep_interval
+        ):
+            _spawn_background_check(
+                "sandbox-cache-sweep", lambda: check_sandbox_cache_sweep(config),
+                background_checks,
+            )
+            last_cache_sweep = now
 
         # Snapshot local DBs to the mount for off-host durability (they left the
         # Nextcloud-synced workspaces when they moved to local disk). Also off

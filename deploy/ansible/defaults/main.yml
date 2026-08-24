@@ -211,6 +211,7 @@ istota_scheduler_shared_file_check_interval: 120  # Shared file organization che
 istota_scheduler_heartbeat_check_interval: 60    # Heartbeat monitoring check interval
 istota_scheduler_db_health_check_interval: 86400 # SQLite quick_check + REINDEX sweep (default daily)
 istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping sweep (ISSUE-288, 6h; 0 disables)
+istota_scheduler_sandbox_cache_sweep_interval: 21600 # package-cache sweep (ISSUE-317, 6h; 0 disables). Inert unless istota_security_sandbox_cache_dir is set
 istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch loop's read scans; a lock past this skips the tick instead of blocking 30s (0 = 30s default)
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
@@ -1322,7 +1323,44 @@ istota_security_sandbox_ro_paths: []
 # any other mount makes every worktree pay for a full copy. Do not point it AT
 # repos_dir, at the temp dir, or at ~/.cache — a bind above an existing mount
 # covers it, and the daemon refuses those values rather than doing so.
+#
+# STILL BLANK, AND THE PLACEMENT IS AN OPEN QUESTION (ISSUE-317). The advice
+# above is not safe to turn into a default as it stands. build_bwrap_cmd binds
+# {root}/{user_id} for the task's own user and then binds ALL of repos_dir
+# read-write for an admin developer task, in that order — so with the root
+# inside repos_dir the later bind covers the earlier one and every other user's
+# cache is writable from inside the sandbox. uv trusts its unpacked wheels on
+# read and re-verifies them against no hash, so that is the cross-user code path
+# the per-user split in resolve_sandbox_cache_dir exists to close. Verified
+# against the real argv, not argued: the cache bind lands at index 6 and the
+# repos bind at index 7.
+#
+# The mode below does not help — every task runs as the same daemon uid — and
+# neither does reordering the binds, since only {root}/{user_id} would be
+# covered back up and the other users' subdirectories stay exposed.
+#
+# Three ways out, none of them a one-line default, all of them needing a
+# decision this key cannot record: put the root on the same filesystem but
+# outside repos_dir (it is a separate ext4 mount on the reference deployment, so
+# a sibling is a different mount and link(2) returns EXDEV — which is the whole
+# cost the placement advice exists to avoid); carve the root back out inside the
+# sandbox after the repos bind, which is a change to build_bwrap_cmd and wants
+# the linux tier; or accept the exposure and say so in
+# resolve_sandbox_cache_dir's docstring, which currently asserts the opposite.
+#
+# The sweep below is finished and lands with this comment, so whichever way that
+# goes there is already something bounding the caches when the key is set.
 istota_security_sandbox_cache_dir: ""
+# Bounding what that directory grows to (ISSUE-317). Every sweep runs the cheap
+# reclaim the package managers ship (uv cache prune, npm cache verify); a
+# per-user cache still over the ceiling afterwards is wiped with their own clean
+# verbs. A ceiling in bytes rather than an age window because one
+# `uv sync --all-extras` writes about 1.8 GB in a single command. Cadence is
+# istota_scheduler_sandbox_cache_sweep_interval; the sweep is inert while
+# istota_security_sandbox_cache_dir is empty. A user with a task in flight is
+# skipped rather than raced.
+istota_security_sandbox_cache_sweep_enabled: true
+istota_security_sandbox_cache_max_gb: 10.0   # per user; clamped to a 1 GiB floor by the sweeper
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
 # Operator-specific additions to the CONNECT allowlist, as "host:port" strings.
