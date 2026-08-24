@@ -914,40 +914,53 @@
     - "{{ istota_home }}/.config"
   when: not istota_update_only and not istota_web_only
 
-# `resolve_sandbox_cache_dir` refuses a root that is not already an existing
-# writable directory, and falls open to the pre-ISSUE-305 behaviour when it
-# does — a warning in the log and the caches back on bubblewrap's root tmpfs.
-# So the role has to create the root; nothing else will. Only the root: the
-# per-user `{root}/{user_id}` subdirectories are made by the daemon at 0700, and
-# the role has no list of users at this point in the play.
+# Nothing else in the tree creates this. On the reference deployment it exists
+# because an operator made it a mount, and a deployment where it does not is one
+# where every developer task fails on a directory it cannot make.
 #
-# 0700 rather than 0755. This holds one directory per user of package archives
-# that uv trusts on read and never re-verifies against a hash, and each is bound
-# read-write into that user's sandbox — so keeping the root unreadable to
-# everything but the daemon is what stops another local account planting an
-# archive for the next `uv sync` to hardlink into a venv.
+# The role creates the root and stops there. Everything below it is per user —
+# `{repos_dir}/{user_id}` holds one admin's clones, worktrees and package cache,
+# and no other user's subtree is ever in that task's sandbox — and the daemon
+# makes each one at 0700 as the user's first task needs it. The role has no list
+# of users at this point in the play, and inventing one here would create a
+# directory for somebody the daemon does not know about.
 #
-# Fires on any deployment with istota_developer_repos_dir set, since the cache
-# root now derives from it (ISSUE-319 closed the placement question). Still
-# skipped where repos_dir is blank, which leaves the key blank too.
-#
-# Both directories, not just the cache root. Nothing in the tree creates
-# `repos_dir` — on the reference deployment it exists because an operator made
-# it a mount — so creating only the leaf would have `mkdir -p` produce the
-# parent as a side effect, with whatever owner and mode that leaves. The daemon
-# writes worktrees there, so it is named explicitly and given to the daemon.
-- name: Create the developer repos and package-cache directories
+# 0755 on the root itself, because it is a container of per-user directories
+# rather than a place anything is stored: the 0700 that matters is on the
+# subtrees, which is where the package archives uv trusts on read and never
+# re-verifies against a hash actually live.
+- name: Create the developer repos root
   file:
-    path: "{{ item.path }}"
+    path: "{{ istota_developer_repos_dir }}"
     state: directory
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
-    mode: "{{ item.mode }}"
-  loop:
-    - path: "{{ istota_developer_repos_dir }}"
-      mode: "0755"
-    - path: "{{ istota_security_sandbox_cache_dir }}"
-      mode: "0700"
+    mode: "0755"
+  when:
+    - istota_developer_repos_dir | length > 0
+    - not istota_update_only
+    - not istota_web_only
+
+# The fallback root, for a deployment running the sandbox WITHOUT the developer
+# skill. There the caches have no repos tree to live in, so
+# `security.sandbox_cache_dir` still names one and each user gets
+# `{root}/{user_id}` — and `resolve_sandbox_cache_dir` refuses a root that is
+# not already an existing writable directory, falling open to a warning in the
+# log and the caches back on bubblewrap's root tmpfs. Shipped blank, so this
+# fires only for an operator who set the key by hand.
+#
+# It does *not* fire for a developer deployment. There the cache is derived at
+# `{repos_dir}/{user_id}/.package-caches`, created by the daemon along with the
+# subtree it sits in, and this key is not read at all.
+#
+# 0700, because the root holds one cache directory per user.
+- name: Create the fallback package-cache root
+  file:
+    path: "{{ istota_security_sandbox_cache_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0700"
   when:
     - istota_security_sandbox_cache_dir | length > 0
     - not istota_update_only
@@ -2360,6 +2373,69 @@
     - not istota_web_only
     - istota_use_nextcloud_mount | default(false) | bool
     - (_legacy_module_dbs.matched | default(0)) > 0
+
+# One-time relocation: `developer.repos_dir` from one shared tree into per-user
+# subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
+# The sandbox now binds a task's own subtree rather than the whole root, so a
+# clone left at the old depth is in nobody's namespace: the model would not find
+# it, would clone again, and the old tree would sit there paying for disk. The
+# migrator moves each namespace directory wholesale (its worktrees are siblings
+# of the bare clone inside it, so one rename takes them together) and then runs
+# `git worktree repair` on each clone to fix the absolute paths git records in
+# both directions.
+#
+# Here rather than in YAML because the ownership rule has a judgement call in it.
+# Nothing on disk says which user owns a clone — a forge namespace is not a user
+# id — so the migrator reads the admins file, assigns everything to the single
+# admin where there is exactly one, and refuses where there are none or several.
+# Guessing wrong hands one admin's clones to another, which is the exact failure
+# the per-user split exists to prevent. Same pattern as `istota.db_relocate`.
+#
+# Run unconditionally: it writes `{repos_dir}/.istota-layout` on success and is
+# a reported no-op from then on, so there is nothing to gate it on. A blank
+# `developer.repos_dir` exits 0 with "nothing to migrate".
+#
+# **As the daemon user, not as root.** It creates `{repos_dir}/{user_id}` and
+# renames the namespaces into it; created as root that directory is root-owned
+# at 0700 and the daemon can no longer enter the tree it binds, so every
+# developer task would fail on a migration the play reported as successful.
+# Running it as the daemon user also means the moves are only ever done with the
+# permissions the daemon itself has.
+#
+# Three exit codes and each is read differently. 0 is success, including
+# "already migrated" and "nothing to migrate". 1 is a refusal, which touched
+# nothing at all — an ambiguous set of admins, a task in flight, an unreadable
+# root — so the play fails and the operator fixes the named thing and re-runs.
+# 2 is partial: the moves landed but something needs a hand, most often a
+# worktree `git worktree repair` could not fix. That does not fail the play,
+# because re-running cannot clear it and a deploy that stays red forever teaches
+# people to skip the task; it is printed instead, and the tree is recoverable in
+# the state it is in.
+- name: Migrate the developer repos tree into per-user subtrees
+  command: >-
+    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.repos_relocate
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  become: true
+  become_user: "{{ istota_user }}"
+  environment:
+    ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
+  register: _repos_relocate
+  changed_when: >-
+    'moved: ' in _repos_relocate.stdout or 'repaired: ' in _repos_relocate.stdout
+  failed_when: _repos_relocate.rc == 1
+  when:
+    - not istota_update_only
+    - not istota_web_only
+    - istota_developer_repos_dir | length > 0
+
+- name: Show the repos relocation output
+  debug:
+    msg: "{{ _repos_relocate.stdout_lines + _repos_relocate.stderr_lines }}"
+  when:
+    - _repos_relocate is defined
+    - _repos_relocate is not skipped
+    - _repos_relocate.changed or _repos_relocate.rc == 2
 
 - name: Deploy istota-scheduler systemd service
   template:

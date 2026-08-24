@@ -373,36 +373,142 @@ class TestThePackageCacheRoot:
         assert rendered["security"]["sandbox_cache_max_gb"] > 0
         assert rendered["scheduler"]["sandbox_cache_sweep_interval"] > 0
 
-    def test_the_role_creates_the_root_the_resolver_requires(self):
-        """`resolve_sandbox_cache_dir` refuses a root that does not already exist.
+    def test_the_role_creates_the_repos_root_and_stops_there(self):
+        """The root, at 0755, and nothing below it.
 
-        It falls open on every refusal — a warning in the log and the caches back
-        on bubblewrap's root tmpfs — so a `sandbox_cache_dir` whose directory
-        nothing creates is the same no-op the key was before, with the appearance
-        of a fix. Nothing else in the tree creates it.
+        Nothing else in the tree creates `developer.repos_dir`, and everything
+        under it is per user: the daemon makes `{repos_dir}/{user_id}` at 0700
+        as each user's first task needs it. A role that also made a per-user
+        directory would be inventing a user list at a point in the play where
+        it does not have one.
         """
         tasks = yaml.safe_load(TASKS_FILE.read_text())
         creators = [
             t for t in tasks
             if isinstance(t.get("file"), dict)
-            and "istota_security_sandbox_cache_dir" in str(
-                [t["file"].get("path"), t.get("loop")]
-            )
+            and t["file"].get("path") == "{{ istota_developer_repos_dir }}"
+        ]
+
+        assert creators, "tasks/main.yml creates no developer repos root"
+        task = creators[0]
+        assert task["file"]["owner"] == "{{ istota_user }}"
+        assert task["file"]["mode"] == "0755"
+        assert any(
+            "istota_developer_repos_dir" in str(cond) for cond in task["when"]
+        ), "the root is created even where no repos_dir is configured"
+
+    def test_the_role_creates_the_fallback_root_the_resolver_requires(self):
+        """`resolve_sandbox_cache_dir` refuses a root that does not already exist.
+
+        It falls open on every refusal — a warning in the log and the caches back
+        on bubblewrap's root tmpfs — so a `sandbox_cache_dir` whose directory
+        nothing creates is the same no-op the key was before, with the appearance
+        of a fix. That branch is only reached on a deployment running the sandbox
+        without the developer skill, which is exactly where nothing else would
+        have made the directory.
+        """
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        creators = [
+            t for t in tasks
+            if isinstance(t.get("file"), dict)
+            and t["file"].get("path") == "{{ istota_security_sandbox_cache_dir }}"
         ]
 
         assert creators, "tasks/main.yml creates no package-cache root"
         task = creators[0]
         assert task["file"]["owner"] == "{{ istota_user }}"
 
-        # 0700, because each subdirectory holds package archives uv trusts on
-        # read and re-verifies against no hash.
-        modes = [entry["mode"] for entry in task["loop"]
-                 if "sandbox_cache_dir" in entry["path"]]
-        assert modes == ["0700"]
+        # 0700, because the root holds one cache directory per user and each is
+        # full of package archives uv trusts on read and re-verifies against no
+        # hash.
+        assert task["file"]["mode"] == "0700"
 
         # Skipped entirely when the key is blank, which is the shipped default,
-        # so no deployment gets a stray directory out of this.
+        # so a developer deployment — where the cache is derived instead — gets
+        # no stray directory out of this.
         assert any(
             "istota_security_sandbox_cache_dir" in str(cond)
             for cond in task["when"]
         )
+
+
+class TestTheReposRelocationTask:
+    """The role invokes `istota.repos_relocate`, and how it reads the answer.
+
+    The migrator is where the judgement lives — which admin owns a clone, and
+    whether it is safe to move one at all — so the role's whole job is to run it
+    at the right point in the play, as the right user, and to read its three
+    exit codes apart. Each of those is a way to report a migration that did not
+    happen, so each is asserted.
+    """
+
+    @pytest.fixture
+    def tasks(self):
+        return yaml.safe_load(TASKS_FILE.read_text())
+
+    @pytest.fixture
+    def migrator(self, tasks):
+        found = [
+            t for t in tasks
+            if "repos_relocate" in str(t.get("command", ""))
+        ]
+        assert found, "tasks/main.yml never runs the repos migrator"
+        return found[0]
+
+    def test_it_runs_as_the_daemon_user(self, migrator):
+        """Not as root, and this is the difference between a working migration
+        and one the play calls green.
+
+        The migrator creates `{repos_dir}/{user_id}` and renames the namespace
+        directories into it. Created by root that directory is root-owned at
+        0700, so the daemon can no longer enter the tree the sandbox binds for
+        it and every developer task fails afterwards.
+        """
+        assert migrator.get("become") is True
+        assert migrator["become_user"] == "{{ istota_user }}"
+
+    def test_it_reads_the_admins_file_the_units_read(self, migrator):
+        """Ownership comes from the admins file, so the migrator has to be
+        pointed at the same one the three systemd units are — a renamed
+        namespace puts it somewhere `/etc/istota/admins` is not."""
+        assert (
+            migrator["environment"]["ISTOTA_ADMINS_FILE"]
+            == "/etc/{{ istota_namespace }}/admins"
+        )
+
+    def test_a_refusal_fails_the_play_and_a_partial_does_not(self, migrator):
+        """Exit 1 touched nothing and names something the operator can fix, so
+        it stops the deploy. Exit 2 moved the tree and left something needing a
+        hand, which re-running cannot clear — a task that stayed red forever
+        would be one people learn to skip."""
+        assert migrator["failed_when"] == "_repos_relocate.rc == 1"
+
+    def test_a_no_op_run_is_not_reported_as_a_change(self, migrator):
+        """It runs on every deploy and is a no-op after the first, so
+        `changed_when` has to key on the migrator's own output rather than on
+        the exit code, which is 0 either way."""
+        assert "moved: " in migrator["changed_when"]
+
+    def test_it_runs_after_the_code_and_before_the_units(self, tasks):
+        """Ordering, and both halves matter.
+
+        It needs the new code in the venv to run at all, and it must be done
+        before anything restarts the scheduler — a daemon that has picked up the
+        per-user binds while the clones are still at the old depth sees an empty
+        tree and clones everything again.
+        """
+        names = [t.get("name", "") for t in tasks]
+        migrator = next(
+            i for i, t in enumerate(tasks)
+            if "repos_relocate" in str(t.get("command", ""))
+        )
+        venv = next(
+            i for i, name in enumerate(names)
+            if name == "Install Python dependencies with uv"
+        )
+        scheduler_unit = next(
+            i for i, name in enumerate(names)
+            if name == "Deploy istota-scheduler systemd service"
+        )
+
+        assert venv < migrator < scheduler_unit
