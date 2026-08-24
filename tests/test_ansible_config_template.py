@@ -380,22 +380,61 @@ class TestThePackageCacheRoot:
         under it is per user: the daemon makes `{repos_dir}/{user_id}` at 0700
         as each user's first task needs it. A role that also made a per-user
         directory would be inventing a user list at a point in the play where
-        it does not have one.
+        it does not have one — so "and stops there" is asserted rather than
+        described, by requiring exactly one creator and no `file:` task naming
+        anything *below* the root.
         """
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
         creators = [
             t for t in tasks
             if isinstance(t.get("file"), dict)
             and t["file"].get("path") == "{{ istota_developer_repos_dir }}"
         ]
 
-        assert creators, "tasks/main.yml creates no developer repos root"
+        assert len(creators) == 1, (
+            f"expected exactly one task creating the repos root, found "
+            f"{[t.get('name') for t in creators]}"
+        )
         task = creators[0]
         assert task["file"]["owner"] == "{{ istota_user }}"
         assert task["file"]["mode"] == "0755"
         assert any(
             "istota_developer_repos_dir" in str(cond) for cond in task["when"]
         ), "the root is created even where no repos_dir is configured"
+
+        below = [
+            t.get("name") for t in tasks
+            if isinstance(t.get("file"), dict)
+            and str(t["file"].get("path", "")).startswith(
+                "{{ istota_developer_repos_dir }}/"
+            )
+        ]
+        assert not below, (
+            f"the role creates something under the repos root ({below}); "
+            "everything below it belongs to one user and the daemon makes it"
+        )
+
+    def test_the_directory_tasks_are_not_skipped_on_an_update_only_deploy(self):
+        """Same gate as the migrator, and for the same reason.
+
+        Update-only renders the config and restarts, so it can put the per-user
+        binds on a host where nothing has made the root yet. The migrator's own
+        `mkdir(parents=True)` would then create it with the daemon's umask
+        rather than the owner and mode the role names.
+        """
+        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        paths = (
+            "{{ istota_developer_repos_dir }}",
+            "{{ istota_security_sandbox_cache_dir }}",
+        )
+        for path in paths:
+            task = next(
+                t for t in tasks
+                if isinstance(t.get("file"), dict) and t["file"].get("path") == path
+            )
+            assert not any(
+                "istota_update_only" in str(cond) for cond in task["when"]
+            ), f"{task['name']!r} is skipped on an update-only deploy"
 
     def test_the_role_creates_the_fallback_root_the_resolver_requires(self):
         """`resolve_sandbox_cache_dir` refuses a root that does not already exist.
@@ -430,6 +469,26 @@ class TestThePackageCacheRoot:
             "istota_security_sandbox_cache_dir" in str(cond)
             for cond in task["when"]
         )
+
+
+def _flatten(tasks: list) -> list:
+    """Every task, including those nested under `block`/`rescue`/`always`.
+
+    `yaml.safe_load` returns the top-level list, and this file has one-shot
+    migrators wrapped in blocks that stop and start the three units. An index
+    comparison over the unflattened list cannot see those at all, which is how
+    an ordering assertion ends up weaker than the sentence describing it.
+    """
+    out = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        out.append(task)
+        for key in ("block", "rescue", "always"):
+            nested = task.get(key)
+            if isinstance(nested, list):
+                out.extend(_flatten(nested))
+    return out
 
 
 class TestTheReposRelocationTask:
@@ -476,12 +535,42 @@ class TestTheReposRelocationTask:
             == "/etc/{{ istota_namespace }}/admins"
         )
 
-    def test_a_refusal_fails_the_play_and_a_partial_does_not(self, migrator):
-        """Exit 1 touched nothing and names something the operator can fix, so
-        it stops the deploy. Exit 2 moved the tree and left something needing a
-        hand, which re-running cannot clear — a task that stayed red forever
-        would be one people learn to skip."""
-        assert migrator["failed_when"] == "_repos_relocate.rc == 1"
+    def test_the_pass_condition_is_stated_positively(self, migrator):
+        """`failed_when` replaces the module's own verdict rather than adding
+        to it, so a rule naming the migrator's codes hands every *other* code
+        back as success.
+
+        `repos_relocate` returns 0, 1 or 2, but the `command` module reports its
+        own failures through the same field — a missing interpreter arrives as
+        rc 2, a killed process as a signal code. `failed_when: rc == 1` would
+        pass both, on a task that moves repositories. So the condition is the
+        inverse: pass only where the migrator demonstrably reached its own end,
+        which the `done:` line is the evidence of.
+        """
+        condition = migrator["failed_when"]
+
+        assert "rc != 0" in condition, (
+            "the rule enumerates exit codes instead of stating what passes, so "
+            "an exit the migrator cannot produce is reported as success"
+        )
+        assert "done: " in condition, (
+            "nothing distinguishes the migrator's own exit 2 from the command "
+            "module's"
+        )
+        assert "FAILED: " in condition, (
+            "an exit 2 that moved nothing and wrote no marker is retryable, so "
+            "it has to fail the play rather than be reported and passed over"
+        )
+
+    def test_a_partial_that_only_needs_a_hand_does_not_fail_the_play(self, migrator):
+        """The other half of the same rule, and the reason it is not just
+        "fail on anything but zero".
+
+        An exit 2 whose report carries only `NOT repaired:` moved the tree and
+        wrote the marker, so re-running has no rename left to perform and the
+        play would stay red for ever — which is how a task ends up skipped.
+        """
+        assert "rc == 2" in migrator["failed_when"]
 
     def test_it_runs_on_an_update_only_deploy(self, migrator):
         """The gate that matters, and the one that is easy to get backwards.
@@ -501,35 +590,65 @@ class TestTheReposRelocationTask:
         """It runs on every deploy and is a no-op after the first, so
         `changed_when` has to key on the migrator's own output rather than on
         the exit code, which is 0 either way."""
-        assert "moved: " in migrator["changed_when"]
+        condition = migrator["changed_when"]
+
+        # Anchored to the start of a line, not a bare substring. The report
+        # prints one `note:` line per entry it declined to move, each beginning
+        # with that entry's own name, and entries under `repos_dir` were
+        # model-writable on every deployment running the shared bind — so a
+        # directory named `moved` renders `note: moved: a symlink; left in
+        # place` and a substring test reports `changed` on every deploy after.
+        assert "^(moved|repaired): " in condition, (
+            "the change test is a bare substring, which model-written output "
+            "can satisfy"
+        )
 
         # And the marker, because a first run over an empty tree moves nothing
         # and still writes `.istota-layout` — the one run that touched the disk
         # would otherwise read the same as every run after it. `_print_report`
         # prints "marker not written" on the other branch, which does not
         # contain this substring.
-        assert "marker written" in migrator["changed_when"]
+        assert "marker written" in condition
 
-    def test_it_runs_after_the_code_and_before_the_units(self, tasks):
+    def test_it_runs_after_the_code_and_before_the_units_are_deployed(self, tasks):
         """Ordering, and both halves matter.
 
-        It needs the new code in the venv to run at all, and it must be done
-        before anything restarts the scheduler — a daemon that has picked up the
-        per-user binds while the clones are still at the old depth sees an empty
-        tree and clones everything again.
+        It needs the new code in the venv to run at all, and it has to be done
+        before the play deploys and starts the units — a daemon that picks up
+        the per-user binds while the clones are still at the old depth sees an
+        empty tree and clones everything again.
+
+        Flattened first. `yaml.safe_load` returns the top-level list only, and
+        this file has three one-shot migrations that stop and start all three
+        units from *inside* a `block:`; an index comparison over the unflattened
+        list cannot see any of them.
+
+        **What this does not claim**, because it is not true: that nothing
+        restarts the scheduler before the migration. Those three blocks do, each
+        gated on a piece of legacy state (a pre-rename database, framework
+        location rows, module databases on the mount) that a current deployment
+        does not have. The migrator sits ahead of two of the three and behind
+        the oldest. That hazard is theirs and pre-dates this task — the daemon
+        is running for the whole play in any case, since nothing stops it at the
+        start — so the property worth pinning is the one restart every deploy
+        performs.
         """
-        names = [t.get("name", "") for t in tasks]
+        flat = _flatten(tasks)
+        names = [t.get("name", "") for t in flat]
         migrator = next(
-            i for i, t in enumerate(tasks)
+            i for i, t in enumerate(flat)
             if "repos_relocate" in str(t.get("command", ""))
         )
         venv = next(
             i for i, name in enumerate(names)
             if name == "Install Python dependencies with uv"
         )
-        scheduler_unit = next(
-            i for i, name in enumerate(names)
-            if name == "Deploy istota-scheduler systemd service"
-        )
+        assert venv < migrator
 
-        assert venv < migrator < scheduler_unit
+        for name in (
+            "Deploy istota-scheduler systemd service",
+            "Force handlers to run now",
+            "Enable and start istota-scheduler",
+        ):
+            index = next(i for i, other in enumerate(names) if other == name)
+            assert migrator < index, f"the migration runs after {name!r}"

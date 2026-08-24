@@ -93,8 +93,20 @@ PLANTED_IN_CACHE = "sitecustomize.py"
 #: has to target a directory inside the user's own subtree but outside the
 #: cache, which is what a worktree's venv is: on one mount it succeeds, and
 #: across a mount boundary it is `EXDEV` however identical the filesystems are.
+#: The sentinel is assembled by the shell rather than written out, so the two
+#: marker strings never appear in the command text sent to the model.
+#: `transcript()` concatenates the `content` of every recorded message, and the
+#: assistant turn carries the command in `tool_calls` with `content: null`
+#: today — but a provider shape that put it in `content`, or a harness that
+#: echoed it, would make `probe_output` extract the *script* instead of its
+#: output, and the script contains both `other_present=yes` and
+#: `other_present=no`, both `other_writable` branches and no empty listing. That
+#: is three of the four assertions below passing on an echo.
+MARK = "REPOS_PROBE"
+
 REPOS_PROBE = f"""
-echo REPOS_PROBE_BEGIN
+M={MARK}
+echo "${{M}}_BEGIN"
 if ls -A {OTHER_SUBTREE} >/dev/null 2>&1; then
   echo "other_present=yes"
 else
@@ -121,7 +133,7 @@ else
   echo "hardlink=failed"
 fi
 rm -f {OWN_CACHE}/probe {OWN_SUBTREE}/fake-venv/linked
-echo REPOS_PROBE_END
+echo "${{M}}_END"
 """
 
 REPOS_SCRIPT = [
@@ -141,8 +153,8 @@ REPOS_SCRIPT = [
 def probe_output(stack) -> str:
     """The marked block out of the endpoint transcript, or a readable failure."""
     transcript = stack.endpoint.transcript()
-    begin = transcript.find("REPOS_PROBE_BEGIN")
-    end = transcript.find("REPOS_PROBE_END", begin + 1)
+    begin = transcript.find(f"{MARK}_BEGIN")
+    end = transcript.find(f"{MARK}_END", begin + 1)
     if begin < 0 or end < 0:
         raise AssertionError(
             "the probe's output never reached the model, so the Bash tool did "
@@ -167,7 +179,7 @@ def seeded(stack):
     same daemon uid, so the mode is about other local accounts rather than about
     this boundary.
     """
-    stack.exec([
+    result = stack.exec([
         "sh", "-c",
         f"mkdir -p {OTHER_SUBTREE}/{CACHE_NAME} "
         f"{OTHER_SUBTREE}/{PLANTED_NAMESPACE}/{PLANTED_CLONE} && "
@@ -176,6 +188,15 @@ def seeded(stack):
         f"echo '[remote \"origin\"]' > "
         f"{OTHER_SUBTREE}/{PLANTED_NAMESPACE}/{PLANTED_CLONE}/config",
     ])
+    # `Stack.exec` returns the status rather than raising on it. A seed that did
+    # not land leaves the other user's subtree missing, which is the answer the
+    # sandbox assertions want — arriving by the one route that says nothing
+    # about the binds. The control catches it in the same session, but it should
+    # not be the thing that reports it.
+    assert result.returncode == 0, (
+        f"seeding {OTHER_SUBTREE} failed, so the absence the tests below assert "
+        f"is about a directory that was never created\n{result.stderr}"
+    )
     yield stack
     stack.exec(["sh", "-c", f"rm -rf {OTHER_SUBTREE} {OWN_SUBTREE}/fake-venv"])
 

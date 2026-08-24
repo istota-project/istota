@@ -156,6 +156,7 @@
       - cron                # Scheduled backups
       - bubblewrap          # Per-user filesystem sandbox
       - fuse3               # FUSE mount support (fusermount3)
+      - acl                 # setfacl, for the one task that becomes the daemon user
     state: present
     update_cache: yes
     cache_valid_time: 3600
@@ -918,6 +919,12 @@
 # because an operator made it a mount, and a deployment where it does not is one
 # where every developer task fails on a directory it cannot make.
 #
+# Not gated on `istota_update_only`, which is the gate the migrator below is
+# also without. Update-only renders the config and restarts, so it is a run that
+# can put the per-user binds on a host where nothing has made this yet — and the
+# migrator's own `mkdir(parents=True)` would then create it with the daemon's
+# umask instead of the owner and mode named here.
+#
 # The role creates the root and stops there. Everything below it is per user —
 # `{repos_dir}/{user_id}` holds one admin's clones, worktrees and package cache,
 # and no other user's subtree is ever in that task's sandbox — and the daemon
@@ -938,7 +945,6 @@
     mode: "0755"
   when:
     - istota_developer_repos_dir | length > 0
-    - not istota_update_only
     - not istota_web_only
 
 # The fallback root, for a deployment running the sandbox WITHOUT the developer
@@ -963,7 +969,6 @@
     mode: "0700"
   when:
     - istota_security_sandbox_cache_dir | length > 0
-    - not istota_update_only
     - not istota_web_only
 
 - name: "Create /var/log/{{ istota_namespace }} directory"
@@ -2166,6 +2171,106 @@
     group: "{{ istota_group }}"
   when: not ansible_check_mode and not istota_web_only
 
+# One-time relocation: `developer.repos_dir` from one shared tree into per-user
+# subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
+# The sandbox now binds a task's own subtree rather than the whole root, so a
+# clone left at the old depth is in nobody's namespace: the model would not find
+# it, would clone again, and the old tree would sit there paying for disk. The
+# migrator moves each namespace directory wholesale (its worktrees are siblings
+# of the bare clone inside it, so one rename takes them together) and then runs
+# `git worktree repair` on each clone to fix the absolute paths git records in
+# both directions.
+#
+# Here rather than in YAML because the ownership rule has a judgement call in it.
+# Nothing on disk says which user owns a clone — a forge namespace is not a user
+# id — so the migrator reads the admins file, assigns everything to the single
+# admin where there is exactly one, and refuses where there are none or several.
+# Guessing wrong hands one admin's clones to another, which is the exact failure
+# the per-user split exists to prevent. Same pattern as `istota.db_relocate`.
+#
+# Run unconditionally: it writes `{repos_dir}/.istota-layout` on success and is
+# a reported no-op from then on, so there is nothing to gate it on. A blank
+# `developer.repos_dir` exits 0 with "nothing to migrate".
+#
+# **Not gated on `istota_update_only`**, and that is the gate that matters.
+# Update-only is "pull the code, update the dependencies, render the config,
+# restart" — precisely the run that puts the per-user binds on a host whose
+# clones are still at the old depth. Gating it there would land the split and
+# skip the migration on the one path most likely to carry it. `istota.db_relocate`
+# and the location migrator are ungated the same way, and the two directory
+# tasks above were brought into line with all three.
+#
+# **As the daemon user, not as root.** It creates `{repos_dir}/{user_id}` and
+# renames the namespaces into it; created as root that directory is root-owned
+# at 0700 and the daemon can no longer enter the tree it binds, so every
+# developer task would fail on a migration the play reported as successful.
+# Running it as the daemon user also means the moves are only ever done with the
+# permissions the daemon itself has.
+#
+# `changed_when` reads the migrator's own output, because the exit code is 0
+# whether it moved a tree or found nothing to do. Anchored to the start of a
+# line: the report prints one `note:` line per entry it declined to move, each
+# beginning with that entry's own name, and the entries under `repos_dir` were
+# model-writable on every deployment running the shared bind — so a directory
+# named `moved` renders `note: moved: a symlink; left in place`, and a plain
+# substring test would report `changed` on every deploy for ever after. The
+# marker is the third arm: a first run over an empty or absent tree moves
+# nothing and still writes `.istota-layout`, and calling that unchanged would
+# have the one run that touched the disk read like every run after it. "marker
+# not written" does not contain "marker written", so those two stay apart.
+#
+# **`failed_when` replaces the module's own verdict rather than adding to it**,
+# which is why it cannot simply name the migrator's codes. `repos_relocate`
+# returns 0, 1 or 2, but the `command` module reports its own failures through
+# the same field — a missing interpreter arrives as rc 2, and a killed process
+# as a signal code — so a rule phrased as "fail on 1" hands every one of those
+# back as success, on a task that moves repositories. The condition below is
+# the inverse: pass only where the migrator demonstrably ran to its own end.
+#
+# 0 is success, including "already migrated" and "nothing to migrate". 1 is a
+# refusal, which touched nothing at all — an ambiguous set of admins, a task in
+# flight, an unreadable root — so the play fails, the operator fixes the named
+# thing and re-runs. 2 is the interesting one and it covers two different
+# states. Where the report carries a `FAILED:` line the marker was *not*
+# written, so a re-run retries and the play should stop. Where it carries only
+# `NOT repaired:` the moves landed, the marker is written and re-running has no
+# rename left to perform, so failing the play would leave it red for ever and
+# teach people to skip the task; that case is printed instead and the tree is
+# recoverable in the state it is in. The `done:` line is what says the report
+# was ours at all, which is what tells the migrator's exit 2 from the command
+# module's.
+- name: Migrate the developer repos tree into per-user subtrees
+  command: >-
+    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.repos_relocate
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  become: true
+  become_user: "{{ istota_user }}"
+  environment:
+    ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
+  register: _repos_relocate
+  changed_when: >-
+    (_repos_relocate.stdout_lines | default([])
+       | select('match', '^(moved|repaired): ') | list | length > 0)
+    or 'marker written' in (_repos_relocate.stderr | default(''))
+  failed_when: >-
+    _repos_relocate.rc != 0 and not (
+      _repos_relocate.rc == 2
+      and 'done: ' in (_repos_relocate.stderr | default(''))
+      and 'FAILED: ' not in (_repos_relocate.stderr | default(''))
+    )
+  when:
+    - not istota_web_only
+    - istota_developer_repos_dir | length > 0
+
+- name: Show the repos relocation output
+  debug:
+    msg: "{{ _repos_relocate.stdout_lines + _repos_relocate.stderr_lines }}"
+  when:
+    - _repos_relocate is defined
+    - _repos_relocate is not skipped
+    - _repos_relocate.changed or _repos_relocate.rc == 2
+
 # One-time migration: framework istota.db → per-user location.db.
 # Copies each user's location_pings/places/visits/dismissed_clusters/location_state
 # rows into {workspace}/location/data/location.db, then drops the framework tables.
@@ -2373,85 +2478,6 @@
     - not istota_web_only
     - istota_use_nextcloud_mount | default(false) | bool
     - (_legacy_module_dbs.matched | default(0)) > 0
-
-# One-time relocation: `developer.repos_dir` from one shared tree into per-user
-# subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
-# The sandbox now binds a task's own subtree rather than the whole root, so a
-# clone left at the old depth is in nobody's namespace: the model would not find
-# it, would clone again, and the old tree would sit there paying for disk. The
-# migrator moves each namespace directory wholesale (its worktrees are siblings
-# of the bare clone inside it, so one rename takes them together) and then runs
-# `git worktree repair` on each clone to fix the absolute paths git records in
-# both directions.
-#
-# Here rather than in YAML because the ownership rule has a judgement call in it.
-# Nothing on disk says which user owns a clone — a forge namespace is not a user
-# id — so the migrator reads the admins file, assigns everything to the single
-# admin where there is exactly one, and refuses where there are none or several.
-# Guessing wrong hands one admin's clones to another, which is the exact failure
-# the per-user split exists to prevent. Same pattern as `istota.db_relocate`.
-#
-# Run unconditionally: it writes `{repos_dir}/.istota-layout` on success and is
-# a reported no-op from then on, so there is nothing to gate it on. A blank
-# `developer.repos_dir` exits 0 with "nothing to migrate".
-#
-# **Not gated on `istota_update_only`**, unlike the directory creation above,
-# and that is the gate that matters. Update-only is "pull the code, update the
-# dependencies, render the config, restart" — which is precisely the run that
-# puts the per-user binds on a host whose clones are still at the old depth.
-# Gating it there would land the split and skip the migration on the one path
-# most likely to carry it. `istota.db_relocate` and the location migrator are
-# gated the same way, for the same reason.
-#
-# **As the daemon user, not as root.** It creates `{repos_dir}/{user_id}` and
-# renames the namespaces into it; created as root that directory is root-owned
-# at 0700 and the daemon can no longer enter the tree it binds, so every
-# developer task would fail on a migration the play reported as successful.
-# Running it as the daemon user also means the moves are only ever done with the
-# permissions the daemon itself has.
-#
-# `changed_when` reads the migrator's own output, because the exit code is 0
-# whether it moved a tree or found nothing to do. The marker is the third arm:
-# a first run over an empty or absent tree moves nothing and still writes
-# `.istota-layout`, and reporting that as unchanged would have the one run that
-# touched the disk look identical to every run after it. "marker not written"
-# does not contain "marker written", so the two branches stay apart.
-#
-# Three exit codes and each is read differently. 0 is success, including
-# "already migrated" and "nothing to migrate". 1 is a refusal, which touched
-# nothing at all — an ambiguous set of admins, a task in flight, an unreadable
-# root — so the play fails and the operator fixes the named thing and re-runs.
-# 2 is partial: the moves landed but something needs a hand, most often a
-# worktree `git worktree repair` could not fix. That does not fail the play,
-# because re-running cannot clear it and a deploy that stays red forever teaches
-# people to skip the task; it is printed instead, and the tree is recoverable in
-# the state it is in.
-- name: Migrate the developer repos tree into per-user subtrees
-  command: >-
-    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.repos_relocate
-  args:
-    chdir: "{{ istota_repo_dir }}"
-  become: true
-  become_user: "{{ istota_user }}"
-  environment:
-    ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
-  register: _repos_relocate
-  changed_when: >-
-    'moved: ' in _repos_relocate.stdout or
-    'repaired: ' in _repos_relocate.stdout or
-    'marker written' in _repos_relocate.stderr
-  failed_when: _repos_relocate.rc == 1
-  when:
-    - not istota_web_only
-    - istota_developer_repos_dir | length > 0
-
-- name: Show the repos relocation output
-  debug:
-    msg: "{{ _repos_relocate.stdout_lines + _repos_relocate.stderr_lines }}"
-  when:
-    - _repos_relocate is defined
-    - _repos_relocate is not skipped
-    - _repos_relocate.changed or _repos_relocate.rc == 2
 
 - name: Deploy istota-scheduler systemd service
   template:
