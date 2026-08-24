@@ -1356,3 +1356,128 @@ def test_the_terminal_frame_is_the_last_thing_on_the_connection(server):
     out = server.run(argv=["sh", "-c", "echo hi"], cwd=str(server.repos))
     assert out.terminal is out.controls[-1]
     assert out.stdout == b"hi\n"
+
+
+class TestTheDoctorProbeSpeaksToTheRealServer:
+    """`doctor`'s transport probe, against this server rather than a stub.
+
+    The four `developer.container` checks are otherwise exercised against a
+    monkeypatched `_exec_transport_request`, which proves the reporting and
+    nothing about the wire. That is the shape of vacuous assertion this
+    subsystem keeps producing — a probe whose success is indistinguishable from
+    a no-op — so the framing, the acknowledgement parse and the control-frame
+    walk are held against the real server here, where the harness already is.
+    """
+
+    def test_a_ping_comes_back_with_a_pong(self, server):
+        from istota import doctor
+
+        frames, error = doctor._exec_transport_request(
+            Path(server.socket_path), encode_ping_request(), 10.0
+        )
+
+        assert error == ""
+        assert any(frame.get("pong") is True for frame in frames)
+        assert is_terminal(frames[-1])
+
+    def test_a_stat_carries_the_uid_and_the_repos_root(self, server):
+        """What the identity check compares. A server answering with neither
+        would make that check pass by producing no findings."""
+        from istota import doctor
+
+        frames, error = doctor._exec_transport_request(
+            Path(server.socket_path), encode_stat_request(), 10.0
+        )
+
+        assert error == ""
+        stat = next(f for f in frames if "uid" in f)
+        assert stat["uid"] == os.getuid()
+        assert stat["repos_root"] == str(server.repos)
+
+    def test_an_exec_status_comes_back(self, server):
+        """The uv-cache check reads a `test -d` exit code off the terminal
+        frame, so a probe that could not distinguish 0 from 1 would report every
+        deployment's cache mount as present."""
+        from istota import doctor
+
+        for command, expected in ((["true"], 0), (["false"], 1)):
+            frames, error = doctor._exec_transport_request(
+                Path(server.socket_path),
+                encode_exec_request(argv=command, cwd=None, stdin=False, timeout=5),
+                10.0,
+            )
+            assert error == ""
+            assert frames[-1]["exit_code"] == expected
+
+    def test_a_refusal_is_reported_rather_than_read_as_silence(self, server):
+        """An error acknowledgement closes the connection with nothing streamed
+        behind it. Reading that as "no frames" would make a refused probe
+        indistinguishable from a healthy one that said nothing."""
+        from istota import doctor
+
+        frames, error = doctor._exec_transport_request(
+            Path(server.socket_path),
+            encode_exec_request(
+                argv=["true"], cwd=str(server.outside), stdin=False, timeout=5
+            ),
+            10.0,
+        )
+
+        assert frames == []
+        assert ERR_PATH_REFUSED in error
+
+    def test_a_socket_nobody_is_serving_is_reported_not_raised(self, tmp_path):
+        """Doctor runs on the daemon's start-up path; an exception there turns a
+        diagnostic into an outage."""
+        from istota import doctor
+
+        frames, error = doctor._exec_transport_request(
+            tmp_path / "absent.sock", encode_ping_request(), 1.0
+        )
+
+        assert frames == []
+        assert "could not connect" in error
+
+    def test_the_checks_come_back_green_against_it(self, server, tmp_path):
+        """End to end: the four checks, over the real transport, with no
+        monkeypatching anywhere. `repos_root` has to agree, which is what makes
+        the identity check's OK mean something."""
+        from istota import doctor
+        from istota.config import (
+            Config,
+            ContainerConfig,
+            DeveloperConfig,
+            UserConfig,
+        )
+
+        # The server's own roots, spelled as the daemon would derive them:
+        # `{repos_dir}/{user}` and `{exec_socket_dir}/{user}/exec.sock`.
+        user = server.repos.name
+        config = Config(
+            db_path=tmp_path / "test.db",
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir=str(server.repos.parent),
+                container=ContainerConfig(
+                    backend="devbox",
+                    exec_socket_dir=str(Path(server.socket_path).parent.parent),
+                ),
+            ),
+            users={user: UserConfig(display_name=user)},
+        )
+        # `_start_server` names the socket directory `sock`, not the user, so
+        # the derived path has to be made to match rather than assumed.
+        derived = Path(server.socket_path).parent.parent / user
+        derived.mkdir(exist_ok=True)
+        link = derived / "exec.sock"
+        if not link.exists():
+            os.symlink(server.socket_path, link)
+
+        results = {r.name: r for r in doctor.check_developer_container(config, probe=True)}
+
+        assert results["developer.container.transport"].status == "ok", (
+            results["developer.container.transport"].detail
+        )
+        assert results["developer.container.identity"].status == "ok", (
+            results["developer.container.identity"].detail
+        )
