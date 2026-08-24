@@ -283,7 +283,9 @@ def _repos_root() -> Path:
     root = developer_repos_root()
     if root is None:
         raise ReviewError(
-            "DEVELOPER_REPOS_DIR is unset, so there is no root to confine git to.",
+            "No developer repos root resolved for this task, so there is no "
+            "root to confine git to. DEVELOPER_REPOS_DIR must be set and must "
+            "name this task's own subtree (ISTOTA_USER_ID).",
             reason="repos_dir_unset",
         )
     return root

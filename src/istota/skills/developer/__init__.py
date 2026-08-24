@@ -401,6 +401,25 @@ def setup_env(ctx) -> dict[str, str]:
     cache_root = config.security.sandbox_cache_dir
     repos_root = _user_repos_dir(dev, ctx)
     if repos_root is not None:
+        # The one place that knows the layout. `DEVELOPER_REPOS_DIR` is the
+        # task's own subtree, exactly the path `build_bwrap_cmd` binds, so the
+        # documented clone recipe (`$DEVELOPER_REPOS_DIR/<ns>/<project>.git`)
+        # lands inside the namespace instead of on bwrap's root tmpfs. It goes
+        # to the model *and*, through `proxy_base_env`, to every host-side skill
+        # CLI — `code_review` contains a model-named worktree against it.
+        #
+        # Emitted here rather than resolved from `developer.repos_dir` by the
+        # manifest, and the manifest entry is `from: setup_env` (metadata only)
+        # rather than `from: config`, because the two cannot both name it: the
+        # merge in `execute_task` applies `build_skill_env` first and the hooks
+        # second, both with `if k not in env`, so a `from: config` entry wins
+        # and this value would be dropped without a word. Measured, not read —
+        # `tests/test_developer_repos_env.py::TestManifestOutranksSetupEnv`.
+        #
+        # Absent for a non-admin, matching `_user_repos_dir`'s gate and the
+        # bind's: a variable with no bind behind it names a directory on the
+        # root tmpfs, which is the defect this stage closes, one gate out.
+        env["DEVELOPER_REPOS_DIR"] = str(repos_root)
         scrub_and_report(repos_root, skip=[cache_root] if cache_root else [])
 
     return env

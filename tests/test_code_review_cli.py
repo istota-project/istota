@@ -82,9 +82,16 @@ def commit(repo: Path, message: str) -> None:
 
 @pytest.fixture
 def repos_root(tmp_path, monkeypatch) -> Path:
-    root = tmp_path / "repos"
-    root.mkdir()
+    """The caller's own subtree of `developer.repos_dir`.
+
+    `setup_env` derives the variable as `{repos_dir}/{user_id}` and
+    `developer_repos_root` refuses a value not named for `ISTOTA_USER_ID`, so
+    the user id here has to match the one `review_env` sets.
+    """
+    root = tmp_path / "repos" / "admin"
+    root.mkdir(parents=True)
     monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+    monkeypatch.setenv("ISTOTA_USER_ID", "admin")
     return root.resolve()
 
 

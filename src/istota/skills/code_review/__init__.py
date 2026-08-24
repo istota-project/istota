@@ -157,18 +157,20 @@ def cmd_run(args):
         )
 
     # The guard above reads `repos_dir` off the loaded config; containment below
-    # resolves against `DEVELOPER_REPOS_DIR`. Those can disagree — the variable
-    # is injected only for *authorized* skills, so a claude_code deployment with
-    # `[developer]` configured but no forge token has the config key and not the
-    # variable. Reported through `path_not_allowed` that reads as "your path is
-    # wrong" and blocks the push; it is neither. Separate reason, and skipped,
-    # because no amount of not-pushing will set the variable.
+    # resolves against `DEVELOPER_REPOS_DIR`, which is the *task's own subtree*
+    # of it. Those can disagree: the variable comes from the developer skill's
+    # `setup_env`, which does not run for a non-admin and declines a subtree it
+    # cannot name safely, and `developer_repos_root` refuses a value that is not
+    # this task's own. Reporting any of that through `path_not_allowed` would
+    # read as "your path is wrong" and block the push; it is neither. Separate
+    # reason, and skipped, because no amount of not-pushing will set it.
     if developer_repos_root() is None:
         _skip(
             "repos_root_unavailable",
-            "DEVELOPER_REPOS_DIR is not set in this process, so no worktree path "
-            "can be validated. The variable is injected for authorized skills "
-            "only — check that code_review resolved its credentials.",
+            "No developer repos root resolved in this process, so no worktree "
+            "path can be validated. DEVELOPER_REPOS_DIR is derived per task by "
+            "the developer skill's setup_env and must name this task's own "
+            "subtree (ISTOTA_USER_ID); check that both are set.",
         )
 
     worktree, error = resolve_under_repos(args.worktree)

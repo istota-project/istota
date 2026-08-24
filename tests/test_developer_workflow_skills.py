@@ -147,8 +147,16 @@ class TestCliFlagMatchesReality:
         assert api_key.when == ["developer.enabled", "brain.native.api_key"]
 
         repos = specs["DEVELOPER_REPOS_DIR"]
-        assert repos.config_path == "developer.repos_dir"
         assert repos.sensitive is False, "a directory path is not a credential"
+        assert repos.source == "setup_env", (
+            "the value is the caller's own subtree of `developer.repos_dir`, "
+            "which only the developer skill's setup_env hook can derive — and "
+            "a `from: config` entry here would outrank that hook silently"
+        )
+        assert repos.config_path == "", (
+            "a `from: setup_env` spec resolves to None by design; a config_path "
+            "on it reads as a value that is never used"
+        )
 
 
 def _fenced_blocks(body: str):
