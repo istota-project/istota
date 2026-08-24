@@ -389,14 +389,54 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     would mean a user whose task directory exists and whose repos directory
     does not, silently.
 
-    None when the layout cannot be named — no configured root, or no user id.
-    The fallback for an empty user id would be the shared root itself, which is
-    the exposure this split exists to remove, so it fails closed instead.
+    What *is* checked is that the join did what it says — the same equality
+    rule ``sandbox_cache_sweeper`` uses, and for the same reason. Truthiness
+    alone lets three values through that resolve outside one user's subtree:
+    ``.`` collapses to the shared root, ``..`` to its parent, and an absolute
+    component replaces the root outright. And the entry is model-plantable:
+    every deployment running the shared bind gave a task read-write access to
+    this root, so ``{repos_dir}/{user_id}`` may already be a symlink someone
+    left there, which ``_bind`` and ``_add`` both resolve and which ``chmod``
+    would follow. That is not a stricter rule about user ids; it is the check
+    that the path named is the one the layout describes.
+
+    Validated resolved, returned **as written**, like
+    :func:`resolve_sandbox_cache_dir`: ``_bind`` uses the string it is handed
+    as the sandbox destination, so returning the resolved path would put a
+    symlinked deployment root at a different name inside the namespace from
+    everything else bound under it, hence on another mount.
+
+    None when the layout cannot be named — no configured root, no user id, or
+    a join that lands somewhere else. The fallback in each case would be the
+    shared root, which is the exposure this split exists to remove, so it fails
+    closed instead.
     """
     root = config.developer.repos_dir
     if not root or not user_id:
         return None
-    return Path(root) / user_id
+    root_path = Path(root)
+    candidate = root_path / user_id
+    try:
+        # Two checks, because neither catches the other's cases. The lexical
+        # one refuses a component that never became a child (`.` is dropped by
+        # `PurePath`, an absolute one replaces the root, a nested one goes
+        # deeper); the resolved one refuses `..` and every symlink, which are
+        # children by name and somewhere else on disk.
+        contained = (
+            candidate.parent == root_path
+            and candidate.resolve() == root_path.resolve() / user_id
+        )
+        if not contained:
+            logger.warning(
+                "developer.repos_dir: %s does not resolve to the subtree named "
+                "by user id %r; not using it. A symlink or a path component in "
+                "the user id would reach outside that user's own tree.",
+                candidate, user_id,
+            )
+            return None
+    except OSError:
+        return None
+    return candidate
 
 
 def discover_calendars_for_task(
@@ -1953,13 +1993,16 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     direction only**: what the cache can swallow. It does not answer what can
     swallow the cache, and for a long time this docstring claimed it did — that
     a cache *inside* one of these "covers nothing", therefore is safe. The first
-    half is true and the conclusion does not follow. ``developer.repos_dir`` is
-    both the documented home for the cache *and* an entry on this list bound
-    seven lines after it, so the documented shape put every user's cache
-    directory inside an ancestor bind emitted later, read-write, for every admin
-    developer task (ISSUE-319). The other direction is
-    ``_sandbox_cache_covering_targets``; the exposure is closed by masking the
-    sibling directories, not by moving the bind.
+    half is true and the conclusion does not follow. ``developer.repos_dir``
+    was both the documented home for the cache *and* an entry on this list,
+    bound in full seven lines after it, so the documented shape put every
+    user's cache directory inside an ancestor bind emitted later, read-write,
+    for every admin developer task (ISSUE-319). The bind is per-user now, so
+    what an admin task can reach through it is that admin's own subtree — but
+    this list keeps naming the whole root, because the question it answers is
+    what the cache can *swallow*, and a cache mounted over the root would still
+    cover every subtree beneath it. The other direction is
+    ``_sandbox_cache_covering_targets``, which does take a user id.
     """
     home = Path(os.environ.get("HOME", "/tmp"))
     targets: list[Path] = [
@@ -1984,7 +2027,7 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     return targets
 
 
-def _sandbox_cache_covering_targets(config: Config) -> list[Path]:
+def _sandbox_cache_covering_targets(config: Config, user_id: str) -> list[Path]:
     """Bind destinations ``build_bwrap_cmd`` emits *after* the cache bind.
 
     The other direction from ``_sandbox_bind_targets``. One of these being an
@@ -2002,22 +2045,31 @@ def _sandbox_cache_covering_targets(config: Config) -> list[Path]:
     a single bind covers both. The exposure is closed by masking the sibling
     directories instead — see ``sandbox_cache_sibling_dirs``.
 
-    Today the developer repos bind is the only entry. The per-resource mounts
-    are the other binds emitted after the cache and cannot reach it: they live
-    under ``nextcloud_mount_path``, which ``_validate_workspace_dir`` already
-    forbids a cache root from overlapping in either direction. Listed
-    unconditionally, without the ``is_admin`` gate the bind itself carries: this
-    feeds a refusal, and refusing a cache for a task that was not exposed costs
-    RAM, where allowing one for a task that was costs the boundary.
+    Today the developer repos bind is the only entry, and it is that task's own
+    subtree (``get_user_repos_dir``) rather than the configured root — which is
+    why this takes a user id at all. The root is not a bind destination any
+    more, and listing it here would answer a question about a mount nothing
+    emits: over-broad in the refusal it feeds, and wrong in the accounting
+    check in ``build_bwrap_cmd``, which compares this list against the real
+    argv and logs an error per task when a coverer is missing from it.
+
+    The per-resource mounts are the other binds emitted after the cache and
+    cannot reach it: they live under ``nextcloud_mount_path``, which
+    ``_validate_workspace_dir`` already forbids a cache root from overlapping
+    in either direction. Listed without the ``is_admin`` gate the bind itself
+    carries: this feeds a refusal, and refusing a cache for a task that was not
+    exposed costs RAM, where allowing one for a task that was costs the
+    boundary.
     """
-    if not config.developer.repos_dir:
-        return []
-    return [Path(config.developer.repos_dir)]
+    repos = get_user_repos_dir(config, user_id)
+    return [repos] if repos is not None else []
 
 
-def _sandbox_cache_is_covered(config: Config, resolved_root: Path) -> Path | None:
+def _sandbox_cache_is_covered(
+    config: Config, user_id: str, resolved_root: Path,
+) -> Path | None:
     """The later bind that covers *resolved_root*, or None."""
-    for target in _sandbox_cache_covering_targets(config):
+    for target in _sandbox_cache_covering_targets(config, user_id):
         try:
             resolved_target = target.resolve()
         except OSError:
@@ -2232,7 +2284,7 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         # *is* the boundary, so `--disable-userns` is a precondition rather
         # than hardening. Refused here rather than in `build_bwrap_cmd` so the
         # bind and the UV_CACHE_DIR group cannot disagree.
-        covered_by = _sandbox_cache_is_covered(config, resolved_root)
+        covered_by = _sandbox_cache_is_covered(config, user_id, resolved_root)
         if covered_by is not None and not _bwrap_supports_disable_userns():
             _refuse(
                 f"sandbox_cache_dir {resolved_root} is inside {covered_by}, which the "
@@ -2539,13 +2591,16 @@ def build_bwrap_cmd(
     # `_sandbox_bind_targets` is what refuses that. Still before the masks,
     # which stay last.
     #
-    # The bind stays *before* the developer repos bind, deliberately. That
-    # later bind is an ancestor and covers this one, which is what puts the
-    # cache and the venv on a single mount and is the only shape where uv can
-    # hardlink rather than copy — moving this bind after it makes the cache its
-    # own mount again and costs the full byte copy. What the covering bind also
-    # does is expose every *other* user's cache directory, and the masks below
-    # are what close that; see `_sandbox_cache_covering_targets`.
+    # The bind stays *before* the developer repos bind, deliberately. Where the
+    # cache root is inside `{repos_dir}/{user_id}`, that later bind is an
+    # ancestor and covers this one, which is what puts the cache and the venv
+    # on a single mount and is the only shape where uv can hardlink rather than
+    # copy — moving this bind after it makes the cache its own mount again and
+    # costs the full byte copy. A cache root elsewhere under `repos_dir` is not
+    # covered by anything now that the bind is per-user, and pays that copy.
+    # Where there is a covering bind it also exposes every *other* user's cache
+    # directory in that root, and the masks below are what close that; see
+    # `_sandbox_cache_covering_targets`.
     cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
     cache_sibling_masks: list[Path] = []
     # -1 until the bind is emitted, and the mask block below gates on it rather
@@ -2748,7 +2803,7 @@ def build_bwrap_cmd(
         # Both names for the root, against both names for each destination.
         #
         # `_bind` uses the path **as written** as its sandbox destination and
-        # the repos bind passes `repos_dir` unresolved, while
+        # the repos bind passes `{repos_dir}/{user_id}` unresolved, while
         # `resolve_sandbox_cache_dir` returns the cache as written for the same
         # reason. So under a symlinked deployment root (`/srv/repos` ->
         # `/data/repos`) a resolved-only comparison finds no coverer, emits no
@@ -2781,7 +2836,7 @@ def build_bwrap_cmd(
         ]
         if covering:
             accounted: set[Path] = set()
-            for target in _sandbox_cache_covering_targets(config):
+            for target in _sandbox_cache_covering_targets(config, task.user_id):
                 try:
                     accounted.add(target.resolve())
                 except OSError:
@@ -2994,10 +3049,11 @@ def native_fs_roots(
 
     # Every *other* user's cache, denied (ISSUE-319). The bwrap counterpart is
     # a read-only tmpfs over each one, emitted after the repos bind that would
-    # otherwise expose them; here the equivalent is a deny root, because the
-    # developer repos root added below is a write root and the whole cache root
-    # sits inside it. Without this the sibling masks are a bwrap-only property
-    # and the native brain's in-process file tools walk straight past them.
+    # otherwise expose them; here the equivalent is a deny root, for a cache
+    # root inside the per-user repos subtree added below, which is a write
+    # root. Without this the sibling masks are a bwrap-only property and the
+    # native brain's in-process file tools walk straight past them. A cache
+    # root elsewhere is reached by neither seam and the denial is inert.
     #
     # Same shape as the `.developer` denial above and for the same reason: a
     # carve-out nested inside a write root, which containment alone cannot say.

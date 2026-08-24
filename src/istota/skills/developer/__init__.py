@@ -393,9 +393,11 @@ def setup_env(ctx) -> dict[str, str]:
     # the credential helper, GIT_CONFIG_COUNT and the forge-CLI wiring, leaving
     # a task that looks fine and cannot authenticate. `scrub_and_report` holds a
     # never-raises contract of its own; this ordering is the second guard.
-    # The package caches sit inside repos_dir by default (ISSUE-319) and hold
-    # one directory per unpacked wheel. Pruned from the walk: none of them is a
-    # repository, and this runs on every task.
+    # The package caches sit under repos_dir by default (ISSUE-319) and hold
+    # one directory per unpacked wheel. Pruned from the walk where the walk
+    # reaches them — none of them is a repository, and this runs on every task.
+    # Inert while the configured cache root is outside `{repos_dir}/{user_id}`,
+    # which is now the whole of what is walked.
     cache_root = config.security.sandbox_cache_dir
     repos_root = _user_repos_dir(dev, ctx)
     if repos_root is not None:
@@ -405,27 +407,47 @@ def setup_env(ctx) -> dict[str, str]:
 
 
 def _user_repos_dir(dev, ctx) -> Path | None:
-    """Create and return ``{repos_dir}/{user_id}``, or None.
+    """``{repos_dir}/{user_id}``, created if it is not there, or None.
 
-    The layout rule is ``executor.get_user_repos_dir``; this is the same rule
-    written a second time because a skill module cannot import the executor
-    that imports it. ``tests/test_sandbox.py::TestPerUserReposDir`` holds the
-    two equal, so a change to either without the other goes red.
+    The layout rule is ``executor.get_user_repos_dir``, including its
+    containment check; this is the same rule written a second time because a
+    skill module cannot import the executor that imports it (``istota.skills``
+    star-imports every skill, so the executor's import graph would ride along
+    on every path that touches one). ``tests/test_sandbox.py::TestPerUserReposDir``
+    holds the two equal, so a change to either without the other goes red.
 
     Created here, at 0700, because ``build_bwrap_cmd``'s ``_bind`` skips a path
     that does not exist. Without it a user's first developer task binds nothing
     at all, the model's first ``mkdir -p`` under ``$DEVELOPER_REPOS_DIR`` lands
     on bwrap's root tmpfs, and the clone it then spends minutes on disappears
     when the task ends — a working first task and a confusing one differ by
-    this directory. Same shape as ``resolve_sandbox_cache_dir``'s creation of
-    the per-user cache directory, deliberately: ``mkdir`` is umask-dependent,
-    so the mode is set explicitly afterwards.
+    this directory. ``mkdir`` + an explicit ``chmod`` is the idiom
+    ``resolve_sandbox_cache_dir`` uses for the per-user cache directory, for
+    the reason that ``mkdir``'s mode is umask-dependent. Only the idiom is
+    shared: that function validates its root through half a dozen guards this
+    one does not repeat, because the root here is an operator-set path the
+    sandbox has bound since the developer skill shipped.
+
+    **A failed ``chmod`` must not cancel the scrub.** They are two failures and
+    only one of them is disqualifying: ``mkdir(exist_ok=True)`` succeeds on a
+    directory another uid owns and ``chmod`` then raises ``EPERM``, while
+    ``build_bwrap_cmd`` binds that directory regardless — its gate is the
+    path's existence, not this function's return value. Returning None on the
+    chmod would bind an unscrubbed tree, which is ISSUE-270 back, on the one
+    shape (a migrator or an operator made the directory) where it is most
+    likely.
 
     Never raises. This runs late in a hook whose exceptions
     ``dispatch_setup_env_hooks`` swallows along with everything the hook
     returned, so a failure here has to be reported rather than thrown — a task
     that cannot clone is better than one that silently cannot authenticate.
     """
+    # The bind is admin-gated, so a non-admin's subtree would be created, mode
+    # reset and walked on every task and every heartbeat tick for a directory
+    # no sandbox ever binds. The two gates agree instead.
+    if not getattr(ctx, "is_admin", False):
+        return None
+
     user_id = getattr(getattr(ctx, "task", None), "user_id", "") or ""
     if not user_id:
         # The fallback would be the shared root, which is the cross-user reach
@@ -435,15 +457,42 @@ def _user_repos_dir(dev, ctx) -> Path | None:
             "repos subtree under %s", dev.repos_dir,
         )
         return None
-    repos_root = Path(dev.repos_dir) / user_id
+
+    root = Path(dev.repos_dir)
+    repos_root = root / user_id
+    try:
+        contained = (
+            repos_root.parent == root
+            and repos_root.resolve() == root.resolve() / user_id
+        )
+    except OSError:
+        contained = False
+    if not contained:
+        # A symlink left in the root by a task from the shared-tree era, or a
+        # user id that is not one path component. Either way this is not that
+        # user's subtree, and `mkdir`, `chmod` and the scrub's rewrites would
+        # all follow it. See `executor.get_user_repos_dir`.
+        logger.warning(
+            "developer: %s is not the subtree named by user id %r; not "
+            "creating, chmodding or scrubbing it", repos_root, user_id,
+        )
+        return None
+
     try:
         repos_root.mkdir(parents=True, exist_ok=True)
-        os.chmod(repos_root, 0o700)
     except OSError as exc:
         logger.warning(
-            "developer: could not prepare the repos subtree %s (%s); the task "
+            "developer: could not create the repos subtree %s (%s); the task "
             "will have no writable repos directory inside the sandbox",
             repos_root, exc,
         )
         return None
+    try:
+        os.chmod(repos_root, 0o700)
+    except OSError as exc:
+        # Reported, not fatal — see the docstring. The scrub still runs.
+        logger.warning(
+            "developer: could not set 0700 on the repos subtree %s (%s)",
+            repos_root, exc,
+        )
     return repos_root

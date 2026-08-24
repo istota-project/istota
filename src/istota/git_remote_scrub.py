@@ -69,11 +69,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger("istota.git_remote_scrub")
 
-# How far below `repos_dir` to look. The documented layout puts a bare clone at
-# `<namespace>/<project>.git` with its worktrees alongside, so everything of
-# interest is at depth 2; the extra levels cover a repo filed one directory
-# deeper by hand. Exceeding it is logged — a sweep that silently declines to
-# look is indistinguishable from one that looked and found nothing.
+# How far below the walk's root to look. The documented layout puts a bare
+# clone at `{repos_dir}/{user_id}/<namespace>/<project>.git` with its worktrees
+# alongside, and the two callers hand this function different roots: the
+# developer skill's `setup_env` sweeps one user's subtree, where a clone is at
+# depth 2, while `worktree_reaper` sweeps the whole of `repos_dir` from the
+# scheduler, where it is at depth 3. So the slack for a repository filed one
+# directory deeper by hand is two levels on the first and one on the second.
+# Exceeding it is logged — a sweep that silently declines to look is
+# indistinguishable from one that looked and found nothing.
 _MAX_DEPTH = 4
 
 _GIT_TIMEOUT = 15

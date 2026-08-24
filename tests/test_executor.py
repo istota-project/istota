@@ -695,6 +695,9 @@ class TestDeveloperEnvVars:
         ctx = _Ctx()
         ctx.config = config
         ctx.user_temp_dir = str(user_temp)
+        # The hook creates and scrubs the repos subtree only for an admin,
+        # matching the bind's own gate.
+        ctx.is_admin = True
         # The hook reads the task's user id to name the repos subtree it
         # creates and sweeps; without one it takes the fail-closed branch and
         # every assertion below would be made against a hook that did half its

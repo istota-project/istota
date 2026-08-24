@@ -1284,6 +1284,7 @@ class TestPerUserReposDir:
         class _Ctx:
             config = sandbox_config
             user_temp_dir = str(user_temp)
+            is_admin = True
 
         ctx = _Ctx()
         ctx.task = task
@@ -1315,6 +1316,7 @@ class TestPerUserReposDir:
         class _Ctx:
             config = sandbox_config
             user_temp_dir = str(user_temp)
+            is_admin = True
 
         ctx = _Ctx()
         ctx.task = None
@@ -1322,6 +1324,138 @@ class TestPerUserReposDir:
 
         assert list(repos.iterdir()) == []
         assert repos.stat().st_mode & 0o777 == 0o755
+
+
+    def test_a_planted_symlink_is_refused_by_both_sides(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """The entry is model-plantable, and this is the shape that makes it so.
+
+        Every deployment running the shared bind gave an admin task read-write
+        access to the whole root, so `{repos_dir}/{user_id}` may already be a
+        symlink a task left there. `_bind` and `_add` resolve their source and
+        `chmod` follows a link, so without a containment check the sandbox
+        binds the target read-write and the hook chmods and rewrites git
+        configs under it.
+        """
+        from istota.executor import get_user_repos_dir
+        from istota.skills.developer import setup_env
+
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "victim").mkdir()
+        (repos / "alice").symlink_to(outside)
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+
+        assert get_user_repos_dir(sandbox_config, "alice") is None
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), True)
+        assert str(outside.resolve()) not in result
+        assert str((outside / "victim").resolve()) not in result
+
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        class _Ctx:
+            config = sandbox_config
+            user_temp_dir = str(user_temp)
+            is_admin = True
+
+        ctx = _Ctx()
+        ctx.task = make_sandbox_task()
+        before = outside.stat().st_mode & 0o777
+        setup_env(ctx)
+        assert outside.stat().st_mode & 0o777 == before, \
+            "the hook chmodded a directory outside the repos root"
+
+    @pytest.mark.parametrize("user_id", [".", "..", "/etc", "a/b"])
+    def test_a_user_id_that_is_not_one_component_is_refused(
+        self, sandbox_config, tmp_path, user_id,
+    ):
+        """Truthiness is not containment. `.` collapses to the shared root,
+        `..` to its parent, an absolute component replaces the root outright,
+        and a nested one lands in some other user's tree — each of them a path
+        the bind, the native write roots, the `chmod` and the scrub's rewrites
+        would all be pointed at."""
+        from istota.executor import get_user_repos_dir
+
+        sandbox_config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"),
+        )
+        assert get_user_repos_dir(sandbox_config, user_id) is None
+
+    def test_a_failed_chmod_still_scrubs(
+        self, sandbox_config, make_sandbox_task, tmp_path, monkeypatch,
+    ):
+        """The two failures are not one. `mkdir(exist_ok=True)` succeeds on a
+        directory another uid owns and `chmod` then raises EPERM — and
+        `build_bwrap_cmd` binds that directory regardless, because its gate is
+        the path's existence. Returning early on the chmod would bind an
+        unscrubbed tree, which is ISSUE-270 back on the one shape (a migrator
+        or an operator made the directory) where it is most likely.
+        """
+        from istota.skills import developer as developer_skill
+
+        repos = tmp_path / "repos"
+        (repos / "alice").mkdir(parents=True)
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        real_chmod = os.chmod
+
+        def _refuse(path, mode, **kw):
+            # Only the subtree: the hook chmods its generated helper scripts too.
+            if Path(path) == repos / "alice":
+                raise PermissionError(1, "Operation not permitted")
+            return real_chmod(path, mode, **kw)
+
+        monkeypatch.setattr(developer_skill.os, "chmod", _refuse)
+        scrubbed = []
+        monkeypatch.setattr(
+            developer_skill, "scrub_and_report",
+            lambda root, **kw: scrubbed.append(Path(root)),
+        )
+
+        class _Ctx:
+            config = sandbox_config
+            user_temp_dir = str(user_temp)
+            is_admin = True
+
+        ctx = _Ctx()
+        ctx.task = make_sandbox_task()
+        developer_skill.setup_env(ctx)
+
+        assert scrubbed == [repos / "alice"]
+
+    def test_a_non_admin_task_does_not_create_a_subtree(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """The bind is admin-gated, so creating and chmodding a subtree for a
+        user no sandbox ever binds is churn on every task and every heartbeat
+        tick. The two gates agree instead."""
+        from istota.skills.developer import setup_env
+
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        class _Ctx:
+            config = sandbox_config
+            user_temp_dir = str(user_temp)
+            is_admin = False
+
+        ctx = _Ctx()
+        ctx.task = make_sandbox_task()
+        env = setup_env(ctx)
+
+        assert list(repos.iterdir()) == []
+        # and the rest of the hook still ran
+        assert "GIT_CONFIG_COUNT" in env or env == {}
 
 
 class TestBuildBwrapCmdSandboxCacheDir:
@@ -1664,6 +1798,21 @@ class TestSandboxCacheSiblingMasks:
         )
         mask_idx = result.index(str(cache_root / "bob"))
         assert repos_idx < mask_idx
+
+    def test_the_covering_bind_is_one_this_module_accounts_for(
+        self, sandbox_config, make_sandbox_task, tmp_path, caplog,
+    ):
+        """`build_bwrap_cmd` compares the binds that actually cover the cache
+        against `_sandbox_cache_covering_targets` and logs an error when one is
+        missing from that list — the alarm for "somebody moved a bind". Moving
+        the repos bind to the per-user subtree without moving the list is
+        exactly that, and nothing else in the suite reads the log, so the alarm
+        would fire once per admin task under a green suite.
+        """
+        self._setup(sandbox_config, tmp_path)
+        with caplog.at_level("ERROR"):
+            self._argv(sandbox_config, make_sandbox_task())
+        assert "does not list" not in caplog.text, caplog.text
 
     def test_the_masks_are_read_only(
         self, sandbox_config, make_sandbox_task, tmp_path,

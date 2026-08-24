@@ -772,6 +772,9 @@ class TestDeveloperSetupEnvSweep:
         ctx = _Ctx()
         ctx.config = config
         ctx.user_temp_dir = str(user_temp)
+        # The hook creates and scrubs the repos subtree only for an admin,
+        # matching the bind's own gate.
+        ctx.is_admin = True
         # The hook sweeps the task's own subtree of `repos_dir`, so the task —
         # and specifically its user id — is what says which tree that is.
         ctx.task = db.Task(
