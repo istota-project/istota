@@ -134,6 +134,26 @@ FEEDS = Profile(
 # session's real image turned out to be — there is no constant to write down.
 NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 
+#: The developer profile again, with the package caches on disk under
+#: `repos_dir` — the placement ISSUE-317 asked for and ISSUE-319 made safe.
+#:
+#: A profile of its own rather than a flag on `forge`, per the pool's own rule:
+#: `StackPool` keys by name, so a config difference a boot depends on has to be
+#: a new name. It also keeps the cache bind out of every forge scenario, which
+#: would otherwise all start carrying one for no reason of their own.
+#:
+#: `ISTOTA_SECURITY_SANDBOX_CACHE_DIR` is read by `render-config.sh` and passed
+#: through by `docker-compose.yml`, so the two-file rule holds. The root itself
+#: is created by the scenario rather than by the boot: the lean shape bypasses
+#: `entrypoint.sh`, nothing else makes it, and `resolve_sandbox_cache_dir`
+#: re-checks that it is an existing writable directory on every task — so
+#: creating it after the daemon is up is enough.
+CACHE = Profile(
+    "cache",
+    services=("model", "gitlab"),
+    config={"ISTOTA_SECURITY_SANDBOX_CACHE_DIR": "/data/repos/.package-caches"},
+)
+
 # Exactly one full profile, and the asymmetry with the lean shape above is
 # deliberate. The argument for fine-grained profiles — that a stack with every
 # subsystem enabled has the daemon polling mail, feeds and Talk during every
@@ -183,7 +203,7 @@ MAIL = Profile(
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
-ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, NOTIFY, FEEDS, MAIL, FULL)
+ALL: tuple[Profile, ...] = (BASE, FORGE, NO_FORGE, NOTIFY, FEEDS, MAIL, CACHE, FULL)
 
 
 def by_name(name: str) -> Profile:

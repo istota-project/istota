@@ -108,6 +108,7 @@ import logging
 import os
 import subprocess
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -802,6 +803,7 @@ def reap_worktrees(
     *,
     retention_hours: float = DEFAULT_RETENTION_HOURS,
     protect: list[Path] | None = None,
+    skip: Iterable[Path | str] = (),
     now: float | None = None,
 ) -> list[ReapOutcome]:
     """Sweep every repository under ``root``, removing what has already landed.
@@ -816,9 +818,14 @@ def reap_worktrees(
     window does not mean "reap sooner", it means "reap the checkout a task is
     still setting up" — a worktree seconds old is clean, unlocked and carries
     nothing that is not upstream.
+
+    ``skip`` prunes subtrees from the repository walk — see
+    :func:`git_remote_scrub.find_git_dirs`. Distinct from ``protect``, which
+    names worktrees found and then held back: nothing under ``skip`` is a
+    repository, so the sweep never has to decide about it.
     """
     try:
-        return _reap(root, retention_hours, protect, now)
+        return _reap(root, retention_hours, protect, skip, now)
     except Exception:  # noqa: BLE001 — the public entry point of a delete path
         logger.exception("worktree_reaper: sweep of %s failed", root)
         return []
@@ -828,6 +835,7 @@ def _reap(
     root: Path | str,
     retention_hours: float,
     protect: list[Path] | None,
+    skip: Iterable[Path | str],
     now: float | None,
 ) -> list[ReapOutcome]:
     root_path = Path(root)
@@ -858,7 +866,7 @@ def _reap(
     cutoff = stamp - retention_hours * 3600
     outcomes: list[ReapOutcome] = []
 
-    for git_dir in find_git_dirs(root_path):
+    for git_dir in find_git_dirs(root_path, skip=skip):
         # Per repository, so one that blows up in an unforeseen way cannot end
         # the sweep and leave every later repository unswept while the caller
         # reads the result as complete.
@@ -933,6 +941,7 @@ def reap_and_report(
     *,
     retention_hours: float = DEFAULT_RETENTION_HOURS,
     protect: list[Path] | None = None,
+    skip: Iterable[Path | str] = (),
 ) -> list[ReapOutcome]:
     """:func:`reap_worktrees`, logged.
 
@@ -940,7 +949,9 @@ def reap_and_report(
     count per reason — the held-back set is the number an operator needs to see
     growing, and a line each would bury it on a busy repos directory.
     """
-    outcomes = reap_worktrees(root, retention_hours=retention_hours, protect=protect)
+    outcomes = reap_worktrees(
+        root, retention_hours=retention_hours, protect=protect, skip=skip,
+    )
 
     held: dict[str, int] = {}
     for outcome in outcomes:

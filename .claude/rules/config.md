@@ -257,14 +257,96 @@ never re-verified against a hash, so a planted archive is executed by the next `
 that hardlinks out of it. Per-user costs nothing the placement argument was about —
 hardlink sharing is between one user's worktrees, which stay inside one subdirectory.
 
-Put the root under `developer.repos_dir`. uv populates a venv by hardlinking out of its
-cache and `link(2)` returns EXDEV across a mount boundary even on one device, so a cache
-on any other mount makes every worktree pay for a full copy instead of sharing one byte
-set. For the same reason `resolve_sandbox_cache_dir` returns the path **as written**
-rather than resolved: `_bind` uses the string it is handed as the sandbox destination and
-the repos bind passes `repos_dir` unresolved, so resolving here would put a symlinked
-`repos_dir` and a cache under it at two names, hence two mounts, and hardlinking between
-them fails silently.
+Put the root under `developer.repos_dir`; the Ansible role derives it as
+`{repos_dir}/.package-caches` and leaves it empty when `repos_dir` is. uv populates a venv
+by hardlinking out of its cache and `link(2)` compares **mounts**, not devices, so a cache
+root anywhere else returns EXDEV even on one filesystem and every worktree pays for a full
+copy. Measured four ways on the deployment (ISSUE-319): host with no namespace works, two
+separate binds gives EXDEV, one bind covering both works, and re-binding the cache on top
+of the repos bind gives EXDEV again. So the repos bind covering the cache bind is not
+incidental to the placement — it is the entire mechanism, and carving the cache back out
+costs exactly what putting it elsewhere costs. For the same reason
+`resolve_sandbox_cache_dir` returns the path **as written** rather than resolved: `_bind`
+uses the string it is handed as the sandbox destination and the repos bind passes
+`repos_dir` unresolved, so resolving here would put a symlinked `repos_dir` and a cache
+under it at two names, hence two mounts, and hardlinking between them fails silently.
+
+**That covering bind also exposes every other user's cache, and the sibling masks are what
+close it.** The repos bind is an ancestor of the cache bind and emitted after it, so inside
+the sandbox `{root}` is the host directory in full, read-write — and uv trusts its own
+unpacked wheels on read, so one admin's task could plant an archive the next admin's
+`uv sync` hardlinks out of and executes. `build_bwrap_cmd` masks every *other*
+subdirectory of `{root}` with an empty read-only tmpfs, in the mask block, after both
+binds.
+
+**Every refusal lives in `resolve_sandbox_cache_dir`, not in `build_bwrap_cmd`,** and that
+placement is the whole correctness argument rather than a tidiness one. Dropping only the
+bind leaves `execute_task` pointing `UV_CACHE_DIR` at a path that is *still in the
+namespace* — the covering bind put the entire root there — so uv writes into the shared
+root with every other user's cache beside it and no mask over any of them. That is not the
+pre-ISSUE-305 fallback it reads as; it is ISSUE-319 unmitigated, reachable by a task
+planting one symlink. The three callers of that predicate drop together or not at all. It
+costs one `iterdir` of a directory holding one entry per user, on a path NativeBrain takes
+per Bash call.
+
+The sibling set is enumerated from the filesystem rather than from config, because
+`resolve_sandbox_cache_dir` creates a subdirectory lazily on that user's first task and a
+config-derived list would miss a user added since the daemon started. Five things are then
+refused, each because the masks would otherwise be less than they claim: a root that cannot
+be listed; a root holding a **symlink** (`Path.is_dir()` follows one, so the mask would
+cover the name and leave the target reachable); an entry that cannot be *classified* at all,
+since `Path.is_symlink` swallows only ENOENT/ENOTDIR/ELOOP/EINVAL/EBADF and an EACCES would
+otherwise mask an unexamined entry — a symlink at its own name, or a regular file handed to
+bwrap as `--tmpfs <file>`, which cannot be mounted and fails every task before it runs; more
+than `MAX_SANDBOX_CACHE_SIBLINGS` entries, because the root is model-writable and enough
+`mkdir`s push the argv past `E2BIG` and fail every *later* task at launch; and a covered
+root on a bwrap without `--disable-userns`, since here the mask **is** the boundary rather
+than defence behind the skill CLIs and a task that can `unshare -Urm` can umount it. Each
+refusal costs RAM and nothing else.
+
+The covering scan compares **both** names for the root against both names for each bind
+destination, and matches every bwrap bind verb rather than the two emitted today. `_bind`
+writes the destination as it was handed and the repos bind passes `repos_dir` unresolved, so
+a resolved-only comparison finds no coverer under a symlinked deployment root, emits no
+masks, and disagrees with `_sandbox_cache_is_covered` — which resolves both sides and does
+find one — in the direction that exposes. Same trap `_mask_dir` already handles by masking at
+every name a path answers to. `_mask_dir` now reports whether it covered the target, and a
+refused sibling mask takes the whole root with it rather than being the silent `continue` it
+is for the database masks.
+
+**On NativeBrain the equivalent is a write denial, and it is not parity.** The in-process
+file tools have `repos_dir` as a write root and no namespace at all, so without
+`native_fs_roots` carrying the siblings in `write_denied_roots` the fix would be a
+bwrap-only property — and `native` is also the configured fallback for an anthropic primary.
+That closes the planting path, which is a write. It leaves another user's cache *readable*,
+because that seam has no read-deny to reach for.
+
+**Accepted residual: the root itself stays writable inside the sandbox.** Only existing
+subdirectories are masked, and the root is reached through the repos bind, so an admin task
+can `mkdir {root}/victim` for a user who has not run a task yet and populate it;
+`resolve_sandbox_cache_dir` adopts whatever is at that name. Closing it needs a record of
+which directories the daemon created, kept where the model cannot write — new persistent
+state with its own migration and failure modes. It is not closable by moving the root, since
+all of `repos_dir` is model-writable, nor by masking the root and binding the cache back
+inside it, since that makes the cache its own mount and `link(2)` returns EXDEV, which is
+the cost the placement exists to avoid. A task can also switch the disk cache off
+deployment-wide by planting one symlink: degrade-closed working as designed, but triggerable
+from inside the sandbox and permanent until someone reads the log.
+
+`_sandbox_bind_targets` answers what the cache can swallow; `_sandbox_cache_covering_targets`
+answers what can swallow the cache. Confusing the two is what made ISSUE-319 invisible to
+review for a release — the docstring correctly said a cache *inside* a bind target covers
+nothing, and drew from that the wrong conclusion that it was therefore safe. The mask block
+now asks the question of the argv it actually built rather than of a list of binds it
+believes it emits, so moving a bind moves the answer with it.
+
+One consequence of the placement, since it is not obvious: `git_remote_scrub.find_git_dirs`
+walks `repos_dir` on every task and on every reaper sweep, and uv's `archive-v0` is one
+directory per unpacked wheel. `_MAX_DEPTH` already stops it descending into them, but it
+still lists and lstats every one — 25 ms over 4,500 directories, and a per-sweep log line
+claiming thousands went unswept for credentials. Both callers pass the configured cache
+root as `skip`. The cost of that prune, stated rather than implied: a repository parked
+under the cache root is not swept.
 
 `resolve_sandbox_cache_dir` (in `executor.py`) is the single predicate behind the bind,
 the environment and `native_fs_roots`, so they cannot disagree, and it **never raises** —

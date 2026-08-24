@@ -1324,33 +1324,28 @@ istota_security_sandbox_ro_paths: []
 # repos_dir, at the temp dir, or at ~/.cache — a bind above an existing mount
 # covers it, and the daemon refuses those values rather than doing so.
 #
-# STILL BLANK, AND THE PLACEMENT IS AN OPEN QUESTION (ISSUE-317). The advice
-# above is not safe to turn into a default as it stands. build_bwrap_cmd binds
-# {root}/{user_id} for the task's own user and then binds ALL of repos_dir
-# read-write for an admin developer task, in that order — so with the root
-# inside repos_dir the later bind covers the earlier one and every other user's
-# cache is writable from inside the sandbox. uv trusts its unpacked wheels on
-# read and re-verifies them against no hash, so that is the cross-user code path
-# the per-user split in resolve_sandbox_cache_dir exists to close. Verified
-# against the real argv, not argued: the cache bind lands at index 6 and the
-# repos bind at index 7.
+# Derived from istota_developer_repos_dir, and blank when that is blank: with
+# no repos bind there is no shared mount to put the cache on, and the whole
+# placement argument is about that mount.
 #
-# The mode below does not help — every task runs as the same daemon uid — and
-# neither does reordering the binds, since only {root}/{user_id} would be
-# covered back up and the other users' subdirectories stay exposed.
+# The repos bind is emitted AFTER this one and is an ancestor of it, so it
+# covers the cache root — which is the point, not an accident. link(2) compares
+# mounts rather than devices, so a cache root outside repos_dir returns EXDEV
+# even on the same filesystem, and so does one carved back out with a nested
+# bind; both were measured on the reference deployment (ISSUE-319). The single
+# covering bind is the only shape where uv hardlinks instead of copying every
+# wheel.
 #
-# Three ways out, none of them a one-line default, all of them needing a
-# decision this key cannot record: put the root on the same filesystem but
-# outside repos_dir (it is a separate ext4 mount on the reference deployment, so
-# a sibling is a different mount and link(2) returns EXDEV — which is the whole
-# cost the placement advice exists to avoid); carve the root back out inside the
-# sandbox after the repos bind, which is a change to build_bwrap_cmd and wants
-# the linux tier; or accept the exposure and say so in
-# resolve_sandbox_cache_dir's docstring, which currently asserts the opposite.
-#
-# The sweep below is finished and lands with this comment, so whichever way that
-# goes there is already something bounding the caches when the key is set.
-istota_security_sandbox_cache_dir: ""
+# What that covering also exposes — every other user's cache directory,
+# read-write, to every admin developer task — is closed by build_bwrap_cmd
+# masking the sibling directories with empty read-only tmpfs mounts, after both
+# binds. Here the mask IS the boundary rather than defence behind one, so the
+# daemon refuses to bind a covered cache at all on a bwrap without
+# --disable-userns, and refuses one whose root it cannot list or that holds a
+# symlink. Each refusal costs RAM and nothing else.
+istota_security_sandbox_cache_dir: >-
+  {{ (istota_developer_repos_dir ~ '/.package-caches')
+     if istota_developer_repos_dir else '' }}
 # Bounding what that directory grows to (ISSUE-317). Every sweep runs the cheap
 # reclaim the package managers ship (uv cache prune, npm cache verify); a
 # per-user cache still over the ceiling afterwards is wiped with their own clean
@@ -1360,7 +1355,14 @@ istota_security_sandbox_cache_dir: ""
 # istota_security_sandbox_cache_dir is empty. A user with a task in flight is
 # skipped rather than raced.
 istota_security_sandbox_cache_sweep_enabled: true
-istota_security_sandbox_cache_max_gb: 10.0   # per user; clamped to a 1 GiB floor by the sweeper
+# Per user, clamped to a 1 GiB floor by the sweeper. Sized against two figures
+# from the reference deployment: one `uv sync --all-extras` writes about 1.8 GB,
+# so a ceiling under that would wipe a cache that is doing its job on every
+# sweep; and the root now shares a 40 GB volume with the worktrees, which had
+# about 9 GB free. 4 GB holds two full resolutions per admin and leaves the
+# worktrees room. Raise it on a bigger volume — a sweep only ever costs a
+# re-download.
+istota_security_sandbox_cache_max_gb: 4.0
 istota_security_network_enabled: true              # --unshare-net + CONNECT proxy (requires sandbox)
 istota_security_network_allow_pypi: true           # add pypi.org + files.pythonhosted.org to allowlist
 # Operator-specific additions to the CONNECT allowlist, as "host:port" strings.

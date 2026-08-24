@@ -927,8 +927,9 @@
 # everything but the daemon is what stops another local account planting an
 # archive for the next `uv sync` to hardlink into a venv.
 #
-# Only fires for an operator who has set the key by hand: the shipped default is
-# still blank while the placement question in defaults/main.yml is open.
+# Fires on any deployment with istota_developer_repos_dir set, since the cache
+# root now derives from it (ISSUE-319 closed the placement question). Still
+# skipped where repos_dir is blank, which leaves the key blank too.
 #
 # Both directories, not just the cache root. Nothing in the tree creates
 # `repos_dir` — on the reference deployment it exists because an operator made

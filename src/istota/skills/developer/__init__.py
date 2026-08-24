@@ -391,6 +391,10 @@ def setup_env(ctx) -> dict[str, str]:
     # the credential helper, GIT_CONFIG_COUNT and the forge-CLI wiring, leaving
     # a task that looks fine and cannot authenticate. `scrub_and_report` holds a
     # never-raises contract of its own; this ordering is the second guard.
-    scrub_and_report(Path(dev.repos_dir))
+    # The package caches sit inside repos_dir by default (ISSUE-319) and hold
+    # one directory per unpacked wheel. Pruned from the walk: none of them is a
+    # repository, and this runs on every task.
+    cache_root = config.security.sandbox_cache_dir
+    scrub_and_report(Path(dev.repos_dir), skip=[cache_root] if cache_root else [])
 
     return env
