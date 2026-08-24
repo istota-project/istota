@@ -396,6 +396,42 @@ class TestBodiesDoNotContradict:
             "the refused-verb list must not be described as a boundary"
         )
 
+    def test_a_zero_exit_from_an_install_is_not_evidence_it_completed(self):
+        """ISSUE-318. `npm install` exits 0 when a package's postinstall binary
+        fetch is refused at the network boundary: npm suppresses lifecycle
+        script output by default, so the run prints `added N packages`, exits
+        0, and leaves an empty cache directory where the browser should be. The
+        boundary rule above it is unreachable from there — nothing was printed,
+        so there is no host to name and no reason to stop — and the failure
+        resurfaces much later as a missing binary in a test run."""
+        body = self._body("developer")
+        assert "not evidence it completed" in body, (
+            "developer must say a zero exit from an install does not prove a "
+            "postinstall fetch succeeded"
+        )
+        assert "--foreground-scripts" in body, (
+            "the only way to see a suppressed postinstall error has to be named"
+        )
+        assert "PUPPETEER_SKIP_DOWNLOAD" in body, (
+            "a skip variable is what makes the outcome honest rather than "
+            "silently empty; name at least one"
+        )
+
+    def test_the_boundary_is_named_in_the_shape_plain_node_reports_it(self):
+        """ISSUE-318, second half. The sandbox exports `HTTPS_PROXY`, so npm,
+        `uv`, `git` and `curl` are refused at the proxy against a CONNECT they
+        name themselves.
+        Plain Node does not read proxy environment, so a postinstall script
+        written in JS never reaches the proxy: it resolves DNS inside
+        `--unshare-net` and fails with `EAI_AGAIN`. That reads as a transient
+        DNS problem and invites exactly the retry the boundary rule forbids, so
+        the rule has to name the shape as well as the answer."""
+        body = self._body("developer")
+        assert "EAI_AGAIN" in body, (
+            "the boundary rule must name the DNS error shape a plain Node "
+            "postinstall reports, or the model reads the refusal as a flake"
+        )
+
     @pytest.mark.parametrize("name", ["developer", "commit", "code_review"])
     def test_no_recipe_runs_a_command_under_a_near_ceiling_timeout(self, name):
         """D3. `timeout 590` inside a 600-second tool cap is the pattern the
@@ -625,9 +661,24 @@ class TestLoadBudget:
     the model retries an install that cannot succeed until the task's budget is
     gone. `docs/deployment/security.md` carries the operator-facing half; the
     model never reads that file.
+
+    761 -> 763 for ISSUE-318, two net lines against that same paragraph,
+    because naming the boundary turned out not to be enough to reach the model.
+    `npm install` exits 0 when a package's postinstall binary fetch is refused
+    there: npm hides lifecycle-script output, so the run prints `added N
+    packages` and leaves an empty cache directory, and the ISSUE-304 line never
+    fires because nothing was printed and there is no host to name. The second
+    of the two covers the error's shape rather than the answer -- the sandbox
+    exports `HTTPS_PROXY`, so npm, `uv`, `git` and `curl` are refused at the
+    proxy against a `CONNECT` they name themselves, while plain Node ignores
+    proxy environment and fails at DNS with
+    `EAI_AGAIN`, which reads as a flake and invites exactly the retry the rule
+    forbids. Neither point is deducible from the line already there, and both
+    were paid for by a task that installed Puppeteer, saw exit 0, and found the
+    browser missing at run time.
     """
 
-    BUDGET_LINES = 761
+    BUDGET_LINES = 763
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
