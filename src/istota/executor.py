@@ -2082,6 +2082,19 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
     branches because the configured root was model-adjacent too under the old
     default.
 
+    **The protection checks run against the cache's parent, not the cache**, on
+    both branches — the bind-target list, the database directories and
+    ``_validate_workspace_dir``. Conservative in the direction that matters,
+    since a broader path can only refuse more. One consequence is worth stating
+    because it has no escape hatch any more: ``_validate_workspace_dir``
+    overlaps in *both* directions, so a ``developer.repos_dir`` that overlaps
+    the source tree, the Nextcloud mount, a database directory or a ``$HOME``
+    dotfile directory loses its disk cache on every task, and
+    ``security.sandbox_cache_dir`` cannot be used to put it elsewhere because
+    that branch is not taken. Under the pre-derivation shape the cache root was
+    independently configurable and could sidestep the overlap. The refusal is
+    now a fact about ``repos_dir``, and the fix is to move ``repos_dir``.
+
     Returned **as written**, not resolved, though every check below runs against
     the resolved path. ``_bind`` uses the string it was handed as the sandbox
     destination, and the repos bind passes ``{repos_dir}/{user_id}`` unresolved
@@ -2102,42 +2115,70 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
             _cache_dir_refusals.add(message)
             logger.warning("%s", message)
 
-    # Which shape, and with it the three things that differ: the root the leaf
-    # is created under, the leaf's name, and which directory the *operator* is
-    # responsible for having created. On the derived branch that last one is
-    # `repos_dir` itself — `{repos_dir}/{user_id}` is made here (with parents)
-    # for a non-admin, whose subtree the developer skill's `setup_env`
-    # deliberately does not create, since no sandbox binds it.
-    if config.developer.repos_dir:
-        repos_root = get_user_repos_dir(config, user_id)
-        if repos_root is None:
-            # `get_user_repos_dir` has already said why. No fall back to
-            # `security.sandbox_cache_dir`: with `repos_dir` set, that key is
-            # not this deployment's cache location, and the reasons the join
-            # fails — no user id, a planted symlink — are reasons to give this
-            # task no disk-backed cache rather than to reach for another path.
-            _refuse(
-                f"sandbox cache: {config.developer.repos_dir} has no usable subtree "
-                f"for user {user_id!r}; not binding a cache. Package caches stay on "
-                "the sandbox's root tmpfs, in RAM."
-            )
-            return None
-        raw = str(repos_root)
-        leaf = SANDBOX_CACHE_ROOT_NAME
-        must_exist = Path(config.developer.repos_dir)
-    else:
-        raw = config.security.sandbox_cache_dir
-        if not raw:
-            return None
-        leaf = user_id
-        must_exist = Path(raw)
-
+    # Inside the `try`, deliberately, and this is not a style choice. The
+    # never-raises contract is what both callers rest on, and one of them is
+    # `build_bwrap_cmd` under NativeBrain, which reaches this per Bash call. The
+    # branch selection touches paths: `get_user_repos_dir` guards only `OSError`
+    # while `Path.resolve()` raises `ValueError` on an embedded null byte and
+    # `Path(root) / user_id` raises `TypeError` on a non-str user id. The
+    # pre-derivation code read a plain string attribute and entered the `try`
+    # immediately, so leaving the selection above it opened a hole that had not
+    # been there.
     try:
+        # Which shape, and with it the three things that differ: the root the
+        # leaf is created under, the leaf's name, and which directory the
+        # *operator* is responsible for having created. On the derived branch
+        # that last one is `repos_dir` itself — `{repos_dir}/{user_id}` is made
+        # here (with parents) for a non-admin, whose subtree the developer
+        # skill's `setup_env` deliberately does not create, since no sandbox
+        # binds it.
+        #
+        # **Gated on `enabled` as well as on the path**, matching
+        # `build_bwrap_cmd` and `_user_repos_dir` exactly. The derivation's
+        # whole justification is that the repos bind covers the cache, and that
+        # bind is `is_admin and config.developer.enabled`; with the skill
+        # switched off there is no covering bind, so deriving would take the
+        # operator's explicit `security.sandbox_cache_dir` away and give nothing
+        # back. A sandbox running without the developer skill is exactly the
+        # deployment that key is kept for.
+        if config.developer.enabled and config.developer.repos_dir:
+            repos_root = get_user_repos_dir(config, user_id)
+            if repos_root is None:
+                # `get_user_repos_dir` has already said why. No fall back to
+                # `security.sandbox_cache_dir`: with the developer skill on,
+                # that key is not this deployment's cache location, and the
+                # reasons the join fails — no user id, a planted symlink — are
+                # reasons to give this task no disk-backed cache rather than to
+                # reach for another path.
+                _refuse(
+                    f"sandbox cache: {config.developer.repos_dir} has no usable "
+                    f"subtree for user {user_id!r}; not binding a cache. Package "
+                    "caches stay on the sandbox's root tmpfs, in RAM."
+                )
+                return None
+            raw = str(repos_root)
+            leaf = SANDBOX_CACHE_ROOT_NAME
+            must_exist = Path(config.developer.repos_dir)
+            key = "developer.repos_dir"
+        else:
+            raw = config.security.sandbox_cache_dir
+            if not raw:
+                return None
+            leaf = user_id
+            must_exist = Path(raw)
+            key = "security.sandbox_cache_dir"
+
         root = Path(raw)
         if not root.is_absolute():
+            # Names the branch's own key. `get_user_repos_dir` runs no
+            # absoluteness check of its own, so a relative `developer.repos_dir`
+            # surfaces here and nowhere else — and sending that operator to
+            # `security.sandbox_cache_dir`, which is blank on their deployment,
+            # is worse than saying nothing.
             _refuse(
-                f"sandbox_cache_dir {raw!r} is not an absolute path; not binding it. "
-                "A relative path would resolve against the daemon's working directory."
+                f"sandbox cache root {raw!r} (from {key}) is not an absolute path; "
+                "not binding a cache. A relative path would resolve against the "
+                "daemon's working directory."
             )
             return None
 
@@ -2250,10 +2291,60 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
                     "sandbox cache: could not set 0700 on %s (%s); the cache "
                     "inside it is still 0700", root, exc,
                 )
-        os.chmod(cache_dir, 0o700)
+
+        # `mkdir` and `chmod` re-traverse the path *by name*, so the containment
+        # check above is a check on one inode and these are operations on
+        # whatever the name means now. `Path.mkdir(exist_ok=True)` swallows
+        # `FileExistsError` whenever `is_dir()` says yes, and `is_dir()` follows
+        # a symlink; plain `os.chmod` follows one too. On the derived branch the
+        # parent is bound read-write into a live task's sandbox and this
+        # function runs on the task path, so the writer and the checker are
+        # concurrent by construction — a symlink landing at `.package-caches`
+        # between the two would get another user's subtree `chmod 0700`-ed.
+        #
+        # `O_NOFOLLOW` refuses the symlink at the last component (ELOOP), and
+        # `fchmod` then acts on the descriptor rather than on the name, so the
+        # mode lands on the inode that was opened or on nothing. The equality is
+        # re-asserted through `/proc/self/fd` where that is readable, which is
+        # the only way to ask "what did I actually open" rather than "what does
+        # this name mean now".
+        #
+        # **The residual is stated rather than implied.** `_bind` resolves the
+        # path again at `execve`, so a swap after this returns still reaches the
+        # bind. Closing that means binding through `/proc/self/fd/N`, which
+        # changes the sandbox *destination* name — and the destination name is
+        # load-bearing here (see the "as written" paragraph above: two names
+        # means two mounts means EXDEV). That is a trade this function cannot
+        # make alone.
+        fd = os.open(cache_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(fd, 0o700)
+            try:
+                opened = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            except OSError:
+                # No procfs (darwin, and the test suite runs there). The
+                # `O_NOFOLLOW` above is still the guard that matters; this is
+                # the confirmation, not the check.
+                opened = None
+            if opened is not None and opened != resolved_root / leaf:
+                _refuse(
+                    f"sandbox cache {cache_dir} changed under us: it is {opened}, "
+                    f"not {resolved_root / leaf}; not binding it."
+                )
+                return None
+        finally:
+            os.close(fd)
         return cache_dir
     except Exception as exc:  # never raise: both callers are on the task path
-        _refuse(f"sandbox cache {raw} rejected ({exc}); not binding it.")
+        # `raw` deliberately via `locals()`: the branch selection is inside the
+        # `try` now, so it is the one thing that can raise *before* `raw` is
+        # bound, and a bare reference here would turn the never-raises guard
+        # into an `UnboundLocalError` on exactly the path it was widened to
+        # cover. Found by the test for that widening.
+        _refuse(
+            f"sandbox cache {locals().get('raw', '<unresolved>')} rejected "
+            f"({exc!r}); not binding it."
+        )
         return None
 
 
@@ -2528,9 +2619,18 @@ def build_bwrap_cmd(
     # --- Developer repos (RW) ---
     #
     # The task's own subtree, never the shared root — see `get_user_repos_dir`.
-    # Created by the developer skill's `setup_env`, which runs before this;
-    # `_bind` skips a path that does not exist, so a user who has never run a
-    # developer task binds nothing rather than having the root stand in.
+    # Created by the developer skill's `setup_env`, which runs before this.
+    #
+    # The `exists()` below reads as the guard that stops a user who has never
+    # run a developer task from having the root stand in, and it is no longer
+    # doing that work: `resolve_sandbox_cache_dir` runs a dozen lines above and
+    # creates `{repos_dir}/{user_id}` with `parents=True` for *every* task on a
+    # developer-enabled deployment, non-admins included, because the cache is
+    # derived inside it. So on the branch this gate covers the answer is now
+    # unconditionally yes. Behaviour is unchanged — `setup_env` already created
+    # the directory for exactly the admin tasks the bind covers — but the next
+    # person to move that `mkdir` should know the check here stopped catching
+    # anything, rather than read a comment that says otherwise.
     if is_admin and config.developer.enabled:
         repos = get_user_repos_dir(config, task.user_id)
         if repos is not None and repos.exists():

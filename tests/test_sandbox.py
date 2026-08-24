@@ -1836,6 +1836,7 @@ class TestDerivedSandboxCacheDir:
         here, with parents, or their first task has no disk-backed cache."""
         repos = tmp_path / "repos"
         repos.mkdir()
+        sandbox_config.developer.enabled = True
         sandbox_config.developer.repos_dir = str(repos)
 
         cache = resolve_sandbox_cache_dir(sandbox_config, "carol")
@@ -1852,6 +1853,7 @@ class TestDerivedSandboxCacheDir:
     ):
         """A typo in `developer.repos_dir` should be a warning and a cache in
         RAM, not the daemon materializing a directory tree from a bad value."""
+        sandbox_config.developer.enabled = True
         sandbox_config.developer.repos_dir = str(tmp_path / "never-created")
 
         assert resolve_sandbox_cache_dir(sandbox_config, "alice") is None
@@ -1964,3 +1966,75 @@ class TestDerivedSandboxCacheDir:
         assert [Path(p) for p in (skip or [])] == [
             repos / "alice" / ".package-caches"
         ], f"the scrub does not skip the cache inside the tree it walks: {skip}"
+
+    def test_the_configured_key_is_honoured_when_the_skill_is_disabled(
+        self, sandbox_config, tmp_path,
+    ):
+        """`repos_dir` set and `developer.enabled` false is a real shape — it is
+        the rendered default, since the role writes the `[developer]` block only
+        when the skill is on. The derivation's whole justification is that the
+        repos bind covers the cache, and that bind is gated on
+        `is_admin and config.developer.enabled`; with the skill off there is no
+        covering bind, so deriving would take the operator's explicit fallback
+        away and give nothing back.
+        """
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        cache_root = tmp_path / "caches"
+        cache_root.mkdir()
+        sandbox_config.developer.enabled = False
+        sandbox_config.developer.repos_dir = str(repos)
+        sandbox_config.security.sandbox_cache_dir = str(cache_root)
+
+        assert resolve_sandbox_cache_dir(sandbox_config, "alice") == cache_root / "alice"
+        assert not (repos / "alice").exists()
+
+    def test_the_never_raises_contract_covers_the_branch_selection(
+        self, sandbox_config, tmp_path,
+    ):
+        """`build_bwrap_cmd` reaches this per Bash call under NativeBrain, so an
+        exception here fails the task rather than falling open to the RAM cache.
+        The branch selection touches paths, and `get_user_repos_dir` guards only
+        `OSError` — `Path.resolve()` raises `ValueError` on an embedded null
+        byte and the join raises `TypeError` on a non-str user id, neither of
+        which it catches. Both used to be impossible here because the old code
+        read a plain string attribute before entering the `try`.
+        """
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        sandbox_config.developer.enabled = True
+        sandbox_config.developer.repos_dir = str(repos)
+
+        for user_id in ("al\x00ice", 7):
+            assert resolve_sandbox_cache_dir(sandbox_config, user_id) is None
+
+    def test_a_symlink_planted_after_the_check_does_not_get_chmodded(
+        self, sandbox_config, tmp_path, monkeypatch,
+    ):
+        """The containment check and the `chmod` are separated by a `mkdir`, and
+        both re-traverse the path by name. The parent is bound read-write into a
+        live task's sandbox and this function runs on the task path, so the
+        writer and the checker are concurrent by construction — `os.chmod`
+        follows a symlink, so a swap in that window would set 0700 on another
+        user's subtree. `O_NOFOLLOW` refuses it instead.
+
+        The window is simulated by planting the link from inside `mkdir`, which
+        is where a real racing task would land it.
+        """
+        repos = self._setup(sandbox_config, tmp_path)
+        cache = repos / "alice" / ".package-caches"
+        victim = repos / "bob"
+        victim.chmod(0o755)
+
+        real_mkdir = Path.mkdir
+
+        def _plant(self, *a, **kw):
+            if self == cache and not cache.exists():
+                cache.symlink_to(victim)
+                return
+            return real_mkdir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "mkdir", _plant)
+        assert resolve_sandbox_cache_dir(sandbox_config, "alice") is None
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o755, \
+            "another user's subtree was chmodded through a planted symlink"

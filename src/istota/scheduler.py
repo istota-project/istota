@@ -4326,6 +4326,36 @@ def check_doctor(config: Config, state: dict) -> list:
     return results
 
 
+#: `executor.SANDBOX_CACHE_ROOT_NAME`, restated. Held equal by
+#: `tests/test_worktree_reaper.py`.
+_SANDBOX_CACHE_ROOT_NAME = ".package-caches"
+
+
+def _package_cache_dirs(repos_dir: str) -> list[Path]:
+    """Every derived package cache under `repos_dir` — `{root}/*/.package-caches`.
+
+    The layout is `executor.SANDBOX_CACHE_ROOT_NAME`, restated here rather than
+    imported for the reason the developer skill restates it: this is the
+    scheduler, and it should not pull the executor in for one string.
+    `tests/test_worktree_reaper.py` holds the spelling to the executor's.
+
+    Enumerated from disk rather than from `user_profiles`, because the caches
+    are created lazily on a user's first task and it is precisely the directory
+    that *exists* that costs the walk. Never raises and never returns a partial
+    guess: an unreadable root yields an empty list, which costs a noisy sweep
+    rather than a wrong one — `skip` only prunes the walk, so getting it wrong
+    in this direction loses performance, not safety.
+    """
+    try:
+        return [
+            entry / _SANDBOX_CACHE_ROOT_NAME
+            for entry in Path(repos_dir).iterdir()
+            if entry.is_dir() and not entry.is_symlink()
+        ]
+    except OSError:
+        return []
+
+
 def check_worktree_reap(config: Config) -> list:
     """Sweep `developer.repos_dir` for worktrees whose work has landed.
 
@@ -4356,11 +4386,23 @@ def check_worktree_reap(config: Config) -> list:
         return reap_and_report(
             Path(dev.repos_dir),
             retention_hours=dev.worktree_retention_hours,
-            # The package caches live inside repos_dir by default and hold one
-            # directory per unpacked wheel. None of them is a repository, and
-            # walking them logs a per-sweep line claiming thousands of
-            # directories went unswept for credentials (ISSUE-319).
-            skip=[config.security.sandbox_cache_dir] if config.security.sandbox_cache_dir else [],
+            # The package caches live inside repos_dir and hold one directory
+            # per unpacked wheel. None of them is a repository, and walking
+            # them logs a per-sweep line claiming thousands of directories went
+            # unswept for credentials (ISSUE-319).
+            #
+            # One entry per user, because the caches are derived per user now —
+            # `{repos_dir}/{user_id}/.package-caches`, `find_git_dirs` matches
+            # `skip` on the resolved path, and this used to name
+            # `security.sandbox_cache_dir`, which is blank on a deployment that
+            # has a repos tree to derive from. An empty skip is not a cosmetic
+            # loss: the cache sits at depth 2, so `uv/archive-v0` lands exactly
+            # on `_MAX_DEPTH` and every unpacked wheel is listed and lstatted,
+            # and a git directory inside the cache at depth 4 or less would be
+            # picked up as a reap candidate — which means `git fetch` against a
+            # model-written `remote.origin.url`, from the unsandboxed
+            # scheduler, outside the CONNECT allowlist, on every sweep.
+            skip=_package_cache_dirs(dev.repos_dir),
         )
     except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
         logger.error("worktree_reap_failed err=%s", exc, exc_info=True)
