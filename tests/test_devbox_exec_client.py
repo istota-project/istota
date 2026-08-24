@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -35,6 +36,7 @@ import pytest
 from istota.devbox_exec_protocol import (
     PROTOCOL_VERSION,
     SIGPIPE_EXIT,
+    STREAM_CONTROL,
     STREAM_STDIN,
     STREAM_STDOUT,
     encode_ack_error,
@@ -569,7 +571,8 @@ class TestTheFourTransportCodes:
 
     def test_123_when_the_server_reports_no_exit_status_at_all(self, fake_server):
         """The server sends a null `exit_code` rather than inventing 1 for its
-        own faults. The client must not read the null as success either."""
+        own faults. The client must not read the null as success either, and it
+        folds the reason into the one line the contract promises."""
 
         def respond(conn, line):
             conn.sendall(encode_ack_ok())
@@ -588,6 +591,20 @@ class TestTheFourTransportCodes:
         done = run_client(srv.path, "true")
         assert done.returncode == EXIT_CONNECTION_LOST
         assert b"did not exit after SIGKILL" in done.stderr
+        assert len(done.stderr.strip().splitlines()) == 1
+
+    def test_123_when_the_server_accepts_and_never_acknowledges(self, fake_server):
+        """A socket that answers nothing is reachable: the socket directory is
+        writable by a container root, which may unlink the server's inode and
+        bind its own. Unbounded, that hangs the shim for the whole task."""
+        srv = fake_server(lambda conn, line: time.sleep(30))
+        started = time.monotonic()
+        done = run_client(
+            srv.path, "true", options=("--connect-timeout", "1"), timeout=25
+        )
+        assert done.returncode == EXIT_CONNECTION_LOST
+        assert b"did not acknowledge" in done.stderr
+        assert time.monotonic() - started < 20
 
     def test_123_against_a_real_server_that_dies_mid_command(self, server_factory):
         """What a container restart looks like from the client's side, with a
@@ -714,3 +731,320 @@ class TestTheClientIsACopyableLeaf:
         )
         assert done.returncode == 3
         assert done.stderr == b""
+
+    def test_the_sibling_module_is_what_it_imports_and_not_the_package(
+        self, server, tmp_path
+    ):
+        """The control for the test above, which on its own proves nothing: this
+        checkout is an editable install, so `import istota…` succeeds from any
+        directory and a client written that way passes it. Copying the client
+        *without* its sibling is what discriminates — it must fail, and name the
+        module it could not find."""
+        dev_bin = tmp_path / "lonely"
+        dev_bin.mkdir()
+        shutil.copy2(CLIENT, dev_bin / CLIENT.name)
+        done = run_client(
+            server.socket_path,
+            "sh",
+            "-c",
+            "exit 3",
+            cwd=server.repos,
+            client=dev_bin / CLIENT.name,
+        )
+        assert done.returncode != 3
+        assert done.returncode != 0
+        assert b"devbox_exec_protocol" in done.stderr
+
+
+# --------------------------------------------------------------------------- #
+# The descriptors the client is handed
+# --------------------------------------------------------------------------- #
+
+
+def run_client_with_redirection(
+    redirect: str,
+    socket_path: str,
+    *command: str,
+    cwd: str | Path | None = None,
+    options: tuple[str, ...] = (),
+    timeout: float = RUN_TIMEOUT,
+) -> subprocess.CompletedProcess:
+    """Run the client under a shell that has closed one of its std descriptors."""
+    inner = " ".join(
+        shlex.quote(a)
+        for a in [
+            sys.executable,
+            str(CLIENT),
+            "--socket",
+            socket_path,
+            *options,
+            "--",
+            *command,
+        ]
+    )
+    return subprocess.run(
+        ["sh", "-c", f"exec {inner} {redirect}"],
+        cwd=str(cwd) if cwd is not None else None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
+
+
+class TestAClosedStandardDescriptorCannotBecomeTheSocket:
+    """`socket.socket()` takes the lowest free descriptor. A shim invoked as
+    `npm ci >&-` — which the model can type — hands this process a closed fd 1,
+    and without the reservation the socket lands on it: the command's output
+    goes into the wire and the client exits 0, which is a clean status over
+    missing output. With more output the server parses the command's own stdout
+    as a client frame instead, kills the process group, and the status is wrong
+    in the other direction."""
+
+    def test_a_closed_stdout_neither_swallows_the_output_nor_the_status(self, server):
+        done = run_client_with_redirection(
+            ">&-",
+            server.socket_path,
+            "sh",
+            "-c",
+            "echo hello-from-command; exit 5",
+            cwd=server.repos,
+        )
+        assert done.returncode == 5
+        assert b"unknown stream" not in done.stderr
+
+    def test_a_closed_stderr_leaves_the_output_where_it_belongs(self, server):
+        """The command has to write to *stderr* for this to discriminate: with
+        the socket on fd 2, it is the command's own stderr that goes into the
+        wire, the server reads it as a client frame and kills the group, and
+        the status that comes back is the transport's rather than the
+        command's.
+
+        And it has to still be running when that happens, which is what the
+        sleep is for: a command that has already exited has had its terminal
+        frame sent, so the client reads its status before it injects anything
+        and the corruption goes unobserved."""
+        done = run_client_with_redirection(
+            "2>&-",
+            server.socket_path,
+            "sh",
+            "-c",
+            "echo to-stderr >&2; sleep 2; echo to-stdout; exit 6",
+            cwd=server.repos,
+        )
+        assert done.returncode == 6
+        assert done.stdout == b"to-stdout\n"
+
+    def test_a_write_only_stdin_still_sends_the_eof_marker(self, server_factory):
+        """A dead fd 0 with a live connection is the case the swallowed
+        exception got wrong: the command waits on stdin that will never come,
+        and the wait ends at the server's idle backstop — an hour, on the
+        deployment default — reported as a command killed for idleness."""
+        srv = server_factory(idle_timeout=8.0)
+        done = run_client_with_redirection(
+            "0>/dev/null",
+            srv.socket_path,
+            "cat",
+            cwd=srv.repos,
+            options=("--stdin",),
+            timeout=30,
+        )
+        assert done.returncode == 0
+        assert done.stdout == b""
+
+    def test_a_closed_stdin_is_not_read_as_the_servers_own_frames(self, server):
+        """The worst of the three: the stdin thread would read the server's
+        frames off the socket and send them back as the command's input, which
+        put raw 8-byte frame headers on the command's stdout."""
+        done = run_client_with_redirection(
+            "0<&-",
+            server.socket_path,
+            "cat",
+            cwd=server.repos,
+            options=("--stdin",),
+        )
+        assert done.returncode == 0
+        assert done.stdout == b""
+
+
+class TestTheClientsOwnStdoutGoingAway:
+    def test_a_closed_reader_is_reported_as_141_with_a_line_that_says_why(
+        self, server
+    ):
+        """`shimmed | head -1`. A real command takes SIGPIPE and reports 141, so
+        the shim does too — and says so, because a shim reporting 141 and a
+        command reporting 141 are different facts."""
+        inner = " ".join(
+            shlex.quote(a)
+            for a in [
+                sys.executable,
+                str(CLIENT),
+                "--socket",
+                server.socket_path,
+                "--",
+                "yes",
+            ]
+        )
+        done = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", f"{inner} | head -1"],
+            cwd=str(server.repos),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_TIMEOUT,
+        )
+        assert done.returncode == SIGPIPE_EXIT
+        assert done.stdout == b"y\n"
+        assert b"istota-devbox-exec:" in done.stderr
+        assert b"closed the pipe" in done.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Reading the wire
+# --------------------------------------------------------------------------- #
+
+
+class TestTheAcknowledgementAndTheFramesMayShareASegment:
+    def test_bytes_after_the_newline_are_not_dropped(self, fake_server):
+        """The real server writes the ack and the first frames as separate
+        transport writes, so this path is unreachable through it — measured,
+        every `leftover` against a real server is empty. A client that read the
+        ack with `recv` and threw the rest away passes the whole suite."""
+
+        def respond(conn, line):
+            conn.sendall(
+                encode_ack_ok()
+                + pack_frame(STREAM_STDOUT, b"in the same segment")
+                + encode_control({"exit_code": 3, "signal": None})
+            )
+
+        srv = fake_server(respond)
+        done = run_client(srv.path, "true")
+        assert done.stdout == b"in the same segment"
+        assert done.returncode == 3
+
+
+class TestTheTerminalFrameMustBeUsable:
+    @pytest.mark.parametrize("code", [4096, -1, True, "0", 0.0])
+    def test_a_status_no_process_could_have_produced_is_a_protocol_error(
+        self, fake_server, code
+    ):
+        """Each reaches 122 by a different clause of the same check, and these
+        are the clauses a later edit is most likely to simplify away."""
+
+        def respond(conn, line):
+            conn.sendall(encode_ack_ok())
+            conn.sendall(encode_control({"exit_code": code, "signal": None}))
+
+        srv = fake_server(respond)
+        done = run_client(srv.path, "true")
+        assert done.returncode == EXIT_PROTOCOL_ERROR
+
+    def test_a_control_frame_that_is_not_json_is_a_protocol_error(self, fake_server):
+        def respond(conn, line):
+            conn.sendall(encode_ack_ok())
+            conn.sendall(pack_frame(STREAM_CONTROL, b"not json"))
+
+        srv = fake_server(respond)
+        done = run_client(srv.path, "true")
+        assert done.returncode == EXIT_PROTOCOL_ERROR
+
+
+# --------------------------------------------------------------------------- #
+# The command line
+# --------------------------------------------------------------------------- #
+
+
+class TestTheCommandIsTakenVerbatim:
+    def test_only_the_first_separator_is_the_separator(self, fake_server):
+        """`npm run test -- --watch` is an ordinary thing to type, and argparse's
+        own `--` handling is what this splits by hand to avoid."""
+        srv = fake_server(_ack_then_exit_zero)
+        done = run_client(
+            srv.path, "npm", "run", "test", "--", "--watch", "--reporter=dot"
+        )
+        assert done.returncode == 0
+        assert json.loads(srv.requests[0])["argv"] == [
+            "npm",
+            "run",
+            "test",
+            "--",
+            "--watch",
+            "--reporter=dot",
+        ]
+
+    def test_an_argument_with_spaces_and_globs_travels_unchanged(self, fake_server):
+        srv = fake_server(_ack_then_exit_zero)
+        done = run_client(srv.path, "sh", "-c", "echo 'a b' *.py")
+        assert done.returncode == 0
+        assert json.loads(srv.requests[0])["argv"] == ["sh", "-c", "echo 'a b' *.py"]
+
+    def test_no_separator_at_all_is_a_usage_failure_and_not_a_status(self, tmp_path):
+        done = subprocess.run(
+            [sys.executable, str(CLIENT), "--socket", str(tmp_path / "s.sock"), "true"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_TIMEOUT,
+        )
+        assert done.returncode == EXIT_NO_CONNECT
+        assert b"separator" in done.stderr
+
+    def test_a_separator_with_nothing_after_it_is_a_usage_failure(self, tmp_path):
+        done = run_client(str(tmp_path / "s.sock"))
+        assert done.returncode == EXIT_NO_CONNECT
+        assert b"istota-devbox-exec:" in done.stderr
+
+    def test_a_help_flag_in_the_command_belongs_to_the_command(self, fake_server):
+        """`-- npm --help` is a request to run `npm --help` in the container,
+        not a request for this client's usage."""
+        srv = fake_server(_ack_then_exit_zero)
+        done = run_client(srv.path, "npm", "--help")
+        assert done.returncode == 0
+        assert done.stdout == b""
+        assert json.loads(srv.requests[0])["argv"] == ["npm", "--help"]
+
+    def test_help_prints_usage_and_still_does_not_exit_zero(self):
+        """argparse exits 0 from inside `print_help`. A shim that got a zero
+        status from a client that ran nothing is the one answer this file
+        exists never to give."""
+        done = subprocess.run(
+            [sys.executable, str(CLIENT), "--help"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_TIMEOUT,
+        )
+        assert done.returncode != 0
+        assert b"--socket" in done.stdout
+
+
+class TestTheTimeouts:
+    def test_a_zero_connect_budget_means_no_budget_rather_than_non_blocking(
+        self, server
+    ):
+        """`settimeout(0)` puts the socket in non-blocking mode, where `connect`
+        raises at once — so a `0` in config would fail every command on the
+        deployment rather than removing a limit."""
+        done = run_client(
+            server.socket_path,
+            "sh",
+            "-c",
+            "exit 4",
+            cwd=server.repos,
+            options=("--connect-timeout", "0"),
+        )
+        assert done.returncode == 4
+
+    def test_a_non_finite_timeout_never_reaches_the_wire(self, server):
+        """`nan` is neither less than nor greater than zero, so the protocol's
+        range check passes it, and `json.dumps` writes the non-standard token
+        `NaN`."""
+        done = run_client(
+            server.socket_path,
+            "true",
+            cwd=server.repos,
+            options=("--timeout", "nan"),
+        )
+        assert done.returncode == EXIT_NO_CONNECT
+        assert b"finite" in done.stderr
