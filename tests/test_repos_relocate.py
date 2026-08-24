@@ -23,6 +23,7 @@ close, so the refusal cases get as much attention as the happy path.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -802,3 +803,337 @@ class TestTheCliContract:
         monkeypatch.setattr(os, "rename", failing_rename)
 
         assert main([]) == EXIT_PARTIAL
+
+
+# ---------------------------------------------------------------------------
+# The destination is a path too
+# ---------------------------------------------------------------------------
+
+
+class TestTheDestinationIsHeldToContainment:
+    """`{repos_dir}/{user_id}` gets the same equality rule the sources get.
+
+    Review found this open, and it is the worst shape the module can fail in:
+    `mkdir(exist_ok=True)` succeeds on a symlink to a directory, `chmod`
+    follows it and `rename` traverses it, so every repository lands at an
+    attacker-chosen path, the marker goes down and the run reports success. The
+    entry is plantable — the old shared root was bound read-write into every
+    admin task, which is the premise the whole spec rests on.
+    """
+
+    def test_a_symlink_named_after_the_admin_refuses(self, tree, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tree["repos_dir"] / "alice").symlink_to(outside)
+
+        outcome = plan(tree["repos_dir"], {"alice"})
+
+        assert isinstance(outcome, RelocateRefusal)
+        assert outcome.reason == "destination_not_contained"
+
+    def test_the_repositories_stay_in_the_tree(self, tree, deployment, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tree["repos_dir"] / "alice").symlink_to(outside)
+        deployment.write()
+
+        assert main([]) == EXIT_REFUSED
+
+        assert list(outside.iterdir()) == []
+        assert (tree["repos_dir"] / "acme" / "widget.git").is_dir()
+        assert not (tree["repos_dir"] / MARKER_NAME).exists()
+
+    def test_a_symlink_planted_after_the_plan_is_still_refused(self, tree, tmp_path):
+        """The window `apply`'s own re-check exists for. The plan and the move
+        are separated by however long an operator spent reading a `--dry-run`,
+        and the entry is plantable by any task in that window."""
+        repos_dir = tree["repos_dir"]
+        outcome = plan(repos_dir, {"alice"})
+        assert not isinstance(outcome, RelocateRefusal)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (repos_dir / "alice").symlink_to(outside)
+
+        report = apply(outcome)
+
+        assert report.moved == ()
+        assert any("does not resolve to the subtree" in f for f in report.failed)
+        assert list(outside.iterdir()) == []
+        assert not report.marker_written
+        assert (repos_dir / "acme" / "widget.git").is_dir()
+
+    def test_a_real_directory_named_after_the_admin_is_not_refused(self, tree):
+        """`setup_env` creates this directory at 0700 on every developer task,
+        so finding it already there is the ordinary case, not the hostile one."""
+        (tree["repos_dir"] / "alice").mkdir(mode=0o700)
+
+        report = apply(plan(tree["repos_dir"], {"alice"}))
+
+        assert sorted(report.moved) == ["acme", "other-org"]
+        assert report.marker_written
+
+
+# ---------------------------------------------------------------------------
+# What a repair is allowed to write
+# ---------------------------------------------------------------------------
+
+
+def _victim(tmp_path: Path) -> tuple[Path, Path]:
+    """A repository outside `repos_dir`, with a worktree of its own."""
+    bare = tmp_path / "victim" / "victim.git"
+    bare.parent.mkdir(parents=True, exist_ok=True)
+    _git(tmp_path, "clone", "-q", "--bare", str(_upstream(tmp_path, "victim")), str(bare))
+    worktree = tmp_path / "victim" / "victim--wt"
+    _git(bare, "worktree", "add", "-q", "-b", "vwt", str(worktree), "main")
+    return bare, worktree
+
+
+class TestARepairNeverWritesToAnotherRepository:
+    """`git worktree repair <path>` decides *which repository to write* from
+    `<path>/.git`, not from the `-C` argument — measured, not assumed. Both
+    inputs are model-writable on the old layout: the `worktrees/*/gitdir`
+    record inside the moving clone names the path, and that path's own `.git`
+    names the repository. So a record can nominate a directory whose `.git`
+    points at an unrelated repository and have that repository's worktree
+    redirected into it — the exact cross-user reach this migration exists to
+    close, delivered by the migration.
+    """
+
+    def test_a_planted_record_does_not_redirect_another_repository(
+        self, tree, tmp_path
+    ):
+        repos_dir = tree["repos_dir"]
+        victim_bare, victim_wt = _victim(tmp_path)
+        victim_record = victim_bare / "worktrees" / "victim--wt" / "gitdir"
+        before = victim_record.read_text()
+
+        # A directory inside the moving namespace whose `.git` names the
+        # victim's administrative directory, plus a record in the moving clone
+        # that nominates it as a worktree.
+        planted = repos_dir / "acme" / "planted"
+        planted.mkdir()
+        (planted / ".git").write_text(
+            f"gitdir: {victim_bare / 'worktrees' / 'victim--wt'}\n"
+        )
+        record = repos_dir / "acme" / "widget.git" / "worktrees" / "planted"
+        record.mkdir(parents=True)
+        (record / "gitdir").write_text(f"{planted / '.git'}\n")
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert victim_record.read_text() == before
+        assert Path(_toplevel(victim_wt)).resolve() == victim_wt.resolve()
+        assert str(repos_dir / "alice" / "acme" / "planted") in report.unrepaired
+        # The control: git really was invoked for this clone, so the victim
+        # surviving is the precondition's doing rather than a repair that
+        # never ran.
+        assert str(
+            repos_dir / "alice" / "acme" / "widget--istota-42-add-auth"
+        ) in report.repaired
+
+
+class TestHostileWorktreeRecords:
+    """A `worktrees/*/gitdir` file is model-written under `repos_dir`, so what
+    it names is an input and not a fact."""
+
+    def _record(self, bare: Path, name: str, text: str) -> None:
+        entry = bare / "worktrees" / name
+        entry.mkdir(parents=True)
+        (entry / "gitdir").write_text(text)
+
+    def test_a_record_climbing_out_with_dotdot_is_stale(self, tree, tmp_path):
+        """`relative_to` is lexical: it hands back `../../..` as though it were
+        a child, so the escape survives a containment check made with it."""
+        repos_dir = tree["repos_dir"]
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / ".git").write_text("gitdir: nowhere\n")
+        self._record(
+            repos_dir / "acme" / "widget.git", "escape",
+            f"{repos_dir / 'acme'}/../../outside/.git\n",
+        )
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert (outside / ".git").read_text() == "gitdir: nowhere\n"
+        assert any("outside the moved namespace" in n for n in report.notes)
+
+    def test_a_record_naming_another_tree_is_stale(self, tree, tmp_path):
+        repos_dir = tree["repos_dir"]
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        self._record(
+            repos_dir / "acme" / "widget.git", "elsewhere",
+            f"{elsewhere / '.git'}\n",
+        )
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert any(str(elsewhere) in n for n in report.notes)
+        assert report.unrepaired == ()
+
+    def test_a_record_not_naming_a_git_file_is_ignored(self, tree):
+        """git writes `<worktree>/.git` on every entry. A record without that
+        suffix would otherwise nominate the namespace directory itself."""
+        repos_dir = tree["repos_dir"]
+        self._record(
+            repos_dir / "acme" / "widget.git", "bare-dir", f"{repos_dir / 'acme'}\n",
+        )
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert any("does not name a worktree's .git file" in n for n in report.notes)
+        assert (repos_dir / "alice" / "acme").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# A symlinked repos_dir
+# ---------------------------------------------------------------------------
+
+
+class TestASymlinkedReposDir:
+    """git canonicalises both records it writes, and this module is handed the
+    configured spelling. Comparing the two lexically classifies every record as
+    outside the namespace — nothing repaired, marker written, exit 0, which is
+    the silent direction."""
+
+    def test_worktrees_are_repaired_through_a_symlinked_root(self, tmp_path):
+        real = tmp_path / "realrepos"
+        real.mkdir()
+        repos_dir = tmp_path / "repos"
+        repos_dir.symlink_to(real)
+        bare = _clone(repos_dir, "acme", "widget", _upstream(tmp_path, "widget"))
+        _worktree(bare, "widget--wt")
+        # The premise: git recorded the resolved spelling, not the one given.
+        record = (bare / "worktrees" / "widget--wt" / "gitdir").read_text()
+        assert str(real) in record and str(repos_dir) not in record
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        moved = repos_dir / "alice" / "acme" / "widget--wt"
+        assert report.repaired == (str(moved),)
+        assert report.unrepaired == ()
+        assert _resolves(moved)
+
+
+# ---------------------------------------------------------------------------
+# Resuming a run that died
+# ---------------------------------------------------------------------------
+
+
+def _crashed_after_the_renames(tree, *, progress: bool) -> Path:
+    """The state a process death between the last rename and the repairs leaves.
+
+    Every namespace is in place under the user's subtree and no worktree has
+    been repaired. Built by hand rather than by killing `apply`, so the
+    assertions are about what the next run does rather than about how it got
+    there.
+    """
+    repos_dir = tree["repos_dir"]
+    dst = repos_dir / "alice"
+    dst.mkdir()
+    moved = []
+    for namespace in ("acme", "other-org"):
+        os.rename(repos_dir / namespace, dst / namespace)
+        moved.append(namespace)
+    if progress:
+        (repos_dir / ".istota-layout.in-progress").write_text(
+            json.dumps({"user_id": "alice", "moved": moved}) + "\n"
+        )
+    return repos_dir
+
+
+class TestResumingAnInterruptedRun:
+    """The marker records that the tree moved and cannot record that its
+    worktrees were repaired. Without the progress file the next run finds
+    nothing to move, writes the marker and reports success over a deployment
+    whose every worktree is dead — permanently, because the marker is what
+    stops it looking again."""
+
+    def test_the_control_without_the_progress_file_nothing_is_repaired(self, tree):
+        """What the progress file buys, stated as the behaviour without it."""
+        repos_dir = _crashed_after_the_renames(tree, progress=False)
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert report.repaired == ()
+        assert report.marker_written
+        assert not _resolves(repos_dir / "alice" / "acme" / "widget--istota-42-add-auth")
+
+    def test_the_next_run_finishes_the_repairs(self, tree):
+        repos_dir = _crashed_after_the_renames(tree, progress=True)
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert report.moved == ()
+        assert len(report.repaired) == 2
+        for name in ("acme/widget--istota-42-add-auth", "other-org/thing--istota-7-fix"):
+            assert _resolves(repos_dir / "alice" / name)
+
+    def test_the_resumed_run_still_writes_the_marker(self, tree, deployment):
+        repos_dir = _crashed_after_the_renames(tree, progress=True)
+        deployment.write()
+
+        assert main([]) == EXIT_OK
+
+        assert (repos_dir / MARKER_NAME).read_text().strip() == LAYOUT_VERSION
+        assert not (repos_dir / ".istota-layout.in-progress").exists()
+
+    def test_a_successful_run_leaves_no_progress_file(self, tree):
+        repos_dir = tree["repos_dir"]
+
+        apply(plan(repos_dir, {"alice"}))
+
+        assert not (repos_dir / ".istota-layout.in-progress").exists()
+
+    def test_ownership_is_never_taken_from_the_progress_file(self, tree):
+        """It sits in the model-writable root like everything else, so a
+        planted one naming another admin would be exactly the cross-user
+        handoff this spec exists to prevent."""
+        repos_dir = tree["repos_dir"]
+        (repos_dir / ".istota-layout.in-progress").write_text(
+            json.dumps({"user_id": "mallory", "moved": ["acme"]}) + "\n"
+        )
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert sorted(report.moved) == ["acme", "other-org"]
+        assert (repos_dir / "alice" / "acme" / "widget.git").is_dir()
+        assert not (repos_dir / "mallory").exists()
+
+    def test_a_corrupt_progress_file_is_not_fatal(self, tree):
+        repos_dir = tree["repos_dir"]
+        (repos_dir / ".istota-layout.in-progress").write_text("{not json\n")
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert sorted(report.moved) == ["acme", "other-org"]
+
+
+class TestTheWalkReportsWhatItCouldNotSee:
+    """The walk decides what gets repaired, so a subtree it dropped is a clone
+    whose worktrees nobody will fix."""
+
+    def test_a_repository_below_the_scan_depth_is_reported(self, tree, tmp_path):
+        repos_dir = tree["repos_dir"]
+        _clone(repos_dir, "deep/a/b/c/d", "buried", _upstream(tmp_path, "buried"))
+
+        report = apply(plan(repos_dir, {"alice"}))
+
+        assert any("scan depth" in n for n in report.notes)
+        assert "deep" in report.moved
+
+
+class TestAlreadyMigratedStillReports:
+    def test_odd_entries_are_reported_on_every_run(self, tree):
+        """'What could not be done is reported rather than passed over' has to
+        keep holding after the marker exists, or a stray entry is mentioned
+        once and never again."""
+        repos_dir = tree["repos_dir"]
+        (repos_dir / MARKER_NAME).write_text(f"{LAYOUT_VERSION}\n")
+        (repos_dir / "notes.txt").write_text("hello\n")
+
+        outcome = plan(repos_dir, {"alice"})
+
+        assert outcome.already_migrated
+        assert any("notes.txt" in n for n in outcome.notes)
