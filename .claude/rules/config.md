@@ -217,8 +217,8 @@ sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
 skill_proxy_timeout: int = 300
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths: list[str] = []     # extra RO binds; keep narrow
-sandbox_cache_dir: str = ""          # disk-backed RW cache dir; empty = today's behaviour
-sandbox_cache_sweep_enabled: bool = True   # bound what that dir grows to (ISSUE-317)
+sandbox_cache_dir: str = ""          # FALLBACK cache root; unread while developer.repos_dir is set
+sandbox_cache_sweep_enabled: bool = True   # bound what the per-user caches grow to (ISSUE-317)
 sandbox_cache_max_gb: float = 10.0         # per user; clamped to a 1 GiB floor
 network: NetworkConfig = NetworkConfig()
 ```
@@ -243,174 +243,37 @@ binds that single file itself (`custom_system_prompt_path`), so no operator
 needs an entry here for it — and `config.toml`, its neighbour, still isn't in
 the sandbox.
 
-`sandbox_cache_dir` names a disk-backed directory for the package managers' caches.
-Empty is the default and keeps the pre-ISSUE-305 behaviour, which is that `$HOME/.cache`
-exists inside the namespace only as a directory bwrap created on its own root tmpfs: a
-`uv sync` unpacks into RAM that `host_pressure.read_tmpfs_usage` cannot attribute — the
-mount is in the task's namespace and in no table the host reads, so it lands in
-`shmem_unaccounted` — and the whole cache is discarded at task exit.
+`sandbox_cache_dir` is the **fallback** root for the package managers' caches (uv, npm, and anything else honouring `XDG_CACHE_HOME`), read only where the developer skill is not configured. Empty is the default and keeps the pre-ISSUE-305 behaviour, which is that `$HOME/.cache` exists inside the namespace only as a directory bwrap created on its own root tmpfs: a `uv sync` unpacks into RAM that `host_pressure.read_tmpfs_usage` cannot attribute — the mount is in the task's namespace and in no table the host reads, so it lands in `shmem_unaccounted` — and the whole cache is discarded at task exit.
 
-**It is a root, and each user gets `{root}/{user_id}`.** A single shared directory would
-be the first RW surface a non-admin task and an admin task hold in common, and it
-persists across tasks by construction; uv's unpacked-wheel cache is trusted on read and
-never re-verified against a hash, so a planted archive is executed by the next `uv sync`
-that hardlinks out of it. Per-user costs nothing the placement argument was about —
-hardlink sharing is between one user's worktrees, which stay inside one subdirectory.
+**Where a cache goes is decided by `resolve_sandbox_cache_dir`, and it has two branches.** With `developer.enabled` and `developer.repos_dir` set the path is *derived*: `{repos_dir}/{user_id}/.package-caches`, inside the subtree `build_bwrap_cmd` binds for that task, and this key is not consulted at all. Without them it is `{sandbox_cache_dir}/{user_id}`, which serves a deployment running the sandbox without the developer skill — nothing binds an ancestor of it, so it is its own mount and a venv in the task workspace pays the copy, the same cost it always paid rather than a regression.
 
-Put the root under `developer.repos_dir`; the Ansible role derives it as
-`{repos_dir}/.package-caches` and leaves it empty when `repos_dir` is. uv populates a venv
-by hardlinking out of its cache and `link(2)` compares **mounts**, not devices, so a cache
-root anywhere else returns EXDEV even on one filesystem and every worktree pays for a full
-copy. Measured four ways on the deployment (ISSUE-319): host with no namespace works, two
-separate binds gives EXDEV, one bind covering both works, and re-binding the cache on top
-of the repos bind gives EXDEV again. So the repos bind covering the cache bind is not
-incidental to the placement — it is the entire mechanism, and carving the cache back out
-costs exactly what putting it elsewhere costs. For the same reason
-`resolve_sandbox_cache_dir` returns the path **as written** rather than resolved: `_bind`
-uses the string it is handed as the sandbox destination and the repos bind passes
-`repos_dir` unresolved, so resolving here would put a symlinked `repos_dir` and a cache
-under it at two names, hence two mounts, and hardlinking between them fails silently.
+**Per user in both shapes.** A single shared directory would be the first RW surface a non-admin task and an admin task hold in common, and it persists across tasks by construction; uv's unpacked-wheel cache is trusted on read and never re-verified against a hash, so a planted archive is executed by the next `uv sync` that hardlinks out of it. Per-user costs nothing the placement argument was about — hardlink sharing is between one user's worktrees, which stay inside one subtree.
 
-**That covering bind also exposes every other user's cache, and the sibling masks are what
-close it.** The repos bind is an ancestor of the cache bind and emitted after it, so inside
-the sandbox `{root}` is the host directory in full, read-write — and uv trusts its own
-unpacked wheels on read, so one admin's task could plant an archive the next admin's
-`uv sync` hardlinks out of and executes. `build_bwrap_cmd` masks every *other*
-subdirectory of `{root}` with an empty read-only tmpfs, in the mask block, after both
-binds.
+**The derivation exists for the mount.** uv populates a venv by hardlinking out of its cache and `link(2)` compares **mounts**, not devices, so a cache root anywhere else returns EXDEV even on one filesystem and every worktree pays for a full copy. Measured four ways on the reference deployment (ISSUE-319): host with no namespace works, two separate binds gives EXDEV, one bind covering both works, and re-binding the cache on top of the repos bind gives EXDEV again. The cache bind is emitted first and the repos bind — its ancestor — after it, so the second covers the first. That covering is the entire mechanism, and carving the cache back out costs exactly what putting it elsewhere costs. For the same reason `resolve_sandbox_cache_dir` returns the path **as written** rather than resolved: `_bind` uses the string it is handed as the sandbox destination and the repos bind passes its path unresolved, so resolving here would put a symlinked `repos_dir` and a cache under it at two names, hence two mounts, and hardlinking between them fails silently.
 
-**Every refusal lives in `resolve_sandbox_cache_dir`, not in `build_bwrap_cmd`,** and that
-placement is the whole correctness argument rather than a tidiness one. Dropping only the
-bind leaves `execute_task` pointing `UV_CACHE_DIR` at a path that is *still in the
-namespace* — the covering bind put the entire root there — so uv writes into the shared
-root with every other user's cache beside it and no mask over any of them. That is not the
-pre-ISSUE-305 fallback it reads as; it is ISSUE-319 unmitigated, reachable by a task
-planting one symlink. The three callers of that predicate drop together or not at all. It
-costs one `iterdir` of a directory holding one entry per user, on a path NativeBrain takes
-per Bash call.
+**What that covering exposes is now the calling user's own subtree, which is why there are no masks.** Under the shared root it exposed every other user's cache read-write to every admin developer task, and closing that took about 200 lines in `build_bwrap_cmd`. All of it is gone — `_sandbox_cache_covering_targets`, `_sandbox_cache_is_covered`, `sandbox_cache_sibling_dirs`, `MAX_SANDBOX_CACHE_SIBLINGS`, `_BWRAP_BIND_VERBS`, the argv covering scan, the sibling-mask loop with its root-mask fallback and both error branches, and the matching write denials in `native_fs_roots`. In their place is one assertion: the derived directory must resolve to exactly the path the layout names. That is the invariant the layout rests on, and it is a line plus a test rather than an argv walk. `_mask_dir` keeps the `bool` return the mask loop added — it is a genuine improvement over a silent `continue` on a delete-adjacent path, and the database mask callers can start reading it.
 
-The sibling set is enumerated from the filesystem rather than from config, because
-`resolve_sandbox_cache_dir` creates a subdirectory lazily on that user's first task and a
-config-derived list would miss a user added since the daemon started. Five things are then
-refused, each because the masks would otherwise be less than they claim: a root that cannot
-be listed; a root holding a **symlink** (`Path.is_dir()` follows one, so the mask would
-cover the name and leave the target reachable); an entry that cannot be *classified* at all,
-since `Path.is_symlink` swallows only ENOENT/ENOTDIR/ELOOP/EINVAL/EBADF and an EACCES would
-otherwise mask an unexamined entry — a symlink at its own name, or a regular file handed to
-bwrap as `--tmpfs <file>`, which cannot be mounted and fails every task before it runs; more
-than `MAX_SANDBOX_CACHE_SIBLINGS` entries, because the root is model-writable and enough
-`mkdir`s push the argv past `E2BIG` and fail every *later* task at launch; and a covered
-root on a bwrap without `--disable-userns`, since here the mask **is** the boundary rather
-than defence behind the skill CLIs and a task that can `unshare -Urm` can umount it. Each
-refusal costs RAM and nothing else.
+**The assertion is not decorative**, because the cache's parent is bound read-write into the task's own sandbox. A symlink planted at `.package-caches` would otherwise be created, `chmod 0700`-ed and bound by the daemon, which is ISSUE-319 back through a name. The mode goes on through an `O_NOFOLLOW` fd rather than a path, since `mkdir(exist_ok=True)` and `os.chmod` both follow symlinks and re-traverse by name.
 
-The covering scan compares **both** names for the root against both names for each bind
-destination, and matches every bwrap bind verb rather than the two emitted today. `_bind`
-writes the destination as it was handed and the repos bind passes `repos_dir` unresolved, so
-a resolved-only comparison finds no coverer under a symlinked deployment root, emits no
-masks, and disagrees with `_sandbox_cache_is_covered` — which resolves both sides and does
-find one — in the direction that exposes. Same trap `_mask_dir` already handles by masking at
-every name a path answers to. `_mask_dir` now reports whether it covered the target, and a
-refused sibling mask takes the whole root with it rather than being the silent `continue` it
-is for the database masks.
+**The `--disable-userns` precondition on the cache bind went with the masks**, and the argument it left behind is recorded rather than settled. It was there because a tmpfs mask can be unmounted from a nested user namespace, and there is no mask to defend now. It was also pinning the cache directory as a mountpoint, and `rename` on a mountpoint returns `EBUSY` — so removing it reopens a window between the containment check and `_bind`'s own resolution at `execve` in which a symlink could be swapped in, walkable in principle by a second concurrent task for the same user, since `user_max_foreground_workers` defaults to 2. Nothing in the default suite can answer that: it needs a real bwrap where the flag probes false, two concurrent admin tasks for one user, and a loop racing the swap. Restoring the precondition is not free either — on a bwrap without the flag it refuses the cache outright, which is the EXDEV full copy ISSUE-305 exists to avoid. Kept deleted, raised as ISSUE-320, with a comment at the bind site pointing there. The flag itself is unchanged for the database masks, where a refusal costs defence in depth rather than the boundary.
 
-**On NativeBrain the equivalent is a write denial, and it is not parity.** The in-process
-file tools have `repos_dir` as a write root and no namespace at all, so without
-`native_fs_roots` carrying the siblings in `write_denied_roots` the fix would be a
-bwrap-only property — and `native` is also the configured fallback for an anthropic primary.
-That closes the planting path, which is a write. It leaves another user's cache *readable*,
-because that seam has no read-deny to reach for.
+**Every refusal lives in `resolve_sandbox_cache_dir`, not in `build_bwrap_cmd`,** and that placement is the correctness argument rather than a tidiness one: the bind, the cache environment in `execute_task` and `native_fs_roots` are three consumers of one predicate, and they drop together or not at all. It **never raises** — both callers are on the task path, and for NativeBrain `build_bwrap_cmd` runs per Bash call — and the branch selection sits *inside* the `try`, since `Path.resolve()` raises `ValueError` on an embedded null byte and the join raises `TypeError` on a non-str user id. Every rejection falls open to the pre-ISSUE-305 behaviour: a relative path, a root that is not an existing writable directory, anything under a database directory (checked here, since `_validate_workspace_dir` skips a relative `db_path`), the rest of that function's blocklist, and **anything at or above a path the sandbox already mounts**. That last one is `_sandbox_bind_targets`: bwrap applies argv in order and the cache bind is emitted late, so a destination above an earlier mount covers it — `= $HOME/.cache` overmounts the read-only huggingface bind, `= config.temp_dir` hands every user's workspace to every task and makes the `.developer` credential helpers writable again, `= $HOME/.local` gives the model write access to the `claude` binary. It answers that one direction only, and inferring from "a cache inside a bind target covers nothing" that it is therefore safe is what kept ISSUE-319 invisible for a release. Each distinct refusal warns once per process, not twice per task.
 
-**Accepted residual: the root itself stays writable inside the sandbox.** Only existing
-subdirectories are masked, and the root is reached through the repos bind, so an admin task
-can `mkdir {root}/victim` for a user who has not run a task yet and populate it;
-`resolve_sandbox_cache_dir` adopts whatever is at that name. Closing it needs a record of
-which directories the daemon created, kept where the model cannot write — new persistent
-state with its own migration and failure modes. It is not closable by moving the root, since
-all of `repos_dir` is model-writable, nor by masking the root and binding the cache back
-inside it, since that makes the cache its own mount and `link(2)` returns EXDEV, which is
-the cost the placement exists to avoid. A task can also switch the disk cache off
-deployment-wide by planting one symlink: degrade-closed working as designed, but triggerable
-from inside the sandbox and permanent until someone reads the log.
+**The protection checks run against the cache's parent**, on both branches, which can only ever refuse more. One consequence has no escape hatch any more and is worth stating plainly: `_validate_workspace_dir` overlaps in *both* directions, so a `developer.repos_dir` overlapping the source tree, the Nextcloud mount, a database directory or a `$HOME` dotfile directory loses its disk cache on every task — and `sandbox_cache_dir` cannot be used to put it somewhere else, because that branch is not taken. The refusal is a fact about `repos_dir`, and the fix is to move `repos_dir`.
 
-`_sandbox_bind_targets` answers what the cache can swallow; `_sandbox_cache_covering_targets`
-answers what can swallow the cache. Confusing the two is what made ISSUE-319 invisible to
-review for a release — the docstring correctly said a cache *inside* a bind target covers
-nothing, and drew from that the wrong conclusion that it was therefore safe. The mask block
-now asks the question of the argv it actually built rather than of a list of binds it
-believes it emits, so moving a bind moves the answer with it.
+**The residual ISSUE-319 declined to close is closed by the layout rather than by a guard.** The old shared root stayed writable inside the sandbox, so a task could create a cache directory for a user who had not run one yet, populate it, and have the daemon adopt it on that user's first task. There is no shared root in the namespace now: a task sees `{repos_dir}/{user_id}` and nothing above it, so there is no name left to plant.
 
-One consequence of the placement, since it is not obvious: `git_remote_scrub.find_git_dirs`
-walks `repos_dir` on every task and on every reaper sweep, and uv's `archive-v0` is one
-directory per unpacked wheel. `_MAX_DEPTH` already stops it descending into them, but it
-still lists and lstats every one — 25 ms over 4,500 directories, and a per-sweep log line
-claiming thousands went unswept for credentials. Both callers pass the configured cache
-root as `skip`. The cost of that prune, stated rather than implied: a repository parked
-under the cache root is not swept.
+One consequence of the placement, since it is not obvious: `git_remote_scrub.find_git_dirs` walks under `repos_dir` on every task and on every reaper sweep, and uv's `archive-v0` is one directory per unpacked wheel. `_MAX_DEPTH` already stops it descending into them, but it still lists and lstats every one — 25 ms over 4,500 directories, and a per-sweep log line claiming thousands went unswept for credentials. Both callers pass the derived cache as `skip`: the developer skill's `setup_env` passes the one cache under the subtree it sweeps, and `scheduler.check_worktree_reap` enumerates `{repos_dir}/*/.package-caches` from disk, since a cache appears on a user's first task. For the reaper that prune is not only performance — a git directory inside a cache would otherwise be evaluated as a reap candidate, which fetches against a model-written `remote.origin.url` from the unsandboxed scheduler, outside the CONNECT allowlist, every sweep. The cost of the prune, stated rather than implied: a repository parked under a cache directory is not swept.
 
-`resolve_sandbox_cache_dir` (in `executor.py`) is the single predicate behind the bind,
-the environment and `native_fs_roots`, so they cannot disagree, and it **never raises** —
-both callers are on the task path, and for NativeBrain `build_bwrap_cmd` runs per Bash
-call. Every rejection falls open to today's behaviour: a path that is relative, not an
-existing writable directory, under a database directory, or **at or above anything the
-sandbox already mounts**. That last one is the rejection that matters. bwrap applies argv
-in order and the cache bind is emitted late, so a destination above an earlier mount
-covers it: `= $HOME/.cache` overmounts the read-only huggingface bind, `= config.temp_dir`
-hands every user's workspace to every task and makes the `.developer` credential helpers
-writable again, `= $HOME/.local` gives the model write access to the `claude` binary, and
-`= developer.repos_dir` — one character off the documented shape — binds the repos RW for
-non-admins, past the admin gate the repos bind carries. `_sandbox_bind_targets` is that
-list; it is the same idea as `_mask_protected`, for the one other late mount operation.
-The database check is made here rather than left to `_validate_workspace_dir`, which skips
-a relative `db_path` (the shipped default) for a REPL-shaped reason the daemon does not
-have. Each distinct refusal warns once per process, not twice per task.
+The environment variables (`UV_CACHE_DIR`, `XDG_CACHE_HOME`, `npm_config_cache`, and `HF_HOME` pinned back to `~/.cache/huggingface` so moving XDG does not orphan the read-only model-cache bind) are set in `execute_task`, in the model-only block **after** `proxy_base_env` is snapshotted — deliberately not in `build_clean_env`. That function feeds the proxy's base env, which SkillProxy hands every host-side skill CLI: a process running unsandboxed as the daemon user has no business resolving a cache out of a directory the model can write, which is the same confused-deputy shape the `ISTOTA_PATH_PREPEND` handling guards against.
 
-The environment variables (`UV_CACHE_DIR`, `XDG_CACHE_HOME`, `npm_config_cache`, and
-`HF_HOME` pinned back to `~/.cache/huggingface` so moving XDG does not orphan the
-read-only model-cache bind) are set in `execute_task`, in the model-only block **after**
-`proxy_base_env` is snapshotted — deliberately not in `build_clean_env`. That function
-feeds the proxy's base env, which SkillProxy hands every host-side skill CLI: a process
-running unsandboxed as the daemon user has no business resolving a cache out of a
-directory the model can write, which is the same confused-deputy shape the
-`ISTOTA_PATH_PREPEND` handling guards against.
+**The sweep follows the cache, not the key.** `sandbox_cache_sweep_enabled` / `sandbox_cache_max_gb` / `[scheduler] sandbox_cache_sweep_interval` bound what these directories grow to (ISSUE-317, `src/istota/sandbox_cache_sweeper.py`). Moving the caches onto disk is what makes them **persist**, and nothing pruned them, so the fix for a bounded RAM burn was an unbounded disk leak on the volume the worktree reaper is already fighting for. `scheduler.sandbox_cache_sweep_root` reproduces `resolve_sandbox_cache_dir`'s branch selection, so the blank Ansible default for `sandbox_cache_dir` switches nothing off on a developer deployment — the sweep walks `{repos_dir}/{user_id}/.package-caches` for each user instead. It reproduces the *branch selection* and deliberately not the refusals, because a root the resolver never writes into is a sweep that finds nothing while the real caches grow. On the derived layout the user ids come from `config.users` and the sweeper derives one path each, reading no name back out of the tree: entries under `repos_dir` are model-writable, and a user id is the one axis that must not come from there. An empty user list is reported rather than passing as a silent no-op. The price is visible rather than hidden — `report_orphan_caches` names a cache belonging to nobody the caller listed, which the one-level shape used to catch by enumerating, and acts on nothing.
 
-`sandbox_cache_sweep_enabled` / `sandbox_cache_max_gb` / `[scheduler] sandbox_cache_sweep_interval`
-bound what that directory grows to (ISSUE-317, `src/istota/sandbox_cache_sweeper.py`). Moving the
-caches onto disk is what makes them **persist**, and nothing pruned them, so the fix for a bounded
-RAM burn was an unbounded disk leak on the volume the worktree reaper is already fighting for. The
-Ansible default for `sandbox_cache_dir` is still blank, and that is now a recorded decision rather
-than an oversight: the placement the reference doc recommends — under `developer.repos_dir` — cannot
-be made a default as it stands, because `build_bwrap_cmd` binds `{root}/{user_id}` and *then* binds
-all of `repos_dir` read-write for an admin developer task, so the later bind covers the earlier one
-and every other user's cache is writable inside the sandbox. uv trusts its unpacked wheels on read
-and re-verifies them against no hash, so that is exactly the cross-user code path the per-user split
-exists to close. Reordering the binds does not fix it (only `{root}/{user_id}` would be covered back
-up), and neither does the 0700 mode (every task runs as the same daemon uid). The open options are a
-root on the same filesystem but outside `repos_dir` — hard where `repos_dir` is its own mount, since
-a sibling then costs `EXDEV` and the full copy the placement advice exists to avoid — carving the
-root back out inside `build_bwrap_cmd` after the repos bind, or accepting the exposure and saying so
-in `resolve_sandbox_cache_dir`'s docstring. `deploy/ansible/defaults/main.yml` carries the long form,
-and `tests/test_ansible_config_template.py::TestThePackageCacheRoot` asserts both the blank default
-and the bind order that forces it, so a future change has to turn those red deliberately.
+**A size ceiling, not an age rule.** One `uv sync --all-extras` writes about 1.8 GB in a single command, so a window phrased in days either keeps everything or throws away a cache minutes old and about to be reused. Every visited cache gets the package managers' own cheap reclaim first (`uv cache prune`, `npm cache verify`), which keeps the warm entries; only one still over its ceiling afterwards is wiped with their `clean` verbs. **The sweeper deletes no file itself** — not the root, not a per-user directory, not a cache entry. A tool that is missing, that fails or that times out is reported and the cache is left alone, because the difference between "uv's cache" and "everything the model put in this directory" is what uv knows and the sweeper does not.
 
-**A size ceiling, not an age rule.** One `uv sync --all-extras` writes about 1.8 GB in a single
-command, so a window phrased in days either keeps everything or throws away a cache minutes old and
-about to be reused. Every visited cache gets the package managers' own cheap reclaim first
-(`uv cache prune`, `npm cache verify`), which keeps the warm entries; only one still over its
-ceiling afterwards is wiped with their `clean` verbs. **The sweeper deletes no file itself** — not
-the root, not a per-user directory, not a cache entry. A tool that is missing, that fails or that
-times out is reported and the cache is left alone, because the difference between "uv's cache" and
-"everything the model put in this directory" is what uv knows and the sweeper does not.
+**Three guards stand between a running task and a wipe**, since unlinking a cache entry under a `uv sync` turns its next `link(2)` into `ENOENT`. `scheduler.check_sandbox_cache_sweep` reads the users with a `locked` or `running` task and passes them in; a user in that set is skipped entirely, including the cheap reclaim, since `prune` unlinks too, and an *unreadable* task table cancels the whole sweep rather than arriving as an empty set that reads as "nobody is working". Behind that, an idle window on the cache tree's newest mtime catches a writer the task table never knew about. Behind that, `--force` is never passed to uv, so uv's own in-use check still stands — which is the only one of the three that sees a sync against a fully warm cache, since that writes nothing and merely hardlinks out. npm's `--force` on `cache clean` is a different flag with no in-use check behind it.
 
-**Three guards stand between a running task and a wipe**, since unlinking a cache entry under a
-`uv sync` turns its next `link(2)` into `ENOENT`. `scheduler.check_sandbox_cache_sweep` reads the
-users with a `locked` or `running` task and passes them in; a user in that set is skipped entirely,
-including the cheap reclaim, since `prune` unlinks too, and an *unreadable* task table cancels the
-whole sweep rather than arriving as an empty set that reads as "nobody is working". Behind that, an
-idle window on the cache tree's newest mtime catches a writer the task table never knew about. Behind
-that, `--force` is never passed to uv, so uv's own in-use check still stands — which is the only one
-of the three that sees a sync against a fully warm cache, since that writes nothing and merely
-hardlinks out. npm's `--force` on `cache clean` is a different flag with no in-use check behind it.
+**A fourth thing guards the sweep's own aim, and the derived layout is what forced it.** The module used to claim that resolving a path before handing it to a subprocess left nothing to swap. That held under one level for a structural reason nobody had recorded — the cache root's parent was never bound into a sandbox — and it is false under two, where `.package-caches` is an ordinary entry in a directory the task writes. The directory's `(st_dev, st_ino)` is pinned through an `O_NOFOLLOW` open and re-asserted before each round and before each tool; one that changed identity mid-sweep reports `swapped` and nothing further is run against it. Reverted, the control reports the victim's cache wiped at zero bytes.
 
 `sandbox_admin_db_write` was **removed**: the framework DB is no longer bound
 into the sandbox for anyone, so there is no bind left to widen. A stale key
@@ -750,6 +613,14 @@ worktree_reap_enabled: bool = True    # Reap landed worktrees, from the schedule
 worktree_retention_hours: float = 24.0  # Idle time before one is a candidate; clamped to a 1h floor
 review: ReviewConfig
 ```
+
+`repos_dir` is a **root of per-user subtrees**, not one shared tree: `{repos_dir}/{user_id}/{namespace}/{project}.git`, with a worktree as a sibling of its bare clone and the derived package cache at `{repos_dir}/{user_id}/.package-caches`. `build_bwrap_cmd` and `native_fs_roots` give an admin developer task only `{repos_dir}/{user_id}`, so one admin cannot read or write another's clones, worktrees, model-written git configs or cache. That is structural rather than enforced, which is what let the ISSUE-319 mask machinery be deleted instead of extended.
+
+The namespace level is kept rather than flattened to `{user_id}/{project}.git`, which reads better and collides when one user clones two projects with the same basename from different namespaces. Depth 3 stays inside `git_remote_scrub._MAX_DEPTH` and inside what the worktree reaper walks, so neither needed a change. Two admins working the same repository now keep two clones; the disk cost is bounded and small next to worktrees and caches, and the alternative is the shared mutable tree the split exists to remove.
+
+`DEVELOPER_REPOS_DIR` is that subtree, derived per task by the developer skill's `setup_env` hook. Both manifests that declare it (`developer`, `code_review`) are `from: setup_env`, so the hook is the sole producer — a hook value never outranks a manifest-resolved `from: config` entry (`executor` merges `build_skill_env` first, both under `if k not in env`), so the conflict is removed rather than won. One consequence: emission is gated on `is_admin` and config rather than on skill authorization, which is the same gate the bind already carries. An operator override manifest at `config/skills/developer/skill.md` still carrying the old `from: config` entry would outrank the hook and hand the model the shared root again, silently; the guard test reads bundled manifests only.
+
+An existing deployment is moved by `repos_relocate.py`, which the Ansible role runs after the code is in place and before the units restart. Ownership is the whole problem — nothing on disk says which user owns a clone, since a forge namespace is not a user id — so it assigns every namespace to the single configured admin and refuses where there are none or several. `{repos_dir}/.istota-layout` holding `2` is the idempotency marker. `{repos_dir}/.package-caches`, the shared cache root the previous layout used, is reported and left in place: it is orphaned by the derivation and safe for an operator to remove by hand.
 
 `gitlab_reviewer` is the value the developer skill exports as `GITLAB_REVIEWER` and hands to `glab mr create --reviewer`, which resolves by username. `gitlab_reviewer_id` holds the same person's numeric id and is read by nothing — it kept its name and lost its consumer in ISSUE-289, where the name was the bug: operators put the id `users/<id>` reports into the field the skill consumed, `glab` answered `failed to find user by name`, and because the recipe builds the flag rather than failing, every agent-authored MR opened with nobody assigned. The `developer.gitlab_reviewer` doctor check WARNs on an all-digits username, and on an `_id` set with no username beside it — the shape a host that has not re-run Ansible is in.
 

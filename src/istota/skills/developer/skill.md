@@ -13,7 +13,7 @@ Work in git repositories, manage merge requests on GitLab and pull requests on G
 
 | Variable | Description |
 |---|---|
-| `DEVELOPER_REPOS_DIR` | Base directory for repo clones and worktrees |
+| `DEVELOPER_REPOS_DIR` | Your own base directory for repo clones and worktrees. Every path below is relative to it; nothing outside it is reachable |
 | `GITLAB_URL` | GitLab instance URL (e.g., `https://gitlab.com`) |
 | `GITLAB_DEFAULT_NAMESPACE` | Default GitLab namespace (user/group) for resolving short repo names |
 | `GITLAB_REVIEWER` | GitLab username to assign as MR reviewer |
@@ -49,11 +49,11 @@ This is an accident guard, not a security boundary. Hitting it means you are abo
 $DEVELOPER_REPOS_DIR/
 ├── namespace/project.git/                    # bare clone
 ├── namespace/project--istota-42-add-auth/      # worktree for task 42
-└── namespace/project--istota-55-fix-bug/       # worktree for task 55
+├── namespace/project--istota-55-fix-bug/       # worktree for task 55
+└── .package-caches/                          # uv + npm caches; leave it alone
 ```
 
-- Bare clones go in `<namespace>/<project>.git/`
-- Worktrees are siblings: `<namespace>/<project>--<branch-slug>/`
+- Bare clones go in `<namespace>/<project>.git/`; worktrees are siblings, `<namespace>/<project>--<branch-slug>/`
 
 ## Cloning a Repository
 
