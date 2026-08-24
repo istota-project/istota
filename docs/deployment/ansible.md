@@ -168,7 +168,7 @@ This needs both `Delegate=memory pids cpu` and `DelegateSubgroup=supervisor` on 
 
 The container runs a supervisor as PID 1's child rather than `sleep infinity`, with `init: true` for reaping. `restart: unless-stopped` restarts the container and says nothing about a process inside one, so without the supervisor a server picked off by a dockerd restart or a memory limit stays gone until somebody notices.
 
-`ping`, `traceroute`, `mtr` and `tcpdump` do not work inside it. They need `CAP_NET_RAW`, which the definition no longer grants: a build needs none of them, and a container holding it can pick its own source address and walk past every address-scoped drop rule the role installs. Egress is otherwise permissive, bounded by those rules — link-local, Azure's host agent, RFC1918 and carrier-grade NAT.
+The raw-socket diagnostics — `traceroute`, `mtr`, `tcpdump` — do not work inside it. They need `CAP_NET_RAW`, which the definition no longer grants: a build needs none of them, and a container holding it can pick its own source address and walk past every address-scoped drop rule the role installs. `ping` is probably unaffected, since it tries an unprivileged ICMP datagram socket first and Docker's default sysctls permit that. Egress is otherwise permissive, bounded by those rules — link-local, Azure's host agent, RFC1918 and carrier-grade NAT.
 
 ## Where project code builds and runs
 

@@ -629,7 +629,7 @@ run_container_tier() {
     # the machine, and the tests skip themselves there rather than taking the
     # whole tier down with them.
     run_in_container sh -c '. /src/scripts/dev/linux-tier-cgroup.sh
-ruff check --output-format concise src tests testbed && exec pytest "$@"' \
+ruff check --output-format concise src tests testbed docker/devbox && exec pytest "$@"' \
         -- -o cache_dir=/tmp/pytest_cache "${pytest_args[@]}"
 }
 
@@ -640,8 +640,8 @@ ruff check --output-format concise src tests testbed && exec pytest "$@"' \
 run_native_tier() {
     # Container mode is cwd-immune by construction — the bind, the `-f` path
     # and `-w /src` are all absolute. Native mode is not: `uv` walks up from
-    # the process's cwd to find a project, and `ruff check … src tests testbed`
-    # names three relative paths. Run from inside another checkout, the driver
+    # the process's cwd to find a project, and `ruff check … src tests testbed
+    # docker/devbox` names four relative paths. Run from inside another checkout, the driver
     # would lint and collect that one and report the answer as this
     # repository's.
     cd "$REPO_ROOT"
@@ -705,7 +705,7 @@ run_native_tier() {
     # `uv.lock`, which is a tracked file, so a test run would leave a diff
     # behind. It does not install anything the venv is missing either way —
     # `uv sync --extra test` is the prerequisite, stated in the header.
-    uv run --frozen ruff check --output-format concise src tests testbed
+    uv run --frozen ruff check --output-format concise src tests testbed docker/devbox
     exec uv run --frozen pytest "${pytest_args[@]}"
 }
 

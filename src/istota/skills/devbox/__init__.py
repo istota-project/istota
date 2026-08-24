@@ -924,11 +924,14 @@ def _to_int(s: str) -> int | None:
 
 
 def cmd_reset(args) -> dict:
-    """The one verb still spoken in Docker, because it recreates a container.
+    """The one verb spoken entirely in Docker, because it restarts a container.
 
-    The transport cannot do this and should not learn how: a server inside a
-    container cannot restart the container it is inside. So `_run_docker` and
-    `_check_owned` survive here and nowhere else in this file.
+    It wipes `/home/dev` and `docker restart`s the box — it does not *create*
+    one, so it is not the way to pick up a rebuilt image. The transport cannot
+    do even the restart and should not learn how: a server inside a container
+    cannot restart the container it is inside. So `_check_owned` survives for
+    this verb and nowhere else; `_run_docker` also survives for `cmd_status`,
+    which asks Docker about the container beside what it asks the server.
     """
     container = _container_name()
     if not container:
