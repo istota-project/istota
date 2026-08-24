@@ -1,0 +1,189 @@
+#!/bin/sh
+# istota-exec-run — the devbox container's `command`, and the exec server's
+# supervisor.
+#
+# The container used to run `sleep infinity` and be an exec target. It is now a
+# service host, and that changes two things a `sleep` cannot do.
+#
+# **Something has to restart the server.** `restart: unless-stopped` restarts
+# the *container*; it says nothing about a process inside one. After a dockerd
+# restart, a host reboot, or the server being picked off when the container
+# reaches its `mem_limit`, an unsupervised server is gone until an operator
+# notices, and every developer task on the deployment fails at its first
+# shimmed command. So the loop below: run the server, log its exit, pause a
+# second, run it again.
+#
+# **Something has to reap.** `sleep infinity` as PID 1 never calls `wait()`, so
+# anything that outlives the server's own reap reparents to PID 1 and stays a
+# zombie against `pids_limit` for the life of the container. That is why the
+# service is declared with `init: true`: tini takes PID 1 and reaps, and this
+# script runs beneath it. Do not "simplify" this into the container's PID 1 —
+# see below.
+#
+# **This is not the server, and that is deliberate.** Running the server itself
+# as the container's command would make a server crash take the container, and
+# with it every concurrent build of that user's other tasks. A one-second
+# respawn keeps the container's liveness independent of the server's and costs
+# a second.
+#
+# The one other thing it does is the `/home/dev` chown, described where it
+# happens.
+#
+# POSIX `sh`, not bash: it forks nothing, pipes nothing, and the smaller
+# interpreter is one less thing to reason about in a PID-2 supervisor.
+#
+# `set -e` is deliberately *off*. The whole point of the loop is to survive a
+# non-zero exit from the server; `-e` would make the first one fatal.
+set -u
+
+SERVER=/usr/local/bin/istota-exec-serve
+
+# Every setting arrives in the container's own environment, from the per-user
+# service definition. That is a different thing from the model's environment,
+# which is where the shims deliberately read nothing from: the shims are
+# children of the model's own shell, so an env-supplied path there is a path
+# the model chooses. Nothing the model runs can reach this process's
+# environment, which was fixed when the container was created.
+#
+# The two required settings are per user and have no defensible default —
+# `{exec_socket_dir}/{user_id}/exec.sock` and `{repos_dir}/{user_id}` are both
+# spelled identically on the host and in here, and guessing either would be
+# guessing which user's container this is.
+SOCKET="${ISTOTA_EXEC_SOCKET:-}"
+REPOS_ROOT="${ISTOTA_EXEC_REPOS_ROOT:-}"
+
+# The rest have defaults, and an unset one is left off the command line
+# entirely so the server's own default governs. Two copies of a default is one
+# copy too many when they can drift.
+EXEC_HOME="${ISTOTA_EXEC_HOME:-/home/dev}"
+IDLE_TIMEOUT="${ISTOTA_EXEC_IDLE_TIMEOUT_SECONDS:-}"
+LOG_LEVEL="${ISTOTA_EXEC_LOG_LEVEL:-info}"
+RESPAWN_PAUSE="${ISTOTA_EXEC_RESPAWN_PAUSE_SECONDS:-1}"
+UNCONFIGURED_PAUSE="${ISTOTA_EXEC_UNCONFIGURED_PAUSE_SECONDS:-300}"
+
+log() {
+    printf '%s istota-exec-run %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+}
+
+# The image gives `dev` passwordless sudo, so the chown below works whichever
+# uid this script runs as. Preferring a direct call when already root keeps the
+# common path free of sudo and keeps this working on a container started with
+# `--user root` for debugging.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
+# --- The /home/dev chown ----------------------------------------------------
+#
+# The daemon and this container run as the same numeric uid, because they share
+# a filesystem. Where they do not, it fails in both directions: a worktree the
+# daemon created is one `dev` cannot write a `node_modules/` into, and — the
+# expensive one — a tree the container created is one the daemon's
+# `git worktree remove` cannot unlink, so every worktree that ever ran a build
+# becomes permanently unreapable.
+#
+# The image satisfies that by construction: `useradd -u ${DEV_UID}` and a
+# `/home/dev` created at build time. What does not is a *pre-existing volume*,
+# whose files were created at uid 1000 by an earlier image and which masks the
+# build-time directory when it is mounted.
+#
+# So: one self-healing step, here, rather than an Ansible-side check of a
+# volume's uid that an operator has to have read a release note to run.
+#
+# **Guarded by a stat of the directory itself**, which is what bounds it. A
+# recursive chown sets the top directory too, so the very walk that repairs the
+# volume is what stops the next boot from walking it again. The guard tests
+# both halves the chown sets — a guard narrower than its own remedy would leave
+# a volume it could see was wrong and never fix.
+#
+# A failure is logged and not fatal. The transport is still worth starting on a
+# volume that could not be fully repaired, and the log line is what an operator
+# reads; `doctor`'s identity check is what tells them to.
+repair_home_ownership() {
+    if [ ! -d "$EXEC_HOME" ]; then
+        log "no ${EXEC_HOME} to check ownership of; skipping the chown"
+        return
+    fi
+
+    # `id -u dev` rather than `id -u`: the passwd entry is where DEV_UID was
+    # written at build time, and it is the answer even when this script was
+    # started as somebody else.
+    want_uid="$(id -u dev 2>/dev/null || echo "")"
+    want_gid="$(id -g dev 2>/dev/null || echo "")"
+    if [ -z "$want_uid" ] || [ -z "$want_gid" ]; then
+        log "cannot resolve the 'dev' account; skipping the ${EXEC_HOME} chown"
+        return
+    fi
+
+    have_uid="$(stat -c %u "$EXEC_HOME" 2>/dev/null || echo "")"
+    have_gid="$(stat -c %g "$EXEC_HOME" 2>/dev/null || echo "")"
+    if [ "$have_uid" = "$want_uid" ] && [ "$have_gid" = "$want_gid" ]; then
+        return
+    fi
+
+    log "chown ${EXEC_HOME}: owned by ${have_uid}:${have_gid}, dev is ${want_uid}:${want_gid}"
+    if as_root chown -R "${want_uid}:${want_gid}" "$EXEC_HOME"; then
+        log "chown ${EXEC_HOME}: done"
+    else
+        log "chown ${EXEC_HOME}: FAILED; parts of the volume stay unwritable by dev"
+    fi
+}
+
+# --- Refusing to guess ------------------------------------------------------
+#
+# A missing required setting holds here rather than exiting. Exiting would take
+# the container down under `restart: unless-stopped`, which turns a
+# configuration mistake into a crash loop that also removes the one way in to
+# diagnose it. Holding keeps the container up with the transport down, which is
+# the state `doctor`'s transport check is written to report — and it says so on
+# a cadence, because one line at boot is a line nobody scrolls back to.
+hold_unconfigured() {
+    while :; do
+        log "ISTOTA_EXEC_SOCKET and ISTOTA_EXEC_REPOS_ROOT must both be set;" \
+            "the exec transport is not running (socket='${SOCKET}'," \
+            "repos root='${REPOS_ROOT}')"
+        sleep "$UNCONFIGURED_PAUSE"
+    done
+}
+
+# Two spellings rather than one built by word splitting: an unquoted variable
+# holding a whole flag is how a value with a space in it becomes two arguments.
+run_server_once() {
+    if [ -n "$IDLE_TIMEOUT" ]; then
+        "$SERVER" \
+            --socket "$SOCKET" \
+            --repos-root "$REPOS_ROOT" \
+            --home "$EXEC_HOME" \
+            --log-level "$LOG_LEVEL" \
+            --idle-timeout-seconds "$IDLE_TIMEOUT"
+    else
+        "$SERVER" \
+            --socket "$SOCKET" \
+            --repos-root "$REPOS_ROOT" \
+            --home "$EXEC_HOME" \
+            --log-level "$LOG_LEVEL"
+    fi
+}
+
+main() {
+    repair_home_ownership
+
+    if [ -z "$SOCKET" ] || [ -z "$REPOS_ROOT" ]; then
+        hold_unconfigured
+    fi
+
+    log "supervising ${SERVER} on ${SOCKET}, repos root ${REPOS_ROOT}"
+    while :; do
+        run_server_once
+        status=$?
+        log "istota-exec-serve exited with status ${status};" \
+            "restarting in ${RESPAWN_PAUSE}s"
+        sleep "$RESPAWN_PAUSE"
+    done
+}
+
+main "$@"
