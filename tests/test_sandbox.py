@@ -700,8 +700,13 @@ class TestNoDockerReachesTheSandbox:
     def test_the_docker_client_binary_is_not_bound(
         self, sandbox_config, make_sandbox_task, tmp_path
     ):
-        """A `docker` client with nothing to talk to is a confusing failure
-        rather than a safe one, so the CLI bind went with the socket."""
+        """The explicit bind went with the socket it existed to serve.
+
+        Not the thing that makes Docker unreachable: `/usr` is `--ro-bind`ed
+        whole, so `/usr/bin/docker` is in the namespace on any host with the
+        client installed. The socket is the boundary; this is the redundant
+        bind that used to point at it.
+        """
         config, cli = self._devbox_config(sandbox_config, tmp_path)
         task = make_sandbox_task(user_id="alice")
 

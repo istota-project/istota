@@ -184,8 +184,12 @@ class TestTheDockerProxySocket:
         for authorized in ({"developer"}, {"email"}):
             argv = _argv(config, task, authorized)
             assert "/var/run/docker.sock" not in argv
-            # The CLI binary went with the socket: a `docker` client with
-            # nothing to talk to is a confusing failure rather than a safe one.
+            # The explicit read-only bind of the client binary went too. It is
+            # not what makes Docker unreachable — `/usr` is bound whole, so
+            # `/usr/bin/docker` is in the namespace on any host that installs
+            # the client — but it was there only to serve the socket bind above,
+            # and a bind with nothing behind it is a claim about the boundary
+            # that is not the boundary.
             assert str(cli) not in _bind_sources(argv)
             assert str(cli) not in argv
 

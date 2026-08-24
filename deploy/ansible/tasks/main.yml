@@ -1393,7 +1393,7 @@
         - "restart istota-web"
         - "restart istota-webhooks"
         - "restart istota-devbox-proxy"
-    
+
     - name: Warn if no tags found
       debug:
         msg: "No semver tags found in repository, staying on branch {{ istota_repo_branch }}"
@@ -2943,13 +2943,21 @@
       when: item != ""
       failed_when: false
 
-    - name: Remove the docker-proxy unit and tmpfiles templates
+    # The socket directory goes with them. The variable that named it is
+    # deleted, so the path is written out here rather than interpolated — this
+    # is the last thing in the role that knows where the old sockets were, and
+    # after this play nothing does. `/var/run` is a symlink to a tmpfs on a
+    # systemd host, so the directory would go at the next reboot anyway; this is
+    # so a host that is not rebooted does not keep a directory of dead sockets
+    # named after a subsystem that no longer exists.
+    - name: Remove the docker-proxy unit, tmpfiles snippet and socket directory
       file:
         path: "{{ item }}"
         state: absent
       loop:
         - "/etc/systemd/system/{{ istota_namespace }}-docker-proxy@.service"
         - "/etc/tmpfiles.d/{{ istota_namespace }}-docker-proxy.conf"
+        - "/var/run/{{ istota_namespace }}-docker"
       notify:
         - "reload systemd for docker proxy"
   when: not istota_web_only

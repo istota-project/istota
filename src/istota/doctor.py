@@ -1937,11 +1937,27 @@ def check_developer_container(config: "Config", probe: bool) -> list[CheckResult
 
     dev = getattr(config, "developer", None)
     if backend != config_module.CONTAINER_BACKEND_DEVBOX:
-        return results + _container_results(
-            names[1:], SKIP,
+        # Two switches, and one of the four pairs is a deployment where the
+        # devbox *skill* is offered and cannot work. The role provisions the
+        # socket directory and sets `ISTOTA_EXEC_SOCKET` on the container only
+        # under `backend = devbox`, and since the skill moved onto this
+        # transport every verb but `reset` needs a server behind that socket. So
+        # `devbox.enabled = true` with `backend = none` is a skill in the menu
+        # whose commands all fail — which the skill CLI now says at the point of
+        # use, and which an operator should hear before a task finds out.
+        detail = (
             "[developer.container] backend is not 'devbox'; development commands "
-            "run on the host",
+            "run on the host"
         )
+        if getattr(getattr(config, "devbox", None), "enabled", False):
+            detail += (
+                ". [devbox] enabled is true, so the devbox skill is offered — "
+                "but its exec, cp-in, cp-out, exec-file and status verbs all "
+                "need this transport and will refuse. Set backend to 'devbox' "
+                "and re-deploy, or turn [devbox] enabled off; `reset` is the "
+                "only verb that works either way"
+            )
+        return results + _container_results(names[1:], SKIP, detail)
     if not getattr(dev, "enabled", False) or not getattr(dev, "repos_dir", ""):
         return results + _container_results(
             names[1:], SKIP,

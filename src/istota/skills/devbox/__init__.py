@@ -69,23 +69,44 @@ import sys
 import time
 from pathlib import Path
 
+from istota import devbox_exec_client as _client
 from istota import devbox_exec_protocol as proto
-from istota.skill_host_paths import resolve_host_path, validate_host_path
+from istota.skill_host_paths import resolve_host_path
 
 DEFAULT_MAX_OUTPUT_BYTES = 102_400
 MAX_COMMAND_BYTES = 32 * 1024  # `bash -o pipefail -c` argv length cap
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 _OWNER_LABEL = "com.istota.user_id"
 
-# How long to wait for the connect and for the acknowledgement. Both are
-# properties of a server that is up: a connect that has not completed in this
-# long is a socket with nothing behind it, and an ack that has not arrived is a
-# server that read the request and never answered. Neither bounds the command,
-# which is deliberately unbounded here — the task's own budget governs, and the
-# skill proxy's `security.skill_proxy_timeout` is the outer ceiling on this
-# process whatever this file does.
-CONNECT_TIMEOUT_SECONDS = 5.0
-ACK_TIMEOUT_SECONDS = 30.0
+# The two connect-path budgets, both taken from the exec client rather than
+# restated. There are two clients of one server now — the shims run
+# `devbox_exec_client`, this CLI speaks the wire itself — and two clients
+# disagreeing about how long a slow spawn may take shows up as one of them
+# reporting a devbox outage the other does not see.
+#
+# `[developer.container] connect_timeout_seconds` overrides the first, because
+# it is "the client's connect budget, and the only timeout on the connect path"
+# and the shims already bake it in. This CLI already loads the `Config` that
+# carries it to resolve the socket, so reading it costs nothing.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = _client.DEFAULT_CONNECT_TIMEOUT_SECONDS
+ACK_TIMEOUT_SECONDS = _client.ACK_TIMEOUT_SECONDS
+
+# Neither of the two bounds the command. The *transport* imposes no timeout by
+# design — the task's own budget governs — but this process is not the
+# transport: the skill proxy runs it as a buffered `subprocess.run(timeout=…)`
+# under `security.skill_proxy_timeout`, and on expiry it is killed with its
+# envelope unprinted and every byte of output lost. That ceiling is the one a
+# caller has to plan around, so `skill.md` names it rather than repeating the
+# transport's "no timeout" at a reader for whom it is not true.
+#
+# How much output is held in memory while waiting. The envelope's cap is a
+# rendering decision applied at the end; this is the one that bounds the
+# *process*, which matters because the skill proxy runs inside the scheduler
+# daemon, so these bytes are charged to the daemon's own memory and to no task
+# cgroup. Generous, because the point of leaving `docker exec` is that a build
+# log arrives whole — but not unbounded, because `exec 'cat /dev/urandom'` is
+# one command away.
+MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024
 
 # Both re-exported from `istota.devbox_exec_protocol`, which is the vendored
 # module the server also reads them from. A second copy of the sentence is a
@@ -111,11 +132,6 @@ _SIGPIPE_NOTE = proto.SIGPIPE_NOTE
 # filesystem, and the process inside it knows. A server built with a different
 # `--staging` would otherwise refuse every `exec-file` with `path_refused`.
 _EXEC_STAGING_DIR = "/home/dev/.istota-exec"
-
-# What the server's `cwd: null` resolves to, quoted here only for messages. The
-# constant that decides it lives in the server, in the container, and never
-# travels: this verb sends `null` and the server names the directory.
-_SERVER_HOME = "/home/dev"
 
 
 def _err(msg: str, **extra) -> dict:
@@ -166,8 +182,16 @@ def _truncate(data: bytes, cap: int) -> str:
 # ---- Where the socket is ---------------------------------------------------
 
 
-def _socket_path() -> tuple[str | None, str | None]:
-    """``(path, error)`` — the exec socket for this task's user.
+class _Transport:
+    """Where the socket is, and how long to wait for it."""
+
+    def __init__(self, path: str, connect_timeout: float) -> None:
+        self.path = path
+        self.connect_timeout = connect_timeout
+
+
+def _transport_settings() -> "tuple[_Transport | None, str | None]":
+    """``(settings, error)`` — the exec socket for this task's user.
 
     Read from **configuration in this host-side process**, never from the
     environment. The distinction is the one the shims are built on: a shim is a
@@ -176,6 +200,16 @@ def _socket_path() -> tuple[str | None, str | None]:
     acknowledgement and a fabricated exit 0 from a socket the model wrote. This
     CLI is spawned by the skill proxy outside the sandbox and loads the same
     config file the daemon did, which is not something the model can reach.
+
+    **The backend is checked here, and it is a refusal rather than a connect
+    failure on purpose.** ``exec_socket_dir`` carries a non-empty default, so a
+    path always resolves — but the Ansible role provisions the socket directory
+    and sets ``ISTOTA_EXEC_SOCKET`` on the container only under
+    ``backend = devbox``. On the shipped pair ``devbox.enabled = true`` with
+    ``backend = none``, every verb but ``reset`` would otherwise fail with "the
+    container may be down", naming neither the cause nor the fix — on a
+    deployment where nothing is down and where this skill worked before the
+    transport existed. So it names the key to set instead.
     """
     uid = _user_id()
     if not uid:
@@ -184,17 +218,37 @@ def _socket_path() -> tuple[str | None, str | None]:
             "per-user devbox socket to resolve. This CLI must run under a task."
         )
     try:
-        from istota.config import exec_socket_path, load_config
+        from istota import config as config_module
 
-        path = exec_socket_path(load_config(), uid)
+        config = config_module.load_config()
+        backend = config_module.container_backend(config)
+        path = config_module.exec_socket_path(config, uid)
+        budget = getattr(
+            getattr(getattr(config, "developer", None), "container", None),
+            "connect_timeout_seconds",
+            DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        )
     except Exception as e:  # noqa: BLE001 — JSON envelope is the contract
         return None, f"could not resolve the devbox exec socket from config: {e}"
+    if backend != config_module.CONTAINER_BACKEND_DEVBOX:
+        return None, (
+            f"This deployment's [developer.container] backend is {backend!r}, so "
+            f"no exec server is provisioned inside the devbox and every verb but "
+            f"`reset` has nothing to talk to. Set it to "
+            f"{config_module.CONTAINER_BACKEND_DEVBOX!r} and re-run the deploy. "
+            f"This is a deployment setting; a task cannot change it."
+        )
     if path is None:
         return None, (
             "No exec socket directory is configured "
-            "([developer.container] exec_socket_dir, or [devbox] exec_socket_dir)."
+            "([developer.container] exec_socket_dir)."
         )
-    return str(path), None
+    # A zero or negative budget would put the socket in non-blocking mode, where
+    # `connect` raises at once and every verb reports an outage. Not a timeout
+    # anybody meant to ask for, so it reads as "use the default".
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
+        budget = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    return _Transport(str(path), float(budget)), None
 
 
 # ---- The conversation ------------------------------------------------------
@@ -219,6 +273,12 @@ class _Reply:
         self.terminal: dict = {}
 
 
+_ACK_TIMEOUT_MESSAGE = (
+    "{path}: the server accepted the connection and did not acknowledge within "
+    f"{ACK_TIMEOUT_SECONDS:g}s; whether anything ran is unknown"
+)
+
+
 def _read_ack(sock: socket.socket, path: str) -> tuple[dict, bytes]:
     """Read the acknowledgement line and hand back whatever followed it.
 
@@ -231,12 +291,17 @@ def _read_ack(sock: socket.socket, path: str) -> tuple[dict, bytes]:
     while b"\n" not in buf:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _Refused(
-                f"{path}: the server accepted the connection and did not "
-                f"acknowledge within {ACK_TIMEOUT_SECONDS:g}s"
-            )
+            raise _Refused(_ACK_TIMEOUT_MESSAGE.format(path=path))
         sock.settimeout(remaining)
-        chunk = sock.recv(proto.CHUNK_BYTES)
+        try:
+            chunk = sock.recv(proto.CHUNK_BYTES)
+        except TimeoutError as e:
+            # `settimeout` makes `recv` *raise* on expiry rather than return, so
+            # the deadline branch above only ever fires when the clock ran out
+            # between two reads. Without this the ordinary hang — a server that
+            # accepted the connection and never wrote — escaped as a bare
+            # `TimeoutError`, and the crafted message was unreachable.
+            raise _Refused(_ACK_TIMEOUT_MESSAGE.format(path=path)) from e
         if not chunk:
             raise _Refused(
                 f"{path}: the server closed the connection without acknowledging"
@@ -268,7 +333,20 @@ def _send_body(sock: socket.socket, body: bytes) -> None:
 
 
 def _pump(sock: socket.socket, leftover: bytes, path: str) -> _Reply:
-    """Collect frames until the terminal one."""
+    """Collect frames until the terminal one.
+
+    Accumulation is bounded by ``MAX_BUFFERED_OUTPUT_BYTES``. Past it the
+    connection is dropped rather than the read continuing — which is what makes
+    the bound real: this process is the skill proxy's child and the skill proxy
+    runs inside the scheduler daemon, so the bytes are charged to the daemon's
+    memory and to no task cgroup. Dropping the connection is also the server's
+    reap signal, so the command that was producing them stops too.
+
+    A truncation here is recorded on the reply and surfaces as an *error*
+    envelope, never as a status. What the command went on to do is unknown at
+    that point, and the whole premise of this transport is not reporting a
+    status it does not have.
+    """
     reply = _Reply()
     decoder = proto.FrameDecoder()
     pending = leftover
@@ -289,6 +367,13 @@ def _pump(sock: socket.socket, leftover: bytes, path: str) -> _Reply:
                     f"{path}: the server sent stream {stream}, which travels "
                     "the other way"
                 )
+        if len(reply.stdout) + len(reply.stderr) > MAX_BUFFERED_OUTPUT_BYTES:
+            raise _Refused(
+                f"{path}: the command produced more than "
+                f"{MAX_BUFFERED_OUTPUT_BYTES // (1024 * 1024)} MiB of output, "
+                f"which is more than this process will hold; the connection was "
+                f"dropped and the command killed with it, so its fate is unknown"
+            )
         pending = sock.recv(proto.CHUNK_BYTES)
         if not pending:
             # The one case with no exit status at all, and it is not
@@ -301,31 +386,35 @@ def _pump(sock: socket.socket, leftover: bytes, path: str) -> _Reply:
             )
 
 
-def _require_socket_path() -> str:
-    """The socket path, or a refusal naming what could not be resolved."""
-    path, err = _socket_path()
+def _require_transport() -> "_Transport":
+    """The transport settings, or a refusal naming what could not be resolved."""
+    settings, err = _transport_settings()
     if err:
         raise _Refused(err)
-    return path
+    return settings
 
 
 def _converse(
-    request: bytes, *, body: bytes | None = None, socket_path: str | None = None
+    request: bytes,
+    *,
+    body: bytes | None = None,
+    transport: "_Transport | None" = None,
 ) -> _Reply:
     """One request, one reply. Raises ``_Refused`` on anything short of that.
 
-    ``socket_path`` is optional so a verb making several calls resolves the
-    path once — ``exec-file`` is three exchanges, and re-reading the config file
-    for each is three answers where one is wanted.
+    ``transport`` is optional so a verb making several calls resolves it once —
+    ``exec-file`` is four exchanges, and re-reading the config file for each is
+    four answers where one is wanted.
     """
-    path = socket_path or _require_socket_path()
+    settings = transport or _require_transport()
+    path = settings.path
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     except OSError as e:  # pragma: no cover - AF_UNIX is always available here
         raise _Refused(f"cannot create a socket: {e}") from e
     with sock:
         try:
-            sock.settimeout(CONNECT_TIMEOUT_SECONDS)
+            sock.settimeout(settings.connect_timeout)
             sock.connect(path)
             sock.sendall(request)
         except OSError as e:
@@ -362,6 +451,32 @@ def _converse(
         return _pump(sock, leftover, path)
 
 
+def _terminal_fault(terminal: dict) -> str | None:
+    """The fault a terminal frame carries, or None.
+
+    Two shapes, and both have to be read. The server acknowledges ``exec``,
+    ``read_file`` and ``write_file`` *before* it streams — that ordering is what
+    makes an ``ok`` ack mean the command is running — so every failure after
+    that point arrives here rather than in the acknowledgement. It may come with
+    no ``exit_code`` at all, and it may come *alongside* a real one, because
+    ``istota-exec-serve`` folds an input error into the body after
+    ``terminal_frame`` has already put ``waitpid``'s answer in it.
+
+    So a caller cannot read ``exit_code`` alone. A frame carrying ``error`` is a
+    fault whatever the status says.
+    """
+    error = terminal.get("error")
+    if error:
+        message = terminal.get("message") or ""
+        return f"{error}: {message}".strip().rstrip(":").strip()
+    if terminal.get("exit_code") is None:
+        return (
+            "the devbox reported no exit status for this command; its fate is "
+            "unknown and it may have completed"
+        )
+    return None
+
+
 def _envelope(reply: _Reply, started: float) -> dict:
     """The JSON envelope a language model reads.
 
@@ -389,14 +504,11 @@ def _envelope(reply: _Reply, started: float) -> dict:
         note = _SIGPIPE_NOTE
     if note:
         result["note"] = note
-    if code is None:
-        # The server reported no status. Not an `exit_code: 0`, ever.
-        return _err(
-            "the devbox reported no exit status for this command; its fate is "
-            "unknown and it may have completed",
-            stdout=result["stdout"],
-            stderr=result["stderr"],
-        )
+    fault = _terminal_fault(reply.terminal)
+    if fault:
+        # Never an `exit_code`, and never `status: "ok"` beside a fault. The
+        # output stays, because it is what a reader has to go on.
+        return _err(fault, stdout=result["stdout"], stderr=result["stderr"])
     return result
 
 
@@ -463,24 +575,48 @@ def _check_owned(container: str) -> str | None:
 # ---- Host paths ------------------------------------------------------------
 
 
-def _validate_host_path(p: Path, *, must_exist: bool) -> str | None:
-    """Reject symlinks; require the path to land under an allowed root.
+def _resolve_host_path(p: Path, *, must_exist: bool) -> tuple[Path | None, str | None]:
+    """Validate a host path and hand back the one to actually operate on.
 
     The rule itself lives in ``istota.skill_host_paths`` — ``kv set
     --value-file`` needs the identical scoping, and two copies of a boundary
-    check drift. Returns None on success, an error string on failure.
+    check drift. **Use the returned path**: acting on the caller-supplied one
+    re-walks its symlinks and reopens the window the check closed.
 
-    Prefer `_resolve_host_path`, which hands back the approved path: acting on
-    the caller-supplied one re-walks its symlinks and reopens the window.
+    This is the host side, and it is unchanged by the move onto the transport.
+    The container side is the server's business, decided inside the container;
+    this one is about a path the model picked for a CLI running host-side with
+    the daemon's whole filesystem view, which is a different question.
     """
-    return validate_host_path(p, must_exist=must_exist, operation="cp-in/cp-out")
-
-
-def _resolve_host_path(p: Path, *, must_exist: bool) -> tuple[Path | None, str | None]:
-    """`_validate_host_path` plus the approved path to actually operate on."""
     return resolve_host_path(
         p, writable=not must_exist, operation="cp-in/cp-out",
     )
+
+
+def _confirm_write(reply: _Reply, path: str, expected: int) -> str | None:
+    """Why a ``write_file`` did not land, or None.
+
+    **The reply is not optional and dropping it is the ISSUE-306 shape in a new
+    envelope.** ``istota-exec-serve`` acknowledges ``write_file`` *before* it
+    reads the body — it has to, since the ack is what tells the caller to start
+    sending — so ENOSPC on the write, a failed ``chmod`` or ``replace``, and a
+    body longer than declared all arrive in the terminal frame and nowhere else.
+    A caller that looks only at the ack has been told a file exists that does
+    not.
+
+    Two things are checked because they fail separately: the frame may carry a
+    fault, and it carries the count the server actually wrote.
+    """
+    fault = _terminal_fault(reply.terminal)
+    if fault:
+        return f"the devbox refused the write to {path}: {fault}"
+    written = reply.terminal.get("size")
+    if written != expected:
+        return (
+            f"the devbox reported writing {written} of {expected} bytes to "
+            f"{path}; treat the destination as incomplete"
+        )
+    return None
 
 
 def _reports_refusals(fn):
@@ -499,6 +635,20 @@ def _reports_refusals(fn):
             return _err(e.message, **({"code": e.code} if e.code else {}))
         except proto.ProtocolError as e:
             return _err(str(e), code=e.code)
+        except OSError as e:
+            # The case Design 4 calls "not hypothetical": a container restart
+            # mid-command. `_converse` guards only `connect` and the request
+            # `sendall`; a peer that vanishes later raises `BrokenPipeError` out
+            # of `_send_body` or `ConnectionResetError` out of `_pump`'s `recv`,
+            # both `OSError` and neither of the two above. Without this the
+            # answer was a traceback for an importing caller and a `main`
+            # fallback line for the CLI — two answers to one question, which is
+            # what this decorator exists to stop. Never an `exit_code`: the
+            # command may well have completed.
+            return _err(
+                f"the devbox connection failed mid-command: {e}; the command's "
+                f"fate is unknown and it may have completed"
+            )
     return wrapper
 
 
@@ -556,18 +706,25 @@ def cmd_exec_file(args) -> dict:
         return _err(f"could not read {local}: {e}")
 
     # One resolution for all four exchanges below.
-    sock_path = _require_socket_path()
-    remote = f"{_staging_dir(sock_path)}/exec_{os.getpid()}_{base}"
+    transport = _require_transport()
+    remote = f"{_staging_dir(transport)}/exec_{os.getpid()}_{base}"
 
     # 0755 on the way in. The server applies the mode with an explicit chmod
     # that defeats the umask, so both branches below are covered — the
     # interpreter one needs read, the no-interpreter one needs execute, and
     # granting only the second was the shape of an older bug.
-    _converse(
+    staged = _converse(
         proto.encode_write_file_request(path=remote, size=len(body), mode=0o755),
         body=body,
-        socket_path=sock_path,
+        transport=transport,
     )
+    # Checked, not assumed. Unchecked, a staging write that failed after the ack
+    # left the exec below running a path that was never created — and the model
+    # read "can't open file" and concluded its own script was wrong. Worse on a
+    # reused pid, where a stale copy from an earlier call is what runs.
+    write_err = _confirm_write(staged, remote, len(body))
+    if write_err:
+        return _err(write_err)
 
     interpreter = args.interpreter or _guess_interpreter(local)
     argv = [interpreter, remote] if interpreter else [remote]
@@ -582,7 +739,7 @@ def cmd_exec_file(args) -> dict:
             proto.encode_exec_request(
                 argv=argv, cwd=None, stdin=False, timeout=args.timeout or 0,
             ),
-            socket_path=sock_path,
+            transport=transport,
         )
     finally:
         # Scratch copies, cleaned up whatever happened. Best-effort: a devbox
@@ -593,21 +750,21 @@ def cmd_exec_file(args) -> dict:
                 proto.encode_exec_request(
                     argv=["rm", "-f", remote], cwd=None, stdin=False, timeout=30,
                 ),
-                socket_path=sock_path,
+                transport=transport,
             )
         except Exception:  # noqa: BLE001 — best-effort cleanup, never raises
             pass
     return _envelope(reply, started)
 
 
-def _staging_dir(socket_path: str) -> str:
+def _staging_dir(transport: "_Transport") -> str:
     """The directory the *server* stages into, asked rather than assumed.
 
     ``stat`` reports it, so a server started with a different ``--staging``
     still works instead of refusing every ``exec-file`` with ``path_refused``.
     The fallback is the compiled-in default, for a server too old to say.
     """
-    reply = _converse(proto.encode_stat_request(), socket_path=socket_path)
+    reply = _converse(proto.encode_stat_request(), transport=transport)
     stat = reply.control[0] if reply.control else {}
     staging = stat.get("staging")
     if isinstance(staging, str) and staging.startswith("/"):
@@ -655,15 +812,9 @@ def cmd_cp_in(args) -> dict:
         proto.encode_write_file_request(path=args.dest, size=len(body)),
         body=body,
     )
-    # The server reports what it wrote, and that is the one number worth
-    # checking: a short write acknowledged as a success is the ISSUE-306 shape
-    # in a new envelope, and the count costs nothing to compare.
-    written = reply.terminal.get("size")
-    if written != len(body):
-        return _err(
-            f"the devbox reported writing {written} of {len(body)} bytes to "
-            f"{args.dest}; treat the destination as incomplete"
-        )
+    write_err = _confirm_write(reply, args.dest, len(body))
+    if write_err:
+        return _err(write_err)
     return {"status": "ok", "src": str(src), "dest": args.dest, "size": len(body)}
 
 
@@ -674,6 +825,29 @@ def cmd_cp_out(args) -> dict:
     # containment check), so resolving before the source is known to be
     # readable left an empty tree in the user's workspace behind every refusal.
     reply = _converse(proto.encode_read_file_request(path=args.src))
+
+    # **Checked before anything reaches the host disk.** The server
+    # acknowledges `read_file` *before* it streams, so a failure after that
+    # point — the file growing past the read cap mid-stream, an OSError on the
+    # read, an internal fault — arrives only in the terminal frame. A caller
+    # reading `reply.stdout` and stopping there writes half a tarball to the
+    # host and reports success, which is the ISSUE-312 shape exactly: bytes of
+    # unknown provenance the caller goes on to read. The count is compared as
+    # well as the fault, since the server reports what it actually sent.
+    fault = _terminal_fault(reply.terminal)
+    if fault:
+        return _err(
+            f"the devbox could not finish reading {args.src}: {fault}. Nothing "
+            f"was written to the host — the bytes that did arrive are a "
+            f"fragment of unknown length."
+        )
+    sent = reply.terminal.get("size")
+    if sent != len(reply.stdout):
+        return _err(
+            f"the devbox reported sending {sent} bytes of {args.src} and "
+            f"{len(reply.stdout)} arrived; nothing was written to the host."
+        )
+
     dest, path_err = _resolve_host_path(Path(args.dest), must_exist=False)
     if path_err:
         return _err(path_err)
@@ -727,8 +901,14 @@ def cmd_status(args) -> dict:
 
     try:
         reply = _converse(proto.encode_stat_request())
-    except _Refused as e:
-        info["transport"] = {"reachable": False, "error": e.message}
+    except (_Refused, proto.ProtocolError, OSError) as e:
+        # All three, because this verb's whole point is that the two halves fail
+        # separately. `OSError` covers a server that accepted the connection and
+        # then hung: with only `_Refused` caught, a dead transport took the
+        # container facts down with it and the verb raised — the opposite of
+        # what the docstring above promises.
+        message = getattr(e, "message", None) or str(e)
+        info["transport"] = {"reachable": False, "error": message}
         return info
 
     stat = reply.control[0] if reply.control else {}

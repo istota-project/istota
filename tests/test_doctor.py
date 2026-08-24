@@ -2008,6 +2008,45 @@ class TestTheDeveloperContainerChecks:
         for name in self.NAMES - {"developer.container.backend"}:
             assert by_name[name].status == SKIP
 
+    def test_the_skip_names_the_devbox_skill_when_that_pair_is_configured(
+        self, make_config, tmp_path
+    ):
+        """The pair the transport created, and the one this check is the only
+        witness to.
+
+        `devbox.enabled = true` with `backend = none` offers the devbox skill on
+        a deployment where the role provisions no exec server, so every verb but
+        `reset` refuses. The skill CLI says so at the point of use; an operator
+        should hear it before a task does. Design 16 has the mirror-image pair
+        (`backend = devbox` with `devbox.enabled = false`) and its own gate
+        correction; this is the other direction.
+        """
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.devbox.enabled = True
+
+        transport = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.transport"
+        ]
+
+        assert transport.status == SKIP
+        assert "devbox skill is offered" in transport.detail
+        assert "reset" in transport.detail
+
+    def test_the_skip_says_nothing_extra_when_the_skill_is_off(
+        self, make_config, tmp_path
+    ):
+        """Control: the sentence must not appear on the ordinary
+        `backend = none` deployment, which has no devbox and no problem."""
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.devbox.enabled = False
+
+        transport = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.transport"
+        ]
+
+        assert transport.status == SKIP
+        assert "devbox skill is offered" not in transport.detail
+
     def test_probe_false_opens_no_socket(self, make_config, tmp_path, monkeypatch):
         """Doctor runs on the daemon's start-up path; `probe=False` must connect
         to nothing."""

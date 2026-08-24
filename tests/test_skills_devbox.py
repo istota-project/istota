@@ -18,7 +18,8 @@ proves. `reset` is the one verb still spoken in Docker, and it is the one place
 thing no test here can do and no server can do for it.
 
 The socket is reached the way the deployment reaches it: a real `config.toml`
-with an `exec_socket_dir`, resolved by `_socket_path()` through `load_config()`.
+with an `exec_socket_dir`, resolved by `_transport_settings()` through
+`load_config()`.
 Monkeypatching that resolution would leave the "the CLI reads its socket from
 its own configuration, never from the environment" rule untested, and that rule
 is what stops `ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine` buying a fabricated exit 0.
@@ -33,6 +34,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -206,9 +208,19 @@ class TestTheHarnessIsNotAStub:
 
     def test_with_no_server_every_verb_refuses(self, monkeypatch, tmp_path):
         """The negative control: point the config at an empty directory and
-        require a refusal rather than a fabricated success."""
+        require a refusal rather than a fabricated success.
+
+        `backend` is set, so this is the *connect* failure rather than the
+        configuration refusal `TestTheBackendMustBeDevbox` covers — the two have
+        different messages and a control that hit the wrong one would prove
+        nothing about the socket.
+        """
         config = tmp_path / "config.toml"
-        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
 
         result = _exec("true")
@@ -216,6 +228,542 @@ class TestTheHarnessIsNotAStub:
         assert result["status"] == "error", result
         assert "exit_code" not in result, result
         assert str(tmp_path) in result["error"], result
+
+
+# --------------------------------------------------------------------------- #
+# A scripted server, for the answers a real one will not give cheaply
+# --------------------------------------------------------------------------- #
+
+
+class _ScriptedServer:
+    """A socket that acknowledges and then does whatever the test says.
+
+    The `dbx` fixture drives the shipped server, which is the right default —
+    it is the thing that has to be spoken to. But every failure this class
+    exists for happens **after** the acknowledgement, and the server sends that
+    ack before it streams precisely so an `ok` means the work started. A real
+    server produces those only under conditions a test cannot arrange cheaply:
+    a container restarting mid-command, a file growing past the read cap while
+    it is being sent, ENOSPC on a staging write.
+
+    So they are scripted. What is under test is this client's reading of the
+    protocol, and the protocol is the contract both sides are written against.
+    """
+
+    def __init__(self, socket_path: str, handler) -> None:
+        self.path = socket_path
+        self._handler = handler
+        self.requests: list[dict] = []
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(socket_path)
+        self._sock.listen(8)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        with conn:
+            buf = b""
+            try:
+                while b"\n" not in buf:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    buf += chunk
+                line, _, rest = buf.partition(b"\n")
+                request = json.loads(line)
+                self.requests.append(request)
+                self._handler(self, conn, request, rest)
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:  # pragma: no cover
+            pass
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Point the CLI's config at a socket a test scripts by hand."""
+    servers: list[_ScriptedServer] = []
+    base = Path(tempfile.mkdtemp(dir="/tmp", prefix="istota-dbx-s-")).resolve()
+    sock_dir = base / "sock" / "bob"
+    sock_dir.mkdir(parents=True)
+    config = base / "config.toml"
+    config.write_text(
+        "[developer]\nenabled = true\n"
+        f'repos_dir = "{base / "repos"}"\n'
+        "\n[developer.container]\n"
+        'backend = "devbox"\n'
+        f'exec_socket_dir = "{base / "sock"}"\n'
+    )
+    monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+    def make(handler) -> _ScriptedServer:
+        server = _ScriptedServer(str(sock_dir / "exec.sock"), handler)
+        servers.append(server)
+        return server
+
+    try:
+        yield make
+    finally:
+        for server in servers:
+            server.close()
+
+
+def _ack_ok() -> bytes:
+    return proto.encode_ack_ok()
+
+
+
+def _drain_body(conn, size: int, rest: bytes = b"") -> None:
+    """Read exactly the declared body so the client's `sendall` cannot block.
+
+    Bounded by the declared size rather than by end-of-stream, because the
+    client does not close after sending: it sends the body and then waits for
+    the terminal frame, so a `while conn.recv(...)` drain blocks forever and
+    deadlocks both sides. The declared size is the terminator — the same fact
+    that makes the client's trailing `stdin_eof` unnecessary.
+    """
+    decoder = proto.FrameDecoder()
+    received = 0
+    pending = rest
+    while received < size:
+        for stream, payload in decoder.feed(pending):
+            if stream == proto.STREAM_STDIN:
+                received += len(payload)
+        if received >= size:
+            return
+        pending = conn.recv(65536)
+        if not pending:
+            return
+
+
+class TestAFateItCannotReportIsNeverASuccess:
+    """The one contract this whole transport exists for.
+
+    Design 4: "The client **must never report 0 there**." A connection that
+    closes after the acknowledgement and before the terminal frame is the only
+    case in the design with no exit status at all, and it is not hypothetical —
+    it is what a container restart looks like. The naive implementation reports
+    it as success, which is why it gets a class of its own.
+    """
+
+    def test_a_connection_that_closes_after_the_ack_is_an_error(self, scripted):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"partial output\n"))
+            conn.close()
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert "fate is unknown" in result["error"], result
+
+    @pytest.mark.parametrize(
+        "failure",
+        [ConnectionResetError(104, "Connection reset by peer"),
+         BrokenPipeError(32, "Broken pipe")],
+    )
+    def test_a_socket_error_mid_command_is_an_envelope(self, monkeypatch, failure):
+        """The other half of a peer going away, and a different code path.
+
+        A *clean* close makes `recv` return `b''`, which `_pump` turns into a
+        refusal — the test above. A peer that resets, or one that goes away
+        while a body is still being written, makes the call *raise* an
+        `OSError`, which is neither `_Refused` nor `ProtocolError`. That gap
+        handed an importing caller a traceback where the CLI printed an
+        envelope. A container restart mid-build produces both shapes.
+
+        Raised at the seam rather than provoked over a real socket, and that is
+        deliberate: whether a given RST surfaces as `ECONNRESET` or as a clean
+        EOF depends on whether the data was already buffered, so a socket-level
+        version of this test passes or fails on timing. What is under test is
+        the handling, and the raising is a property of Python's sockets.
+        """
+        def boom(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(devbox, "_converse", boom)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert "fate is unknown" in result["error"], result
+
+    def test_status_keeps_its_container_half_through_a_socket_error(
+        self, monkeypatch
+    ):
+        """Same gap, at the one verb that must survive it with half an answer."""
+        monkeypatch.setattr(
+            devbox,
+            "_run_docker",
+            _drain(
+                [
+                    (
+                        0,
+                        b"true|2026-05-13T10:00:00Z|istota-devbox:latest"
+                        b"|deadbeef1234abcd|0|bob",
+                        b"",
+                    ),
+                ]
+            ),
+        )
+
+        def boom(*args, **kwargs):
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+        monkeypatch.setattr(devbox, "_converse", boom)
+
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["running"] is True, info
+        assert info["transport"]["reachable"] is False, info
+
+    def test_a_terminal_frame_with_no_status_is_an_error(self, scripted):
+        """The server says so explicitly rather than by hanging up. Same rule:
+        no status is not a zero."""
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(
+                proto.encode_control(
+                    {"exit_code": None, "signal": None, "reason": "timeout"}
+                )
+            )
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+
+    def test_a_fault_beside_a_real_status_is_still_an_error(self, scripted):
+        """`istota-exec-serve` folds an input error into the body *after*
+        `terminal_frame` has already put waitpid's answer in it, so the protocol
+        admits a frame reporting both. Reading `exit_code` alone reports the
+        fault as a clean run."""
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(
+                proto.encode_control(
+                    {
+                        "exit_code": 0,
+                        "signal": None,
+                        "error": "internal",
+                        "message": "the input pump died",
+                    }
+                )
+            )
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "internal" in result["error"], result
+
+    def test_a_server_that_never_acknowledges_is_an_envelope(
+        self, scripted, monkeypatch
+    ):
+        """`settimeout` makes `recv` *raise* rather than return, so the crafted
+        message was unreachable and the verb raised a bare TimeoutError past the
+        decorator — a dict on one path and an exception on the other."""
+        monkeypatch.setattr(devbox, "ACK_TIMEOUT_SECONDS", 0.4)
+        monkeypatch.setattr(
+            devbox, "_ACK_TIMEOUT_MESSAGE", "{path}: no acknowledgement"
+        )
+
+        def handler(server, conn, request, rest):
+            time.sleep(5)
+
+        scripted(handler)
+
+        result = _exec("some-build")
+
+        assert result["status"] == "error", result
+        assert "no acknowledgement" in result["error"], result
+
+    def test_status_keeps_its_container_half_when_the_transport_hangs(
+        self, scripted, monkeypatch
+    ):
+        """Two halves, and neither substitutes for the other — so a dead
+        transport must not take the container facts with it."""
+        monkeypatch.setattr(devbox, "ACK_TIMEOUT_SECONDS", 0.4)
+        monkeypatch.setattr(
+            devbox,
+            "_run_docker",
+            _drain(
+                [
+                    (
+                        0,
+                        b"true|2026-05-13T10:00:00Z|istota-devbox:latest"
+                        b"|deadbeef1234abcd|0|bob",
+                        b"",
+                    ),
+                ]
+            ),
+        )
+
+        def handler(server, conn, request, rest):
+            time.sleep(5)
+
+        scripted(handler)
+
+        info = devbox.cmd_status(_args())
+
+        assert info["status"] == "ok", info
+        assert info["running"] is True, info
+        assert info["transport"]["reachable"] is False, info
+
+
+class TestAPostAcknowledgementFailureNeverReadsAsSuccess:
+    """The ack is sent before the bytes move, so this is where they land.
+
+    ``read_file`` and ``write_file`` are both acknowledged *before* the server
+    streams — it has to be that way, since the ack is what tells the other side
+    to start. Every failure after that point arrives in the terminal frame and
+    nowhere else, and a caller that stops at the ack has been told a file exists
+    that does not. Which is ISSUE-306 and ISSUE-312 in a new envelope.
+    """
+
+    def test_cp_out_writes_nothing_when_the_read_failed_mid_stream(
+        self, scripted, tmp_path
+    ):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"HALF-A-FILE"))
+            conn.sendall(
+                proto.encode_control(
+                    {
+                        "exit_code": None,
+                        "error": "too_large",
+                        "message": "grew past the read cap while streaming",
+                    }
+                )
+            )
+
+        scripted(handler)
+        dest = tmp_path / "landed.bin"
+
+        result = devbox.cmd_cp_out(_args(src="/home/dev/out.bin", dest=str(dest)))
+
+        assert result["status"] == "error", result
+        assert not dest.exists(), (
+            "a fragment of unknown length was written to the host and reported "
+            "as a success — the ISSUE-312 shape exactly"
+        )
+
+    def test_cp_out_refuses_a_short_stream(self, scripted, tmp_path):
+        """The server reports what it sent; a mismatch is a truncation."""
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"1234"))
+            conn.sendall(proto.encode_control({"exit_code": 0, "size": 9999}))
+
+        scripted(handler)
+        dest = tmp_path / "landed.bin"
+
+        result = devbox.cmd_cp_out(_args(src="/home/dev/out.bin", dest=str(dest)))
+
+        assert result["status"] == "error", result
+        assert not dest.exists()
+
+    def test_cp_in_refuses_a_short_write(self, scripted, tmp_path):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            _drain_body(conn, request["size"], rest)
+            conn.sendall(proto.encode_control({"exit_code": 0, "size": 1}))
+
+        scripted(handler)
+        src = tmp_path / "probe.txt"
+        src.write_text("a much longer body than one byte\n")
+
+        result = devbox.cmd_cp_in(_args(src=str(src), dest="/home/dev/probe.txt"))
+
+        assert result["status"] == "error", result
+        assert "incomplete" in result["error"], result
+
+    def test_exec_file_does_not_run_a_script_whose_staging_write_failed(
+        self, scripted, tmp_path
+    ):
+        """Unchecked, the exec ran a path that was never created and the model
+        read "can't open file" and concluded its own script was wrong."""
+
+        def handler(server, conn, request, rest):
+            action = request.get("action")
+            conn.sendall(_ack_ok())
+            if action == "stat":
+                conn.sendall(
+                    proto.encode_control({"staging": "/home/dev/.istota-exec"})
+                )
+                conn.sendall(proto.encode_control({"exit_code": 0}))
+                return
+            if action == "write_file":
+                _drain_body(conn, request["size"], rest)
+                conn.sendall(
+                    proto.encode_control(
+                        {
+                            "exit_code": None,
+                            "error": "internal",
+                            "message": "No space left on device",
+                        }
+                    )
+                )
+                return
+            conn.sendall(proto.encode_control({"exit_code": 0}))
+
+        server = scripted(handler)
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\necho ok\n")
+
+        result = devbox.cmd_exec_file(
+            _args(path=str(script), interpreter=None, timeout=None)
+        )
+
+        assert result["status"] == "error", result
+        assert "No space left" in result["error"], result
+        assert [r["action"] for r in server.requests] == ["stat", "write_file"], (
+            "the exec ran anyway, against a file the write never created"
+        )
+
+
+class TestOutputIsBoundedInThisProcess:
+    """The envelope's cap is a rendering decision; this one bounds the process.
+
+    The skill proxy runs inside the scheduler daemon, so these bytes are charged
+    to the daemon's own memory and to no task cgroup — and
+    `exec 'cat /dev/urandom'` is one command away.
+    """
+
+    def test_a_command_past_the_buffer_cap_is_an_error_not_a_status(
+        self, scripted, monkeypatch
+    ):
+        monkeypatch.setattr(devbox, "MAX_BUFFERED_OUTPUT_BYTES", 4096)
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            try:
+                for _ in range(64):
+                    conn.sendall(proto.pack_frame(proto.STREAM_STDOUT, b"x" * 1024))
+                conn.sendall(proto.encode_control({"exit_code": 0}))
+            except OSError:
+                return
+
+        scripted(handler)
+
+        result = _exec("cat /dev/urandom")
+
+        assert result["status"] == "error", result
+        assert "exit_code" not in result, result
+        assert "fate is unknown" in result["error"], result
+
+
+class TestTheBackendMustBeDevbox:
+    """The pair the transport created, and the message it used to produce.
+
+    `exec_socket_dir` carries a non-empty default, so a path always resolves —
+    but the role provisions the socket only under `backend = devbox`. On the
+    shipped pair `devbox.enabled = true` with `backend = none`, every verb but
+    `reset` failed with "the container may be down", on a deployment where
+    nothing was down and where this skill worked before the transport existed.
+    """
+
+    def test_it_names_the_key_rather_than_blaming_the_container(
+        self, monkeypatch, tmp_path
+    ):
+        config = tmp_path / "config.toml"
+        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+        result = _exec("true")
+
+        assert result["status"] == "error", result
+        assert "backend" in result["error"], result
+        assert "may be down" not in result["error"], result
+
+    def test_reset_still_works_with_the_backend_off(self, monkeypatch, tmp_path):
+        """`reset` is host-side Docker and does not touch the transport, so the
+        one verb that never needed a server keeps working."""
+        config = tmp_path / "config.toml"
+        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+        monkeypatch.setattr(
+            devbox,
+            "_run_docker",
+            _drain(
+                [
+                    *_ownership_sequence(),
+                    (0, b"", b""),
+                    (0, b"", b""),
+                    (0, b"", b""),
+                ]
+            ),
+        )
+
+        assert devbox.cmd_reset(_args(yes=True))["status"] == "ok"
+
+
+class TestTheConnectBudgetComesFromConfig:
+    def test_it_reads_the_configured_value(self, monkeypatch, tmp_path):
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+            "connect_timeout_seconds = 1.5\n"
+        )
+        monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
+
+        settings, err = devbox._transport_settings()
+
+        assert err is None, err
+        assert settings.connect_timeout == 1.5
+
+    @pytest.mark.parametrize("value", [0, -1, True])
+    def test_a_budget_that_would_disable_blocking_falls_back(
+        self, monkeypatch, tmp_path, value
+    ):
+        """Zero or negative puts the socket in non-blocking mode, where connect
+        raises at once and every verb reports an outage."""
+        from istota.config import Config
+
+        config = Config()
+        config.developer.container.exec_socket_dir = str(tmp_path)
+        config.developer.container.backend = "devbox"
+        config.developer.container.connect_timeout_seconds = value
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
+
+        settings, err = devbox._transport_settings()
+
+        assert err is None, err
+        assert settings.connect_timeout == devbox.DEFAULT_CONNECT_TIMEOUT_SECONDS
+
+    def test_the_two_clients_agree_on_the_ack_budget(self):
+        """Two clients of one server disagreeing about how long a slow spawn may
+        take shows up as one reporting an outage the other does not see."""
+        from istota import devbox_exec_client
+
+        assert devbox.ACK_TIMEOUT_SECONDS == devbox_exec_client.ACK_TIMEOUT_SECONDS
 
 
 # --------------------------------------------------------------------------- #
@@ -260,9 +808,17 @@ class TestTheGuardsThatWentWithDockerCp:
         """Explicitly *not* on the deletion list. It scopes the host side of a
         verb whose host path the model still picks, which is a different
         question from what the container may touch."""
-        err = devbox._validate_host_path(Path("/etc/passwd"), must_exist=True)
-        assert err is not None
+        from istota import skill_host_paths
+
+        resolved, err = devbox._resolve_host_path(
+            Path("/etc/passwd"), must_exist=True
+        )
+        assert resolved is None
         assert "outside allowed roots" in err
+        # And it is the shared rule, not a copy: `kv set --value-file` and the
+        # deferred health ops go through the same function.
+        assert devbox._resolve_host_path.__module__ != skill_host_paths.__name__
+        assert skill_host_paths.resolve_host_path is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -750,7 +1306,11 @@ class TestStatus:
         self, monkeypatch, tmp_path,
     ):
         config = tmp_path / "config.toml"
-        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
         monkeypatch.setattr(
             devbox, "_run_docker", lambda argv, timeout: (1, b"", b"nope")
@@ -914,7 +1474,11 @@ class TestMain:
 
     def test_an_error_envelope_exits_nonzero(self, monkeypatch, capsys, tmp_path):
         config = tmp_path / "config.toml"
-        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
 
         with pytest.raises(SystemExit) as exc:
@@ -947,13 +1511,17 @@ class TestTheSocketPathComesFromConfig:
 
     def test_it_derives_the_per_user_socket(self, monkeypatch, tmp_path):
         config = tmp_path / "config.toml"
-        config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
+        config.write_text(
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            f'exec_socket_dir = "{tmp_path}"\n'
+        )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
 
-        path, err = devbox._socket_path()
+        settings, err = devbox._transport_settings()
 
         assert err is None, err
-        assert path == str(tmp_path / "bob" / "exec.sock")
+        assert settings.path == str(tmp_path / "bob" / "exec.sock")
 
     def test_a_config_naming_no_directory_is_a_named_refusal(
         self, monkeypatch, tmp_path,
@@ -966,12 +1534,13 @@ class TestTheSocketPathComesFromConfig:
         from istota.config import Config
 
         config = Config()
+        config.developer.container.backend = "devbox"
         config.developer.container.exec_socket_dir = ""
         monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
 
-        path, err = devbox._socket_path()
+        settings, err = devbox._transport_settings()
 
-        assert path is None
+        assert settings is None
         assert "exec_socket_dir" in err
 
     def test_the_devbox_block_carries_no_second_spelling(self):
