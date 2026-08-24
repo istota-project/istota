@@ -328,17 +328,29 @@ class TestBuildBwrapCmdAdmin:
             assert str(sandbox_config.db_path) + suffix not in joined
 
     def test_developer_repos_mounted(self, sandbox_config, make_sandbox_task, tmp_path):
+        """The *per-user* root, and only it.
+
+        `repos_dir` is a root holding every user's worktrees. Binding the root
+        would give one admin's task read and write access to another's
+        checkouts — which is also the reach a devbox mounting the root would
+        hand the container, and the reason the layout went per user.
+        """
         repos_dir = tmp_path / "repos"
-        repos_dir.mkdir()
+        mine = repos_dir / "alice"
+        theirs = repos_dir / "bob"
+        mine.mkdir(parents=True)
+        theirs.mkdir(parents=True)
         sandbox_config.developer = DeveloperConfig(
             enabled=True,
             repos_dir=str(repos_dir),
         )
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
-        repos_str = str(repos_dir.resolve())
         bind_pairs = _get_bind_pairs(result, "--bind")
-        assert any(src == repos_str for src, _ in bind_pairs)
+        sources = {src for src, _ in bind_pairs}
+        assert str(mine.resolve()) in sources
+        assert str(repos_dir.resolve()) not in sources
+        assert str(theirs.resolve()) not in sources
 
     def test_no_repos_when_developer_disabled(self, sandbox_config, make_sandbox_task, tmp_path):
         repos_dir = tmp_path / "repos"

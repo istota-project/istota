@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from . import db
 from . import email_support
 from . import task_cgroup
+from . import config as istota_config
 from .config import Config
 from .context import (
     build_talk_context,
@@ -1921,6 +1922,12 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
         home / ".cache" / "huggingface",
     ]
     if config.developer.repos_dir:
+        # The *global* root, not `repos_root(config, user_id)`, and deliberately
+        # so — this function has no user and the global entry is the stricter
+        # test. Equal-or-ancestor is the rule, so naming the root refuses a
+        # cache at or above `{repos_dir}` while leaving one at
+        # `{repos_dir}/{user_id}` permitted; that one lands *inside* the repos
+        # bind for that user, at the same host directory, which covers nothing.
         targets.append(Path(config.developer.repos_dir))
     if config.nextcloud_mount_path:
         targets.append(Path(config.nextcloud_mount_path))
@@ -2077,13 +2084,22 @@ def build_bwrap_cmd(
     proxy_sock: Path | None = None,
     net_proxy_sock: Path | None = None,
     extra_ro_binds: list[Path] | None = None,
-    selected_skills: "frozenset[str] | set[str] | list[str] | None" = None,
+    authorized_skills: "frozenset[str] | set[str] | list[str] | None" = None,
     workspace_dir: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
     Returns the original cmd unchanged if sandbox is not available
     (non-Linux, bwrap not installed, or namespace creation denied).
+
+    ``authorized_skills`` is the union of selected skills and skills
+    auto-authorized by credential presence — the same set
+    ``_build_network_allowlist`` keys on. It used to be ``selected_skills``, was
+    read by nothing, and is now the predicate behind the exec-socket bind.
+    *Authorized*, not *selected*, deliberately: `developer` is a menu skill with
+    no `always_include` and no `source_types`, so it reaches `selected_skills`
+    only via sticky skills, which is to say on the second turn of a conversation
+    and not the first.
 
     ``workspace_dir`` (REPL ``--workspace cwd``) is bound RW and becomes the
     sandbox ``--chdir`` target instead of ``user_temp_dir``. It is bounds-checked
@@ -2302,10 +2318,44 @@ def build_bwrap_cmd(
         _bind(cache_dir)
 
     # --- Developer repos (RW) ---
-    if is_admin and config.developer.enabled and config.developer.repos_dir:
-        repos = Path(config.developer.repos_dir)
+    #
+    # `{repos_dir}/{user_id}`, not the root. The root holds every user's
+    # worktrees, and binding it would give one user's task read and write access
+    # to another's checkouts — which the admin gate narrows but does not close,
+    # since a deployment with several admins has several users behind it.
+    repos = istota_config.repos_root(config, task.user_id)
+    if is_admin and config.developer.enabled and repos is not None:
         if repos.exists():
             _bind(repos)
+
+    # --- The devbox exec socket (RW) ---
+    #
+    # Gated on `"developer" in authorized_skills`, byte for byte the predicate
+    # at `_build_network_allowlist` that already decides whether this task gets
+    # the package registries and the forge. The exec socket is bound exactly
+    # where the package registries are allowed.
+    #
+    # **The docker-proxy bind above is ungated and this one is not, and the
+    # difference is the mechanism rather than the caution.** That proxy is an
+    # allowlist: it refuses create, run, build, privileged and host-mount, so
+    # even an untrusted-content task reaching it with `curl --unix-socket`
+    # cannot escalate. This is an unauthenticated arbitrary-command channel into
+    # a container with permissive egress, so binding it into every task's
+    # sandbox would hand an email, feed or browse task a route straight around
+    # `_build_network_allowlist`, which is per task and skill-scoped.
+    #
+    # The *directory*, not the socket file: a server restart unlinks and
+    # recreates the inode, and a bind of the file itself strands this side
+    # against a dead target. Only the per-user subdirectory — the parent holds
+    # every user's socket, and that is arbitrary command execution against
+    # another user's repositories.
+    if (
+        istota_config.devbox_container_backend(config)
+        and "developer" in (authorized_skills or ())
+    ):
+        exec_dir = istota_config.exec_socket_dir(config, task.user_id)
+        if exec_dir is not None and exec_dir.is_dir():
+            _bind(exec_dir)
 
     # --- Per-resource mounts ---
     if mount:
@@ -2600,9 +2650,11 @@ def native_fs_roots(
     # exist, and `resolve_sandbox_cache_dir` creates it, so the two agree.
     _add(write, resolve_sandbox_cache_dir(config, task.user_id))
 
-    # Developer repos (RW, admin only).
-    if is_admin and config.developer.enabled and config.developer.repos_dir:
-        _add(write, Path(config.developer.repos_dir))
+    # Developer repos (RW, admin only). The per-user root, mirroring the bwrap
+    # bind — the two must name the same directory or the native brain's file
+    # tools reach somewhere the sandbox does not.
+    if is_admin and config.developer.enabled:
+        _add(write, istota_config.repos_root(config, task.user_id))
 
     # Per-resource mounts (RW/RO) not already covered by the user dir.
     if mount:
@@ -4632,7 +4684,11 @@ def execute_task(
                 Path(user_temp_dir), proxy_sock=_proxy_sock,
                 net_proxy_sock=_net_proxy_sock,
                 extra_ro_binds=_extra_ro_binds,
-                selected_skills=frozenset(selected_skills),
+                # The set computed ~190 lines above, not `selected_skills`. See
+                # `build_bwrap_cmd`'s own docstring for why the distinction
+                # decides whether the exec transport routes on the first turn of
+                # a conversation.
+                authorized_skills=frozenset(authorized_skills),
                 workspace_dir=workspace_dir,
             )
 
