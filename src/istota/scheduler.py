@@ -4413,12 +4413,25 @@ def sandbox_cache_sweep_root(config: Config) -> tuple[Path, list[str] | None] | 
     """Where the per-user package caches are, and whose they are. None if nowhere.
 
     The two shapes `executor.resolve_sandbox_cache_dir` produces, asked the
-    other way round. **This predicate has to agree with that one exactly**, and
-    the agreement is what the sweep is worth: a root the resolver does not write
-    into is a sweep that finds nothing while the real caches grow, and it fails
-    silently in the direction of the disk leak ISSUE-317 exists to close. The
-    gate is therefore `enabled and repos_dir`, the same pair, and a test holds
-    the two functions to the same answer.
+    other way round. **It reproduces that function's branch selection, not its
+    refusals**, and the difference is worth being exact about rather than
+    claiming an agreement that does not hold. The branch gate is the same pair,
+    `enabled and repos_dir`, and that is the part the sweep's worth rests on: a
+    root the resolver does not write into is a sweep that finds nothing while
+    the real caches grow, silently and in the direction of the disk leak
+    ISSUE-317 exists to close.
+
+    The resolver then refuses five further things (a relative root, one the
+    daemon cannot write, one at or above a sandbox mount, one under a database
+    directory, and `_validate_workspace_dir`'s blocklist) and this does not
+    re-derive them — duplicating that chain is the drift the whole finding
+    would be about. Only the one refusal that changes *where this walks* is
+    repeated: an absolute root. A relative `developer.repos_dir` makes the
+    resolver return None while this would hand `sweep_and_report` a path
+    resolved against the daemon's working directory, so the sweep would run
+    package-manager reclaim verbs somewhere no cache was ever created. The
+    others all leave the sweep walking a directory the resolver simply declined
+    to populate, which finds nothing and costs a log line.
 
     * developer skill on with a repos dir — the caches are derived per user at
       `{repos_dir}/{user_id}/.package-caches`, so the root is `repos_dir` and
@@ -4427,18 +4440,37 @@ def sandbox_cache_sweep_root(config: Config) -> tuple[Path, list[str] | None] | 
       rather than enumerated**, because `repos_dir` is bound read-write into
       every admin developer task and a directory name found there is not
       evidence of a user — see `sandbox_cache_sweeper._candidates_for_users`.
+      A cache belonging to nobody on that list is reported by
+      `report_orphan_caches` and acted on by nothing.
     * otherwise, `security.sandbox_cache_dir` and its one-level layout, which
       the sweeper enumerates itself. Unchanged.
 
     Returning `None` rather than a root with nothing at it keeps "there is no
     cache to bound" distinguishable from "the cache is empty", which is what the
     caller's own gate needs.
+
     """
     dev, sec = config.developer, config.security
     if dev.enabled and dev.repos_dir:
-        return Path(dev.repos_dir), sorted(config.users)
+        root = Path(dev.repos_dir)
+        if not root.is_absolute():
+            logger.warning(
+                "sandbox_cache_sweep_skipped reason=repos_dir_not_absolute path=%r "
+                "— it would resolve against the daemon's working directory, and "
+                "the resolver refuses it too, so no cache was ever created there.",
+                dev.repos_dir,
+            )
+            return None
+        return root, sorted(config.users)
     if sec.sandbox_cache_dir:
-        return Path(sec.sandbox_cache_dir), None
+        root = Path(sec.sandbox_cache_dir)
+        if not root.is_absolute():
+            logger.warning(
+                "sandbox_cache_sweep_skipped reason=sandbox_cache_dir_not_absolute "
+                "path=%r — same reason.", sec.sandbox_cache_dir,
+            )
+            return None
+        return root, None
     return None
 
 
