@@ -1347,13 +1347,10 @@ istota_security_sandbox_cache_dir: ""
 # istota_scheduler_sandbox_cache_sweep_interval. A user with a task in flight is
 # skipped rather than raced.
 #
-# KNOWN GAP, stated rather than implied: scheduler.check_sandbox_cache_sweep
-# gates on security.sandbox_cache_dir and sandbox_cache_sweeper walks that root
-# expecting {root}/{user_id}. Neither has learned the derived layout, so with
-# the key blank — the default above, and what a developer deployment now runs —
-# the sweep does not run and the derived caches are unbounded. Re-rooting the
-# sweeper is not part of the per-user-repos_dir layout change and needs its own
-# decision about how a per-user cache is enumerated when there is no one root.
+# The sweep follows the cache rather than the key: with the developer skill on
+# it walks {repos_dir}/{user_id}/.package-caches for each user the daemon knows
+# about, and with it off it walks this key's root as before. So a blank value
+# above switches nothing off.
 istota_security_sandbox_cache_sweep_enabled: true
 # Per user, clamped to a 1 GiB floor by the sweeper. Sized against two figures
 # from the reference deployment: one `uv sync --all-extras` writes about 1.8 GB,

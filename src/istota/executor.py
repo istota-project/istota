@@ -2612,6 +2612,25 @@ def build_bwrap_cmd(
     # which is already bound RW for exactly these tasks; there is no other
     # user's cache in the namespace to mask, which is what retired the ISSUE-319
     # machinery rather than merely satisfying it.
+    #
+    # **The `--disable-userns` precondition this bind used to carry is gone,
+    # and one property went with it that the deletion's stated reason did not
+    # cover.** The flag was justified by the sibling masks — a mask can be
+    # unmounted from a nested user namespace, so it was a precondition rather
+    # than hardening — and with no masks left that justification lapses. But it
+    # was also pinning this directory as a *mountpoint*, and `rename` on a
+    # mountpoint returns EBUSY, so it incidentally closed the window between
+    # `resolve_sandbox_cache_dir`'s containment check and `_bind`'s own
+    # resolution at `execve`. That window is open again, walkable in principle
+    # by a second concurrent task for the same user.
+    #
+    # Weighed and deliberately not relied on. Nothing in the default suite can
+    # settle whether it is reachable — it needs a real bwrap where the flag
+    # probes false, two concurrent admin tasks for one user, and a loop racing
+    # the swap — and restoring the precondition refuses the cache outright on
+    # any bwrap without the flag, which is the EXDEV full-copy ISSUE-305 exists
+    # to avoid. ISSUE-320 raises the empirical test; the decision to keep the
+    # deletion meanwhile is in the spec's Decisions section.
     cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
     if cache_dir is not None:
         _bind(cache_dir)

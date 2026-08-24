@@ -45,6 +45,7 @@ from istota.sandbox_cache_sweeper import (
     ACTION_WIPED,
     MIN_MAX_BYTES,
     CACHE_NPM,
+    CACHE_ROOT_NAME,
     CACHE_UV,
     measure_cache,
     sweep_and_report,
@@ -858,6 +859,66 @@ class TestSchedulerIntegration:
         assert outcomes["alice"].action == ACTION_BUSY
         assert toolbox.calls() == []
 
+    def test_it_sweeps_the_derived_layout_on_a_developer_deployment(
+        self, tmp_path, toolbox,
+    ):
+        """The regression this whole re-rooting exists for. With the developer
+        skill on, `security.sandbox_cache_dir` is blank and the caches are at
+        `{repos_dir}/{user_id}/.package-caches` — so a sweep still gated on the
+        blank key does nothing at all, silently, while roughly 1.8 GB per
+        `uv sync --all-extras` accumulates on the volume the worktree reaper is
+        already fighting for.
+        """
+        from istota.config import DeveloperConfig, UserConfig
+        from istota.scheduler import check_sandbox_cache_sweep
+
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        cache = repos / "alice" / CACHE_ROOT_NAME
+        _fill(cache / CACHE_UV / "archive-v0", "wheel", 4 * MB)
+        _age(repos, 86400)
+
+        config = self._config("", tmp_path)
+        config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        config.users = {"alice": UserConfig()}
+
+        outcomes = check_sandbox_cache_sweep(config)
+
+        assert [o.user_id for o in outcomes] == ["alice"]
+        assert any("prune" in c for c in toolbox.calls())
+
+    def test_the_derived_sweep_asks_the_task_table_about_the_right_user(
+        self, tmp_path, toolbox,
+    ):
+        """Guard 1 across the real seam. The busy set holds user ids and the
+        derived cache directory is called `.package-caches` for everybody, so a
+        sweeper that took the id from the path would never match a live task —
+        for any user, on any deployment.
+        """
+        from istota import db
+        from istota.config import DeveloperConfig, UserConfig
+        from istota.scheduler import check_sandbox_cache_sweep
+
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _fill(repos / "alice" / CACHE_ROOT_NAME / CACHE_UV / "archive-v0", "wheel", 4 * MB)
+        _age(repos, 86400)
+
+        config = self._config("", tmp_path)
+        config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="x", user_id="alice")
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
+            conn.commit()
+
+        outcomes = _by_user(check_sandbox_cache_sweep(config))
+
+        assert outcomes["alice"].action == ACTION_BUSY
+        assert toolbox.calls() == []
+
     def test_an_unreadable_task_table_refuses_to_sweep(self, tmp_path, toolbox, caplog):
         """Fail closed. An empty busy set reads as 'nobody is working', which is
         the one wrong answer that costs a running task its cache."""
@@ -894,3 +955,297 @@ def test_the_cache_subdirectory_names_match_the_executors():
 
     assert CACHE_UV == SANDBOX_CACHE_UV
     assert CACHE_NPM == SANDBOX_CACHE_NPM
+
+
+# ---------------------------------------------------------------------------
+# The derived two-level layout
+# ---------------------------------------------------------------------------
+
+def _derived_cache(repos: Path, user: str, *, uv: int = 0, npm: int = 0, other: int = 0) -> Path:
+    """A cache in the layout `resolve_sandbox_cache_dir` derives from `repos_dir`.
+
+    `{repos_dir}/{user_id}/.package-caches`, with the user's clones as siblings
+    of it — which is the point of the shape and the reason the sweeper cannot
+    read a user id back out of this tree.
+    """
+    cache = repos / user / CACHE_ROOT_NAME
+    cache.mkdir(parents=True, exist_ok=True)
+    if uv:
+        _fill(cache / CACHE_UV / "archive-v0", "wheel", uv)
+    if npm:
+        _fill(cache / CACHE_NPM / "_cacache", "content", npm)
+    if other:
+        _fill(cache / "huggingface", "model", other)
+    return cache
+
+
+class TestTheDerivedLayout:
+    """`{repos_dir}/{user_id}/.package-caches`, swept from a daemon-supplied
+    user list rather than by enumerating a tree the model can write."""
+
+    def test_a_users_derived_cache_is_swept(self, tmp_path, toolbox):
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        cache = _derived_cache(repos, "alice", uv=4 * MB)
+        _age(repos, 86400)
+
+        outcomes = _by_user(sweep(repos, user_ids=["alice"]))
+
+        assert outcomes["alice"].path == cache.resolve()
+        assert outcomes["alice"].action in (ACTION_RECLAIMED, ACTION_WIPED)
+        assert any("prune" in c for c in toolbox.calls())
+
+    def test_the_outcome_carries_the_user_id_not_the_directory_name(
+        self, tmp_path, toolbox,
+    ):
+        """Every derived cache directory is called `.package-caches`, so a
+        sweeper reading `path.name` would report — and, worse, ask the busy
+        check about — the same string for every user on the deployment."""
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _derived_cache(repos, "alice", uv=1)
+        _derived_cache(repos, "bob", uv=1)
+        _age(repos, 86400)
+
+        assert sorted(o.user_id for o in sweep(repos, user_ids=["alice", "bob"])) == [
+            "alice", "bob",
+        ]
+
+    def test_a_busy_user_is_skipped_on_the_derived_layout(self, tmp_path, toolbox):
+        """Guard 1, which is the one the directory-name bug would have defeated
+        for every user at once: `.package-caches` is never in the busy set."""
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _derived_cache(repos, "alice", uv=4 * MB)
+        _age(repos, 86400)
+
+        outcomes = _by_user(sweep(repos, user_ids=["alice"], busy_users={"alice"}))
+
+        assert outcomes["alice"].action == ACTION_BUSY
+        assert toolbox.calls() == []
+
+    def test_a_user_id_invented_by_the_tree_is_never_swept(self, tmp_path, toolbox):
+        """The reason the ids come from the daemon. `repos_dir` is bound
+        read-write into every admin developer task, so a task can create
+        `{repos_dir}/zzz/.package-caches` — and a sweeper enumerating the tree
+        would take `zzz` for a user, find it can never be in flight, and run a
+        reclaim verb inside a directory the model chose.
+        """
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _derived_cache(repos, "alice", uv=1)
+        planted = _derived_cache(repos, "zzz", uv=4 * MB)
+        _age(repos, 86400)
+
+        outcomes = sweep(repos, user_ids=["alice"])
+
+        assert [o.user_id for o in outcomes] == ["alice"]
+        assert not any(str(planted) in c for c in toolbox.calls()), toolbox.calls()
+
+    def test_a_symlinked_user_subtree_is_refused(self, tmp_path, toolbox):
+        """The first of the two model-plantable components. A link at
+        `{repos_dir}/{user_id}` aims the whole derivation somewhere else, and
+        the equality is against the *whole* derived path for that reason."""
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        _fill(elsewhere / CACHE_ROOT_NAME / CACHE_UV / "archive-v0", "wheel", 4 * MB)
+        _age(elsewhere, 86400)
+        (repos / "alice").symlink_to(elsewhere)
+
+        outcomes = _by_user(sweep(repos, user_ids=["alice"]))
+
+        assert outcomes["alice"].action == ACTION_OUTSIDE
+        assert toolbox.calls() == []
+        assert (elsewhere / CACHE_ROOT_NAME / CACHE_UV / "archive-v0" / "wheel").exists()
+
+    def test_a_symlinked_cache_directory_is_refused(self, tmp_path, toolbox):
+        """The second. The subtree is genuine and `.package-caches` inside it is
+        a link — which is the component a task writes without touching anything
+        the daemon created."""
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        (repos / "alice").mkdir(parents=True)
+        victim = _derived_cache(repos, "bob", uv=4 * MB)
+        _age(repos, 86400)
+        (repos / "alice" / CACHE_ROOT_NAME).symlink_to(victim)
+
+        outcomes = _by_user(sweep(repos, user_ids=["alice"]))
+
+        assert outcomes["alice"].action == ACTION_OUTSIDE
+        assert not any("clean" in c for c in toolbox.calls()), toolbox.calls()
+        assert (victim / CACHE_UV / "archive-v0" / "wheel").exists()
+
+    def test_a_user_id_that_is_not_one_component_is_refused(self, tmp_path, toolbox):
+        """A malformed profile row rather than a planted directory, and the
+        lexical half of the rule is what catches it — `resolve()` would answer
+        perfectly happily for a path outside the root."""
+        toolbox("uv")
+        repos = tmp_path / "repos"
+        repos.mkdir()
+
+        outcomes = sweep(repos, user_ids=["../elsewhere", "a/b", "/etc"])
+
+        assert {o.action for o in outcomes} == {ACTION_OUTSIDE}
+        assert toolbox.calls() == []
+
+    def test_a_user_with_no_cache_yet_is_silent(self, tmp_path, toolbox):
+        """On this layout that is every user who has not run a task, so an
+        outcome row each would bury the ones that mean something."""
+        toolbox("uv")
+        repos = tmp_path / "repos"
+        _derived_cache(repos, "alice", uv=1)
+        _age(repos, 86400)
+
+        assert [o.user_id for o in sweep(repos, user_ids=["alice", "bob", "carol"])] == [
+            "alice",
+        ]
+
+    def test_the_clones_beside_the_cache_are_never_touched(self, tmp_path, toolbox):
+        """The derived cache shares its parent with the user's checkouts. The
+        sweep measures and reclaims the cache directory alone — a ceiling
+        applied one level up would count every worktree and wipe on every pass.
+        """
+        toolbox("uv")
+        toolbox("npm")
+        repos = tmp_path / "repos"
+        _derived_cache(repos, "alice", uv=1)
+        clone = _fill(repos / "alice" / "acme" / "widget.git", "pack", 4 * MB)
+        _age(repos, 86400)
+
+        outcomes = _by_user(sweep(repos, user_ids=["alice"]))
+
+        assert outcomes["alice"].before_bytes < 4 * MB, \
+            "the ceiling is being applied to the user's clones, not to the cache"
+        assert clone.exists()
+
+    def test_an_empty_user_list_sweeps_nothing(self, tmp_path, toolbox):
+        """A valid answer meaning "no users", distinct from `None`, which means
+        the other layout entirely."""
+        toolbox("uv")
+        repos = tmp_path / "repos"
+        _derived_cache(repos, "alice", uv=4 * MB)
+        _age(repos, 86400)
+
+        assert sweep(repos, user_ids=[]) == []
+        assert toolbox.calls() == []
+
+    def test_the_one_level_layout_is_unchanged(self, tmp_path, toolbox):
+        """`user_ids=None` is the fallback shape and must not have moved: it is
+        what a deployment running the sandbox without the developer skill has,
+        and this change is not supposed to reach it."""
+        toolbox("uv")
+        toolbox("npm")
+        root = tmp_path / "caches"
+        _cache(root, "alice", uv=4 * MB)
+        _age(root, 86400)
+
+        outcomes = _by_user(sweep(root))
+
+        assert outcomes["alice"].path == (root / "alice").resolve()
+        assert outcomes["alice"].action in (ACTION_RECLAIMED, ACTION_WIPED)
+
+
+class TestTheSweepRootPredicate:
+    """`scheduler.sandbox_cache_sweep_root` has to answer the same question
+    `executor.resolve_sandbox_cache_dir` does, from the other end."""
+
+    def _config(self, tmp_path, *, repos_dir="", enabled=False, cache_dir="", users=()):
+        from istota.config import Config, DeveloperConfig, SecurityConfig, UserConfig
+
+        config = Config()
+        # Under `data/`, not directly in `tmp_path`: the resolver refuses a
+        # cache root under the database directory, and a `db_path` at the top
+        # of the fixture makes `tmp_path` that directory — which would refuse
+        # every shape below for a reason belonging to the fixture.
+        config.db_path = tmp_path / "data" / "istota.db"
+        config.developer = DeveloperConfig(enabled=enabled, repos_dir=str(repos_dir))
+        config.security = SecurityConfig(sandbox_cache_dir=str(cache_dir))
+        config.users = {u: UserConfig() for u in users}
+        return config
+
+    def test_the_developer_shape_yields_the_repos_root_and_the_daemons_users(
+        self, tmp_path,
+    ):
+        from istota.scheduler import sandbox_cache_sweep_root
+
+        repos = tmp_path / "repos"
+        config = self._config(
+            tmp_path, repos_dir=repos, enabled=True, users=("alice", "bob"),
+        )
+
+        assert sandbox_cache_sweep_root(config) == (repos, ["alice", "bob"])
+
+    def test_the_fallback_shape_yields_the_configured_root_and_no_list(self, tmp_path):
+        from istota.scheduler import sandbox_cache_sweep_root
+
+        caches = tmp_path / "caches"
+        config = self._config(tmp_path, cache_dir=caches)
+
+        assert sandbox_cache_sweep_root(config) == (caches, None)
+
+    def test_the_developer_shape_wins_over_a_stale_configured_key(self, tmp_path):
+        """The resolver ignores the key when the skill is on, so a sweep that
+        honoured it would walk a directory nothing writes into while the real
+        caches grew."""
+        from istota.scheduler import sandbox_cache_sweep_root
+
+        repos = tmp_path / "repos"
+        config = self._config(
+            tmp_path, repos_dir=repos, enabled=True,
+            cache_dir=tmp_path / "old-caches", users=("alice",),
+        )
+
+        root, user_ids = sandbox_cache_sweep_root(config)
+        assert root == repos
+        assert user_ids == ["alice"]
+
+    def test_neither_configured_means_nothing_to_sweep(self, tmp_path):
+        from istota.scheduler import sandbox_cache_sweep_root
+
+        assert sandbox_cache_sweep_root(self._config(tmp_path)) is None
+
+    def test_it_agrees_with_the_resolver_on_every_shape(self, tmp_path):
+        """The property that makes the sweep worth running: the root it walks
+        must be the one the resolver writes into. Disagreeing is silent and
+        fails in the direction of the disk leak — a sweep that finds nothing
+        looks exactly like a deployment that is inside its ceiling.
+        """
+        from istota.executor import resolve_sandbox_cache_dir
+        from istota.scheduler import sandbox_cache_sweep_root
+
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        caches = tmp_path / "caches"
+        caches.mkdir()
+
+        shapes = [
+            {"repos_dir": repos, "enabled": True, "users": ("alice",)},
+            {"repos_dir": repos, "enabled": True, "cache_dir": caches, "users": ("alice",)},
+            {"cache_dir": caches, "users": ("alice",)},
+            {"repos_dir": repos, "enabled": False, "cache_dir": caches, "users": ("alice",)},
+        ]
+        for shape in shapes:
+            config = self._config(tmp_path, **shape)
+            resolved = resolve_sandbox_cache_dir(config, "alice")
+            target = sandbox_cache_sweep_root(config)
+            assert resolved is not None and target is not None, shape
+            root, _ = target
+            assert resolved.is_relative_to(root), (
+                f"{shape}: the resolver writes to {resolved}, the sweep walks {root}"
+            )
+
+
+def test_the_cache_root_name_matches_the_executors():
+    """The second literal shared with `executor`, on the same terms as the two
+    subdirectory names: the sweeper is a leaf and does not import it."""
+    from istota.executor import SANDBOX_CACHE_ROOT_NAME
+
+    assert CACHE_ROOT_NAME == SANDBOX_CACHE_ROOT_NAME

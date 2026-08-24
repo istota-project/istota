@@ -4409,8 +4409,41 @@ def check_worktree_reap(config: Config) -> list:
         return []
 
 
+def sandbox_cache_sweep_root(config: Config) -> tuple[Path, list[str] | None] | None:
+    """Where the per-user package caches are, and whose they are. None if nowhere.
+
+    The two shapes `executor.resolve_sandbox_cache_dir` produces, asked the
+    other way round. **This predicate has to agree with that one exactly**, and
+    the agreement is what the sweep is worth: a root the resolver does not write
+    into is a sweep that finds nothing while the real caches grow, and it fails
+    silently in the direction of the disk leak ISSUE-317 exists to close. The
+    gate is therefore `enabled and repos_dir`, the same pair, and a test holds
+    the two functions to the same answer.
+
+    * developer skill on with a repos dir — the caches are derived per user at
+      `{repos_dir}/{user_id}/.package-caches`, so the root is `repos_dir` and
+      the user list is the daemon's own (`config.users`, which the config
+      loader has already overlaid `user_profiles` onto). **The list is passed
+      rather than enumerated**, because `repos_dir` is bound read-write into
+      every admin developer task and a directory name found there is not
+      evidence of a user — see `sandbox_cache_sweeper._candidates_for_users`.
+    * otherwise, `security.sandbox_cache_dir` and its one-level layout, which
+      the sweeper enumerates itself. Unchanged.
+
+    Returning `None` rather than a root with nothing at it keeps "there is no
+    cache to bound" distinguishable from "the cache is empty", which is what the
+    caller's own gate needs.
+    """
+    dev, sec = config.developer, config.security
+    if dev.enabled and dev.repos_dir:
+        return Path(dev.repos_dir), sorted(config.users)
+    if sec.sandbox_cache_dir:
+        return Path(sec.sandbox_cache_dir), None
+    return None
+
+
 def check_sandbox_cache_sweep(config: Config) -> list:
-    """Bound the per-user package caches under `security.sandbox_cache_dir`.
+    """Bound the per-user package caches, wherever this deployment puts them.
 
     Here rather than on a task's setup path, for the reason `check_worktree_reap`
     above gives: `dispatch_setup_env_hooks` calls every skill's hook whatever the
@@ -4425,6 +4458,10 @@ def check_sandbox_cache_sweep(config: Config) -> list:
     sweeping at all. Disk is what the sweep protects and one more interval of it
     is cheap; a `uv sync` losing its cache mid-resolution is not.
 
+    The *user* list is not fail-closed in the same way and does not need to be:
+    it comes from the already-loaded config rather than from a query, and being
+    wrong about it costs an unswept cache rather than a live task's.
+
     Re-checks its own gate rather than trusting the loop's, matching the reaper:
     the loop's gate exists to skip the thread spawn cheaply, and a delete path
     should be safe to call on its own.
@@ -4432,8 +4469,12 @@ def check_sandbox_cache_sweep(config: Config) -> list:
     from .sandbox_cache_sweeper import sweep_and_report
 
     sec = config.security
-    if not (sec.sandbox_cache_dir and sec.sandbox_cache_sweep_enabled):
+    if not sec.sandbox_cache_sweep_enabled:
         return []
+    target = sandbox_cache_sweep_root(config)
+    if target is None:
+        return []
+    root, user_ids = target
 
     try:
         with db.get_db(config.db_path) as conn:
@@ -4448,9 +4489,10 @@ def check_sandbox_cache_sweep(config: Config) -> list:
 
     try:
         return sweep_and_report(
-            Path(sec.sandbox_cache_dir),
+            root,
             max_bytes=int(sec.sandbox_cache_max_gb * 1024 ** 3),
             busy_users=busy_users,
+            user_ids=user_ids,
         )
     except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
         logger.error("sandbox_cache_sweep_failed err=%s", exc, exc_info=True)
@@ -7310,8 +7352,8 @@ def run_daemon(
         # `npm`, either of which can take minutes on a cold cache, so on the
         # loop thread it would starve dispatch.
         if (
-            config.security.sandbox_cache_dir
-            and config.security.sandbox_cache_sweep_enabled
+            config.security.sandbox_cache_sweep_enabled
+            and sandbox_cache_sweep_root(config) is not None
             and config.scheduler.sandbox_cache_sweep_interval
             and now - last_cache_sweep >= config.scheduler.sandbox_cache_sweep_interval
         ):
