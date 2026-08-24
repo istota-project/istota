@@ -1838,6 +1838,12 @@ def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice"
     repos.mkdir(exist_ok=True)
     exec_root = tmp_path / "run" / "exec"
     exec_root.mkdir(parents=True, exist_ok=True)
+    # The per-user socket directory is what says "this user has a devbox": the
+    # role creates it only for `istota_devbox_users`, and the check treats its
+    # absence as "not configured for one" rather than as a broken container.
+    if not overrides.pop("no_socket_dirs", False):
+        for u in users:
+            (exec_root / u).mkdir(exist_ok=True)
     container_fields = {
         "backend": backend,
         "exec_socket_dir": str(exec_root),
@@ -1875,6 +1881,95 @@ def _agreeing_container(repos_root, *, uid_offset=0, cache_exit=0):
         return [{"exit_code": cache_exit}], ""
 
     return _reply
+
+
+class TestTheReposLayoutCheck:
+    """The loud path for an upgrade that has not moved its clones.
+
+    `repos_dir` became a per-user root on *every* backend, and the bind is
+    skipped when its source does not exist — so a host whose clones still sit
+    flat has an unusable developer skill and no error anywhere naming a path.
+    This is what says so.
+    """
+
+    def _config(self, make_config, tmp_path, users=("alice",)):
+        from istota.config import DeveloperConfig, UserConfig
+
+        repos = tmp_path / "repos"
+        repos.mkdir(exist_ok=True)
+        return make_config(
+            developer=DeveloperConfig(enabled=True, repos_dir=str(repos)),
+            users={u: UserConfig(display_name=u) for u in users},
+        )
+
+    @staticmethod
+    def _bare(path):
+        path.mkdir(parents=True, exist_ok=True)
+        for marker in ("HEAD", "config"):
+            (path / marker).write_text("")
+        (path / "objects").mkdir(exist_ok=True)
+
+    def test_the_flat_layout_fails_and_names_what_it_found(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        self._bare(tmp_path / "repos" / "namespace" / "project.git")
+
+        result = doctor.check_repos_layout(config, probe=False)
+
+        assert result.status == FAIL
+        assert "namespace" in result.detail
+        assert result.remedy
+
+    def test_the_per_user_layout_is_ok(self, make_config, tmp_path):
+        config = self._config(make_config, tmp_path)
+        self._bare(tmp_path / "repos" / "alice" / "namespace" / "project.git")
+
+        result = doctor.check_repos_layout(config, probe=False)
+
+        assert result.status == OK
+
+    def test_a_half_migrated_host_still_fails(self, make_config, tmp_path):
+        """One user moved and another not is the shape a partial play leaves."""
+        config = self._config(make_config, tmp_path, users=("alice", "bob"))
+        self._bare(tmp_path / "repos" / "alice" / "ns" / "project.git")
+        self._bare(tmp_path / "repos" / "leftover" / "project.git")
+
+        result = doctor.check_repos_layout(config, probe=False)
+
+        assert result.status == FAIL
+        assert "leftover" in result.detail
+
+    def test_an_empty_root_is_ok(self, make_config, tmp_path):
+        result = doctor.check_repos_layout(self._config(make_config, tmp_path), probe=False)
+
+        assert result.status == OK
+
+    def test_a_directory_holding_no_repository_is_not_a_finding(
+        self, make_config, tmp_path
+    ):
+        """`repos_dir` is a directory an operator may put other things in."""
+        config = self._config(make_config, tmp_path)
+        (tmp_path / "repos" / "notes").mkdir()
+        (tmp_path / "repos" / "notes" / "README").write_text("hi")
+
+        assert doctor.check_repos_layout(config, probe=False).status == OK
+
+    def test_it_skips_when_the_skill_is_off(self, make_config, tmp_path):
+        from istota.config import DeveloperConfig
+
+        config = make_config(developer=DeveloperConfig(enabled=False))
+
+        assert doctor.check_repos_layout(config, probe=False).status == SKIP
+
+    def test_it_spawns_nothing_under_probe_false(self, make_config, tmp_path, monkeypatch):
+        """It is on the config-load path, where `probe=False` forbids spawning."""
+        monkeypatch.setattr(
+            doctor, "_run",
+            lambda *a, **k: pytest.fail("the repos layout check spawned a process"),
+        )
+        config = self._config(make_config, tmp_path)
+        self._bare(tmp_path / "repos" / "namespace" / "project.git")
+
+        doctor.check_repos_layout(config, probe=False)
 
 
 class TestTheDeveloperContainerChecks:
@@ -1927,6 +2022,20 @@ class TestTheDeveloperContainerChecks:
 
         assert not called
         assert by_name["developer.container.transport"].status == SKIP
+
+    def test_a_user_with_no_devbox_is_not_a_failure(self, make_config, tmp_path):
+        """Which users have a devbox is not in the daemon's config — the list
+        lives in Ansible. Counting every configured user as unreachable would
+        FAIL this check permanently on the reference shape (one admin with a
+        container, several other users without) and alert every admin hourly."""
+        config = _container_config(
+            make_config, tmp_path, users=("alice", "bob"), no_socket_dirs=True
+        )
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+
+        assert by_name["developer.container.transport"].status == SKIP
+        assert "no devbox socket directory" in by_name["developer.container.transport"].detail
 
     def test_a_dead_container_is_a_fail_naming_the_socket(
         self, make_config, tmp_path, monkeypatch
@@ -2066,6 +2175,20 @@ class TestTheBackendAgreementCheck:
         assert result.status == FAIL
         assert "devbox" in result.detail and "none" in result.detail
         assert result.remedy
+
+    def test_an_invalid_value_is_not_reported_as_stale(self, make_config, tmp_path):
+        """The loader corrects an unknown backend to "none" with a warning, so
+        the two differ permanently. Reporting that as drift would send an
+        operator to restart the daemon — the one thing that cannot help — every
+        hour, on the only FAIL in this group."""
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.config_path = self._write(tmp_path, "docker")
+
+        result = self._backend_result(config)
+
+        assert result.status == FAIL
+        assert "not a valid backend" in result.detail
+        assert "restart" not in result.remedy.lower()
 
     def test_a_config_built_in_memory_skips(self, make_config, tmp_path):
         config = _container_config(make_config, tmp_path)

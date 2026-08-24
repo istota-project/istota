@@ -68,11 +68,20 @@ from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger("istota.git_remote_scrub")
 
-# How far below `repos_dir` to look. The documented layout puts a bare clone at
-# `<namespace>/<project>.git` with its worktrees alongside, so everything of
-# interest is at depth 2; the extra levels cover a repo filed one directory
-# deeper by hand. Exceeding it is logged — a sweep that silently declines to
-# look is indistinguishable from one that looked and found nothing.
+# How far below the root it is *given* to look, and the two callers are given
+# different roots — so the slack differs between them and the figure serves the
+# tighter one.
+#
+# The credential scrub takes `{repos_dir}/{user_id}`, where the documented
+# layout puts a bare clone at `<namespace>/<project>.git` with its worktrees
+# alongside: depth 2, with two levels spare for a repo filed deeper by hand.
+# `worktree_reaper` takes the *global* `repos_dir` deliberately — it is a
+# deployment-wide sweep with no user to scope to — so the same repository sits
+# at depth 3 there and only one level is spare.
+#
+# Exceeding it is logged, which is what keeps the narrower margin from being
+# silent: a sweep that declines to look is otherwise indistinguishable from one
+# that looked and found nothing.
 _MAX_DEPTH = 4
 
 _GIT_TIMEOUT = 15

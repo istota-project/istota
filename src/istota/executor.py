@@ -2323,6 +2323,25 @@ def build_bwrap_cmd(
     # worktrees, and binding it would give one user's task read and write access
     # to another's checkouts — which the admin gate narrows but does not close,
     # since a deployment with several admins has several users behind it.
+    #
+    # **Known cost, unresolved, found in review of this change.** The cache bind
+    # above is emitted first, so while this bind was `{repos_dir}` it *covered*
+    # a cache at the documented `{sandbox_cache_dir}/{user}` =
+    # `{repos_dir}/.cache/{user}`, and both paths resolved inside one vfsmount —
+    # which is what made uv's hardlink out of its cache into a worktree `.venv`
+    # work. `{repos_dir}/{user}` is not an ancestor of `{repos_dir}/.cache/{user}`,
+    # so the two are now separate mounts, `do_linkat` compares `mnt` and returns
+    # EXDEV, and uv falls back to full copies: slower and fatter on disk, never
+    # wrong. `resolve_sandbox_cache_dir`'s guard does not catch it — that refuses
+    # a cache at or *above* a bind target, and this one is neither.
+    #
+    # Not fixed here because every candidate fix is a change to the cache
+    # placement rules, which carry five validated failure modes and an operator
+    # recommendation of their own: rewrite the recommended layout so the cache
+    # lands inside the per-user root, teach `_sandbox_bind_targets` about that
+    # root so a sibling cache is refused with a message, or skip the separate
+    # cache bind when it is already inside the repos bind. Measure first — the
+    # `linux` tier is where `link(2)` can actually be observed.
     repos = istota_config.repos_root(config, task.user_id)
     if is_admin and config.developer.enabled and repos is not None:
         if repos.exists():

@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import shlex
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -86,11 +87,32 @@ def _atomic_write(dest: Path, data: str, mode: int) -> Path:
     concurrently, so a plain truncate-then-write can be read half-finished by
     a wrapper another task is running right now. ``os.replace`` is atomic and
     leaves an already-open process on its own inode.
+
+    **The temp name has to be unique per call, not per process.** It used to be
+    ``.{name}.tmp{os.getpid()}``, and the worker pool is threads in one process
+    (``scheduler.UserWorker``) — so two concurrent tasks for one user produced
+    the *identical* path in the identical directory, and the interleaving
+    write / write / chmod / replace / chmod ends in ``FileNotFoundError`` for
+    the second. The docstring above claimed the atomicity that the rename does
+    have and the name did not.
+
+    The consequence is worse than a lost file: ``dispatch_setup_env_hooks``
+    keeps only what a hook returned, so the loser's whole ``setup_env`` output
+    is discarded and its task runs with no shims and no credential helper — a
+    host-side ``npm ci`` that 403s at the CONNECT proxy, which reads as a flaky
+    network. The dot prefix is load-bearing too: ``_remove_shims`` skips it, so
+    one writer's sweep cannot delete another's in-flight temp.
     """
-    tmp = dest.with_name(f".{dest.name}.tmp{os.getpid()}")
-    tmp.write_text(data)
-    tmp.chmod(mode)
-    os.replace(tmp, dest)
+    handle, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=f".{dest.name}.")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "w") as stream:
+            stream.write(data)
+        tmp.chmod(mode)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return dest
 
 
@@ -402,6 +424,12 @@ def _remove_shims(shim_dir: Path, keep: set[str]) -> None:
     shim that is not wanted must not be *reachable*, and the model's shell
     resolves by name.
 
+    **A dotfile is never swept**, and that is the other half of `_atomic_write`'s
+    concurrency fix rather than tidiness: tasks for one user run as threads in
+    one process and share this directory, so a sweep that unlinked everything
+    outside `keep` would delete another writer's in-flight temp file and make
+    its `os.replace` raise — costing that task its whole `setup_env` output.
+
     Never raises: this runs on the setup path.
     """
     try:
@@ -409,7 +437,7 @@ def _remove_shims(shim_dir: Path, keep: set[str]) -> None:
     except OSError:
         return
     for entry in entries:
-        if entry.name in keep:
+        if entry.name in keep or entry.name.startswith("."):
             continue
         try:
             entry.unlink()
@@ -618,6 +646,16 @@ def setup_env(ctx) -> dict[str, str]:
     # never-raises contract of its own; this ordering is the second guard.
     user_repos = istota_config.repos_root(config, _ctx_user_id(ctx))
     if user_repos is not None:
+        # Created here, because nothing else in `src/` does and the bwrap bind
+        # skips a source that does not exist. Inside the sandbox a `mkdir -p
+        # "$DEVELOPER_REPOS_DIR"` writes to bwrap's root tmpfs and vanishes at
+        # task exit, so without this a deployment not driven by the Ansible role
+        # can never bring the directory into existence from a task at all — the
+        # skill would be silently unusable with no error naming a path.
+        try:
+            user_repos.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("developer: could not create %s: %s", user_repos, exc)
         scrub_and_report(user_repos)
 
     return env

@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -82,8 +83,18 @@ def _bare_with_worktree(
     return bare, worktree
 
 
-def _run(migrate, root: Path, user: str | None = "alice", known: str = "") -> list[str]:
-    argv = ["--root", str(root), "--known-user", known]
+def _run(
+    migrate,
+    root: Path,
+    user: str | None = "alice",
+    known: str = "",
+    idle_minutes: float = 0.0,
+) -> list[str]:
+    # `--idle-minutes 0` by default: every tree here is built seconds before it
+    # is migrated, so the live-work window would hold all of them. The window
+    # itself gets its own test.
+    argv = ["--root", str(root), "--known-user", known,
+            "--idle-minutes", str(idle_minutes)]
     if user:
         argv += ["--user", user]
     lines: list[str] = []
@@ -161,6 +172,34 @@ class TestTheHappyPath:
 
         assert not any(line.startswith("MOVED ") for line in lines), lines
         assert (root / "bob" / "namespace" / "project.git").is_dir()
+
+    def test_a_forge_namespace_named_after_a_user_still_moves(self, migrate, tmp_path):
+        """The name alone is not the discriminator.
+
+        A top-level entry in the old layout is a *forge namespace*, and one
+        named after some other istota user is entirely ordinary. Skipping it on
+        the name would leave it behind while the script printed `OK … already in
+        the per-user layout` — the one line an operator would grep for, saying
+        the opposite of what happened. The depth of its repositories is the real
+        discriminator: a per-user root holds them at depth 2, a namespace at 1.
+        """
+        root = tmp_path / "repos"
+        root.mkdir()
+        namespace = root / "bob"
+        namespace.mkdir()
+        seed = tmp_path / "seed"
+        seed.mkdir()
+        _git(seed, "init", "-q", "-b", "main")
+        (seed / "README.md").write_text("hello\n")
+        _git(seed, "add", "-A")
+        _git(seed, "commit", "-qm", "seed")
+        _git(root, "clone", "-q", "--bare", str(seed), str(namespace / "project.git"))
+
+        lines = _run(migrate, root, known="alice,bob")
+
+        assert any(line.startswith("NOTE ") for line in lines), lines
+        assert any(line.startswith("MOVED ") for line in lines), lines
+        assert (root / "alice" / "bob" / "project.git").is_dir()
 
 
 class TestWhatItRefusesToMove:
@@ -256,20 +295,145 @@ class TestWhatItRefusesToMove:
         assert any(line.startswith("MOVED ") for line in lines), lines
 
 
-class TestItNeedsToBeToldTheUser:
-    def test_without_a_user_it_reports_and_changes_nothing(self, migrate, tmp_path):
-        """The old layout recorded no owner — which is half the reason it is
-        being replaced — so nothing here can derive one, and picking wrong would
-        file one person's work under another's name."""
+class TestTheIdleWindow:
+    """The clean check cannot see a build in flight.
+
+    A task running `npm ci` or `uv sync` right now has produced exactly the
+    untracked `node_modules/` and `.venv/` paths `_is_reconstructible`
+    discounts, so the directory reads as clean — and the daemon is up and
+    dispatching while this runs, because the play does not stop it. Without the
+    window the migration moves a checkout out from under the process writing to
+    it.
+    """
+
+    def test_a_freshly_written_tree_is_held(self, migrate, tmp_path):
         root = tmp_path / "repos"
         root.mkdir()
         _bare_with_worktree(root)
 
-        lines = _run(migrate, root, user=None)
+        lines = _run(migrate, root, idle_minutes=15)
 
-        assert all(line.startswith("WOULD-MOVE ") for line in lines), lines
+        assert any("may be using it" in line for line in lines), lines
+        assert (root / "namespace" / "project.git").is_dir()
+
+    def test_an_old_tree_moves(self, migrate, tmp_path):
+        """The negative control for the window: it must not hold everything for
+        ever, or the migration is a no-op with a plausible message."""
+        root = tmp_path / "repos"
+        root.mkdir()
+        _bare_with_worktree(root)
+        old = time.time() - 3600
+        for path in (root / "namespace").rglob("*"):
+            os.utime(path, (old, old), follow_symlinks=False)
+        os.utime(root / "namespace", (old, old))
+
+        lines = _run(migrate, root, idle_minutes=15)
+
+        assert any(line.startswith("MOVED ") for line in lines), lines
+
+    def test_a_build_in_flight_is_held_even_though_git_calls_it_clean(
+        self, migrate, tmp_path
+    ):
+        """The exact case: `git status` discounts the install output, so only
+        the mtime distinguishes a finished worktree from one being written."""
+        root = tmp_path / "repos"
+        root.mkdir()
+        _, worktree = _bare_with_worktree(root)
+        old = time.time() - 3600
+        for path in sorted((root / "namespace").rglob("*"), reverse=True):
+            os.utime(path, (old, old), follow_symlinks=False)
+        os.utime(root / "namespace", (old, old))
+        # …and now an install starts.
+        (worktree / "node_modules").mkdir()
+        (worktree / "node_modules" / "half-written.js").write_text("//\n")
+
+        # The clean check alone, asked directly rather than by running the
+        # migration — a first run with the window off would *move* the tree, and
+        # the second run would then be asserting about the destination.
+        assert migrate._blocking_reason(
+            root / "namespace" / "project.git", root / "namespace"
+        ) == "", "git should call an install-in-flight worktree clean"
+
+        lines = _run(migrate, root, idle_minutes=15)
+
+        assert any("may be using it" in line for line in lines), lines
+        assert (root / "namespace" / "project.git").is_dir()
+
+
+class TestItNeedsToKnowWhoseTheClonesAre:
+    def _exit(self, migrate, root, **kwargs):
+        import contextlib
+        import io
+
+        argv = ["--root", str(root), "--idle-minutes", "0"]
+        for flag, value in kwargs.items():
+            argv += [f"--{flag.replace('_', '-')}", value]
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = migrate.main(argv)
+        return code, [line for line in buffer.getvalue().splitlines() if line.strip()]
+
+    def test_several_users_means_it_reports_and_exits_non_zero(self, migrate, tmp_path):
+        """A green play here is followed by a daemon restart into a state where
+        the repos bind names an empty directory and the developer skill is
+        silently unusable. Nothing can work out the owner, so the operator has
+        to be stopped rather than warned."""
+        root = tmp_path / "repos"
+        root.mkdir()
+        _bare_with_worktree(root)
+
+        code, lines = self._exit(migrate, root, known_user="alice,bob")
+
+        assert code == 2
+        assert any(line.startswith("WOULD-MOVE ") for line in lines), lines
         assert (root / "namespace" / "project.git").is_dir()
         assert not (root / "alice").exists()
+
+    def test_no_users_at_all_also_stops(self, migrate, tmp_path):
+        root = tmp_path / "repos"
+        root.mkdir()
+        _bare_with_worktree(root)
+
+        code, _ = self._exit(migrate, root, known_user="")
+
+        assert code == 2
+
+    def test_one_configured_user_is_derived(self, migrate, tmp_path):
+        """The reference deployment. With one user there is nothing to derive
+        between, and leaving it to a hand-set variable is what turns "the role
+        performs the move" into "the role reports and does nothing" on the host
+        that most needs it."""
+        root = tmp_path / "repos"
+        root.mkdir()
+        _bare_with_worktree(root)
+
+        code, lines = self._exit(migrate, root, known_user="alice")
+
+        assert code == 0
+        assert any(line.startswith("MOVED ") for line in lines), lines
+        assert (root / "alice" / "namespace" / "project.git").is_dir()
+
+    def test_an_explicit_user_still_wins(self, migrate, tmp_path):
+        root = tmp_path / "repos"
+        root.mkdir()
+        _bare_with_worktree(root)
+
+        code, _ = self._exit(migrate, root, known_user="alice,bob", user="bob")
+
+        assert code == 0
+        assert (root / "bob" / "namespace" / "project.git").is_dir()
+
+    def test_a_root_already_migrated_exits_zero_with_no_user(self, migrate, tmp_path):
+        """The steady state on every later run. Exiting 2 there would fail the
+        play for ever on a host that is already correct."""
+        root = tmp_path / "repos"
+        root.mkdir()
+        _bare_with_worktree(root / "alice", seed_root=tmp_path / "seeds")
+
+        code, lines = self._exit(migrate, root, known_user="alice,bob")
+
+        assert code == 0
+        assert any("already in the per-user layout" in line for line in lines), lines
 
 
 class TestTheRoleShipsIt:

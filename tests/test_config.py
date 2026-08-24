@@ -2973,13 +2973,21 @@ class TestTheDeveloperContainerBlock:
 
         assert parsed["shim_commands"] == ["npm"]
 
-    @pytest.mark.parametrize("interpreter", ["python", "python3"])
-    def test_the_interpreter_cannot_be_shimmed(self, interpreter, caplog):
-        """Not a preference. `build_bwrap_cmd` starts the sandbox's own network
-        bridge as `python3 {bridge_path}` inside the namespace with the model's
-        PATH in force, so a shim would route the bridge into a container that
-        has neither the script nor the socket — breaking egress for every
-        developer-enabled task, not only the ones running a build."""
+    @pytest.mark.parametrize(
+        "interpreter",
+        ["python", "python3", "python3.12", "sh", "bash", "env",
+         "git", "gh", "glab", "istota-skill"],
+    )
+    def test_the_sandboxs_own_machinery_cannot_be_shimmed(self, interpreter, caplog):
+        """Each of these is machinery the sandbox itself runs, so shimming one
+        breaks tasks that never touch a build. The network bridge is
+        `/bin/sh -c "python3 {bridge_path} … & exec env … \"$@\""` inside the
+        namespace with the model's PATH in force; git's credential helper is
+        registered per task and exists only on the host; `gh` and `glab` on PATH
+        are the policy wrapper; `istota-skill` is the skill proxy's client.
+
+        `python3.12` is in the list because a versioned name would otherwise
+        walk past a literal refusal and it is the same binary."""
         with caplog.at_level(logging.WARNING):
             parsed = self._parse({"shim_commands": ["npm", interpreter]})
 

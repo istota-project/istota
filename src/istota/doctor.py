@@ -1673,6 +1673,105 @@ def _covers(rule: dict, subnet: str) -> bool | None:
         return None
 
 
+def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
+    """Are this deployment's clones where the daemon now looks for them?
+
+    ``developer.repos_dir`` became a *per-user* root: every consumer that scopes
+    a task — the bwrap bind, the native brain's write root, the
+    ``DEVELOPER_REPOS_DIR`` manifest variable, the credential scrub — takes
+    ``{repos_dir}/{user_id}``. That applies whatever the container backend is,
+    because it is what closes cross-user worktree access rather than anything to
+    do with containers.
+
+    **Which makes the upgrade a silent failure without this check.** On a host
+    whose clones still sit flat under ``repos_dir``, the per-user directory is
+    empty, the bind is skipped because its source does not exist, and the
+    developer skill is unusable with no error anywhere naming a path. The
+    Ansible role performs the move and refuses to guess an owner where there is
+    more than one user; this is what says so on a host it did not reach — a
+    manual install, a half-finished play, an operator who moved one user's
+    clones and not another's.
+
+    Cheap and I/O-only: two ``iterdir`` passes and a marker test per entry, no
+    subprocess, so it is safe on the config-load path.
+    """
+    name = "developer.repos_layout"
+    dev, reason = _dev_gate(config)
+    if dev is None:
+        return CheckResult(name, SKIP, reason)
+
+    root = Path(dev.repos_dir)
+    if not root.is_dir():
+        return CheckResult(
+            name, SKIP, f"{root} does not exist yet, so there is nothing filed in it",
+        )
+
+    from . import config as config_module  # noqa: PLC0415 - a cycle at module scope
+
+    users = set(getattr(config, "users", {}) or {})
+    stray: list[str] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError as exc:
+        return CheckResult(
+            name, SKIP, f"{root} could not be listed: {exc}",
+        )
+    for entry in entries:
+        if not entry.is_dir() or entry.is_symlink() or entry.name in users:
+            continue
+        if _holds_a_repository(entry):
+            stray.append(entry.name)
+
+    if not stray:
+        expected = [u for u in sorted(users) if (root / u).is_dir()]
+        return CheckResult(
+            name, OK,
+            f"{root} holds only per-user roots"
+            + (f" ({', '.join(expected)})" if expected else " and is empty"),
+        )
+
+    example = config_module.repos_root(config, sorted(users)[0]) if users else None
+    return CheckResult(
+        name, FAIL,
+        f"{root} still holds repositories outside any user's directory: "
+        f"{', '.join(stray[:5])}"
+        + (f" and {len(stray) - 5} more" if len(stray) > 5 else ""),
+        remedy=(
+            "The daemon now looks under {repos_dir}/{user_id}"
+            + (f" — for example {example} — " if example else " ")
+            + "and binds nothing when that directory does not exist, so the "
+            "developer skill cannot see these. Re-run the Ansible role with "
+            "`istota_developer_repos_migrate_to` set to the user they belong "
+            "to, or move them by hand."
+        ),
+    )
+
+
+def _holds_a_repository(entry: "Path", depth: int = 0) -> bool:
+    """Is there a git directory at or just below `entry`?
+
+    Two levels, matching the documented layout (`<namespace>/<project>.git`) and
+    the migration script's own scan. Bounded rather than a full walk, because
+    this runs on the start-up path and `repos_dir` holds working trees.
+    """
+    markers = ("HEAD", "config", "objects")
+    if all((entry / marker).exists() for marker in markers):
+        return True
+    if (entry / ".git").exists():
+        return True
+    if depth >= 2:
+        return False
+    try:
+        children = sorted(entry.iterdir())
+    except OSError:
+        return False
+    return any(
+        child.is_dir() and not child.is_symlink()
+        and _holds_a_repository(child, depth + 1)
+        for child in children
+    )
+
+
 # ---------------------------------------------------------------------------
 # The development container
 # ---------------------------------------------------------------------------
@@ -1684,6 +1783,12 @@ CONTAINER_GROUP = "developer.container"
 #: because there is a per-user loop behind it and a dead container should be
 #: reported quickly rather than made to look like a hang.
 CONTAINER_PROBE_TIMEOUT = 5.0
+
+#: How long the *server* gives the one command this check runs (`test -d`).
+#: A constant rather than the connect budget: they answer different questions,
+#: and a command allowed exactly as long as the client will wait for a read is a
+#: race the client loses about half the time.
+CONTAINER_EXEC_TIMEOUT = 10.0
 
 
 def _container_results(names: Iterable[str], status: str, detail: str, remedy: str = "") -> list[CheckResult]:
@@ -1896,6 +2001,21 @@ def _container_backend_result(config: "Config", backend: str, config_module) -> 
         return CheckResult(
             name, OK, f"{path} and this process agree: backend={backend!r}",
         )
+    if on_disk not in config_module.CONTAINER_BACKENDS:
+        # Not drift. The loader corrected it to "none" with a warning, so the
+        # two differ permanently and a restart changes nothing — reporting this
+        # as a stale process would send an operator to do the one thing that
+        # cannot help, hourly.
+        return CheckResult(
+            name, FAIL,
+            f"{path} says backend={on_disk!r}, which is not a valid backend; "
+            f"this process corrected it to {backend!r}",
+            remedy=(
+                "Set [developer.container] backend to one of "
+                f"{', '.join(config_module.CONTAINER_BACKENDS)} and re-render "
+                "the config."
+            ),
+        )
     return CheckResult(
         name, FAIL,
         f"{path} says backend={on_disk!r} and this process is running "
@@ -1931,11 +2051,27 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
     identity_ok: list[str] = []
     cache_bad: list[str] = []
     cache_ok: list[str] = []
+    without_a_devbox: list[str] = []
 
     for user_id in users:
         socket_path = config_module.exec_socket_path(config, user_id)
         if socket_path is None:
             transport_bad.append(f"{user_id}: no socket path could be composed")
+            continue
+        # **Which users have a devbox is not in the daemon's config.** The list
+        # lives in Ansible (`istota_devbox_users`) and reaches neither
+        # `config.users` nor `DevboxConfig`, so iterating every configured user
+        # would FAIL this check permanently on the reference shape — one admin
+        # with a container, several other users without — and `check_doctor`'s
+        # hourly sweep would alert every admin on the transition. A check that
+        # cries wolf is one nobody reads.
+        #
+        # The per-user socket *directory* is the discriminator available here:
+        # the role creates it only for `istota_devbox_users`, both in the play
+        # and in the tmpfiles snippet that recreates it at boot. Its absence is
+        # "no devbox for this user", not "the devbox is broken".
+        if not socket_path.parent.is_dir():
+            without_a_devbox.append(user_id)
             continue
         frames, error = _exec_transport_request(
             socket_path, proto.encode_ping_request(), timeout
@@ -1968,8 +2104,17 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
         cache_dir = Path(cache_root) / user_id
         frames, error = _exec_transport_request(
             socket_path,
+            # A *server-side* budget, deliberately not `timeout`. That one is
+            # the connect budget, which `_parse_container_block` floors at 0.1 —
+            # an operator who sets it small for fast failure would otherwise get
+            # a 0.1s kill budget on `test -d` and be told their cache mount is
+            # missing. The two numbers answer different questions and one of
+            # them is not the operator's to set.
             proto.encode_exec_request(
-                argv=["test", "-d", str(cache_dir)], cwd=None, stdin=False, timeout=timeout
+                argv=["test", "-d", str(cache_dir)],
+                cwd=None,
+                stdin=False,
+                timeout=CONTAINER_EXEC_TIMEOUT,
             ),
             timeout,
         )
@@ -1981,7 +2126,7 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
         else:
             cache_ok.append(user_id)
 
-    results = [_transport_result(reachable, transport_bad)]
+    results = [_transport_result(reachable, transport_bad, without_a_devbox)]
     results.append(_identity_result(identity_ok, identity_bad, reachable))
     results.append(_uv_cache_result(cache_root, cache_ok, cache_bad, reachable))
     return results
@@ -2007,8 +2152,16 @@ def _identity_findings(config: "Config", config_module, user_id: str, stat: dict
     return findings
 
 
-def _transport_result(reachable: list[str], bad: list[str]) -> CheckResult:
+def _transport_result(
+    reachable: list[str], bad: list[str], without_a_devbox: list[str]
+) -> CheckResult:
     name = f"{CONTAINER_GROUP}.transport"
+    if not bad and not reachable:
+        return CheckResult(
+            name, SKIP,
+            f"{len(without_a_devbox)} configured user(s) have no devbox socket "
+            f"directory, so none of them routes development work into a container",
+        )
     if bad:
         return CheckResult(
             name, FAIL,
@@ -2020,10 +2173,10 @@ def _transport_result(reachable: list[str], bad: list[str]) -> CheckResult:
                 "socket directory is mounted into it."
             ),
         )
-    return CheckResult(
-        name, OK,
-        f"the exec transport answered a ping for {len(reachable)} devbox user(s)",
-    )
+    detail = f"the exec transport answered a ping for {len(reachable)} devbox user(s)"
+    if without_a_devbox:
+        detail += f"; {len(without_a_devbox)} configured user(s) have no devbox"
+    return CheckResult(name, OK, detail)
 
 
 def _identity_result(ok: list[str], bad: list[str], reachable: list[str]) -> CheckResult:
@@ -2360,6 +2513,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("developer.forge_policy", check_forge_policy),
     ("developer.gitlab_reviewer", check_gitlab_reviewer),
     ("developer.forge_transport", check_forge_transport),
+    ("developer.repos_layout", check_repos_layout),
     ("developer.container", check_developer_container),
     ("web.static", check_web_static),
     ("sandbox.masks", check_sandbox_masks),
@@ -2397,6 +2551,8 @@ CHECK_SCOPES: dict[str, str] = {
     "developer.forge_transport": DEPLOYMENT,
     # Deployment, not image: three of its four results need a running
     # container to reach, and the fourth reads the rendered config file.
+    # Deployment: it is a fact about what is filed on this host.
+    "developer.repos_layout": DEPLOYMENT,
     "developer.container": DEPLOYMENT,
     "web.static": IMAGE,
     "sandbox.masks": DEPLOYMENT,

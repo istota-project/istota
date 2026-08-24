@@ -2584,6 +2584,21 @@
     - istota_passwd_lookup.ansible_facts.getent_passwd is defined
     - istota_passwd_lookup.ansible_facts.getent_passwd[istota_user] is defined
 
+# The template uses both unconditionally and StrictUndefined would otherwise
+# stop the render with "'istota_devbox_uid' is undefined", which names the
+# variable and not the cause.
+- name: Fail clearly when the daemon user has no passwd entry
+  ansible.builtin.assert:
+    that:
+      - istota_devbox_uid is defined
+      - istota_devbox_gid is defined
+    fail_msg: >-
+      `getent passwd {{ istota_user }}` returned nothing, so the devbox image
+      cannot be built at the daemon's own uid. Create the account (an earlier
+      task in this role does) and re-run; a devbox built at a different uid
+      leaves every worktree that runs a build permanently unreapable.
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
 - name: Deploy devbox compose file
   template:
     src: docker-compose.devbox.yml.j2
@@ -2874,17 +2889,26 @@
     --known-user "{{ (istota_users.keys() | list) | union(istota_devbox_users) | unique | join(',') }}"
   register: istota_repos_migration
   changed_when: "'MOVED ' in (istota_repos_migration.stdout | default(''))"
+  # Exit 2 means it found repositories to move and could not work out whose they
+  # are. That fails the play deliberately: the config handler queued behind this
+  # restarts the daemon, and it would come up with the repos bind naming an
+  # empty per-user directory and the developer skill silently unusable. Set
+  # `istota_developer_repos_migrate_to` to the user the existing clones belong
+  # to, run once, then take it back out. A host with exactly one configured user
+  # never reaches this — there is nothing to derive between, so the move
+  # happens.
+  failed_when: istota_repos_migration.rc not in [0]
   when:
     - istota_developer_enabled and not istota_web_only
     - istota_developer_repos_dir | length > 0
 
 - name: Report repositories the layout migration held back
   ansible.builtin.debug:
-    msg: "{{ istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|WOULD-MOVE) ') | list }}"
+    msg: "{{ istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|NOTE|WOULD-MOVE) ') | list }}"
   when:
     - istota_repos_migration is defined
     - istota_repos_migration.stdout is defined
-    - istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|WOULD-MOVE) ') | list | length > 0
+    - istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|NOTE|WOULD-MOVE) ') | list | length > 0
 
 # --- Docker-API allowlist proxy. One systemd instance per devbox user; the
 # executor binds {dir}/<user>.sock into the sandbox at /var/run/docker.sock

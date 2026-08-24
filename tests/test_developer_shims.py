@@ -104,8 +104,12 @@ class TestTheCorrectedGate:
         assert (_shim_dir(user_temp) / "npm").is_file()
 
     def test_nothing_is_written_with_the_backend_off(self, tmp_path):
-        """`backend = none` is every deployment that has not opted in, and it
-        must be byte-identical to what it was."""
+        """`backend = none` is every deployment that has not opted in: no shim,
+        no client, nothing on PATH.
+
+        Not the same claim as "nothing changed" — `repos_dir` became a per-user
+        root on every backend — but this half of the feature is genuinely
+        absent."""
         config = _make_config(tmp_path, backend="none")
 
         _, user_temp = _run_hook(config, tmp_path)
@@ -163,14 +167,14 @@ class TestWhatIsOnPath:
 
         assert not (_shim_dir(user_temp) / absent).exists()
 
-    def test_an_operator_cannot_shim_the_interpreter(self, tmp_path):
-        """`make` is configurable; `python3` is not, because a shim for it would
-        route `build_bwrap_cmd`'s own network bridge into the container and
-        break egress for every developer-enabled task."""
+    def test_an_operator_cannot_shim_the_sandboxs_own_machinery(self, tmp_path):
+        """`make` is configurable; `python3` and `git` are not, because a shim
+        for either routes machinery the sandbox itself runs into a container
+        that has no copy of it — breaking tasks that never touch a build."""
         config = _make_config(tmp_path)
         config.developer.container.shim_commands = list(
             istota_config._parse_container_block(
-                {"shim_commands": ["npm", "python3", "make"]}
+                {"shim_commands": ["npm", "python3", "git", "make"]}
             )["shim_commands"]
         )
 
@@ -178,6 +182,7 @@ class TestWhatIsOnPath:
 
         assert (_shim_dir(user_temp) / "make").is_file()
         assert not (_shim_dir(user_temp) / "python3").exists()
+        assert not (_shim_dir(user_temp) / "git").exists()
 
     def test_the_shim_directory_is_on_the_returned_path(self, tmp_path):
         config = _make_config(tmp_path)
@@ -373,6 +378,64 @@ class TestTheCopiedFiles:
 
         mode = (user_temp / ".developer" / "devbox-exec").stat().st_mode
         assert mode & stat.S_IXUSR
+
+
+class TestConcurrentTasksForOneUser:
+    """The worker pool is *threads in one process*, and they share `user_temp_dir`.
+
+    A temp name keyed on the pid is therefore the same name for both, and a
+    sweep that unlinked everything outside `keep` would take the other writer's
+    in-flight file. Either way `_install_exec_transport` catches the OSError and
+    returns "", so the loser's whole `setup_env` output is discarded by
+    `dispatch_setup_env_hooks` — no shims and no credential helper — and its
+    `npm ci` runs host-side and 403s at the CONNECT proxy. That reads as a flaky
+    network, which is the symptom this feature exists to remove.
+    """
+
+    def test_two_threads_writing_at_once_both_get_their_shims(self, tmp_path):
+        import threading
+
+        config = _make_config(tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        start = threading.Barrier(6)
+        failures: list[BaseException] = []
+
+        def _work():
+            try:
+                start.wait(timeout=10)
+                for _ in range(4):
+                    env = setup_env(_Ctx(config, user_temp))
+                    if "ISTOTA_PATH_PREPEND" not in env:
+                        raise AssertionError("the hook returned no PATH entry")
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                failures.append(exc)
+
+        threads = [threading.Thread(target=_work) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert not failures, failures
+        for command in config.developer.container.shim_commands:
+            assert (_shim_dir(user_temp) / command).is_file(), command
+
+    def test_a_sweep_leaves_another_writers_temp_file_alone(self, tmp_path):
+        """Directly, rather than by winning a race: a dot-prefixed file in the
+        shim directory is somebody's half-written shim."""
+        from istota.skills.developer import _remove_shims
+
+        config = _make_config(tmp_path)
+        _, user_temp = _run_hook(config, tmp_path)
+        in_flight = _shim_dir(user_temp) / ".npm.abc123"
+        in_flight.write_text("half a shim")
+
+        _remove_shims(_shim_dir(user_temp), keep={"npm"})
+
+        assert in_flight.is_file()
+        assert not (_shim_dir(user_temp) / "cargo").exists()
 
 
 class TestItContactsNothing:

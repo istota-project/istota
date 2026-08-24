@@ -20,9 +20,13 @@ worktree registered outside this root is named and left exactly where it is.
 already exists, `x` stays at the top level and is reported. A merge would be
 the one operation here with no way back.
 
-**It needs to be told the user.** The old layout recorded no owner — which is
-half the reason it is being replaced — so nothing here can derive one. Without
-`--user` the script reports what it would do and changes nothing.
+**It needs to know whose the clones are, and it exits non-zero when it cannot
+work that out.** The old layout recorded no owner, which is half the reason it
+is being replaced. With exactly one configured user there is nothing to derive
+between and the move happens; with several, the script reports what it would do,
+changes nothing and exits 2 — because a green play here is followed by a daemon
+restart into a state where the repos bind names an empty directory and the
+developer skill is silently unusable.
 
 Idempotent: a root already in the per-user shape has nothing at the top level
 that is a repository, so a rerun moves nothing and exits 0.
@@ -38,6 +42,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 #: Directories a tool rebuilds from files that are already committed. Same list
@@ -59,6 +64,23 @@ RECONSTRUCTIBLE = frozenset({
 })
 
 GIT_TIMEOUT = 60
+
+#: How quiet a directory has to have been before it may move.
+#:
+#: **The clean check is not enough on its own, and the reason is specific.** A
+#: task running `npm ci` or `uv sync` right now has produced exactly
+#: `?? node_modules/…` and `?? .venv/…`, which `_is_reconstructible` discounts
+#: by design — so a checkout with an install in flight reads as *clean* and
+#: would be moved out from under the process writing to it. The daemon is up and
+#: dispatching while this runs; the play does not stop it.
+#:
+#: The same guard `worktree_reaper` uses, at a much shorter window, because the
+#: two protect against different lengths of thing: the reaper is a periodic
+#: sweep that must not delete a checkout a task might return to, and this is a
+#: one-shot move that must not land in the middle of a write. Measured across
+#: the checkout *and* the git directory, because a `git commit` touches no
+#: working-tree file and an edit touches no administrative one.
+DEFAULT_IDLE_MINUTES = 15
 
 
 def _git(cwd: Path, *args: str) -> tuple[int, str]:
@@ -159,27 +181,85 @@ def _checkouts(git_dir: Path) -> list[Path] | None:
     do with its contents. That is the documented layout, so getting this wrong
     means the migration never moves anything.
     """
-    code, listing = _git(git_dir, "worktree", "list", "--porcelain")
+    code, listing = _git(git_dir, "worktree", "list", "--porcelain", "-z")
     if code != 0:
         return None
 
+    # `-z`, not the line-oriented form, and for the reason `worktree_reaper`
+    # already pays for: git does not quote a newline in a worktree path in the
+    # line-oriented output, so a path whose second physical line is exactly
+    # `bare` would drop that worktree from this list — and a worktree nobody
+    # `git status`es cannot hold the move. Paths under `repos_dir` are chosen by
+    # the model (`git worktree add <path>`), so this is reachable rather than
+    # theoretical. In `-z` form each attribute is NUL-terminated and a record
+    # ends at an empty attribute.
     found: list[Path] = []
     current: Path | None = None
     is_bare = False
-    for line in listing.splitlines() + [""]:
-        if line.startswith("worktree "):
-            current = Path(line[len("worktree ") :].strip())
+    for attribute in listing.split("\0"):
+        if attribute.startswith("worktree "):
+            current = Path(attribute[len("worktree ") :])
             is_bare = False
             continue
-        if line.strip() == "bare":
+        if attribute == "bare":
             is_bare = True
             continue
-        if line.strip():
+        if attribute:
             continue
         if current is not None and not is_bare:
             found.append(current)
         current, is_bare = None, False
+    if current is not None and not is_bare:
+        found.append(current)
     return found
+
+
+def _resolve(path: Path) -> Path:
+    """`path.resolve()`, falling back to the path itself.
+
+    Never raises: a broken link or a permission error must not take the
+    whole migration with it, and the unresolved path is still the honest
+    answer for a comparison that will then simply not match.
+    """
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _newest_mtime(path: Path) -> float:
+    """The most recent mtime anywhere under `path`, or 0.0.
+
+    Bounded by pruning at the reconstructible directories: walking a
+    `node_modules` is tens of thousands of stats for an answer the directory's
+    own mtime already gives.
+    """
+    newest = 0.0
+    try:
+        newest = path.stat().st_mtime
+    except OSError:
+        return 0.0
+    for dirpath, dirnames, filenames in os.walk(path, onerror=lambda _e: None):
+        dirnames[:] = [d for d in dirnames if d not in RECONSTRUCTIBLE]
+        here = Path(dirpath)
+        for name in list(dirnames) + filenames:
+            try:
+                newest = max(newest, (here / name).lstat().st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
+def _busy_reason(paths: list[Path], idle_seconds: float, now: float) -> str:
+    """Why these directories look like live work, or "" when they are quiet."""
+    if idle_seconds <= 0:
+        return ""
+    for path in paths:
+        newest = _newest_mtime(path)
+        if newest and now - newest < idle_seconds:
+            age = int(now - newest)
+            return f"{path} was written {age}s ago; something may be using it"
+    return ""
 
 
 def _blocking_reason(git_dir: Path, entry: Path) -> str:
@@ -194,11 +274,18 @@ def _blocking_reason(git_dir: Path, entry: Path) -> str:
     if checkouts is None:
         return "git could not list its worktrees"
 
+    # Compared resolved, on both sides. `git worktree list` reports git's own
+    # record of the path, and a `repos_dir` that is or sits under a symlink — a
+    # common shape for a data volume — spells it differently from the one this
+    # walk produced. Unresolved, every repository on such a host is held with
+    # "a worktree lives outside this directory", which is false and points an
+    # operator at a problem that does not exist.
+    resolved_entry = _resolve(entry)
     for checkout in checkouts:
         if not checkout.is_dir():
             return f"a registered worktree is missing: {checkout}"
         try:
-            checkout.relative_to(entry)
+            _resolve(checkout).relative_to(resolved_entry)
         except ValueError:
             return f"a worktree lives outside this directory: {checkout}"
         code, status = _git(
@@ -233,6 +320,12 @@ def main(argv: list[str]) -> int:
         help="comma-separated user ids; a top-level directory with one of these "
              "names is already a per-user root and is left alone",
     )
+    parser.add_argument(
+        "--idle-minutes",
+        type=float,
+        default=DEFAULT_IDLE_MINUTES,
+        help="hold a directory written to more recently than this; 0 disables",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -242,6 +335,8 @@ def main(argv: list[str]) -> int:
         return 0
 
     known = {u.strip() for u in args.known_user.split(",") if u.strip()}
+    idle_seconds = max(args.idle_minutes, 0.0) * 60.0
+    now = time.time()
 
     # A candidate is a top-level directory holding at least one repository —
     # not one that *is* one. The documented layout puts the bare clone at
@@ -253,23 +348,54 @@ def main(argv: list[str]) -> int:
     for entry in sorted(root.iterdir()):
         if not entry.is_dir() or entry.is_symlink():
             continue
-        if entry.name in known:
-            continue
         repositories = _repositories_under(entry)
         if not repositories:
             continue
+        # **A name is not enough to say "already migrated".** `--known-user`
+        # holds user ids, and a top-level entry in the old layout is a *forge
+        # namespace* — one named after some other istota user is entirely
+        # ordinary, and skipping it on the name alone would leave it behind
+        # while the script printed OK. The depth of its repositories is the real
+        # discriminator: a per-user root holds them at depth 2 or more
+        # (`{user}/{namespace}/{project}.git`), a namespace at depth 1.
+        if entry.name in known:
+            depths = [len(g.relative_to(entry).parts) for g in repositories]
+            if min(depths) >= 2:
+                continue
+            print(
+                f"NOTE {entry} is named for a configured user but holds a "
+                f"repository at depth {min(depths)}; treating it as a namespace"
+            )
         candidates.append((entry, repositories))
 
     if not candidates:
         print(f"OK {root} is already in the per-user layout")
         return 0
 
-    if not args.user:
-        for entry, _ in candidates:
-            print(f"WOULD-MOVE {entry} (set istota_developer_repos_migrate_to to move it)")
-        return 0
+    user = args.user
+    if not user and len(known) == 1:
+        # **Derived only where there is nothing to derive between.** One
+        # configured user means every clone under here is theirs; there is no
+        # judgement to make and no way to file one person's work under
+        # another's name. This is the reference deployment, and leaving it to a
+        # hand-set variable is what turns "the role performs the move" into "the
+        # role reports and does nothing" on the host that most needs it.
+        user = next(iter(known))
+        print(f"NOTE one configured user ({user}); moving repositories under them")
 
-    destination_root = root / args.user
+    if not user:
+        for entry, _ in candidates:
+            print(
+                f"WOULD-MOVE {entry} (set istota_developer_repos_migrate_to to "
+                f"the user these belong to)"
+            )
+        # Non-zero, because a green play here is followed by a daemon restart
+        # into a state where the repos bind names an empty directory and the
+        # developer skill is silently unusable. With more than one configured
+        # user nothing can work out the owner, so the operator has to.
+        return 2
+
+    destination_root = root / user
     if args.dry_run:
         for entry, _ in candidates:
             print(f"WOULD-MOVE {entry} -> {destination_root / entry.name}")
@@ -288,6 +414,11 @@ def main(argv: list[str]) -> int:
         reason = next(
             (r for r in (_blocking_reason(g, entry) for g in repositories) if r), ""
         )
+        # The idle window, after the clean check and before the move. The clean
+        # check cannot see a build in flight — an install produces exactly the
+        # untracked paths `_is_reconstructible` discounts — so without this a
+        # directory a task is writing to reads as clean and moves.
+        reason = reason or _busy_reason([entry], idle_seconds, now)
         if reason:
             print(f"HELD {entry}: {reason}")
             continue

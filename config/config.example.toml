@@ -943,9 +943,15 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # daemon, does the transport answer, do the two sides agree on uid and repos
 # root, and is the uv cache mounted.
 #
-# Note `repos_dir` above is a *per-user root* once this is on: the daemon
-# derives `{repos_dir}/{user_id}` and mounts only that into the user's
-# container.
+# Note `repos_dir` above is a *per-user root* **on every backend, including
+# "none"**: the daemon derives `{repos_dir}/{user_id}` and hands that to the
+# sandbox bind, `DEVELOPER_REPOS_DIR` and the credential scrub. That is what
+# closes cross-user worktree access, and it has nothing to do with containers —
+# so an upgraded host must move its existing clones down a level before the
+# developer skill can see them again. The Ansible role does it; with more than
+# one configured user it needs `istota_developer_repos_migrate_to` and fails the
+# play until it gets one, because a green play there is followed by a daemon
+# restart into a state where the bind names an empty directory.
 
 # [developer.container]
 # backend = "none"                    # none | devbox

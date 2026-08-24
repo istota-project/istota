@@ -12,8 +12,21 @@
 # consume a bounded amount of tmpfs and cannot place a file anywhere a host
 # process will look at.
 #
-# 0750 on the parent so no other host user can see what is here; the per-user
-# subdirectories are created by the role with the same owner, because Docker
-# would otherwise auto-create a missing bind-mount source as root:root and the
-# daemon could not write its end.
+# 0750 on the parent so no other host user can see what is here.
+#
+# **The per-user subdirectories are declared here too, and that is not
+# duplication of the play's own task.** This tree is on tmpfs, so it is empty
+# again after a reboot — and the devbox carries `restart: unless-stopped`, so
+# Docker starts the container at boot, finds the bind source missing and
+# auto-creates it `root:root`. `istota-exec-serve` runs as the daemon's uid and
+# binds its socket directly, so it gets EACCES and the supervisor loops with an
+# escalating pause: the transport stays down until somebody runs the play again.
+# systemd-tmpfiles runs at boot; the play does not.
+#
+# 0770 rather than 0750: the *container* creates the socket in here, as the
+# daemon's own uid. That is bounded rather than denied — nothing on the host
+# ever reads anything out of this tree.
 d {{ istota_developer_container_exec_socket_dir }} 0750 {{ istota_user }} {{ istota_group }} -
+{% for devbox_user in istota_devbox_users %}
+d {{ istota_developer_container_exec_socket_dir }}/{{ devbox_user }} 0770 {{ istota_user }} {{ istota_group }} -
+{% endfor %}

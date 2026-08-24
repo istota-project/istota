@@ -741,7 +741,15 @@ class ContainerConfig:
 
     ``backend = "devbox"`` routes the commands in ``shim_commands`` into the
     user's devbox over the exec transport (``devbox_exec_protocol``). ``"none"``
-    is the default and is byte-identical to the behaviour before this existed.
+    is the default, and no shim is written, no socket is bound and no container
+    is reached under it.
+
+    **It is not, however, "nothing changed".** ``developer.repos_dir`` became a
+    per-user root in the same change, and that applies on every backend —
+    including this one — because it is what closes cross-user worktree access
+    rather than anything to do with containers. An upgraded host has to move its
+    existing clones down a level (the Ansible role does it) before the developer
+    skill can see them again.
 
     ``exec_socket_dir`` is the **parent**; the socket is
     ``{exec_socket_dir}/{user_id}/exec.sock``, and only the per-user
@@ -2125,9 +2133,30 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
 #: in a directory on the model's PATH.
 _SHIM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
-#: Names `shim_commands` may not carry, whatever an operator writes. See the
-#: refusal's own comment for why this is breakage rather than taste.
-_UNSHIMMABLE_COMMANDS = frozenset({"python", "python3"})
+#: Names `shim_commands` may not carry, whatever an operator writes, because
+#: shimming one breaks machinery the *sandbox* depends on rather than merely
+#: routing a build somewhere unexpected. See the refusal's own comment.
+#:
+#: `make` is deliberately absent: it is a routing judgement about Makefiles, and
+#: an operator who knows theirs may make it.
+_UNSHIMMABLE_COMMANDS = frozenset({
+    # The sandbox starts its own network bridge with the interpreter, inside the
+    # namespace, with the model's PATH in force.
+    "python", "python3",
+    # The shells and `env` are how every wrapped command is invoked in the first
+    # place — the bridge is `/bin/sh -c`, and a shimmed `env` would route the
+    # `exec env HTTPS_PROXY=… "$@"` that follows it.
+    "sh", "bash", "env",
+    # Host-side by design, each with credential machinery the container has no
+    # copy of: git's credential helper is registered per task via
+    # `GIT_CONFIG_KEY_*`, `gh` and `glab` on PATH are the policy wrapper, and
+    # `istota-skill` is the skill proxy's client.
+    "git", "gh", "glab", "istota-skill",
+})
+
+#: A versioned interpreter is the same refusal. `python3.12` would otherwise
+#: walk past the literal names above, and it is the same binary.
+_UNSHIMMABLE_RE = re.compile(r"^python\d+(\.\d+)*$")
 
 
 def _parse_container_block(raw: object) -> dict:
@@ -2226,20 +2255,23 @@ def _parse_container_block(raw: object) -> dict:
                         "plain command name; skipping it", entry,
                     )
                     continue
-                if name in _UNSHIMMABLE_COMMANDS:
-                    # Not a preference. `build_bwrap_cmd` starts the sandbox's
-                    # own network bridge as `python3 {bridge_path}` *inside* the
-                    # namespace, with the model's PATH in force, so a `python3`
-                    # shim would route the bridge into a container that has
-                    # neither the script nor the socket — breaking egress for
-                    # every developer-enabled task, not only the ones running a
-                    # build. The exec client is itself a Python script, and
+                if name in _UNSHIMMABLE_COMMANDS or _UNSHIMMABLE_RE.match(name):
+                    # Not a preference. Each of these is machinery the *sandbox*
+                    # itself runs, so shimming one breaks tasks that never touch
+                    # a build. `build_bwrap_cmd` starts the network bridge as
+                    # `python3 {bridge_path}` inside the namespace, through
+                    # `/bin/sh -c` and `exec env`, with the model's PATH in
+                    # force; git's credential helper is registered per task and
+                    # exists only on the host; `gh` and `glab` on PATH are the
+                    # policy wrapper; `istota-skill` is the skill proxy's
+                    # client. The exec client is itself a Python script, and
                     # several `developer/skill.md` recipes parse forge output
                     # with `python3 -c`.
                     logger.warning(
                         "[developer.container] shim_commands entry %r is refused: "
-                        "shimming it would route the sandbox's own network bridge "
-                        "into the container. Leave the interpreter on the host.",
+                        "shimming it would route the sandbox's own machinery into "
+                        "the container, which has no copy of it. Leave it on the "
+                        "host.",
                         name,
                     )
                     continue
