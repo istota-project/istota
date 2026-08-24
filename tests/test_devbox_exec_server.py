@@ -1481,3 +1481,162 @@ class TestTheDoctorProbeSpeaksToTheRealServer:
         assert results["developer.container.identity"].status == "ok", (
             results["developer.container.identity"].detail
         )
+
+
+class TestAShimReachesThisServerEndToEnd:
+    """The whole chain minus Docker: shim → client → server → real exit status.
+
+    Every other test of this feature holds one link. `test_developer_shims.py`
+    asserts on the text of a shim, `test_devbox_exec_client.py` drives the
+    client directly, and this file drives the wire — so the thing nobody
+    exercised was the join, which is where a quoting mistake or a wrong flag
+    name lives. The staging hand-verification is what covers the Docker half;
+    this covers everything under it, on the host, with no container.
+
+    `sh` stands in for `npm` because a shim's name is only a filename and `sh`
+    exists on every machine the suite runs on. Nothing in the shim, the client
+    or the server treats one command differently from another.
+    """
+
+    @pytest.fixture
+    def shimmed(self, server, tmp_path):
+        """`setup_env`'s output, wired to this server's socket."""
+        from istota import db
+        from istota.config import (
+            Config,
+            ContainerConfig,
+            DeveloperConfig,
+            SecurityConfig,
+        )
+        from istota.skills.developer import setup_env
+
+        user = server.repos.name
+        socket_parent = Path(server.socket_path).parent.parent
+        # The daemon derives `{exec_socket_dir}/{user}/exec.sock`; the harness
+        # names the directory `sock`. Make the derived path real rather than
+        # assuming the two agree.
+        derived = socket_parent / user
+        derived.mkdir(exist_ok=True)
+        link = derived / "exec.sock"
+        if not link.exists():
+            os.symlink(server.socket_path, link)
+
+        config = Config(
+            db_path=tmp_path / "test.db",
+            developer=DeveloperConfig(
+                enabled=True,
+                repos_dir=str(server.repos.parent),
+                container=ContainerConfig(
+                    backend="devbox",
+                    exec_socket_dir=str(socket_parent),
+                    shim_commands=["sh"],
+                ),
+            ),
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+
+        class _Ctx:
+            pass
+
+        user_temp = server.base / "task-temp"
+        user_temp.mkdir(exist_ok=True)
+        ctx = _Ctx()
+        ctx.config = config
+        ctx.user_temp_dir = str(user_temp)
+        ctx.task = db.Task(
+            id=1, prompt="p", user_id=user, source_type="talk", status="running",
+        )
+        setup_env(ctx)
+        return user_temp / ".developer" / "exec-shims" / "sh"
+
+    def _run(self, shim, *args, cwd, stdin=None):
+        return subprocess.run(
+            [str(shim), *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            input=stdin,
+            timeout=READ_TIMEOUT,
+            check=False,
+        )
+
+    def test_the_command_runs_and_its_status_comes_back(self, shimmed, server):
+        """The measurement this whole transport exists for: `docker exec`
+        through the API proxy runs the command and loses its status."""
+        work = server.repos / "project"
+        work.mkdir()
+
+        assert self._run(shimmed, "-c", "exit 0", cwd=work).returncode == 0
+        assert self._run(shimmed, "-c", "exit 7", cwd=work).returncode == 7
+        assert self._run(shimmed, "-c", "false", cwd=work).returncode == 1
+
+    def test_output_comes_back_on_the_right_stream(self, shimmed, server):
+        work = server.repos / "project"
+        work.mkdir()
+
+        result = self._run(shimmed, "-c", "echo out; echo err >&2", cwd=work)
+
+        assert result.stdout == "out\n"
+        assert "err" in result.stderr
+
+    def test_the_working_directory_travels(self, shimmed, server):
+        """The shim sends no `--cwd`; the client takes the *physical* directory
+        from `os.getcwd()`, which is what the server's realpath check wants."""
+        work = server.repos / "project" / "web"
+        work.mkdir(parents=True)
+
+        result = self._run(shimmed, "-c", "pwd", cwd=work)
+
+        assert result.stdout.strip() == str(work)
+
+    def test_a_pipeline_into_a_shimmed_command_works(self, shimmed, server):
+        """The case an earlier draft broke silently: with `stdin` never set, the
+        producer takes SIGPIPE and, under the Bash tool's pipefail, the whole
+        pipeline comes back 141."""
+        work = server.repos / "project"
+        work.mkdir()
+
+        result = self._run(shimmed, "-c", "cat", cwd=work, stdin="hello\n")
+
+        assert result.returncode == 0
+        assert result.stdout == "hello\n"
+
+    def test_an_argument_with_a_space_and_a_glob_arrives_whole(self, shimmed, server):
+        """`argv`, never `shell`, so no quoting bug can be introduced between
+        the model's shell and the container."""
+        work = server.repos / "project"
+        work.mkdir()
+
+        result = self._run(
+            shimmed, "-c", 'printf "%s\\n" "$@"', "sh", "a b", "*.js", cwd=work
+        )
+
+        assert result.stdout == "a b\n*.js\n"
+
+    def test_a_working_directory_outside_the_root_is_refused_loudly(
+        self, shimmed, server
+    ):
+        """The case that used to run silently in the container's own `/tmp`:
+        `/tmp`, `/home/…` and `/usr/src` all exist in both namespaces and mean
+        different things, and a shim's cwd is *inherited* rather than chosen."""
+        result = self._run(shimmed, "-c", "exit 0", cwd=server.outside)
+
+        assert result.returncode != 0
+        assert "istota-devbox-exec" in result.stderr
+
+    def test_a_dead_socket_exits_120_and_names_it(self, shimmed, server):
+        """The refusal a task gets when the container is down, and the one a
+        task that is not authorized for the developer skill gets on every
+        shimmed command — the same class of loud, immediate failure a host-side
+        `npm ci` gets from the CONNECT proxy today."""
+        work = server.repos / "project"
+        work.mkdir()
+        # The server unlinks its own socket on a clean stop, which is what a
+        # stopped container leaves behind too.
+        _stop_server(server)
+        assert not os.path.exists(server.socket_path)
+
+        result = self._run(shimmed, "-c", "exit 0", cwd=work)
+
+        assert result.returncode == 120
+        assert "exec.sock" in result.stderr
