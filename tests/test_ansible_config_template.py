@@ -292,32 +292,38 @@ def load_config_from(rendered: str) -> Config:
 
 
 class TestThePackageCacheRoot:
-    """ISSUE-317 — the sweep keys, and why the root itself is still blank.
+    """ISSUE-317 and ISSUE-319 — the root, the sweep keys, and the bind order.
 
-    The placement the reference doc recommends (under `developer.repos_dir`)
-    cannot be made the default as it stands: `build_bwrap_cmd` binds
-    `{root}/{user_id}` and then binds all of `repos_dir` read-write for an admin
-    developer task, in that order, so the later bind covers the earlier one and
-    every other user's cache becomes writable inside the sandbox. That is the
-    cross-user path `resolve_sandbox_cache_dir`'s per-user split exists to close.
-    The sweep that bounds the caches is finished and ships; the flip waits on a
-    decision recorded in `defaults/main.yml`.
+    The root now derives from `istota_developer_repos_dir`, which is where uv
+    can hardlink out of its cache and into a venv. The repos bind still covers
+    the cache bind, and that covering is what makes the hardlink work: a cache
+    root outside `repos_dir` and one carved back out with a nested bind were
+    both measured returning EXDEV. What it also exposes — every other user's
+    cache directory — is closed by the sibling masks ISSUE-319 added, not by
+    moving either bind.
     """
 
-    def test_the_root_is_still_blank_by_default(self, parsed):
-        """Held deliberately, so this is an assertion and not an omission.
+    def test_the_root_derives_from_the_repos_dir(self):
+        """Blank `repos_dir` leaves the root blank: with no repos bind there is
+        no mount to share and nothing the placement argument was about."""
+        assert "sandbox_cache_dir" not in tomllib.loads(
+            render(istota_developer_repos_dir="")
+        )["security"]
 
-        A future change that sets it should turn this red and be made to read
-        the reasoning in `defaults/main.yml` first.
-        """
-        assert "sandbox_cache_dir" not in parsed["security"]
+        rendered = tomllib.loads(
+            render(istota_developer_repos_dir="/srv/example/repos")
+        )
+        assert rendered["security"]["sandbox_cache_dir"] == (
+            "/srv/example/repos/.package-caches"
+        )
 
-    def test_the_bind_order_that_holds_the_flip_back_is_still_what_it_was(self, tmp_path):
-        """The reason the default is blank, asserted rather than described.
+    def test_the_bind_order_the_masks_depend_on_is_still_what_it_was(self, tmp_path):
+        """Two properties in one argv, and the sibling masks need both.
 
-        If `build_bwrap_cmd` ever binds `repos_dir` *before* the cache — or
-        carves the root back out — this goes red and the placement question can
-        be reopened on evidence.
+        The repos bind has to come *after* the cache bind — that is the single
+        mount uv hardlinks across — and the masks have to come after both, or
+        the covering bind would overmount them. Move any of the three and this
+        goes red.
         """
         from unittest.mock import patch
 
@@ -337,15 +343,20 @@ class TestThePackageCacheRoot:
         config.security = SecurityConfig(sandbox_cache_dir=str(cache_root))
         task = Task(id=1, prompt="x", user_id="alice", source_type="cli", status="running")
 
-        with patch("istota.executor._bwrap_available", return_value=True):
+        with patch("istota.executor._bwrap_available", return_value=True), \
+                patch("istota.executor._bwrap_supports_disable_userns", return_value=True):
             argv = build_bwrap_cmd(["claude"], config, task, True, [], user_temp)
 
         binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
         assert str(cache_root / "alice") in binds
         assert str(repos) in binds
         assert binds.index(str(repos)) > binds.index(str(cache_root / "alice")), (
-            "the repos bind no longer covers the cache bind — re-read the "
-            "placement note in deploy/ansible/defaults/main.yml"
+            "the repos bind no longer covers the cache bind — uv stops "
+            "hardlinking, and the sibling masks now cover nothing"
+        )
+        assert argv.index(str(cache_root / "bob")) > argv.index(str(repos)), (
+            "bob's cache is masked before the bind that exposes it, so the "
+            "bind overmounts the mask"
         )
 
     def test_the_sweep_keys_render_when_an_operator_sets_the_root(self):

@@ -4356,6 +4356,11 @@ def check_worktree_reap(config: Config) -> list:
         return reap_and_report(
             Path(dev.repos_dir),
             retention_hours=dev.worktree_retention_hours,
+            # The package caches live inside repos_dir by default and hold one
+            # directory per unpacked wheel. None of them is a repository, and
+            # walking them logs a per-sweep line claiming thousands of
+            # directories went unswept for credentials (ISSUE-319).
+            skip=[config.security.sandbox_cache_dir] if config.security.sandbox_cache_dir else [],
         )
     except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
         logger.error("worktree_reap_failed err=%s", exc, exc_info=True)

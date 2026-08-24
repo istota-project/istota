@@ -62,6 +62,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
@@ -278,6 +279,15 @@ def _is_git_dir(path: Path) -> bool:
     return head.startswith(b"ref:") or bool(re.match(rb"^[0-9a-fA-F]{40,64}\s*$", head))
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    """Whether ``path`` is strictly inside ``root``. Both already resolved."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return path != root
+
+
 def _is_worktree_pointer(path: Path) -> bool:
     """Whether ``path`` is a linked worktree's ``.git`` file rather than any
     old file that happens to be called that."""
@@ -287,7 +297,11 @@ def _is_worktree_pointer(path: Path) -> bool:
         return False
 
 
-def find_git_dirs(root: Path, max_depth: int = _MAX_DEPTH) -> list[Path]:
+def find_git_dirs(
+    root: Path,
+    max_depth: int = _MAX_DEPTH,
+    skip: Iterable[Path | str] = (),
+) -> list[Path]:
     """Every git directory under ``root``, including ``root`` itself.
 
     Covers a bare clone (``<project>.git/`` or any other name) and an ordinary
@@ -301,6 +315,16 @@ def find_git_dirs(root: Path, max_depth: int = _MAX_DEPTH) -> list[Path]:
     ``modules/*/config`` for submodules), and a worktree is a full source
     checkout — ``repos_dir`` holds one per active task, and walking into them
     is thousands of wasted stat calls on a path that runs for every task.
+
+    ``skip`` prunes named subtrees outright, matched on the resolved path. The
+    caller that needs it is ``security.sandbox_cache_dir``, whose documented
+    home is inside ``repos_dir`` (ISSUE-319): uv's ``archive-v0`` is one
+    directory per unpacked wheel, and while ``max_depth`` stops the walk from
+    descending into them it still lists and lstats every one. Measured at 25 ms
+    per sweep over 4,500 cache directories — small, and the cost that actually
+    matters is the ``not descending past depth`` line the walk then logs on
+    every task, which reads as thousands of directories going unswept for
+    credentials when none of them is a repository or ever will be.
     """
     try:
         root = Path(root).resolve()
@@ -313,12 +337,43 @@ def find_git_dirs(root: Path, max_depth: int = _MAX_DEPTH) -> list[Path]:
     if _is_git_dir(root):
         return [root]
 
+    # Strictly *under* the root, never the root itself and never above it.
+    # `skip` reaches here as an operator's raw `security.sandbox_cache_dir`, and
+    # a value equal to or above `developer.repos_dir` would prune the walk at
+    # its first step: `find_git_dirs` returns nothing, `scrub_remotes` reports a
+    # clean sweep, and the ISSUE-270 credential scrub plus the whole worktree
+    # reaper are silently switched off by a config typo. `build_bwrap_cmd`
+    # refuses such a value, but neither caller here consults that predicate —
+    # they read the key straight from config, so the check belongs here.
+    pruned: set[Path] = set()
+    for entry in skip:
+        try:
+            resolved = Path(entry).resolve()
+        except OSError:
+            continue
+        if resolved == root or not _is_under(resolved, root):
+            logger.warning(
+                "git_remote_scrub: refusing to prune %s from the sweep of %s — "
+                "it is not strictly inside it, and pruning it would skip "
+                "repositories rather than a cache", resolved, root,
+            )
+            continue
+        pruned.add(resolved)
+
     def _on_error(exc: OSError) -> None:
         logger.debug("git_remote_scrub: skipping %s (%s)", getattr(exc, "filename", "?"), exc)
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=_on_error, followlinks=False):
         here = Path(dirpath)
         depth = len(here.relative_to(root).parts)
+
+        if pruned and here in pruned:
+            # No `resolve()` per directory: `root` is already resolved, `os.walk`
+            # runs with `followlinks=False`, and a symlinked child is removed
+            # from `dirnames` below rather than descended into — so `here` can
+            # carry no symlink component and already equals its own realpath.
+            dirnames[:] = []
+            continue
 
         if _is_git_dir(here):
             found.append(here)
@@ -591,11 +646,13 @@ def scrub_config(config_file: Path, repo: Path, root: Path) -> list[ScrubFinding
     return findings
 
 
-def scrub_remotes(root: Path) -> list[ScrubFinding]:
+def scrub_remotes(root: Path, skip: Iterable[Path | str] = ()) -> list[ScrubFinding]:
     """Remove embedded credentials from every git config under ``root``.
 
     An empty list means the sweep ran and found nothing. A finding with
     ``removed=False`` means a credential is present and still on disk.
+
+    ``skip`` prunes subtrees from the walk — see :func:`find_git_dirs`.
     """
     try:
         resolved = Path(root).resolve()
@@ -603,7 +660,7 @@ def scrub_remotes(root: Path) -> list[ScrubFinding]:
         return []
 
     findings: list[ScrubFinding] = []
-    for git_dir in find_git_dirs(Path(root)):
+    for git_dir in find_git_dirs(Path(root), skip=skip):
         for config_file in config_files_for(git_dir):
             # Per config, so one repository that blows up in an unforeseen way
             # cannot end the sweep and leave every later repository unswept
@@ -619,7 +676,7 @@ def scrub_remotes(root: Path) -> list[ScrubFinding]:
     return findings
 
 
-def scrub_and_report(root: Path) -> list[ScrubFinding]:
+def scrub_and_report(root: Path, skip: Iterable[Path | str] = ()) -> list[ScrubFinding]:
     """:func:`scrub_remotes`, with a warning per finding. Never raises.
 
     The warning names the repository, the setting and the host, and never the
@@ -627,7 +684,7 @@ def scrub_and_report(root: Path) -> list[ScrubFinding]:
     here would move the credential from a config file into the application log.
     """
     try:
-        findings = scrub_remotes(root)
+        findings = scrub_remotes(root, skip=skip)
     except Exception:  # noqa: BLE001 — a setup-path guard must not fail the task
         logger.exception("git_remote_scrub: sweep of %s failed", root)
         return []

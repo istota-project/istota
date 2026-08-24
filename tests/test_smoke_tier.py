@@ -1646,3 +1646,40 @@ class _FakeEndpoint:
 
     def close(self) -> None:
         pass
+
+
+class TestTheCacheProfilePathsAgree:
+    """`tests/smoke/test_sandbox_cache_masks.py` restates two container paths as
+    literals so the scenario reads as one thing. This is what keeps the
+    restatement honest, and it runs in the default suite because it needs no
+    Docker — inside the smoke tier it would only go red on a run somebody was
+    already making for another reason.
+    """
+
+    def test_the_probe_paths_match_the_profile_and_the_repos_dir(self):
+        from testbed.services.gitlab import CONTAINER_REPOS_DIR
+
+        source = (REPO / "tests" / "smoke" / "test_sandbox_cache_masks.py").read_text()
+        cache_root = profiles.CACHE.config["ISTOTA_SECURITY_SANDBOX_CACHE_DIR"]
+
+        assert f'CACHE_ROOT = "{cache_root}"' in source, (
+            "the scenario's CACHE_ROOT literal no longer matches the profile, "
+            "so every assertion in it runs against a directory nothing binds"
+        )
+        assert cache_root.startswith(CONTAINER_REPOS_DIR + "/"), (
+            "the cache root is no longer inside repos_dir, so the repos bind "
+            "does not cover it and there is nothing for the sibling masks to "
+            "close — the scenario would pass with the masks removed"
+        )
+
+    def test_the_probe_asks_about_a_user_the_stack_does_not_have(self):
+        """The masked directory has to be somebody else's.
+
+        `Stack.submit` defaults to `testuser`, so a probe naming that user would
+        read its own cache — which is bound, not masked — and the assertion
+        would be about the wrong directory in the direction that passes.
+        """
+        source = (REPO / "tests" / "smoke" / "test_sandbox_cache_masks.py").read_text()
+
+        assert 'OWN_USER = "testuser"' in source
+        assert 'OTHER_USER = "someone-else"' in source

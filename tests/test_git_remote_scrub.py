@@ -311,6 +311,61 @@ class TestFindGitDirs:
             find_git_dirs(tmp_path, max_depth=2)
         assert "not descending past depth" in caplog.text
 
+    def test_a_skipped_subtree_is_pruned_outright(self, tmp_path, caplog):
+        """`security.sandbox_cache_dir` lives inside `repos_dir` by default
+        (ISSUE-319), and uv's `archive-v0` is one directory per unpacked wheel.
+        `max_depth` already stops the walk descending into them, so the cost
+        that shows is the depth line — which reads as thousands of directories
+        going unswept for credentials when none of them is a repository."""
+        bare = _bare(tmp_path)
+        cache = tmp_path / ".package-caches" / "alice" / "uv" / "archive-v0"
+        for i in range(5):
+            (cache / f"wheel{i}").mkdir(parents=True)
+
+        with caplog.at_level("INFO"):
+            found = find_git_dirs(tmp_path, skip=[tmp_path / ".package-caches"])
+        assert found == [bare]
+        assert "not descending past depth" not in caplog.text
+
+        # Without the skip the same tree logs it, so the assertion above is
+        # about the prune rather than about a depth this tree never reaches.
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            find_git_dirs(tmp_path)
+        assert "not descending past depth" in caplog.text
+
+    def test_a_skip_entry_that_does_not_exist_is_harmless(self, tmp_path):
+        """The key is empty on a deployment that never sets it, and the root is
+        created by the role rather than by this module."""
+        bare = _bare(tmp_path)
+        assert find_git_dirs(tmp_path, skip=[tmp_path / "never-made"]) == [bare]
+
+    def test_a_skip_at_or_above_the_root_is_refused(self, tmp_path, caplog):
+        """`skip` arrives as the operator's raw `security.sandbox_cache_dir`,
+        and neither caller consults the predicate that would reject it. A value
+        equal to or above `repos_dir` would prune the walk at its first step:
+        the sweep reports clean, and the ISSUE-270 credential scrub plus the
+        whole worktree reaper are silently switched off by a config typo."""
+        bare = _bare(tmp_path)
+
+        with caplog.at_level("WARNING"):
+            assert find_git_dirs(tmp_path, skip=[tmp_path]) == [bare]
+        assert "refusing to prune" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert find_git_dirs(tmp_path, skip=[tmp_path.parent]) == [bare]
+        assert "refusing to prune" in caplog.text
+
+    def test_a_repository_inside_a_skipped_subtree_is_not_found(self, tmp_path):
+        """The prune is by subtree, not by "is it a cache". Stated as an
+        assertion because it is the cost of the prune: a repository an operator
+        parks under the cache root goes unswept for credentials."""
+        cache = tmp_path / ".package-caches"
+        cache.mkdir()
+        _git(tmp_path, "init", "-q", "--bare", str(cache / "parked.git"))
+        assert find_git_dirs(tmp_path, skip=[cache]) == []
+
 
 class TestSweepDoesNotWalkCheckouts:
     """`setup_env` runs on every task where developer config is enabled, not
