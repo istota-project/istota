@@ -13,10 +13,16 @@ tested against a real repository rather than a parsed string, because the
 question "has this landed upstream" is git's to answer and the whole design
 rests on getting that one call right.
 
-`git cherry` is the merged test rather than `merge-base --is-ancestor`: a
-squash or rebase merge is the normal way an MR lands, and a rebased branch is
-not an ancestor of anything while every one of its commits has a patch-id
-equivalent upstream. The ancestor test alone would reap almost nothing.
+Containment is two questions asked in order, and both are tested here.
+`merge-base --is-ancestor` runs first: a head reachable from upstream needs no
+patch-id reasoning, and a worktree nobody has committed to sits on exactly the
+upstream tip, so asking anything else first held every abandoned checkout on a
+branch whose tip is a merge commit (ISSUE-316). `git cherry` answers the much
+larger case the ancestor test cannot: a squash or rebase merge is the normal
+way an MR lands, and a rebased branch is an ancestor of nothing while every one
+of its commits has a patch-id equivalent upstream. Neither replaces the other,
+and the merge-head refusal still stands behind both for a merge whose own delta
+exists nowhere upstream.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import time
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from istota.worktree_reaper import (
     parse_worktree_list,
@@ -372,6 +379,108 @@ class TestReaps:
 
         assert _names(outcomes) == {"project--topic"}
 
+    def test_reaps_a_never_committed_worktree_cut_from_a_merge_tip(self, repos):
+        """ISSUE-316, the reported case. The developer skill cuts every
+        worktree from `origin/HEAD`, so before the task's first commit its head
+        *is* the upstream tip. When that tip is a merge commit — four of the
+        last five first-parent commits on the repository this runs against, and
+        the normal state of a branch that lands MRs as merges — the merge-head
+        refusal fired before anything asked whether the head was upstream, and
+        a worktree carrying nothing at all was held forever.
+
+        The head here is reachable from upstream by construction. There is no
+        conflict resolution to be invisible to `git cherry`, because there is
+        no commit."""
+        repos_dir, bare, upstream = repos
+
+        # Land a branch upstream as a merge commit, the way an MR normally
+        # lands, so that `origin/HEAD` resolves to one.
+        _git(upstream, "checkout", "-q", "-b", "feature")
+        (upstream / "feature").write_text("x\n")
+        _git(upstream, "add", "feature")
+        _git(upstream, "commit", "-q", "-m", "feature")
+        _git(upstream, "checkout", "-q", "main")
+        _git(upstream, "merge", "-q", "--no-ff", "feature", "-m", "merge feature")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--topic", "origin/main", branch="topic")
+        head = _git(path, "rev-parse", "HEAD").strip()
+        upstream_head = _git(bare, "rev-parse", "refs/remotes/origin/HEAD").strip()
+        assert head == upstream_head, "precondition: cut from the tip, no commits"
+        assert len(_git(bare, "rev-list", "--parents", "-n", "1", head).split()) > 2, (
+            "precondition: the tip is a merge commit"
+        )
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--topic"}
+        assert not path.exists()
+
+    def test_reaps_a_merge_head_that_landed_upstream_intact(self, repos):
+        """A branch that did work, merged another branch into itself, and then
+        landed — merge commit and all — on upstream. `git cherry` cannot see a
+        merge's own delta, but nothing here needs it to: the merge commit
+        itself is reachable from upstream, so removing the checkout cannot lose
+        the conflict resolution the refusal exists to protect.
+
+        This case used to be held, and the test that held it (now
+        `test_a_merge_head_holds`) landed the merge upstream in its own setup.
+        """
+        repos_dir, bare, upstream = repos
+        path = _worktree(bare, "project--topic", "origin/main", branch="topic")
+        _git(path, "checkout", "-q", "-b", "side")
+        (path / "side").write_text("s\n")
+        _git(path, "add", "side")
+        _git(path, "commit", "-q", "-m", "side")
+        _git(path, "checkout", "-q", "topic")
+        _git(path, "merge", "-q", "--no-ff", "side", "-m", "merge side")
+
+        _git(upstream, "fetch", "-q", str(path), "topic")
+        _git(upstream, "merge", "-q", "--ff-only", "FETCH_HEAD")
+        _git(bare, "fetch", "-q", "origin")
+
+        head = _git(path, "rev-parse", "HEAD").strip()
+        assert len(_git(bare, "rev-list", "--parents", "-n", "1", head).split()) > 2, (
+            "precondition: the head is a merge commit"
+        )
+        _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--topic"}
+        assert not path.exists()
+
+    def test_a_lock_file_alone_does_not_extend_the_hold(self, repos):
+        """The activity probe reads five named files under the administrative
+        directory and no longer the directory's own mtime. A directory is
+        stamped whenever an entry is created or removed in it, which every
+        `.lock` acquisition does even when the operation writes nothing — so a
+        `gc`, a `prune` or a fetch elsewhere in the repository bought a
+        worktree a fresh retention window. Measured on the live clone at
+        filing: an administrative directory 5h26m newer than the newest file
+        in it, every one of which was from the previous day."""
+        repos_dir, bare, _ = repos
+        path = _worktree(bare, "project--main", "origin/main")
+        _age(path, 48)
+
+        admin = Path((path / ".git").read_text().split(":", 1)[1].strip())
+        lock = admin / "index.lock"
+        lock.write_text("")
+        lock.unlink()
+
+        assert admin.stat().st_mtime > time.time() - 60, (
+            "precondition: the directory's own mtime is now"
+        )
+        assert (admin / "index").stat().st_mtime < time.time() - 24 * 3600, (
+            "precondition: every file git actually writes is still old"
+        )
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == {"project--main"}
+        assert not path.exists()
+
     def test_prunes_an_administrative_entry_whose_directory_is_gone(self, repos):
         """A worktree deleted with `rm -rf` leaves a record behind, and every
         later `worktree list` carries it. Pruning those is unconditionally safe
@@ -386,6 +495,35 @@ class TestReaps:
         reap_worktrees(repos_dir, retention_hours=24)
 
         assert "project--gone" not in _git(bare, "worktree", "list", "--porcelain")
+
+    def test_reaps_a_clone_one_level_deeper_under_a_user_directory(
+        self, repos, tmp_path,
+    ):
+        """`repos_dir` is a root of per-user subtrees, so a bare clone sits at
+        `{user}/{namespace}/{project}.git` — depth 3 rather than depth 2.
+
+        The scheduler sweeps the whole root with the daemon's own view and is
+        unchanged by that layout, because `find_git_dirs` walks to depth 4.
+        This is that claim asserted rather than assumed: at depth 3 the walk
+        reaches the clone, and a worktree beside it is swept exactly as one in
+        the flat layout is.
+        """
+        repos_dir, _, upstream = repos
+        deep = tmp_path / "repos" / "alice" / "acme" / "widget.git"
+        deep.parent.mkdir(parents=True, exist_ok=True)
+        _git(tmp_path, "clone", "-q", "--bare", str(upstream), str(deep))
+        _git(deep, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        _git(deep, "fetch", "-q", "origin")
+        _git(deep, "remote", "set-head", "origin", "-a")
+
+        worktree = _worktree(deep, "widget--main", "origin/main")
+        _age(worktree, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert "widget--main" in _names(outcomes), \
+            f"a clone under a per-user directory went unswept: {outcomes}"
+        assert not worktree.exists()
 
     def test_reaps_across_several_bare_clones(self, repos, tmp_path):
         repos_dir, bare, upstream = repos
@@ -713,6 +851,58 @@ class TestHoldsBack:
         assert _names(outcomes) == set()
         assert path.exists()
 
+    def test_a_fetch_inside_the_worktree_counts_as_recent(self, repos):
+        """The operation the developer skill runs at the start of every task,
+        and the one that shows what a fixed list of names costs. A fetch in a
+        linked worktree writes `FETCH_HEAD` and nothing else — not `index`,
+        not `HEAD`, not the reflog — so a probe reading only the handful of
+        names anyone thought to write down sees a live checkout as idle and
+        deletes it while the task is still reading code.
+
+        The administrative half therefore reads every *entry* in that
+        directory rather than a list, which is also what covers a paused
+        rebase, a bisect and a cherry-pick without naming them."""
+        repos_dir, bare, _ = repos
+        path = _worktree(bare, "project--main", "origin/main")
+        _age(path, 48)
+
+        _git(path, "fetch", "-q", "origin")
+
+        admin = Path((path / ".git").read_text().split(":", 1)[1].strip())
+        assert (admin / "FETCH_HEAD").stat().st_mtime > time.time() - 60
+        for name in ("index", "HEAD", "ORIG_HEAD", "logs/HEAD", "gitdir"):
+            named = admin / name
+            assert not named.exists() or named.stat().st_mtime < time.time() - 24 * 3600, (
+                f"precondition: a fetch does not touch {name}, so a probe "
+                f"reading only these names sees this live worktree as idle"
+            )
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert path.exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["recent"]
+
+    def test_a_lock_that_is_still_held_counts_as_recent(self, repos):
+        """The other half of the lock rule. A `.lock` that has been created and
+        removed leaves nothing behind and must buy no exemption; one that is
+        still there means a git process is running right now and must hold.
+        Reading entries rather than the directory's mtime distinguishes the
+        two, which is the whole point — a lock carries an honest timestamp
+        while the directory's mtime outlives it."""
+        repos_dir, bare, _ = repos
+        path = _worktree(bare, "project--main", "origin/main")
+        _age(path, 48)
+
+        admin = Path((path / ".git").read_text().split(":", 1)[1].strip())
+        (admin / "index.lock").write_text("")
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert path.exists()
+        assert [o.reason for o in outcomes if o.path == path] == ["recent"]
+
     def test_git_refuses_the_removal_when_this_modules_check_was_wrong(self, repos, monkeypatch):
         """Defence in depth, and the reason `worktree remove` is called without
         `--force`. Every check above runs before the removal, so a worktree can
@@ -951,10 +1141,34 @@ class TestFailClosed:
         assert [o.reason for o in outcomes if o.path == path] == ["dirty"]
 
     def test_a_failing_merged_check_holds(self, repos, monkeypatch):
+        """The branch is rebase-landed rather than sitting at the tip, so
+        `git cherry` is genuinely the check that decides: the ancestor probe
+        answers "not contained" and passes the question down. Without the
+        monkeypatch this worktree is reaped, which is what keeps the assertion
+        from being vacuous."""
         import istota.worktree_reaper as mod
 
-        repos_dir, bare, _ = repos
-        path = _worktree(bare, "project--main", "origin/main")
+        repos_dir, bare, upstream = repos
+        path = _worktree(bare, "project--topic", "origin/main", branch="topic")
+        (path / "feature").write_text("x\n")
+        _git(path, "add", "feature")
+        _git(path, "commit", "-q", "-m", "feature")
+
+        # Upstream moves first, then replays the patch on top of it. Without
+        # that move the replayed commit has the same tree, parent and message
+        # and git hands back the *identical* sha, which is an ancestor.
+        (upstream / "other").write_text("y\n")
+        _git(upstream, "add", "other")
+        _git(upstream, "commit", "-q", "-m", "other")
+        _git(upstream, "fetch", "-q", str(path), "topic")
+        _git(upstream, "cherry-pick", "FETCH_HEAD")
+        _git(bare, "fetch", "-q", "origin")
+
+        head = _git(path, "rev-parse", "HEAD").strip()
+        upstream_head = _git(bare, "rev-parse", "refs/remotes/origin/HEAD").strip()
+        assert _git(bare, "merge-base", head, upstream_head).strip() != head, (
+            "precondition: not an ancestor, so the cherry check is what decides"
+        )
         _age(path, 48)
         monkeypatch.setattr(mod, "_has_unique_commits", lambda *a: None)
 
@@ -975,7 +1189,17 @@ class TestFailClosed:
     def test_a_merge_head_holds(self, repos):
         """`git cherry` reports the commits a merge brought in and never the
         merge's own delta, so content that exists only in a conflict resolution
-        is invisible to the merged test. The head is refused instead."""
+        is invisible to the merged test. The head is refused instead.
+
+        The setup is what makes this a test of the refusal at all. The merge
+        must be absent from upstream while its *content* is there under other
+        shas — a squash or rebase landing, which is how an MR normally arrives
+        — so that `git cherry` reports no `+` line and the ancestor probe
+        answers "not contained". Both preconditions are asserted, because the
+        earlier version of this test landed the merge commit itself upstream
+        with `merge --ff-only`, which made the head an ancestor and left the
+        refusal untested the moment anything asked that question first
+        (ISSUE-316)."""
         repos_dir, bare, upstream = repos
         path = _worktree(bare, "project--topic", "origin/main", branch="topic")
         _git(path, "checkout", "-q", "-b", "side")
@@ -985,11 +1209,62 @@ class TestFailClosed:
         _git(path, "checkout", "-q", "topic")
         _git(path, "merge", "-q", "--no-ff", "side", "-m", "merge side")
 
-        # Land everything upstream so only the merge-head rule can hold it.
-        _git(upstream, "fetch", "-q", str(path), "topic")
-        _git(upstream, "merge", "-q", "--ff-only", "FETCH_HEAD")
+        # Land the branch's content upstream under a different sha, leaving the
+        # merge commit itself reachable from nowhere but this worktree.
+        _git(upstream, "fetch", "-q", str(path), "side")
+        _git(upstream, "cherry-pick", "FETCH_HEAD")
         _git(bare, "fetch", "-q", "origin")
+
+        head = _git(path, "rev-parse", "HEAD").strip()
+        upstream_head = _git(bare, "rev-parse", "refs/remotes/origin/HEAD").strip()
+        assert len(_git(bare, "rev-list", "--parents", "-n", "1", head).split()) > 2, (
+            "precondition: the head is a merge commit"
+        )
+        assert _git(bare, "merge-base", head, upstream_head).strip() != head, (
+            "precondition: the merge is not an ancestor of upstream"
+        )
+        assert not [
+            line for line in _git(bare, "cherry", upstream_head, head).splitlines()
+            if line.startswith("+")
+        ], "precondition: only the merge-head rule can hold this"
         _age(path, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert _names(outcomes) == set()
+        assert [o.reason for o in outcomes if o.path == path] == ["merge_head"]
+
+    def test_an_unanswerable_ancestor_check_reads_as_not_contained(self, repos):
+        """`merge-base --is-ancestor` exits 0 for contained, 1 for not, and
+        anything else is an error. An error must read as "not contained" and
+        leave the remaining checks to decide, matching every other probe in
+        this module: an unanswerable question holds the worktree rather than
+        licensing a delete."""
+        import istota.worktree_reaper as mod
+
+        _, bare, _ = repos
+        assert mod._is_ancestor(Path("/nonexistent"), "x", "y") is False
+        assert mod._is_ancestor(bare, "0" * 40, "refs/remotes/origin/HEAD") is False
+        assert mod._is_ancestor(bare, "", "refs/remotes/origin/HEAD") is False
+
+    def test_a_merge_head_holds_when_the_ancestor_check_cannot_answer(self, repos, monkeypatch):
+        """The same fall-through through the real sweep: with the ancestor
+        probe unable to answer, a worktree cut from a merge tip is held by the
+        refusal that used to hold it unconditionally."""
+        import istota.worktree_reaper as mod
+
+        repos_dir, bare, upstream = repos
+        _git(upstream, "checkout", "-q", "-b", "feature")
+        (upstream / "feature").write_text("x\n")
+        _git(upstream, "add", "feature")
+        _git(upstream, "commit", "-q", "-m", "feature")
+        _git(upstream, "checkout", "-q", "main")
+        _git(upstream, "merge", "-q", "--no-ff", "feature", "-m", "merge feature")
+        _git(bare, "fetch", "-q", "origin")
+
+        path = _worktree(bare, "project--topic", "origin/main", branch="topic")
+        _age(path, 48)
+        monkeypatch.setattr(mod, "_is_ancestor", lambda *a: False)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
 
@@ -1001,7 +1276,7 @@ class TestBranchRef:
 
     def test_the_ref_delete_is_pinned_to_the_head_that_was_approved(self, repos, monkeypatch):
         """`update-ref -d <ref>` with no old value deletes whatever the ref
-        points at now, not the sha `git cherry` approved — so a branch that
+        points at now, not the sha the containment checks approved — so a branch that
         advanced between the listing and the removal would lose the new commits
         to the delete. With the old value, git refuses and says so."""
         import istota.worktree_reaper as mod
@@ -1090,15 +1365,18 @@ class TestRecheckBeforeRemoval:
         path = _worktree(bare, "project--main", "origin/main")
         _age(path, 48)
 
-        # `_is_merge_commit` runs after the dirty check and before the removal,
-        # which is the window a sibling process would write into.
-        real = mod._is_merge_commit
+        # `_is_ancestor` runs after the dirty check and before the removal,
+        # which is the window a sibling process would write into. (It was
+        # `_is_merge_commit` before ISSUE-316 put the ancestor probe first;
+        # what this needs is any containment check that still runs for a
+        # worktree the sweep is about to remove.)
+        real = mod._is_ancestor
 
-        def write_then_answer(bare_dir, head):
+        def write_then_answer(bare_dir, head, upstream_ref):
             (path / ".env").write_text("SECRET=x\n")
-            return real(bare_dir, head)
+            return real(bare_dir, head, upstream_ref)
 
-        monkeypatch.setattr(mod, "_is_merge_commit", write_then_answer)
+        monkeypatch.setattr(mod, "_is_ancestor", write_then_answer)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
 
@@ -1175,6 +1453,78 @@ class TestSchedulerIntegration:
         from istota.scheduler import check_worktree_reap
 
         assert check_worktree_reap(self._config(tmp_path / "nope")) == []
+
+    def test_the_package_caches_are_pruned_from_the_walk(self, repos):
+        """The skip used to name `security.sandbox_cache_dir`, which is blank on
+        any deployment that has a repos tree to derive a cache from — so it went
+        inert the moment the cache moved inside the per-user subtree.
+
+        Not cosmetic. A git directory inside the cache within `_MAX_DEPTH` is
+        found by the walk and evaluated as a reap candidate, and evaluating one
+        runs `git fetch` against a model-written `remote.origin.url` from the
+        unsandboxed scheduler, outside the CONNECT allowlist, on every sweep.
+        The cache is bound read-write into the task's own sandbox, so it is
+        exactly where such a directory turns up. The cheaper cost is the walk
+        listing every unpacked wheel and then logging that thousands of
+        directories went unswept for credentials.
+
+        The in-test control is the second `find_git_dirs` call: without the
+        skip the same fixture *is* found, so a green assertion means the prune
+        did it and not the depth limit or the git-dir test.
+        """
+        from istota.git_remote_scrub import find_git_dirs
+        from istota.scheduler import _package_cache_dirs
+
+        repos_dir, _bare, _ = repos
+        planted = repos_dir / "alice" / ".package-caches" / "uv" / "evil.git"
+        planted.mkdir(parents=True)
+        (planted / "HEAD").write_text("ref: refs/heads/main\n")
+        (planted / "config").write_text("")
+        (planted / "objects").mkdir()
+
+        skip = _package_cache_dirs(str(repos_dir))
+        assert repos_dir / "alice" / ".package-caches" in skip
+
+        assert planted.resolve() in find_git_dirs(repos_dir), \
+            "the control failed: the fixture is out of the walk's reach anyway"
+        assert planted.resolve() not in find_git_dirs(repos_dir, skip=skip), \
+            "the package cache is still walked for repositories"
+
+    def test_check_worktree_reap_passes_the_derived_skips(self, repos):
+        """The wiring, separately from the prune. The two halves fail
+        independently: a correct `_package_cache_dirs` that the call site does
+        not pass is exactly the state this commit found the code in."""
+        from istota.scheduler import check_worktree_reap
+
+        repos_dir, _bare, _ = repos
+        (repos_dir / "alice" / ".package-caches").mkdir(parents=True)
+
+        with patch("istota.worktree_reaper.reap_and_report", return_value=[]) as reap:
+            check_worktree_reap(self._config(repos_dir))
+
+        skip = reap.call_args.kwargs["skip"]
+        assert repos_dir / "alice" / ".package-caches" in skip, reap.call_args
+        # One entry per top-level directory, each naming a cache and nothing
+        # else — the fixture's own namespace directory is in there too, and a
+        # skip that named a *repository* would prune real work out of the sweep.
+        assert all(p.name == ".package-caches" for p in skip), skip
+
+    def test_the_cache_name_matches_the_executors(self):
+        """Restated in the scheduler rather than imported, like the developer
+        skill's copy. Two spellings drifting apart puts the walk back inside the
+        cache with nothing to say so."""
+        from istota.executor import SANDBOX_CACHE_ROOT_NAME
+        from istota.scheduler import _SANDBOX_CACHE_ROOT_NAME
+
+        assert _SANDBOX_CACHE_ROOT_NAME == SANDBOX_CACHE_ROOT_NAME
+
+    def test_the_cache_enumeration_never_raises(self, tmp_path):
+        """It feeds a delete path's walk. An unreadable root costs a noisy
+        sweep, which is the right way to be wrong: `skip` only prunes, so an
+        empty answer loses performance rather than safety."""
+        from istota.scheduler import _package_cache_dirs
+
+        assert _package_cache_dirs(str(tmp_path / "nope")) == []
 
     def test_the_developer_setup_hook_no_longer_reaps(self, repos, tmp_path):
         """The hook still writes the credential wiring; it must not delete."""

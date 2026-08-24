@@ -1,8 +1,10 @@
 """Developer skill — setup_env hook.
 
-Sweeps ``repos_dir`` for credentials embedded in remote URLs and strips them
-(:mod:`istota.git_remote_scrub`, ISSUE-270) before generating anything, then
-generates, inside the task's user temp directory:
+Creates the task's own subtree of ``repos_dir`` (``{repos_dir}/{user_id}`` —
+the only part of that tree the sandbox binds) and sweeps it for credentials
+embedded in remote URLs, stripping them (:mod:`istota.git_remote_scrub`,
+ISSUE-270) before generating anything. Then generates, inside the task's user
+temp directory:
 
 - the credential-fetch helper and the per-platform git-credential-helper
   scripts, plus the ``GIT_CONFIG_*`` vars that point git at them;
@@ -22,10 +24,13 @@ has paths to that directory that neither the bind nor the deny root covers.
 Same posture as the policy itself: it stops a mistake, not a decision. The
 boundary that does the real work is the forge token's own scope.
 
-Static env vars (DEVELOPER_REPOS_DIR, GITLAB_URL, GITHUB_URL, the optional
+Static env vars (GITLAB_URL, GITHUB_URL, the optional
 namespace/owner/reviewer/credit knobs, GITLAB_TOKEN, GITHUB_TOKEN) come
 from the manifest's ``env:`` block — this hook only handles the parts
-that aren't expressible as static EnvSpecs.
+that aren't expressible as static EnvSpecs. ``DEVELOPER_REPOS_DIR`` is one
+of those parts now: it is the task's own subtree of ``developer.repos_dir``
+rather than the configured value, so the hook owns it and the manifest
+entry is ``from: setup_env``.
 """
 
 from __future__ import annotations
@@ -51,6 +56,15 @@ from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 from istota.git_remote_scrub import scrub_and_report
 
 logger = logging.getLogger("istota.skills.developer")
+
+#: The package-cache directory's name inside a user's repos subtree.
+#:
+#: ``executor.SANDBOX_CACHE_ROOT_NAME``, restated for the same reason
+#: ``_user_repos_dir`` restates the layout rule: a skill module cannot import
+#: the executor that imports it (``istota.skills`` star-imports every skill, so
+#: the executor's import graph would ride along on every path touching one).
+#: ``tests/test_sandbox.py::TestPerUserReposDir`` holds the two equal.
+SANDBOX_CACHE_ROOT_NAME = ".package-caches"
 
 # Where the canonical wrapper lives, for copying into the task's .developer.
 _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
@@ -644,18 +658,157 @@ def setup_env(ctx) -> dict[str, str]:
     # the credential helper, GIT_CONFIG_COUNT and the forge-CLI wiring, leaving
     # a task that looks fine and cannot authenticate. `scrub_and_report` holds a
     # never-raises contract of its own; this ordering is the second guard.
-    user_repos = istota_config.repos_root(config, _ctx_user_id(ctx))
-    if user_repos is not None:
-        # Created here, because nothing else in `src/` does and the bwrap bind
-        # skips a source that does not exist. Inside the sandbox a `mkdir -p
-        # "$DEVELOPER_REPOS_DIR"` writes to bwrap's root tmpfs and vanishes at
-        # task exit, so without this a deployment not driven by the Ansible role
-        # can never bring the directory into existence from a task at all — the
-        # skill would be silently unusable with no error naming a path.
-        try:
-            user_repos.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            logger.warning("developer: could not create %s: %s", user_repos, exc)
-        scrub_and_report(user_repos)
+    #
+    # That all-or-nothing return now costs `DEVELOPER_REPOS_DIR` too, since the
+    # manifest is no longer a second source of it, and moving the assignment
+    # earlier would not help — the hook's whole return value goes, wherever in
+    # it the raise happened. What is worth knowing is that the two new
+    # consequences are quiet: `$DEVELOPER_REPOS_DIR/<ns>/<project>.git` expands
+    # to an absolute path on the sandbox root tmpfs, and `code_review` takes its
+    # `repos_root_unavailable` skip, which is exit 0 and non-blocking by design.
+    # So a raise anywhere above lands work unreviewed rather than failing. The
+    # fix for that is in `dispatch_setup_env_hooks`, which should not be
+    # swallowing a setup failure into an empty dict at all.
+    # The package caches sit *inside* the subtree this walks —
+    # `{repos_dir}/{user_id}/.package-caches`, derived by
+    # `executor.resolve_sandbox_cache_dir` — and hold one directory per
+    # unpacked wheel, none of them a repository. So the skip is not an
+    # optimization that happens to be inert: with the derivation in place the
+    # walk reaches the cache on every task, and `git_remote_scrub`'s depth
+    # budget would be spent on wheels. Named from the constant rather than from
+    # `security.sandbox_cache_dir`, which the resolver does not read while
+    # `repos_dir` is set.
+    repos_root = _user_repos_dir(dev, ctx)
+    cache_root = repos_root / SANDBOX_CACHE_ROOT_NAME if repos_root else None
+    if repos_root is not None:
+        # The one place that knows the layout. `DEVELOPER_REPOS_DIR` is the
+        # task's own subtree, exactly the path `build_bwrap_cmd` binds, so the
+        # documented clone recipe (`$DEVELOPER_REPOS_DIR/<ns>/<project>.git`)
+        # lands inside the namespace instead of on bwrap's root tmpfs. It goes
+        # to the model *and*, through `proxy_base_env`, to every host-side skill
+        # CLI — `code_review` contains a model-named worktree against it.
+        #
+        # Emitted here rather than resolved from `developer.repos_dir` by the
+        # manifest, and the manifest entry is `from: setup_env` (metadata only)
+        # rather than `from: config`, because the two cannot both name it: the
+        # merge in `execute_task` applies `build_skill_env` first and the hooks
+        # second, both with `if k not in env`, so a `from: config` entry wins
+        # and this value would be dropped without a word. Measured, not read —
+        # `tests/test_developer_repos_env.py::TestManifestOutranksSetupEnv`.
+        #
+        # Absent for a non-admin, matching `_user_repos_dir`'s gate and the
+        # bind's: a variable with no bind behind it names a directory on the
+        # root tmpfs, which is the defect this stage closes, one gate out.
+        #
+        # **The authorization gate is gone, and that is deliberate.** The
+        # manifest resolved this through `build_skill_env(authorized_skills,
+        # …)`, so a deployment with `[developer]` configured but no forge token
+        # had the config key and no variable. A hook is dispatched over the
+        # whole skill index whatever the task selected, so every admin task on
+        # a developer-enabled deployment now carries it. That widens what the
+        # model is *told*, not what it can reach: `build_bwrap_cmd` gates the
+        # bind on `is_admin and config.developer.enabled` alone — never on
+        # skill selection — so the directory is already in the namespace of
+        # exactly this set of tasks, and naming it adds nothing. Two things did
+        # depend on the old gate and were corrected with this change: the smoke
+        # tier's authorization control (`tests/smoke/test_secret_isolation.py`,
+        # which now reads `GITLAB_URL`, a var that is still manifest-resolved
+        # and so still gated) and the pre-commit hook's unattended-shell marker,
+        # whose meaning shifted from "authorized for the developer skill" to
+        # "an admin task on a developer-enabled deployment" — see AGENTS.md.
+        env["DEVELOPER_REPOS_DIR"] = str(repos_root)
+        scrub_and_report(repos_root, skip=[cache_root] if cache_root else [])
 
     return env
+
+
+def _user_repos_dir(dev, ctx) -> Path | None:
+    """``{repos_dir}/{user_id}``, created if it is not there, or None.
+
+    The layout rule is ``executor.get_user_repos_dir``, including its
+    containment check; this is the same rule written a second time because a
+    skill module cannot import the executor that imports it (``istota.skills``
+    star-imports every skill, so the executor's import graph would ride along
+    on every path that touches one). ``tests/test_sandbox.py::TestPerUserReposDir``
+    holds the two equal, so a change to either without the other goes red.
+
+    Created here, at 0700, because ``build_bwrap_cmd``'s ``_bind`` skips a path
+    that does not exist. Without it a user's first developer task binds nothing
+    at all, the model's first ``mkdir -p`` under ``$DEVELOPER_REPOS_DIR`` lands
+    on bwrap's root tmpfs, and the clone it then spends minutes on disappears
+    when the task ends — a working first task and a confusing one differ by
+    this directory. ``mkdir`` + an explicit ``chmod`` is the idiom
+    ``resolve_sandbox_cache_dir`` uses for the per-user cache directory, for
+    the reason that ``mkdir``'s mode is umask-dependent. Only the idiom is
+    shared: that function validates its root through half a dozen guards this
+    one does not repeat, because the root here is an operator-set path the
+    sandbox has bound since the developer skill shipped.
+
+    **A failed ``chmod`` must not cancel the scrub.** They are two failures and
+    only one of them is disqualifying: ``mkdir(exist_ok=True)`` succeeds on a
+    directory another uid owns and ``chmod`` then raises ``EPERM``, while
+    ``build_bwrap_cmd`` binds that directory regardless — its gate is the
+    path's existence, not this function's return value. Returning None on the
+    chmod would bind an unscrubbed tree, which is ISSUE-270 back, on the one
+    shape (a migrator or an operator made the directory) where it is most
+    likely.
+
+    Never raises. This runs late in a hook whose exceptions
+    ``dispatch_setup_env_hooks`` swallows along with everything the hook
+    returned, so a failure here has to be reported rather than thrown — a task
+    that cannot clone is better than one that silently cannot authenticate.
+    """
+    # The bind is admin-gated, so a non-admin's subtree would be created, mode
+    # reset and walked on every task and every heartbeat tick for a directory
+    # no sandbox ever binds. The two gates agree instead.
+    if not getattr(ctx, "is_admin", False):
+        return None
+
+    user_id = getattr(getattr(ctx, "task", None), "user_id", "") or ""
+    if not user_id:
+        # The fallback would be the shared root, which is the cross-user reach
+        # the per-user layout exists to remove. Fail closed and say so.
+        logger.warning(
+            "developer: no user id on the task; not creating or scrubbing a "
+            "repos subtree under %s", dev.repos_dir,
+        )
+        return None
+
+    root = Path(dev.repos_dir)
+    repos_root = root / user_id
+    try:
+        contained = (
+            repos_root.parent == root
+            and repos_root.resolve() == root.resolve() / user_id
+        )
+    except OSError:
+        contained = False
+    if not contained:
+        # A symlink left in the root by a task from the shared-tree era, or a
+        # user id that is not one path component. Either way this is not that
+        # user's subtree, and `mkdir`, `chmod` and the scrub's rewrites would
+        # all follow it. See `executor.get_user_repos_dir`.
+        logger.warning(
+            "developer: %s is not the subtree named by user id %r; not "
+            "creating, chmodding or scrubbing it", repos_root, user_id,
+        )
+        return None
+
+    try:
+        repos_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "developer: could not create the repos subtree %s (%s); the task "
+            "will have no writable repos directory inside the sandbox",
+            repos_root, exc,
+        )
+        return None
+    try:
+        os.chmod(repos_root, 0o700)
+    except OSError as exc:
+        # Reported, not fatal — see the docstring. The scrub still runs.
+        logger.warning(
+            "developer: could not set 0700 on the repos subtree %s (%s)",
+            repos_root, exc,
+        )
+    return repos_root

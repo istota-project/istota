@@ -258,6 +258,12 @@ class SchedulerConfig:
     # well under the default 24-hour retention window, so nothing waits long
     # after becoming eligible, and well over the cost of a sweep.
     worktree_reap_interval: int = 21600
+    # Seconds between package-cache sweeps (ISSUE-317, 0 = off). Inert unless
+    # `security.sandbox_cache_dir` is set, since with no configured root there
+    # is no cache on disk to bound. Six hours, matching the worktree reap beside
+    # it: the two answer the same disk, and a cache that went over its ceiling
+    # is not urgent — it is over budget, not broken.
+    sandbox_cache_sweep_interval: int = 21600
     db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
     db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
     db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
@@ -783,9 +789,10 @@ class DeveloperConfig:
     """Developer skill configuration for git + GitLab/GitHub workflows."""
     enabled: bool = False
     # Base directory for repo clones/worktrees. **A per-user root**: the daemon
-    # derives `{repos_dir}/{user_id}` (`config.repos_root`) and everything that
-    # scopes a task — the bwrap bind, the native file-tool write root, the
-    # `DEVELOPER_REPOS_DIR` manifest var, `git_remote_scrub` — is handed that
+    # derives `{repos_dir}/{user_id}` (`executor.get_user_repos_dir`) and
+    # everything that scopes a task — the bwrap bind, the native file-tool write
+    # root, the `DEVELOPER_REPOS_DIR` the developer skill's `setup_env` emits,
+    # `git_remote_scrub` — is handed that
     # rather than this. One rule closing three holes: a devbox mounting the
     # global root would give user B write access to user A's worktrees; a
     # non-admin with a devbox would reach past the admin-only bwrap bind
@@ -1056,6 +1063,20 @@ class SecurityConfig:
     # would cover it. `executor.resolve_sandbox_cache_dir` owns every one of
     # those rules and never raises.
     sandbox_cache_dir: str = ""
+    # Bounding what the key above creates (ISSUE-317, src/istota/sandbox_cache_sweeper.py).
+    # Moving the caches onto disk is what makes them *persist*, and nothing
+    # pruned them: the sweep runs from the scheduler on
+    # `scheduler.sandbox_cache_sweep_interval` and gives each per-user cache the
+    # package managers' own cheap reclaim (`uv cache prune`, `npm cache verify`),
+    # escalating to a full clean only for one still over its ceiling afterwards.
+    # A ceiling in bytes rather than an age window, because one
+    # `uv sync --all-extras` writes about 1.8 GB at once and blows any sane
+    # window immediately. Inert while `sandbox_cache_dir` is empty.
+    sandbox_cache_sweep_enabled: bool = True
+    # Per user, in gibibytes. Clamped to a 1 GiB floor by the sweeper: below
+    # that the ceiling is under a single dependency resolution's working set, so
+    # every sweep would wipe a cache that is doing its job.
+    sandbox_cache_max_gb: float = 10.0
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
 
@@ -2288,31 +2309,6 @@ def _parse_container_block(raw: object) -> dict:
     return kwargs
 
 
-def repos_root(config: "Config", user_id: str) -> Path | None:
-    """This user's subdirectory of ``developer.repos_dir``, or None.
-
-    The one helper behind every per-task consumer of the repos tree: the bwrap
-    RW bind, the native brain's file-tool write root, the protected-cache-parent
-    list, ``git_remote_scrub``'s sweep root and the container's bind mount. They
-    must not disagree — a bind at one spelling and a scrub at another is a
-    directory the model can reach and nothing sweeps.
-
-    Returned **as written**, not resolved, for the reason
-    ``resolve_sandbox_cache_dir`` states at length: ``_bind`` uses the string it
-    is handed as the sandbox destination, so resolving here would put a
-    symlinked ``repos_dir`` and a cache under it at two names inside the
-    namespace, hence on two mounts, and ``link(2)`` returns EXDEV between them.
-
-    None when the skill has no ``repos_dir``, or when there is no user to scope
-    to — the heartbeat builds a task with an empty user id, and a root of
-    ``{repos_dir}/`` is the global root wearing a per-user spelling.
-    """
-    raw = getattr(getattr(config, "developer", None), "repos_dir", "")
-    if not raw or not user_id:
-        return None
-    return Path(raw) / user_id
-
-
 def container_backend(config: "Config") -> str:
     """``developer.container.backend``, defaulted for a config built by hand."""
     dev = getattr(config, "developer", None)
@@ -2725,6 +2721,7 @@ def load_config(config_path: Path | None = None) -> Config:
             db_health_check_interval=sched.get("db_health_check_interval", 86400),
             doctor_check_interval=sched.get("doctor_check_interval", 3600),
             worktree_reap_interval=sched.get("worktree_reap_interval", 21600),
+            sandbox_cache_sweep_interval=sched.get("sandbox_cache_sweep_interval", 21600),
             db_backup_enabled=sched.get("db_backup_enabled", True),
             db_backup_interval=sched.get("db_backup_interval", 86400),
             db_backup_dir=sched.get("db_backup_dir", ""),
@@ -3433,6 +3430,49 @@ def load_config(config_path: Path | None = None) -> Config:
                 "sandbox at all any more (for admins or anyone else); writes go "
                 "through skill CLIs and deferred ops. Remove the key."
             )
+        # The sweep flag and its ceiling are read the strict way the
+        # `[brain.claude_code]` block is, not the terse way the keys around them
+        # are. `bool("false")` is True, and this is the one key in this section
+        # that decides whether a *delete* path runs on a cadence: "the operator
+        # wrote false and the sweep stayed on" is the failure it must not have.
+        # A ceiling that is not a finite number would disable the ceiling rather
+        # than the sweep — NaN compares false against everything, so nothing
+        # would ever look over-budget or under it.
+        def _sweep_enabled() -> bool:
+            if "sandbox_cache_sweep_enabled" not in sec:
+                return True
+            raw = sec["sandbox_cache_sweep_enabled"]
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                text = raw.strip().lower()
+                if text in ("true", "yes", "on", "1"):
+                    return True
+                if text in ("false", "no", "off", "0"):
+                    return False
+            logger.warning(
+                "[security] sandbox_cache_sweep_enabled=%r is not a boolean; using True",
+                raw,
+            )
+            return True
+
+        def _sweep_ceiling() -> float:
+            default = 10.0
+            if "sandbox_cache_max_gb" not in sec:
+                return default
+            raw = sec["sandbox_cache_max_gb"]
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                value = float("nan")
+            if isinstance(raw, bool) or not math.isfinite(value) or value <= 0:
+                logger.warning(
+                    "[security] sandbox_cache_max_gb=%r is not a positive number; using %s",
+                    raw, default,
+                )
+                return default
+            return value
+
         config.security = SecurityConfig(
             sandbox_enabled=sec.get("sandbox_enabled", True),
             skill_proxy_enabled=sec.get("skill_proxy_enabled", True),
@@ -3451,6 +3491,8 @@ def load_config(config_path: Path | None = None) -> Config:
                 )
             } if "sandbox_ro_paths" in sec else {}),
             sandbox_cache_dir=str(sec.get("sandbox_cache_dir", "") or ""),
+            sandbox_cache_sweep_enabled=_sweep_enabled(),
+            sandbox_cache_max_gb=_sweep_ceiling(),
         )
         if (
             config.security.sandbox_enabled

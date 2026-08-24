@@ -427,3 +427,366 @@ def load_config_from(rendered: str) -> Config:
         path = Path(tmp) / "config.toml"
         path.write_text(rendered)
         return load_config(path)
+
+
+class TestThePackageCacheRoot:
+    """ISSUE-305, ISSUE-317, ISSUE-319 — the root, the sweep keys, the bind order.
+
+    **This key has moved twice and the reasons are different, which is why the
+    third reader gets a paragraph.** It shipped blank because there was nowhere
+    good to put a package cache. `cc691d6f` derived it from
+    `istota_developer_repos_dir` — `{repos_dir}/.package-caches` — because uv
+    hardlinks out of its cache and `link(2)` compares mounts, so the cache has
+    to be inside the bind that also holds the venv, and the repos bind was the
+    only such bind. That root was shared by every user, which is ISSUE-319, and
+    it cost about 200 lines of sibling masks to make safe.
+
+    It is blank again now, and *not* for the original reason. The daemon derives
+    the cache itself, per user, at `{repos_dir}/{user_id}/.package-caches`, and
+    `resolve_sandbox_cache_dir` does not read this key at all while `repos_dir`
+    is set. A value here would name the fallback path — what a deployment
+    running the sandbox *without* the developer skill uses — while reading like
+    the intended one. So the assertion below is not "the key is unused"; it is
+    "the developer deployment must not set it".
+    """
+
+    def test_the_root_stays_blank_whatever_the_repos_dir_says(self):
+        """Both ways. A blank `repos_dir` has no tree to derive from, and a set
+        one derives inside the per-user subtree without consulting this key."""
+        for repos_dir in ("", "/srv/example/repos"):
+            rendered = tomllib.loads(render(istota_developer_repos_dir=repos_dir))
+            assert "sandbox_cache_dir" not in rendered["security"], (
+                f"the role set a cache root for repos_dir={repos_dir!r}; the "
+                "daemon derives it and would ignore this value"
+            )
+
+    def test_the_default_render_puts_the_cache_inside_the_bind_that_covers_it(
+        self, tmp_path,
+    ):
+        """The rendered default tied to the argv it produces.
+
+        The repos bind has to come *after* the cache bind: that is the single
+        mount uv hardlinks across, and the whole reason the cache is derived
+        rather than configured. Move either bind and this goes red. What is
+        *not* asserted any more is a mask after both — there is no other user's
+        cache in the namespace to mask, which is the property that replaced it.
+        """
+        from unittest.mock import patch
+
+        from istota.db import Task
+        from istota.executor import build_bwrap_cmd
+
+        repos = tmp_path / "repos"
+        (repos / "alice").mkdir(parents=True)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        config = load_config_from(render(
+            istota_developer_enabled=True, istota_developer_repos_dir=str(repos),
+        ))
+        config.temp_dir = tmp_path / "temp"
+        assert config.security.sandbox_cache_dir == ""
+        task = Task(id=1, prompt="x", user_id="alice", source_type="cli", status="running")
+
+        with patch("istota.executor._bwrap_available", return_value=True):
+            argv = build_bwrap_cmd(["claude"], config, task, True, [], user_temp)
+
+        binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+        cache = str(repos / "alice" / ".package-caches")
+        assert cache in binds
+        assert str(repos / "alice") in binds
+        assert binds.index(str(repos / "alice")) > binds.index(cache), (
+            "the repos bind no longer covers the cache bind — uv stops "
+            "hardlinking and every worktree pays a full copy"
+        )
+        assert str(repos) not in binds, "the shared root was bound"
+
+    def test_the_sweep_keys_render_when_an_operator_sets_the_root(self):
+        rendered = tomllib.loads(
+            render(istota_security_sandbox_cache_dir="/srv/example/repos/.caches")
+        )
+
+        assert rendered["security"]["sandbox_cache_dir"] == "/srv/example/repos/.caches"
+        assert rendered["security"]["sandbox_cache_sweep_enabled"] is True
+        assert rendered["security"]["sandbox_cache_max_gb"] > 0
+        assert rendered["scheduler"]["sandbox_cache_sweep_interval"] > 0
+
+    def test_the_role_creates_the_repos_root_and_stops_there(self):
+        """The root, at 0755, and nothing below it.
+
+        Nothing else in the tree creates `developer.repos_dir`, and everything
+        under it is per user: the daemon makes `{repos_dir}/{user_id}` at 0700
+        as each user's first task needs it. A role that also made a per-user
+        directory would be inventing a user list at a point in the play where
+        it does not have one — so "and stops there" is asserted rather than
+        described, by requiring exactly one creator and no `file:` task naming
+        anything *below* the root.
+        """
+        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        creators = [
+            t for t in tasks
+            if isinstance(t.get("file"), dict)
+            and t["file"].get("path") == "{{ istota_developer_repos_dir }}"
+        ]
+
+        assert len(creators) == 1, (
+            f"expected exactly one task creating the repos root, found "
+            f"{[t.get('name') for t in creators]}"
+        )
+        task = creators[0]
+        assert task["file"]["owner"] == "{{ istota_user }}"
+        assert task["file"]["mode"] == "0755"
+        assert any(
+            "istota_developer_repos_dir" in str(cond) for cond in task["when"]
+        ), "the root is created even where no repos_dir is configured"
+
+        below = [
+            t.get("name") for t in tasks
+            if isinstance(t.get("file"), dict)
+            and str(t["file"].get("path", "")).startswith(
+                "{{ istota_developer_repos_dir }}/"
+            )
+        ]
+        assert not below, (
+            f"the role creates something under the repos root ({below}); "
+            "everything below it belongs to one user and the daemon makes it"
+        )
+
+    def test_the_directory_tasks_are_not_skipped_on_an_update_only_deploy(self):
+        """Same gate as the migrator, and for the same reason.
+
+        Update-only renders the config and restarts, so it can put the per-user
+        binds on a host where nothing has made the root yet. The migrator's own
+        `mkdir(parents=True)` would then create it with the daemon's umask
+        rather than the owner and mode the role names.
+        """
+        tasks = _flatten(yaml.safe_load(TASKS_FILE.read_text()))
+        paths = (
+            "{{ istota_developer_repos_dir }}",
+            "{{ istota_security_sandbox_cache_dir }}",
+        )
+        for path in paths:
+            task = next(
+                t for t in tasks
+                if isinstance(t.get("file"), dict) and t["file"].get("path") == path
+            )
+            assert not any(
+                "istota_update_only" in str(cond) for cond in task["when"]
+            ), f"{task['name']!r} is skipped on an update-only deploy"
+
+    def test_the_role_creates_the_fallback_root_the_resolver_requires(self):
+        """`resolve_sandbox_cache_dir` refuses a root that does not already exist.
+
+        It falls open on every refusal — a warning in the log and the caches back
+        on bubblewrap's root tmpfs — so a `sandbox_cache_dir` whose directory
+        nothing creates is the same no-op the key was before, with the appearance
+        of a fix. That branch is only reached on a deployment running the sandbox
+        without the developer skill, which is exactly where nothing else would
+        have made the directory.
+        """
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        creators = [
+            t for t in tasks
+            if isinstance(t.get("file"), dict)
+            and t["file"].get("path") == "{{ istota_security_sandbox_cache_dir }}"
+        ]
+
+        assert creators, "tasks/main.yml creates no package-cache root"
+        task = creators[0]
+        assert task["file"]["owner"] == "{{ istota_user }}"
+
+        # 0700, because the root holds one cache directory per user and each is
+        # full of package archives uv trusts on read and re-verifies against no
+        # hash.
+        assert task["file"]["mode"] == "0700"
+
+        # Skipped entirely when the key is blank, which is the shipped default,
+        # so a developer deployment — where the cache is derived instead — gets
+        # no stray directory out of this.
+        assert any(
+            "istota_security_sandbox_cache_dir" in str(cond)
+            for cond in task["when"]
+        )
+
+
+def _flatten(tasks: list) -> list:
+    """Every task, including those nested under `block`/`rescue`/`always`.
+
+    `yaml.safe_load` returns the top-level list, and this file has one-shot
+    migrators wrapped in blocks that stop and start the three units. An index
+    comparison over the unflattened list cannot see those at all, which is how
+    an ordering assertion ends up weaker than the sentence describing it.
+    """
+    out = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        out.append(task)
+        for key in ("block", "rescue", "always"):
+            nested = task.get(key)
+            if isinstance(nested, list):
+                out.extend(_flatten(nested))
+    return out
+
+
+class TestTheReposRelocationTask:
+    """The role invokes `istota.repos_relocate`, and how it reads the answer.
+
+    The migrator is where the judgement lives — which admin owns a clone, and
+    whether it is safe to move one at all — so the role's whole job is to run it
+    at the right point in the play, as the right user, and to read its three
+    exit codes apart. Each of those is a way to report a migration that did not
+    happen, so each is asserted.
+    """
+
+    @pytest.fixture
+    def tasks(self):
+        return yaml.safe_load(TASKS_FILE.read_text())
+
+    @pytest.fixture
+    def migrator(self, tasks):
+        found = [
+            t for t in tasks
+            if "repos_relocate" in str(t.get("command", ""))
+        ]
+        assert found, "tasks/main.yml never runs the repos migrator"
+        return found[0]
+
+    def test_it_runs_as_the_daemon_user(self, migrator):
+        """Not as root, and this is the difference between a working migration
+        and one the play calls green.
+
+        The migrator creates `{repos_dir}/{user_id}` and renames the namespace
+        directories into it. Created by root that directory is root-owned at
+        0700, so the daemon can no longer enter the tree the sandbox binds for
+        it and every developer task fails afterwards.
+        """
+        assert migrator.get("become") is True
+        assert migrator["become_user"] == "{{ istota_user }}"
+
+    def test_it_reads_the_admins_file_the_units_read(self, migrator):
+        """Ownership comes from the admins file, so the migrator has to be
+        pointed at the same one the three systemd units are — a renamed
+        namespace puts it somewhere `/etc/istota/admins` is not."""
+        assert (
+            migrator["environment"]["ISTOTA_ADMINS_FILE"]
+            == "/etc/{{ istota_namespace }}/admins"
+        )
+
+    def test_the_pass_condition_is_stated_positively(self, migrator):
+        """`failed_when` replaces the module's own verdict rather than adding
+        to it, so a rule naming the migrator's codes hands every *other* code
+        back as success.
+
+        `repos_relocate` returns 0, 1 or 2, but the `command` module reports its
+        own failures through the same field — a missing interpreter arrives as
+        rc 2, a killed process as a signal code. `failed_when: rc == 1` would
+        pass both, on a task that moves repositories. So the condition is the
+        inverse: pass only where the migrator demonstrably reached its own end,
+        which the `done:` line is the evidence of.
+        """
+        condition = migrator["failed_when"]
+
+        assert "rc != 0" in condition, (
+            "the rule enumerates exit codes instead of stating what passes, so "
+            "an exit the migrator cannot produce is reported as success"
+        )
+        assert "done: " in condition, (
+            "nothing distinguishes the migrator's own exit 2 from the command "
+            "module's"
+        )
+        assert "FAILED: " in condition, (
+            "an exit 2 that moved nothing and wrote no marker is retryable, so "
+            "it has to fail the play rather than be reported and passed over"
+        )
+
+    def test_a_partial_that_only_needs_a_hand_does_not_fail_the_play(self, migrator):
+        """The other half of the same rule, and the reason it is not just
+        "fail on anything but zero".
+
+        An exit 2 whose report carries only `NOT repaired:` moved the tree and
+        wrote the marker, so re-running has no rename left to perform and the
+        play would stay red for ever — which is how a task ends up skipped.
+        """
+        assert "rc == 2" in migrator["failed_when"]
+
+    def test_it_runs_on_an_update_only_deploy(self, migrator):
+        """The gate that matters, and the one that is easy to get backwards.
+
+        `istota_update_only` is "pull the code, update the dependencies, render
+        the config, restart" — precisely the run that puts the per-user binds on
+        a host whose clones are still at the old depth. A migrator skipped there
+        lands the split and skips the migration on the path most likely to carry
+        it. `istota.db_relocate` and the location migrator are ungated the same
+        way.
+        """
+        assert not any(
+            "istota_update_only" in str(cond) for cond in migrator["when"]
+        ), "the repos migrator is skipped on an update-only deploy"
+
+    def test_a_no_op_run_is_not_reported_as_a_change(self, migrator):
+        """It runs on every deploy and is a no-op after the first, so
+        `changed_when` has to key on the migrator's own output rather than on
+        the exit code, which is 0 either way."""
+        condition = migrator["changed_when"]
+
+        # Anchored to the start of a line, not a bare substring. The report
+        # prints one `note:` line per entry it declined to move, each beginning
+        # with that entry's own name, and entries under `repos_dir` were
+        # model-writable on every deployment running the shared bind — so a
+        # directory named `moved` renders `note: moved: a symlink; left in
+        # place` and a substring test reports `changed` on every deploy after.
+        assert "^(moved|repaired): " in condition, (
+            "the change test is a bare substring, which model-written output "
+            "can satisfy"
+        )
+
+        # And the marker, because a first run over an empty tree moves nothing
+        # and still writes `.istota-layout` — the one run that touched the disk
+        # would otherwise read the same as every run after it. `_print_report`
+        # prints "marker not written" on the other branch, which does not
+        # contain this substring.
+        assert "marker written" in condition
+
+    def test_it_runs_after_the_code_and_before_the_units_are_deployed(self, tasks):
+        """Ordering, and both halves matter.
+
+        It needs the new code in the venv to run at all, and it has to be done
+        before the play deploys and starts the units — a daemon that picks up
+        the per-user binds while the clones are still at the old depth sees an
+        empty tree and clones everything again.
+
+        Flattened first. `yaml.safe_load` returns the top-level list only, and
+        this file has three one-shot migrations that stop and start all three
+        units from *inside* a `block:`; an index comparison over the unflattened
+        list cannot see any of them.
+
+        **What this does not claim**, because it is not true: that nothing
+        restarts the scheduler before the migration. Those three blocks do, each
+        gated on a piece of legacy state (a pre-rename database, framework
+        location rows, module databases on the mount) that a current deployment
+        does not have. The migrator sits ahead of two of the three and behind
+        the oldest. That hazard is theirs and pre-dates this task — the daemon
+        is running for the whole play in any case, since nothing stops it at the
+        start — so the property worth pinning is the one restart every deploy
+        performs.
+        """
+        flat = _flatten(tasks)
+        names = [t.get("name", "") for t in flat]
+        migrator = next(
+            i for i, t in enumerate(flat)
+            if "repos_relocate" in str(t.get("command", ""))
+        )
+        venv = next(
+            i for i, name in enumerate(names)
+            if name == "Install Python dependencies with uv"
+        )
+        assert venv < migrator
+
+        for name in (
+            "Deploy istota-scheduler systemd service",
+            "Force handlers to run now",
+            "Enable and start istota-scheduler",
+        ):
+            index = next(i for i, other in enumerate(names) if other == name)
+            assert migrator < index, f"the migration runs after {name!r}"

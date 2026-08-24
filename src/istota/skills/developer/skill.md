@@ -3,7 +3,7 @@ name: developer
 triggers: [git, gitlab, github, repo, repository, commit, branch, merge request, MR, pull request, PR, code review, develop, worktree, clone]
 description: Git repository management, GitLab merge requests, and GitHub pull requests
 companion_skills: [commit, code_review, untrusted_input]
-env: [{"var":"DEVELOPER_REPOS_DIR","from":"config_per_user","config_path":"developer.repos_dir","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER","from":"config","config_path":"developer.gitlab_reviewer","when":["developer.enabled","developer.gitlab_reviewer"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
+env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER","from":"config","config_path":"developer.gitlab_reviewer","when":["developer.enabled","developer.gitlab_reviewer"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
 ---
 # Developer Skill — Git, GitLab & GitHub
 
@@ -13,7 +13,7 @@ Work in git repositories, manage merge requests on GitLab and pull requests on G
 
 | Variable | Description |
 |---|---|
-| `DEVELOPER_REPOS_DIR` | Base directory for repo clones and worktrees |
+| `DEVELOPER_REPOS_DIR` | Your own base directory for repo clones and worktrees. Every path below is relative to it; nothing outside it is reachable |
 | `GITLAB_URL` | GitLab instance URL (e.g., `https://gitlab.com`) |
 | `GITLAB_DEFAULT_NAMESPACE` | Default GitLab namespace (user/group) for resolving short repo names |
 | `GITLAB_REVIEWER` | GitLab username to assign as MR reviewer |
@@ -62,11 +62,11 @@ Four things do change, and none is guessable from the error you get.
 $DEVELOPER_REPOS_DIR/
 ├── namespace/project.git/                    # bare clone
 ├── namespace/project--istota-42-add-auth/      # worktree for task 42
-└── namespace/project--istota-55-fix-bug/       # worktree for task 55
+├── namespace/project--istota-55-fix-bug/       # worktree for task 55
+└── .package-caches/                          # uv + npm caches; leave it alone
 ```
 
-- Bare clones go in `<namespace>/<project>.git/`
-- Worktrees are siblings: `<namespace>/<project>--<branch-slug>/`
+- Bare clones go in `<namespace>/<project>.git/`; worktrees are siblings, `<namespace>/<project>--<branch-slug>/`
 
 ## Cloning a Repository
 
@@ -217,6 +217,8 @@ A fresh worktree has the tracked files and nothing else.
 - **Never share a `node_modules` or a `.venv` between worktrees.** Vite, Vitest and esbuild resolve plugins and their native binaries through the real path of `node_modules`, so a borrowed tree fails at transform time and surfaces as dozens of unrelated red suites. Each worktree gets its own.
 - **Copy the gitignored files the stack needs to run** — `.env`, local config, test fixtures kept out of git. Never print their contents.
 - **A refused connection during an install is a boundary, not a flake.** npm and crates.io are reachable, and PyPI unless the operator turned it off; a package that fetches a binary from somewhere else — `node-gyp` headers, Playwright browsers, a GitHub release asset — is not, and no number of retries will change that. Say which host was refused and stop, rather than reinstalling. The operator adds hosts through `extra_hosts`; you cannot. Installs that run in the container (see "Where Builds and Tests Run") are not bounded this way, so a refusal there is a real network failure.
+- **A zero exit from an install is not evidence it completed.** npm hides lifecycle-script output, so a postinstall binary fetch refused at that same boundary still prints `added N packages` and exits 0, leaving an empty cache directory the task meets much later as a missing binary. For anything that downloads a binary at install time — Puppeteer, Playwright, `node-gyp`, `esbuild`, `sharp`, any package with an `install` or `postinstall` script — re-run with `--foreground-scripts`, or check the artifact is there, before treating the install as done. Where the package has a skip variable (`PUPPETEER_SKIP_DOWNLOAD=1`, `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`), set it so the install is honest and fast rather than silently empty — then report the binary as unavailable behind the boundary and stop, because skipping the download does not put it there.
+- **From plain Node that boundary reads as a DNS failure.** npm, `uv`, `git` and `curl` honour `HTTPS_PROXY`, so a blocked host is refused at the proxy with a 403 against a `CONNECT` the tool itself names. Node ignores proxy environment by default, so a postinstall script written in JS never reaches the proxy at all: it resolves DNS inside the network namespace and fails with `EAI_AGAIN` or `ENOTFOUND`. Same boundary and same answer — name the host and stop — but it does not look like one, and it is not a flake to retry.
 - **Prove it can run tests, cheaply.** A collection step (`pytest --collect-only -q`, one small component test), not a full suite. The base branch was green when it was last committed, so a full pass here re-confirms what the last commit already established. What is unknown is whether *this worktree* can run anything.
 
 If the collection step fails, that is the environment and not the code. Fix the setup and retry. If it fails in a way you cannot explain, stop and report rather than starting work on a worktree you cannot run.

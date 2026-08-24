@@ -284,10 +284,15 @@ class TestTheAnsibleVolumeMountsAreHeldInLine:
             )
 
 
-class TestTheThreeSharedPathsAndNoFourth:
-    """`backend = devbox` adds exactly three mounts, and each is load-bearing.
+class TestTheTwoSharedPathsAndNoThird:
+    """`backend = devbox` adds exactly two mounts, and each is needed.
 
-    Every one of them is a directory the container can write, so a fourth
+    It was three. The package cache had one of its own while
+    `security.sandbox_cache_dir` was a configured root; the cache is derived at
+    `{repos_dir}/{user_id}/.package-caches` now, which is *inside* the repos
+    mount, so it arrives with that mount and needs none of its own.
+
+    Every one of them is a directory the container can write, so a third
     arriving unannounced is the thing to catch. The `PERMITTED` allowlist next
     door covers the default shape; this covers the one this design is for.
     """
@@ -307,10 +312,6 @@ class TestTheThreeSharedPathsAndNoFourth:
             "this user's worktrees, at the identical absolute path on both "
             "sides so a working directory needs no translation"
         ),
-        "/srv/repos/.cache/alice": (
-            "uv's cache, on the same mount as the venv it populates so link(2) "
-            "does not return EXDEV"
-        ),
     }
 
     @staticmethod
@@ -326,15 +327,27 @@ class TestTheThreeSharedPathsAndNoFourth:
                 found[parts[1]] = parts[0]
         return found
 
-    def test_the_three_paths_are_mounted(self, container_service):
+    def test_the_two_paths_are_mounted(self, container_service):
         mounts = self._mounts(container_service)
         assert "/srv/repos/alice" in mounts
-        assert "/srv/repos/.cache/alice" in mounts
         assert "/run/istota-exec/alice" in mounts, (
             "the exec socket directory is not mounted, so nothing routes"
         )
 
-    def test_each_of_the_three_is_at_the_same_spelling_on_both_sides(
+    def test_the_package_cache_has_no_mount_of_its_own(self, container_service):
+        """It is inside the repos mount, and that is the point rather than an
+        omission: one mount covering cache and venv is the only shape where uv
+        hardlinks a wheel instead of copying it, because `link(2)` compares
+        mounts rather than devices. A separate bind for the cache would put the
+        two on different mounts and bring the copies back."""
+        mounts = self._mounts(container_service)
+        assert not any(".package-caches" in dest for dest in mounts), (
+            "the derived package cache has its own bind, which puts it on a "
+            "different mount from the venv it populates"
+        )
+        assert not any(".cache" in dest for dest in mounts)
+
+    def test_each_of_the_two_is_at_the_same_spelling_on_both_sides(
         self, container_service
     ):
         """The whole reason a working directory needs no translation. A shim
@@ -371,7 +384,7 @@ class TestTheThreeSharedPathsAndNoFourth:
         """The negative control. `backend = none` is every deployment that has
         not opted in, and it must be byte-identical to what it was: no repos
         tree in the container, no cache, no socket."""
-        mounts = TestTheThreeSharedPathsAndNoFourth._mounts(ansible_service)
+        mounts = TestTheTwoSharedPathsAndNoThird._mounts(ansible_service)
         assert set(mounts) == {"/home/dev", "/run/istota-cred"}
 
     def test_the_supervisor_is_told_where_the_socket_and_the_repos_are(
@@ -395,19 +408,27 @@ class TestTheThreeSharedPathsAndNoFourth:
         assert env["CARGO_HOME"] == "/home/dev/.cargo"
         assert env["GOMODCACHE"] == "/home/dev/go/pkg/mod"
         assert env["UV_PYTHON_INSTALL_DIR"] == "/home/dev/.uv-python"
-        assert env["UV_CACHE_DIR"] == "/srv/repos/.cache/alice"
+        # Derived inside this user's repos subtree, so it rides the repos mount.
+        assert env["UV_CACHE_DIR"] == "/srv/repos/alice/.package-caches"
 
-    def test_the_uv_cache_mount_and_variable_arrive_together(self):
-        """A `UV_CACHE_DIR` naming a directory the container does not have is
-        worse than no variable: uv would create it on the container's own
-        filesystem and every task would silently lose its cache at recreate."""
+    def test_the_uv_cache_survives_an_unset_sandbox_cache_dir(self):
+        """`security.sandbox_cache_dir` no longer decides this, and the old
+        version of this test asserted that it did.
+
+        While the cache was a configured root, an unset key meant no mount and
+        so no `UV_CACHE_DIR` — a variable naming a directory the container does
+        not have is worse than no variable, since uv would create it on the
+        container's own filesystem and lose it at every recreate. The cache is
+        derived from `repos_dir` now, and its Ansible default is blank, so the
+        old assertion would fail on every correctly configured deployment.
+        """
         service = _render_service(
             **{**CONTAINER_VARS, "istota_security_sandbox_cache_dir": ""}
         )
         env = service.get("environment") or {}
-        assert "UV_CACHE_DIR" not in env
-        mounts = TestTheThreeSharedPathsAndNoFourth._mounts(service)
-        assert not any("cache" in dest for dest in mounts)
+        assert env["UV_CACHE_DIR"] == "/srv/repos/alice/.package-caches"
+        mounts = TestTheTwoSharedPathsAndNoThird._mounts(service)
+        assert not any(".package-caches" in dest for dest in mounts)
 
     def test_the_image_is_built_at_the_daemons_own_uid(self, container_service):
         """The central invariant of the shared mount. A mismatch fails in both

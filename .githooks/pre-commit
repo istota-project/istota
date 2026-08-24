@@ -22,8 +22,10 @@ status=0
 #
 # Three markers, because the daemon spawns unattended shells three ways and no
 # single variable covers all of them. ISTOTA_SANDBOXED is set for every task
-# the model runs; DEVELOPER_REPOS_DIR additionally covers a task authorized for
-# the developer skill; and the daemon sets PRECOMMIT_SCANS_REQUIRED=1 itself in
+# the model runs *where the sandbox is really in effect*; DEVELOPER_REPOS_DIR
+# additionally covers an admin task on a developer-configured deployment, which
+# since the per-user repos split is exactly the set of tasks with a checkout to
+# commit from; and the daemon sets PRECOMMIT_SCANS_REQUIRED=1 itself in
 # the stripped environment it gives cron `command` jobs and heartbeat shell
 # commands, which carry neither of the other two.
 scans_required=0

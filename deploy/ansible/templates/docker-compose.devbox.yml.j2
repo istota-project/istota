@@ -79,14 +79,6 @@ services:
       # a working directory needs no translation and the server's containment
       # check is a plain `realpath` under one root.
       - {{ istota_developer_repos_dir }}/{{ devbox_user }}:{{ istota_developer_repos_dir }}/{{ devbox_user }}
-{% if istota_security_sandbox_cache_dir %}
-      # uv's cache, on the same mount as the venv it populates: uv hardlinks out
-      # of it and `link(2)` returns EXDEV across a mount boundary even on one
-      # device. Absent when the operator has not set sandbox_cache_dir, which is
-      # merely slow — `istota doctor --only developer.container` reports it,
-      # since merely-slow is what nobody investigates.
-      - {{ istota_security_sandbox_cache_dir }}/{{ devbox_user }}:{{ istota_security_sandbox_cache_dir }}/{{ devbox_user }}
-{% endif %}
 {% endif %}
     networks:
       - devbox-net
@@ -140,9 +132,12 @@ services:
       CARGO_HOME: /home/dev/.cargo
       GOMODCACHE: /home/dev/go/pkg/mod
       UV_PYTHON_INSTALL_DIR: /home/dev/.uv-python
-{% if istota_security_sandbox_cache_dir %}
-      UV_CACHE_DIR: {{ istota_security_sandbox_cache_dir }}/{{ devbox_user }}
-{% endif %}
+      # The package cache is derived at `{repos_dir}/{user}/.package-caches`,
+      # which is inside the repos mount above — so it needs no mount of its own
+      # and no `security.sandbox_cache_dir`. One mount covers cache and venv,
+      # which is the only shape where uv hardlinks a wheel instead of copying
+      # it: `link(2)` compares mounts rather than devices.
+      UV_CACHE_DIR: {{ istota_developer_repos_dir }}/{{ devbox_user }}/.package-caches
 {% endif %}
 {% endfor %}
 

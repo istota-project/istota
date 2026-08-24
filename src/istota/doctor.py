@@ -1706,7 +1706,7 @@ def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
             name, SKIP, f"{root} does not exist yet, so there is nothing filed in it",
         )
 
-    from . import config as config_module  # noqa: PLC0415 - a cycle at module scope
+    from .executor import get_user_repos_dir  # noqa: PLC0415 - executor pulls in most of the package
 
     users = set(getattr(config, "users", {}) or {})
     stray: list[str] = []
@@ -1730,7 +1730,7 @@ def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
             + (f" ({', '.join(expected)})" if expected else " and is empty"),
         )
 
-    example = config_module.repos_root(config, sorted(users)[0]) if users else None
+    example = get_user_repos_dir(config, sorted(users)[0]) if users else None
     return CheckResult(
         name, FAIL,
         f"{root} still holds repositories outside any user's directory: "
@@ -1923,8 +1923,10 @@ def check_developer_container(config: "Config", probe: bool) -> list[CheckResult
     * **identity** — the container's uid is not the daemon's, or the two sides
       spell the repos root differently. Untreated, that ends in worktrees that
       can never be reaped, and there is no error message anywhere that says so.
-    * **uv_cache** — no cache mount, so every ``uv sync`` pays a full copy
-      instead of a hardlink. Merely slow is what nobody investigates.
+    * **uv_cache** — the derived package cache, ``{repos_dir}/{user_id}/
+      .package-caches``, is not visible inside the container, so it is not
+      covered by the repos mount and every ``uv sync`` pays a full copy instead
+      of a hardlink. Merely slow is what nobody investigates.
 
     Returns four results whatever happens, so a caller can assert on a name
     rather than on a count.
@@ -2059,7 +2061,13 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
         PROBE_TIMEOUT,
     )
 
-    cache_root = getattr(getattr(config, "security", None), "sandbox_cache_dir", "")
+    # Not `security.sandbox_cache_dir`. That key stopped being the cache root:
+    # the cache is derived at `{repos_dir}/{user_id}/.package-caches`, and the
+    # key is read only where `repos_dir` is unset. Asking after it here would
+    # warn on exactly the deployments that are configured correctly, since the
+    # Ansible default for it is blank.
+    repos_root_cfg = getattr(getattr(config, "developer", None), "repos_dir", "")
+    from .executor import SANDBOX_CACHE_ROOT_NAME  # noqa: PLC0415 - executor pulls in most of the package
 
     reachable: list[str] = []
     transport_bad: list[str] = []
@@ -2115,9 +2123,9 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
             else:
                 identity_ok.append(user_id)
 
-        if not cache_root:
+        if not repos_root_cfg:
             continue
-        cache_dir = Path(cache_root) / user_id
+        cache_dir = Path(repos_root_cfg) / user_id / SANDBOX_CACHE_ROOT_NAME
         frames, error = _exec_transport_request(
             socket_path,
             # A *server-side* budget, deliberately not `timeout`. That one is
@@ -2144,7 +2152,7 @@ def _container_probe_results(config: "Config", config_module, users: list[str]) 
 
     results = [_transport_result(reachable, transport_bad, without_a_devbox)]
     results.append(_identity_result(identity_ok, identity_bad, reachable))
-    results.append(_uv_cache_result(cache_root, cache_ok, cache_bad, reachable))
+    results.append(_uv_cache_result(repos_root_cfg, cache_ok, cache_bad, reachable))
     return results
 
 
@@ -2158,7 +2166,9 @@ def _identity_findings(config: "Config", config_module, user_id: str, stat: dict
             f"{user_id}: the container's server runs as uid {container_uid} and "
             f"this daemon is uid {daemon_uid}"
         )
-    expected = config_module.repos_root(config, user_id)
+    from .executor import get_user_repos_dir  # noqa: PLC0415 - executor pulls in most of the package
+
+    expected = get_user_repos_dir(config, user_id)
     reported = stat.get("repos_root")
     if expected is not None and reported != str(expected):
         findings.append(
@@ -2217,34 +2227,49 @@ def _identity_result(ok: list[str], bad: list[str], reachable: list[str]) -> Che
 
 
 def _uv_cache_result(
-    cache_root: str, ok: list[str], bad: list[str], reachable: list[str]
+    repos_root_cfg: str, ok: list[str], bad: list[str], reachable: list[str]
 ) -> CheckResult:
+    """Is the derived package cache visible inside the container?
+
+    The question this asks changed, and the old one would now be actively
+    misleading. It used to be "did the operator set `security.sandbox_cache_dir`
+    and is its bind present" — but the cache is derived at
+    `{repos_dir}/{user_id}/.package-caches` now, that key is read only where
+    `repos_dir` is unset, and its Ansible default is blank. Asking after the key
+    would WARN on every correctly configured deployment.
+
+    What is worth checking is the property, not the setting: the cache lives
+    inside the repos subtree the container already mounts, so one mount covers
+    cache and venv and `link(2)` hardlinks rather than copying. If that
+    directory is missing from the container, the mount is wrong in a way that is
+    slow rather than broken — which is exactly the failure nobody investigates
+    on their own.
+    """
     name = f"{CONTAINER_GROUP}.uv_cache"
-    if not cache_root:
+    if not repos_root_cfg:
         return CheckResult(
-            name, WARN,
-            "[security] sandbox_cache_dir is unset, so the container has no uv "
-            "cache mount and every `uv sync` copies instead of hardlinking",
-            remedy=(
-                "Set [security] sandbox_cache_dir to a directory under "
-                "developer.repos_dir and re-run the role, so cache and venv sit "
-                "on one mount and link(2) does not return EXDEV."
-            ),
+            name, SKIP,
+            "developer.repos_dir is unset, so there is no per-user repos subtree "
+            "and no derived package cache to look for",
         )
     if bad:
         return CheckResult(
             name, WARN,
-            "the uv cache is not mounted in the container for " + "; ".join(bad),
+            "the derived package cache is not visible in the container for "
+            + "; ".join(bad),
             remedy=(
-                "Add the {sandbox_cache_dir}/{user} bind to the devbox service "
-                "and recreate the container. A missing mount is slow rather than "
-                "broken, which is why nothing else will tell you."
+                "The cache is {developer.repos_dir}/{user}/.package-caches and "
+                "sits inside the repos bind, so a missing directory means that "
+                "bind is wrong or the container predates it. Re-run the role and "
+                "recreate the container. Slow rather than broken — uv falls back "
+                "to copying every wheel — which is why nothing else will tell you."
             ),
         )
     if not reachable:
         return CheckResult(name, SKIP, "no container answered, so nothing was checked")
     return CheckResult(
-        name, OK, f"the uv cache is mounted for {len(ok)} devbox user(s)",
+        name, OK,
+        f"the derived package cache is visible for {len(ok)} devbox user(s)",
     )
 
 

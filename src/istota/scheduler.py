@@ -4327,6 +4327,36 @@ def check_doctor(config: Config, state: dict) -> list:
     return results
 
 
+#: `executor.SANDBOX_CACHE_ROOT_NAME`, restated. Held equal by
+#: `tests/test_worktree_reaper.py`.
+_SANDBOX_CACHE_ROOT_NAME = ".package-caches"
+
+
+def _package_cache_dirs(repos_dir: str) -> list[Path]:
+    """Every derived package cache under `repos_dir` — `{root}/*/.package-caches`.
+
+    The layout is `executor.SANDBOX_CACHE_ROOT_NAME`, restated here rather than
+    imported for the reason the developer skill restates it: this is the
+    scheduler, and it should not pull the executor in for one string.
+    `tests/test_worktree_reaper.py` holds the spelling to the executor's.
+
+    Enumerated from disk rather than from `user_profiles`, because the caches
+    are created lazily on a user's first task and it is precisely the directory
+    that *exists* that costs the walk. Never raises and never returns a partial
+    guess: an unreadable root yields an empty list, which costs a noisy sweep
+    rather than a wrong one — `skip` only prunes the walk, so getting it wrong
+    in this direction loses performance, not safety.
+    """
+    try:
+        return [
+            entry / _SANDBOX_CACHE_ROOT_NAME
+            for entry in Path(repos_dir).iterdir()
+            if entry.is_dir() and not entry.is_symlink()
+        ]
+    except OSError:
+        return []
+
+
 def check_worktree_reap(config: Config) -> list:
     """Sweep `developer.repos_dir` for worktrees whose work has landed.
 
@@ -4368,9 +4398,148 @@ def check_worktree_reap(config: Config) -> list:
         return reap_and_report(
             Path(dev.repos_dir),
             retention_hours=dev.worktree_retention_hours,
+            # The package caches live inside repos_dir and hold one directory
+            # per unpacked wheel. None of them is a repository, and walking
+            # them logs a per-sweep line claiming thousands of directories went
+            # unswept for credentials (ISSUE-319).
+            #
+            # One entry per user, because the caches are derived per user now —
+            # `{repos_dir}/{user_id}/.package-caches`, `find_git_dirs` matches
+            # `skip` on the resolved path, and this used to name
+            # `security.sandbox_cache_dir`, which is blank on a deployment that
+            # has a repos tree to derive from. An empty skip is not a cosmetic
+            # loss: the cache sits at depth 2, so `uv/archive-v0` lands exactly
+            # on `_MAX_DEPTH` and every unpacked wheel is listed and lstatted,
+            # and a git directory inside the cache at depth 4 or less would be
+            # picked up as a reap candidate — which means `git fetch` against a
+            # model-written `remote.origin.url`, from the unsandboxed
+            # scheduler, outside the CONNECT allowlist, on every sweep.
+            skip=_package_cache_dirs(dev.repos_dir),
         )
     except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
         logger.error("worktree_reap_failed err=%s", exc, exc_info=True)
+        return []
+
+
+def sandbox_cache_sweep_root(config: Config) -> tuple[Path, list[str] | None] | None:
+    """Where the per-user package caches are, and whose they are. None if nowhere.
+
+    The two shapes `executor.resolve_sandbox_cache_dir` produces, asked the
+    other way round. **It reproduces that function's branch selection, not its
+    refusals**, and the difference is worth being exact about rather than
+    claiming an agreement that does not hold. The branch gate is the same pair,
+    `enabled and repos_dir`, and that is the part the sweep's worth rests on: a
+    root the resolver does not write into is a sweep that finds nothing while
+    the real caches grow, silently and in the direction of the disk leak
+    ISSUE-317 exists to close.
+
+    The resolver then refuses five further things (a relative root, one the
+    daemon cannot write, one at or above a sandbox mount, one under a database
+    directory, and `_validate_workspace_dir`'s blocklist) and this does not
+    re-derive them — duplicating that chain is the drift the whole finding
+    would be about. Only the one refusal that changes *where this walks* is
+    repeated: an absolute root. A relative `developer.repos_dir` makes the
+    resolver return None while this would hand `sweep_and_report` a path
+    resolved against the daemon's working directory, so the sweep would run
+    package-manager reclaim verbs somewhere no cache was ever created. The
+    others all leave the sweep walking a directory the resolver simply declined
+    to populate, which finds nothing and costs a log line.
+
+    * developer skill on with a repos dir — the caches are derived per user at
+      `{repos_dir}/{user_id}/.package-caches`, so the root is `repos_dir` and
+      the user list is the daemon's own (`config.users`, which the config
+      loader has already overlaid `user_profiles` onto). **The list is passed
+      rather than enumerated**, because `repos_dir` is bound read-write into
+      every admin developer task and a directory name found there is not
+      evidence of a user — see `sandbox_cache_sweeper._candidates_for_users`.
+      A cache belonging to nobody on that list is reported by
+      `report_orphan_caches` and acted on by nothing.
+    * otherwise, `security.sandbox_cache_dir` and its one-level layout, which
+      the sweeper enumerates itself. Unchanged.
+
+    Returning `None` rather than a root with nothing at it keeps "there is no
+    cache to bound" distinguishable from "the cache is empty", which is what the
+    caller's own gate needs.
+
+    """
+    dev, sec = config.developer, config.security
+    if dev.enabled and dev.repos_dir:
+        root = Path(dev.repos_dir)
+        if not root.is_absolute():
+            logger.warning(
+                "sandbox_cache_sweep_skipped reason=repos_dir_not_absolute path=%r "
+                "— it would resolve against the daemon's working directory, and "
+                "the resolver refuses it too, so no cache was ever created there.",
+                dev.repos_dir,
+            )
+            return None
+        return root, sorted(config.users)
+    if sec.sandbox_cache_dir:
+        root = Path(sec.sandbox_cache_dir)
+        if not root.is_absolute():
+            logger.warning(
+                "sandbox_cache_sweep_skipped reason=sandbox_cache_dir_not_absolute "
+                "path=%r — same reason.", sec.sandbox_cache_dir,
+            )
+            return None
+        return root, None
+    return None
+
+
+def check_sandbox_cache_sweep(config: Config) -> list:
+    """Bound the per-user package caches, wherever this deployment puts them.
+
+    Here rather than on a task's setup path, for the reason `check_worktree_reap`
+    above gives: `dispatch_setup_env_hooks` calls every skill's hook whatever the
+    task selected, so a sweep there runs before every Talk reply and every
+    heartbeat tick. A delete path belongs on a cadence somebody chose.
+
+    **The busy set is fail-closed and this function owns that.** The sweeper is
+    a leaf that reads no database, so the set of users with a task in flight has
+    to arrive as an argument — and an unreadable task table would arrive as an
+    empty set, which reads as "nobody is working" and is the one wrong answer
+    that costs a running task its cache. So a failed read returns without
+    sweeping at all. Disk is what the sweep protects and one more interval of it
+    is cheap; a `uv sync` losing its cache mid-resolution is not.
+
+    The *user* list is not fail-closed in the same way and does not need to be:
+    it comes from the already-loaded config rather than from a query, and being
+    wrong about it costs an unswept cache rather than a live task's.
+
+    Re-checks its own gate rather than trusting the loop's, matching the reaper:
+    the loop's gate exists to skip the thread spawn cheaply, and a delete path
+    should be safe to call on its own.
+    """
+    from .sandbox_cache_sweeper import sweep_and_report
+
+    sec = config.security
+    if not sec.sandbox_cache_sweep_enabled:
+        return []
+    target = sandbox_cache_sweep_root(config)
+    if target is None:
+        return []
+    root, user_ids = target
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            busy_users = db.get_users_with_live_tasks(conn)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sandbox_cache_sweep_skipped reason=task_table_unreadable err=%s "
+            "— the set of users with work in flight is unknown, so nothing is swept.",
+            exc,
+        )
+        return []
+
+    try:
+        return sweep_and_report(
+            root,
+            max_bytes=int(sec.sandbox_cache_max_gb * 1024 ** 3),
+            busy_users=busy_users,
+            user_ids=user_ids,
+        )
+    except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
+        logger.error("sandbox_cache_sweep_failed err=%s", exc, exc_info=True)
         return []
 
 
@@ -6976,6 +7145,7 @@ def run_daemon(
     # this clears is the state a restart usually arrives into, and there is no
     # boot run to double up with.
     last_worktree_reap = 0.0
+    last_cache_sweep = 0.0
     # Seeded to now, not 0: the boot run above already swept, so a 0 here would
     # re-run the whole registry on the first tick seconds later.
     last_doctor_check = time.time()
@@ -7237,6 +7407,25 @@ def run_daemon(
                 "worktree-reap", lambda: check_worktree_reap(config), background_checks,
             )
             last_worktree_reap = now
+
+        # Bound the package caches the sandbox writes to disk (ISSUE-317).
+        # Moving them off bwrap's root tmpfs is what makes them persist, and
+        # nothing pruned them, so the fix for a RAM leak was a disk leak on the
+        # volume the reap above is already fighting for. Backgrounded like the
+        # sweeps around it: it walks every cache tree and shells to `uv` and
+        # `npm`, either of which can take minutes on a cold cache, so on the
+        # loop thread it would starve dispatch.
+        if (
+            config.security.sandbox_cache_sweep_enabled
+            and sandbox_cache_sweep_root(config) is not None
+            and config.scheduler.sandbox_cache_sweep_interval
+            and now - last_cache_sweep >= config.scheduler.sandbox_cache_sweep_interval
+        ):
+            _spawn_background_check(
+                "sandbox-cache-sweep", lambda: check_sandbox_cache_sweep(config),
+                background_checks,
+            )
+            last_cache_sweep = now
 
         # Snapshot local DBs to the mount for off-host durability (they left the
         # Nextcloud-synced workspaces when they moved to local disk). Also off

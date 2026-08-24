@@ -15,6 +15,20 @@ this file passed for that reason while proving nothing. Each probe therefore
 reports the device of `/` alongside the device under test, and the test asserts
 both are non-empty before comparing them.
 
+**The ISSUE-319 sibling masks no longer exist, and neither does the
+precondition this paragraph used to describe.** The cache is derived per user
+inside `{developer.repos_dir}/{user_id}` now, so there is no other user's cache
+in the namespace to mask, and `resolve_sandbox_cache_dir` no longer refuses a
+covered cache on a bwrap without `--disable-userns` — with no mask holding the
+boundary, the flag is back to being plain hardening for the database masks. So
+the reason this tier cannot host the cross-user cache scenario is no longer the
+precondition; it is only that `--proc` inside a nested user namespace needs a
+fully visible procfs, and `scripts/test-linux.sh` grants CAP_SYS_ADMIN and
+unconfined seccomp but not `systempaths=unconfined`.
+
+The cases below use `security.sandbox_cache_dir` with `developer.repos_dir`
+unset, which is the fallback branch and is unchanged by that work.
+
 Run with `scripts/test-linux.sh`. Carries the `linux` marker, which pyproject's
 addopts deselects.
 """

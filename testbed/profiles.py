@@ -134,6 +134,16 @@ FEEDS = Profile(
 # session's real image turned out to be — there is no constant to write down.
 NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 
+# There is no `cache` profile, and the reason it went is the reason it existed.
+# It was `forge` plus `ISTOTA_SECURITY_SANDBOX_CACHE_DIR`, kept separate so the
+# cache bind stayed out of every other forge scenario. The daemon now derives
+# the cache from `developer.repos_dir` instead — `{repos_dir}/{user_id}/`
+# `.package-caches`, per user, inside the subtree the sandbox binds — and does
+# not read that key at all while `repos_dir` is set. So the profile's one
+# variable was inert, and every forge stack carries the cache bind anyway, which
+# leaves nothing for a second name to key on. `tests/smoke/`
+# `test_sandbox_repos_isolation.py` runs on `forge`.
+
 # Exactly one full profile, and the asymmetry with the lean shape above is
 # deliberate. The argument for fine-grained profiles — that a stack with every
 # subsystem enabled has the daemon polling mail, feeds and Talk during every

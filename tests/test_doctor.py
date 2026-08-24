@@ -1850,9 +1850,12 @@ def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice"
         "connect_timeout_seconds": 0.5,
     }
     container_fields.update(overrides.pop("container", {}))
+    # Overridable so a caller can express "no repos_dir at all", which is the
+    # shape the derived package cache does not exist in.
+    repos_dir = overrides.pop("repos_dir", str(repos))
     return make_config(
         developer=DeveloperConfig(
-            enabled=True, repos_dir=str(repos), container=ContainerConfig(**container_fields)
+            enabled=True, repos_dir=repos_dir, container=ContainerConfig(**container_fields)
         ),
         security=SecurityConfig(**overrides.pop("security", {})),
         users={u: UserConfig(display_name=u) for u in users},
@@ -2144,21 +2147,28 @@ class TestTheDeveloperContainerChecks:
         assert identity.status == FAIL
         assert "/somewhere/else" in identity.detail
 
-    def test_an_unset_cache_dir_warns_rather_than_passing(
+    def test_an_unset_repos_dir_skips_rather_than_warning(
         self, make_config, tmp_path, monkeypatch
     ):
-        """A deployment without it is merely slow — every `uv sync` pays a full
-        copy instead of a hardlink — and merely-slow is what nobody
-        investigates."""
+        """The inverse of what this test used to assert, and the inversion is
+        the point.
+
+        It used to WARN when `security.sandbox_cache_dir` was unset. That key
+        stopped being the cache root: the cache is derived at
+        `{repos_dir}/{user_id}/.package-caches`, the key is read only where
+        `repos_dir` is unset, and its Ansible default is blank — so the old
+        assertion would fire on every correctly configured deployment, which is
+        worse than no check at all. With no `repos_dir` there is no subtree and
+        no derived cache, so there is nothing to look for and SKIP is honest.
+        """
         monkeypatch.setattr(doctor, "_exec_transport_request", _ping_reply)
-        config = _container_config(make_config, tmp_path)
+        config = _container_config(make_config, tmp_path, repos_dir="")
 
         cache = _by_name(doctor.check_developer_container(config, probe=True))[
             "developer.container.uv_cache"
         ]
 
-        assert cache.status == WARN
-        assert cache.remedy
+        assert cache.status == SKIP
 
     def test_a_missing_cache_mount_warns(self, make_config, tmp_path, monkeypatch):
         monkeypatch.setattr(

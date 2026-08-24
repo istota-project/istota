@@ -204,6 +204,8 @@ sandbox_ro_paths = {{ istota_security_sandbox_ro_paths | to_json }}
 {% endif %}
 {% if istota_security_sandbox_cache_dir %}
 sandbox_cache_dir = "{{ istota_security_sandbox_cache_dir }}"
+sandbox_cache_sweep_enabled = {{ istota_security_sandbox_cache_sweep_enabled | lower }}
+sandbox_cache_max_gb = {{ istota_security_sandbox_cache_max_gb }}
 {% endif %}
 
 [security.network]
@@ -321,6 +323,7 @@ shared_file_check_interval = {{ istota_scheduler_shared_file_check_interval }}
 heartbeat_check_interval = {{ istota_scheduler_heartbeat_check_interval }}
 db_health_check_interval = {{ istota_scheduler_db_health_check_interval }}
 worktree_reap_interval = {{ istota_scheduler_worktree_reap_interval }}
+sandbox_cache_sweep_interval = {{ istota_scheduler_sandbox_cache_sweep_interval }}
 main_loop_read_timeout_ms = {{ istota_scheduler_main_loop_read_timeout_ms }}
 db_backup_enabled = {{ istota_scheduler_db_backup_enabled | lower }}
 db_backup_interval = {{ istota_scheduler_db_backup_interval }}

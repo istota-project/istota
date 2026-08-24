@@ -311,6 +311,61 @@ class TestFindGitDirs:
             find_git_dirs(tmp_path, max_depth=2)
         assert "not descending past depth" in caplog.text
 
+    def test_a_skipped_subtree_is_pruned_outright(self, tmp_path, caplog):
+        """`security.sandbox_cache_dir` lives inside `repos_dir` by default
+        (ISSUE-319), and uv's `archive-v0` is one directory per unpacked wheel.
+        `max_depth` already stops the walk descending into them, so the cost
+        that shows is the depth line — which reads as thousands of directories
+        going unswept for credentials when none of them is a repository."""
+        bare = _bare(tmp_path)
+        cache = tmp_path / ".package-caches" / "alice" / "uv" / "archive-v0"
+        for i in range(5):
+            (cache / f"wheel{i}").mkdir(parents=True)
+
+        with caplog.at_level("INFO"):
+            found = find_git_dirs(tmp_path, skip=[tmp_path / ".package-caches"])
+        assert found == [bare]
+        assert "not descending past depth" not in caplog.text
+
+        # Without the skip the same tree logs it, so the assertion above is
+        # about the prune rather than about a depth this tree never reaches.
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            find_git_dirs(tmp_path)
+        assert "not descending past depth" in caplog.text
+
+    def test_a_skip_entry_that_does_not_exist_is_harmless(self, tmp_path):
+        """The key is empty on a deployment that never sets it, and the root is
+        created by the role rather than by this module."""
+        bare = _bare(tmp_path)
+        assert find_git_dirs(tmp_path, skip=[tmp_path / "never-made"]) == [bare]
+
+    def test_a_skip_at_or_above_the_root_is_refused(self, tmp_path, caplog):
+        """`skip` arrives as the operator's raw `security.sandbox_cache_dir`,
+        and neither caller consults the predicate that would reject it. A value
+        equal to or above `repos_dir` would prune the walk at its first step:
+        the sweep reports clean, and the ISSUE-270 credential scrub plus the
+        whole worktree reaper are silently switched off by a config typo."""
+        bare = _bare(tmp_path)
+
+        with caplog.at_level("WARNING"):
+            assert find_git_dirs(tmp_path, skip=[tmp_path]) == [bare]
+        assert "refusing to prune" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert find_git_dirs(tmp_path, skip=[tmp_path.parent]) == [bare]
+        assert "refusing to prune" in caplog.text
+
+    def test_a_repository_inside_a_skipped_subtree_is_not_found(self, tmp_path):
+        """The prune is by subtree, not by "is it a cache". Stated as an
+        assertion because it is the cost of the prune: a repository an operator
+        parks under the cache root goes unswept for credentials."""
+        cache = tmp_path / ".package-caches"
+        cache.mkdir()
+        _git(tmp_path, "init", "-q", "--bare", str(cache / "parked.git"))
+        assert find_git_dirs(tmp_path, skip=[cache]) == []
+
 
 class TestSweepDoesNotWalkCheckouts:
     """`setup_env` runs on every task where developer config is enabled, not
@@ -680,7 +735,7 @@ class TestDeveloperSetupEnvSweep:
     nobody ever calls it.
     """
 
-    def _run_hook(self, tmp_path, repos_dir):
+    def _run_hook(self, tmp_path, repos_dir, user_id="alice"):
         from istota import db
         from istota.config import Config, DeveloperConfig, SecurityConfig
         from istota.skills.developer import setup_env
@@ -708,7 +763,7 @@ class TestDeveloperSetupEnvSweep:
             ),
             security=SecurityConfig(skill_proxy_enabled=False),
         )
-        user_temp = tmp_path / "temp" / "alice"
+        user_temp = tmp_path / "temp" / user_id
         user_temp.mkdir(parents=True, exist_ok=True)
 
         class _Ctx:
@@ -717,9 +772,14 @@ class TestDeveloperSetupEnvSweep:
         ctx = _Ctx()
         ctx.config = config
         ctx.user_temp_dir = str(user_temp)
-        # The sweep root is `{repos_dir}/{user_id}`, so the hook needs the task.
+        # The hook creates and scrubs the repos subtree only for an admin,
+        # matching the bind's own gate.
+        ctx.is_admin = True
+        # The hook sweeps the task's own subtree of `repos_dir`, so the task —
+        # and specifically its user id — is what says which tree that is.
         ctx.task = db.Task(
-            id=1, prompt="p", user_id="alice", source_type="talk", status="running",
+            id=1, prompt="test", user_id=user_id,
+            source_type="talk", status="running", conversation_token="",
         )
         return setup_env(ctx)
 
@@ -733,7 +793,7 @@ class TestDeveloperSetupEnvSweep:
     def test_the_hook_strips_a_credentialed_remote(self, tmp_path):
         repos = tmp_path / "repos"
         repos.mkdir()
-        bare = _bare(self._mine(repos))
+        bare = _bare(repos / "alice")
         _git(bare, "config", "remote.origin.url", FAKE_URL)
 
         env = self._run_hook(tmp_path, repos)
@@ -747,7 +807,7 @@ class TestDeveloperSetupEnvSweep:
     def test_the_hook_warns_without_printing_the_value(self, tmp_path, caplog):
         repos = tmp_path / "repos"
         repos.mkdir()
-        bare = _bare(self._mine(repos))
+        bare = _bare(repos / "alice")
         _git(bare, "config", "remote.origin.url", FAKE_URL)
 
         with caplog.at_level("WARNING"):
@@ -805,6 +865,30 @@ class TestDeveloperSetupEnvSweep:
 
         assert env["GIT_CONFIG_COUNT"] == "1"
         assert env["GIT_CONFIG_KEY_0"] == "credential.https://gitlab.example.com.helper"
+
+
+    def test_the_sweep_is_scoped_to_the_tasks_own_subtree(self, tmp_path):
+        """`repos_dir` is a root of per-user subtrees and the sandbox binds only
+        the task's own, so the sweep walks only that one.
+
+        Not a gap: a credential in bob's tree is reachable from bob's tasks and
+        from nowhere else, and bob's own next task sweeps it. Walking every
+        user's tree from every user's task would mean the daemon rewriting one
+        admin's repository configs on another admin's schedule, and the scrub is
+        a rewrite.
+        """
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        mine = _bare(repos / "alice")
+        theirs = _bare(repos / "bob")
+        for bare in (mine, theirs):
+            _git(bare, "config", "remote.origin.url", FAKE_URL)
+
+        self._run_hook(tmp_path, repos)
+
+        assert FAKE_TOKEN not in _text(mine / "config")
+        assert FAKE_TOKEN in _text(theirs / "config"), \
+            "the hook rewrote another user's repository config"
 
 
 class TestWritesStayInsideTheRoot:

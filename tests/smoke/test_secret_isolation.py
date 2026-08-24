@@ -154,11 +154,18 @@ class TestNoCredentialReachesTheModel:
         # And the developer skill has to have been *authorized*, or
         # `GITLAB_TOKEN` was never in this task's environment for the split to
         # remove — which would make the scenario below assert the absence of
-        # something nothing put there. `DEVELOPER_REPOS_DIR` is the marker
-        # because it comes from the same `env` manifest and is the one entry
-        # there that is not `sensitive`, so it survives the split that the
-        # token does not.
-        assert "DEVELOPER_REPOS_DIR=" in observed, (
+        # something nothing put there. `GITLAB_URL` is the marker: it is
+        # `from: config` in the same `env` manifest, so `build_skill_env`
+        # resolves it for *authorized skills only*, and it is not `sensitive`,
+        # so it survives the split that the token does not.
+        #
+        # It used to be `DEVELOPER_REPOS_DIR`, which no longer answers the
+        # question. That variable comes from the developer skill's `setup_env`
+        # now, and `dispatch_setup_env_hooks` runs every hook in the index
+        # whatever the task selected — so it is present on any admin task of a
+        # developer-enabled deployment, authorized or not, and this control
+        # would have gone quietly vacuous.
+        assert "GITLAB_URL=" in observed, (
             "the developer skill was not authorized for this task, so no forge "
             "credential was ever resolved into its environment and the "
             "assertions below are vacuous. The prompt has to carry the skill's "
@@ -218,7 +225,10 @@ class TestNoCredentialReachesTheModel:
         # environment for the split to remove, and the two assertions below
         # would then be true of nothing. Stated here as well as in the control
         # above, because this is the assertion someone will read on its own.
-        assert "DEVELOPER_REPOS_DIR=" in observed, (
+        # `GITLAB_URL` and not `DEVELOPER_REPOS_DIR`: only the first is gated on
+        # authorization — see the control above for why the second stopped
+        # being.
+        assert "GITLAB_URL=" in observed, (
             "the developer skill was not authorized for this task, so nothing "
             "resolved a forge credential and this scenario asserts nothing"
         )

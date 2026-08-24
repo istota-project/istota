@@ -258,6 +258,21 @@ features = []
 #                                  # or at or ABOVE anything the sandbox already mounts — a bind
 #                                  # above an earlier mount would cover it, so do not point this
 #                                  # at temp_dir, ~/.cache, ~/.local, or repos_dir itself.
+# sandbox_cache_sweep_enabled = true  # bound what that directory grows to. Moving the caches
+#                                  # onto disk is what makes them persist, and nothing else
+#                                  # prunes them. Every sweep runs the package managers' own
+#                                  # cheap reclaim (uv cache prune, npm cache verify); a
+#                                  # per-user cache still over the ceiling afterwards is wiped
+#                                  # with their clean verbs. A user with a task in flight is
+#                                  # skipped rather than raced. Cadence is
+#                                  # [scheduler] sandbox_cache_sweep_interval; inert while
+#                                  # sandbox_cache_dir is empty.
+# sandbox_cache_max_gb = 10.0      # the ceiling, per user. Bytes rather than an age window
+#                                  # because one `uv sync --all-extras` writes about 1.8 GB in
+#                                  # a single command, which blows any sane window at once.
+#                                  # Clamped to a 1 GiB floor: below that the ceiling is under
+#                                  # one dependency resolution's working set, so every sweep
+#                                  # would wipe a cache that is doing its job.
 
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)

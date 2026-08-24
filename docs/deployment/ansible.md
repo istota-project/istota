@@ -185,7 +185,7 @@ The raw-socket diagnostics — `traceroute`, `mtr`, `tcpdump` — do not work in
 
 `istota_devbox_uid` and `istota_devbox_gid` are **derived**, not configured: the role reads them with `getent passwd {{ istota_user }}` and passes them to the image build, so the daemon and the container write into the shared worktree as one identity. Get that wrong and there is no error message anywhere that says so — the container cannot write into a worktree the daemon made, and once that is worked around the daemon cannot unlink a tree the container made, which leaves every worktree that ever ran a build permanently unreapable. The play asserts the lookup succeeded rather than failing later on an undefined variable.
 
-Set `istota_security_sandbox_cache_dir` under `istota_developer_repos_dir`. uv populates a venv by hardlinking out of its cache and `link(2)` fails across a mount boundary even on one device, so without it every `uv sync` in the container pays a full copy. A deployment missing it is merely slow, which is why `doctor` reports it.
+Leave `istota_security_sandbox_cache_dir` blank. With `istota_developer_enabled` and `istota_developer_repos_dir` set, each user's package cache is derived at `{repos_dir}/{user_id}/.package-caches`, which is inside the repos mount the container already gets — so cache and venv are on one mount and uv hardlinks rather than copying (`link(2)` compares mounts rather than devices). Setting the key on a deployment with the developer skill configured names a path nothing reads.
 
 ### Two upgrade notes
 

@@ -156,6 +156,7 @@
       - cron                # Scheduled backups
       - bubblewrap          # Per-user filesystem sandbox
       - fuse3               # FUSE mount support (fusermount3)
+      - acl                 # setfacl, for the one task that becomes the daemon user
     state: present
     update_cache: yes
     cache_valid_time: 3600
@@ -913,6 +914,62 @@
     - "{{ istota_home }}/tmp"
     - "{{ istota_home }}/.config"
   when: not istota_update_only and not istota_web_only
+
+# Nothing else in the tree creates this. On the reference deployment it exists
+# because an operator made it a mount, and a deployment where it does not is one
+# where every developer task fails on a directory it cannot make.
+#
+# Not gated on `istota_update_only`, which is the gate the migrator below is
+# also without. Update-only renders the config and restarts, so it is a run that
+# can put the per-user binds on a host where nothing has made this yet — and the
+# migrator's own `mkdir(parents=True)` would then create it with the daemon's
+# umask instead of the owner and mode named here.
+#
+# The role creates the root and stops there. Everything below it is per user —
+# `{repos_dir}/{user_id}` holds one admin's clones, worktrees and package cache,
+# and no other user's subtree is ever in that task's sandbox — and the daemon
+# makes each one at 0700 as the user's first task needs it. The role has no list
+# of users at this point in the play, and inventing one here would create a
+# directory for somebody the daemon does not know about.
+#
+# 0755 on the root itself, because it is a container of per-user directories
+# rather than a place anything is stored: the 0700 that matters is on the
+# subtrees, which is where the package archives uv trusts on read and never
+# re-verifies against a hash actually live.
+- name: Create the developer repos root
+  file:
+    path: "{{ istota_developer_repos_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0755"
+  when:
+    - istota_developer_repos_dir | length > 0
+    - not istota_web_only
+
+# The fallback root, for a deployment running the sandbox WITHOUT the developer
+# skill. There the caches have no repos tree to live in, so
+# `security.sandbox_cache_dir` still names one and each user gets
+# `{root}/{user_id}` — and `resolve_sandbox_cache_dir` refuses a root that is
+# not already an existing writable directory, falling open to a warning in the
+# log and the caches back on bubblewrap's root tmpfs. Shipped blank, so this
+# fires only for an operator who set the key by hand.
+#
+# It does *not* fire for a developer deployment. There the cache is derived at
+# `{repos_dir}/{user_id}/.package-caches`, created by the daemon along with the
+# subtree it sits in, and this key is not read at all.
+#
+# 0700, because the root holds one cache directory per user.
+- name: Create the fallback package-cache root
+  file:
+    path: "{{ istota_security_sandbox_cache_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0700"
+  when:
+    - istota_security_sandbox_cache_dir | length > 0
+    - not istota_web_only
 
 - name: "Create /var/log/{{ istota_namespace }} directory"
   file:
@@ -2112,6 +2169,106 @@
     group: "{{ istota_group }}"
   when: not ansible_check_mode and not istota_web_only
 
+# One-time relocation: `developer.repos_dir` from one shared tree into per-user
+# subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
+# The sandbox now binds a task's own subtree rather than the whole root, so a
+# clone left at the old depth is in nobody's namespace: the model would not find
+# it, would clone again, and the old tree would sit there paying for disk. The
+# migrator moves each namespace directory wholesale (its worktrees are siblings
+# of the bare clone inside it, so one rename takes them together) and then runs
+# `git worktree repair` on each clone to fix the absolute paths git records in
+# both directions.
+#
+# Here rather than in YAML because the ownership rule has a judgement call in it.
+# Nothing on disk says which user owns a clone — a forge namespace is not a user
+# id — so the migrator reads the admins file, assigns everything to the single
+# admin where there is exactly one, and refuses where there are none or several.
+# Guessing wrong hands one admin's clones to another, which is the exact failure
+# the per-user split exists to prevent. Same pattern as `istota.db_relocate`.
+#
+# Run unconditionally: it writes `{repos_dir}/.istota-layout` on success and is
+# a reported no-op from then on, so there is nothing to gate it on. A blank
+# `developer.repos_dir` exits 0 with "nothing to migrate".
+#
+# **Not gated on `istota_update_only`**, and that is the gate that matters.
+# Update-only is "pull the code, update the dependencies, render the config,
+# restart" — precisely the run that puts the per-user binds on a host whose
+# clones are still at the old depth. Gating it there would land the split and
+# skip the migration on the one path most likely to carry it. `istota.db_relocate`
+# and the location migrator are ungated the same way, and the two directory
+# tasks above were brought into line with all three.
+#
+# **As the daemon user, not as root.** It creates `{repos_dir}/{user_id}` and
+# renames the namespaces into it; created as root that directory is root-owned
+# at 0700 and the daemon can no longer enter the tree it binds, so every
+# developer task would fail on a migration the play reported as successful.
+# Running it as the daemon user also means the moves are only ever done with the
+# permissions the daemon itself has.
+#
+# `changed_when` reads the migrator's own output, because the exit code is 0
+# whether it moved a tree or found nothing to do. Anchored to the start of a
+# line: the report prints one `note:` line per entry it declined to move, each
+# beginning with that entry's own name, and the entries under `repos_dir` were
+# model-writable on every deployment running the shared bind — so a directory
+# named `moved` renders `note: moved: a symlink; left in place`, and a plain
+# substring test would report `changed` on every deploy for ever after. The
+# marker is the third arm: a first run over an empty or absent tree moves
+# nothing and still writes `.istota-layout`, and calling that unchanged would
+# have the one run that touched the disk read like every run after it. "marker
+# not written" does not contain "marker written", so those two stay apart.
+#
+# **`failed_when` replaces the module's own verdict rather than adding to it**,
+# which is why it cannot simply name the migrator's codes. `repos_relocate`
+# returns 0, 1 or 2, but the `command` module reports its own failures through
+# the same field — a missing interpreter arrives as rc 2, and a killed process
+# as a signal code — so a rule phrased as "fail on 1" hands every one of those
+# back as success, on a task that moves repositories. The condition below is
+# the inverse: pass only where the migrator demonstrably ran to its own end.
+#
+# 0 is success, including "already migrated" and "nothing to migrate". 1 is a
+# refusal, which touched nothing at all — an ambiguous set of admins, a task in
+# flight, an unreadable root — so the play fails, the operator fixes the named
+# thing and re-runs. 2 is the interesting one and it covers two different
+# states. Where the report carries a `FAILED:` line the marker was *not*
+# written, so a re-run retries and the play should stop. Where it carries only
+# `NOT repaired:` the moves landed, the marker is written and re-running has no
+# rename left to perform, so failing the play would leave it red for ever and
+# teach people to skip the task; that case is printed instead and the tree is
+# recoverable in the state it is in. The `done:` line is what says the report
+# was ours at all, which is what tells the migrator's exit 2 from the command
+# module's.
+- name: Migrate the developer repos tree into per-user subtrees
+  command: >-
+    {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.repos_relocate
+  args:
+    chdir: "{{ istota_repo_dir }}"
+  become: true
+  become_user: "{{ istota_user }}"
+  environment:
+    ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
+  register: _repos_relocate
+  changed_when: >-
+    (_repos_relocate.stdout_lines | default([])
+       | select('match', '^(moved|repaired): ') | list | length > 0)
+    or 'marker written' in (_repos_relocate.stderr | default(''))
+  failed_when: >-
+    _repos_relocate.rc != 0 and not (
+      _repos_relocate.rc == 2
+      and 'done: ' in (_repos_relocate.stderr | default(''))
+      and 'FAILED: ' not in (_repos_relocate.stderr | default(''))
+    )
+  when:
+    - not istota_web_only
+    - istota_developer_repos_dir | length > 0
+
+- name: Show the repos relocation output
+  debug:
+    msg: "{{ _repos_relocate.stdout_lines + _repos_relocate.stderr_lines }}"
+  when:
+    - _repos_relocate is defined
+    - _repos_relocate is not skipped
+    - _repos_relocate.changed or _repos_relocate.rc == 2
+
 # One-time migration: framework istota.db → per-user location.db.
 # Copies each user's location_pings/places/visits/dismissed_clusters/location_state
 # rows into {workspace}/location/data/location.db, then drops the framework tables.
@@ -2818,95 +2975,6 @@
   when:
     - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
     - istota_developer_container_backend == 'devbox'
-
-# --- The per-user repos layout ---------------------------------------------
-#
-# `developer.repos_dir` became a per-user root: the daemon derives
-# `{repos_dir}/{user_id}` and every task-scoping consumer takes that. One rule
-# closing three holes — a devbox mounting the global root would hand user B
-# write access to user A's worktrees; a non-admin with a devbox would reach past
-# the admin-only bwrap bind through the transport; and one user's credential
-# scrub would walk and rewrite git configs in every other user's tree.
-#
-# The directory is created for every configured user, not only devbox ones: the
-# layout is the daemon's, and a devbox is one consumer of it.
-- name: Ensure the per-user repos directories exist
-  file:
-    path: "{{ istota_developer_repos_dir }}/{{ item }}"
-    state: directory
-    owner: "{{ istota_user }}"
-    group: "{{ istota_group }}"
-    mode: "0750"
-  loop: "{{ (istota_users.keys() | list) | union(istota_devbox_users) | unique }}"
-  when:
-    - istota_developer_enabled and not istota_web_only
-    - istota_developer_repos_dir | length > 0
-
-# The one-time move. Existing clones sit directly under `repos_dir` and go down
-# a level.
-#
-# It refuses rather than moving anything holding uncommitted work — a repository
-# under here can be a bare clone with live worktrees beside it, and a move
-# performed while a task is mid-run would take the checkout out from under it.
-# The script is idempotent and prints what it did; a directory it declined to
-# move is named, left exactly where it is, and reported as changed=false so a
-# rerun after the operator has dealt with it picks it up.
-#
-# Which user a stray repository belongs to is not derivable — the old layout
-# recorded no owner, which is half the reason it is being replaced — so the
-# move needs a name. `istota_developer_repos_migrate_to` is that name, unset by
-# default, and with it unset the task reports what it *would* move and changes
-# nothing.
-- name: Install the repos layout migration script
-  copy:
-    src: migrate_repos_layout.py
-    dest: "/usr/local/bin/{{ istota_namespace }}-migrate-repos-layout"
-    owner: root
-    group: root
-    mode: "0755"
-  when:
-    - istota_developer_enabled and not istota_web_only
-    - istota_developer_repos_dir | length > 0
-
-# `sudo -u` rather than `become_user`, matching how this role already runs the
-# `claude` CLI as the daemon user. Two reasons and both bite. `ansible.builtin.
-# script` copies to a root-owned temp directory that an unprivileged
-# `become_user` cannot read without `allow_world_readable_tmpfiles`. And running
-# the move as *root* would be worse than failing: git refuses to operate on a
-# repository owned by another user ("dubious ownership") unless `safe.directory`
-# says otherwise, so every repository would be reported held for a reason that
-# has nothing to do with its contents — and a cross-device `shutil.move` as root
-# would leave the copied tree root-owned, which is the uid mismatch this whole
-# change exists to prevent, introduced by its own migration.
-- name: Migrate a flat repos layout to the per-user one
-  shell: >
-    sudo -u {{ istota_user }} {{ istota_home }}/.venv/bin/python
-    /usr/local/bin/{{ istota_namespace }}-migrate-repos-layout
-    --root "{{ istota_developer_repos_dir }}"
-    {% if istota_developer_repos_migrate_to %}--user "{{ istota_developer_repos_migrate_to }}"{% endif %}
-    --known-user "{{ (istota_users.keys() | list) | union(istota_devbox_users) | unique | join(',') }}"
-  register: istota_repos_migration
-  changed_when: "'MOVED ' in (istota_repos_migration.stdout | default(''))"
-  # Exit 2 means it found repositories to move and could not work out whose they
-  # are. That fails the play deliberately: the config handler queued behind this
-  # restarts the daemon, and it would come up with the repos bind naming an
-  # empty per-user directory and the developer skill silently unusable. Set
-  # `istota_developer_repos_migrate_to` to the user the existing clones belong
-  # to, run once, then take it back out. A host with exactly one configured user
-  # never reaches this — there is nothing to derive between, so the move
-  # happens.
-  failed_when: istota_repos_migration.rc not in [0]
-  when:
-    - istota_developer_enabled and not istota_web_only
-    - istota_developer_repos_dir | length > 0
-
-- name: Report repositories the layout migration held back
-  ansible.builtin.debug:
-    msg: "{{ istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|NOTE|WOULD-MOVE) ') | list }}"
-  when:
-    - istota_repos_migration is defined
-    - istota_repos_migration.stdout is defined
-    - istota_repos_migration.stdout_lines | select('match', '^(HELD|FAILED|NOTE|WOULD-MOVE) ') | list | length > 0
 
 # --- Retiring the Docker-API allowlist proxy.
 #
