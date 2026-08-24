@@ -2395,12 +2395,27 @@
 # a reported no-op from then on, so there is nothing to gate it on. A blank
 # `developer.repos_dir` exits 0 with "nothing to migrate".
 #
+# **Not gated on `istota_update_only`**, unlike the directory creation above,
+# and that is the gate that matters. Update-only is "pull the code, update the
+# dependencies, render the config, restart" — which is precisely the run that
+# puts the per-user binds on a host whose clones are still at the old depth.
+# Gating it there would land the split and skip the migration on the one path
+# most likely to carry it. `istota.db_relocate` and the location migrator are
+# gated the same way, for the same reason.
+#
 # **As the daemon user, not as root.** It creates `{repos_dir}/{user_id}` and
 # renames the namespaces into it; created as root that directory is root-owned
 # at 0700 and the daemon can no longer enter the tree it binds, so every
 # developer task would fail on a migration the play reported as successful.
 # Running it as the daemon user also means the moves are only ever done with the
 # permissions the daemon itself has.
+#
+# `changed_when` reads the migrator's own output, because the exit code is 0
+# whether it moved a tree or found nothing to do. The marker is the third arm:
+# a first run over an empty or absent tree moves nothing and still writes
+# `.istota-layout`, and reporting that as unchanged would have the one run that
+# touched the disk look identical to every run after it. "marker not written"
+# does not contain "marker written", so the two branches stay apart.
 #
 # Three exit codes and each is read differently. 0 is success, including
 # "already migrated" and "nothing to migrate". 1 is a refusal, which touched
@@ -2422,10 +2437,11 @@
     ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
   register: _repos_relocate
   changed_when: >-
-    'moved: ' in _repos_relocate.stdout or 'repaired: ' in _repos_relocate.stdout
+    'moved: ' in _repos_relocate.stdout or
+    'repaired: ' in _repos_relocate.stdout or
+    'marker written' in _repos_relocate.stderr
   failed_when: _repos_relocate.rc == 1
   when:
-    - not istota_update_only
     - not istota_web_only
     - istota_developer_repos_dir | length > 0
 

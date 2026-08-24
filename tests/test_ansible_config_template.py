@@ -483,11 +483,32 @@ class TestTheReposRelocationTask:
         would be one people learn to skip."""
         assert migrator["failed_when"] == "_repos_relocate.rc == 1"
 
+    def test_it_runs_on_an_update_only_deploy(self, migrator):
+        """The gate that matters, and the one that is easy to get backwards.
+
+        `istota_update_only` is "pull the code, update the dependencies, render
+        the config, restart" — precisely the run that puts the per-user binds on
+        a host whose clones are still at the old depth. A migrator skipped there
+        lands the split and skips the migration on the path most likely to carry
+        it. `istota.db_relocate` and the location migrator are ungated the same
+        way.
+        """
+        assert not any(
+            "istota_update_only" in str(cond) for cond in migrator["when"]
+        ), "the repos migrator is skipped on an update-only deploy"
+
     def test_a_no_op_run_is_not_reported_as_a_change(self, migrator):
         """It runs on every deploy and is a no-op after the first, so
         `changed_when` has to key on the migrator's own output rather than on
         the exit code, which is 0 either way."""
         assert "moved: " in migrator["changed_when"]
+
+        # And the marker, because a first run over an empty tree moves nothing
+        # and still writes `.istota-layout` — the one run that touched the disk
+        # would otherwise read the same as every run after it. `_print_report`
+        # prints "marker not written" on the other branch, which does not
+        # contain this substring.
+        assert "marker written" in migrator["changed_when"]
 
     def test_it_runs_after_the_code_and_before_the_units(self, tasks):
         """Ordering, and both halves matter.
