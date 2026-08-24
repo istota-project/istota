@@ -618,6 +618,28 @@ def test_every_golden_file_belongs_to_a_case():
     )
 
 
+def test_the_regeneration_switch_survives_the_env_scrub():
+    """The documented regeneration command has to be able to arm this file.
+
+    `tests/conftest.py` scrubs `ISTOTA_*` from the environment per test
+    (ISSUE-301), and `ISTOTA_UPDATE_GOLDEN` matches neither keep-prefix
+    (`ISTOTA_TEST`, `ISTOTA_UPGRADE_`), so it was deleted before `updating()`
+    ever read it. The failure mode is the bad one: the documented command
+    wrote nothing and reported all twelve goldens as *failing*, which reads as
+    a prompt regression rather than as a broken switch — and the way out looks
+    like editing goldens by hand.
+
+    Asserting on the policy rather than on `os.environ`, because the scrub has
+    already run by the time a test body executes: reading the environment here
+    would pass for the wrong reason on a machine that never exported it.
+    """
+    from tests.support.env_isolation import scrubbed_env_names
+
+    assert scrubbed_env_names({UPDATE_ENV: "1"}) == set(), (
+        f"{UPDATE_ENV} is scrubbed before {UPDATE_CMD!r} can read it"
+    )
+
+
 class TestTheStorageBackendDimension:
     """The two prompt-visible differences between the backends, named.
 

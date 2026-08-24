@@ -260,7 +260,7 @@ Test and lint output is the largest single source of wasted context. Spend it de
 
 - **Failure-only output.** Use the runner's own quiet flags: `pytest -q --no-header`, `vitest --reporter=dot`, `go test -failfast`.
 - **Cap the worker count to 2 before you run anything.** `pytest -n auto` and vitest's default size their pool from `cpu_count()`, so each suite claims the whole box — and you are sharing it with other tasks and the daemon itself. Two at once ask for more than exists, and the result is timeouts that have nothing to do with the code. Set `PYTEST_XDIST_AUTO_NUM_WORKERS=2` (honoured by `-n auto`) in the same call as the run, since shell state does not carry between calls; vitest takes `--maxWorkers=2`, `make` takes `-j2`. Use the environment, not the repository's `pyproject.toml`: `-n auto` is correct on a laptop and in CI, and this host is the special case.
-- **The exit status is the result, and a pipe throws it away.** A pipeline reports the status of its *last* command, so `pytest … | tail` exits 0 on a suite that just failed. Every other bullet here pushes toward trimming output, which is what makes this the place to say it:
+- **The exit status is the result, and `pipefail` is what stops a pipe throwing it away.** It is **already on** in your Bash calls (see the Bash note in Available tools for the two costs), so `pytest … | tail` no longer exits 0 on a suite that failed. It arrives through the environment, so it reaches a nested `bash script.sh` too — but bash only, and `/bin/sh` on the Debian server is dash, which has no `pipefail` at all. Write the option yourself in a script, or where you are unsure what shell you are in:
 
   ```bash
   set -o pipefail                               # same Bash call as the pipe

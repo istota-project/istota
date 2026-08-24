@@ -70,6 +70,98 @@ def shell_argv(command: str, *, bash: str | None = None) -> list[str]:
     return [POSIX_SH, "-c", command]
 
 
+#: The variable bash reads its startup options from.
+#:
+#: Set in a process's environment, bash enables each option named in it before
+#: reading any startup file, and the variable is readonly inside the shell so a
+#: command cannot unset it. ``set +o pipefail`` still works, which is the
+#: per-command escape hatch and the only one there is.
+SHELLOPTS_VAR = "SHELLOPTS"
+
+#: The value. Colon-separated option names; one, here.
+PIPEFAIL_SHELLOPTS = "pipefail"
+
+
+def pipefail_env() -> dict[str, str]:
+    """The environment entries that turn ``pipefail`` on for every bash below.
+
+    ``shell_argv`` can only fix a shell istota spawns itself, and the largest
+    consumer of shells in the deployment spawns its own: a ``ClaudeCodeBrain``
+    or ``TmuxClaudeBrain`` task runs its commands through the Claude Code CLI's
+    Bash tool, which builds ``bash -c 'source <shell-snapshot> && eval <cmd>'``
+    in a process istota launches but does not instrument. So that shell started
+    with ``pipefail`` off and reported a pipeline's *last* stage — ``gh auth
+    status 2>&1 | head -3`` came back 0 for a refusal whose whole signal is
+    exit 3, and ``git commit … | tail -25`` came back 0 for a commit the
+    secret-scanning hook had just aborted (ISSUE-321).
+
+    The environment is the only lever that reaches it. This is the fourth
+    member of one family — ISSUE-264 fixed it in the developer skill's prose,
+    ISSUE-307 in ``devbox exec``, ``shell_argv`` above in istota's own three
+    exit-status-as-answer callers — and it lives here so a caller inherits the
+    rule rather than restating it.
+
+    **Why ``SHELLOPTS`` and not ``BASH_ENV``.** Both work, and both were
+    measured working through a sourced shell snapshot. ``BASH_ENV`` names a
+    *file* bash sources before every non-interactive shell, which is arbitrary
+    code execution before every command the model runs, and needs that file to
+    exist, to be bound into the sandbox, and to stay unwritable by the model
+    for the guarantee to hold — three things that can each fail silently, since
+    bash ignores an unreadable ``BASH_ENV`` without a word.
+    ``executor._SHELL_STARTUP_ENV_VARS`` strips it for exactly that reason,
+    from ``build_stripped_env`` and — since this change was reviewed — from
+    ``build_clean_env``'s passthrough loop as well, which is the path that
+    actually mattered here and did not filter. ``SHELLOPTS`` carries option
+    *names*: a value of ``pipefail:$(touch /tmp/x)`` is rejected as an invalid
+    option name rather than evaluated, measured, so there is no file and no
+    inlet. The same set now strips an *inherited* ``SHELLOPTS`` before this
+    value is set, so what reaches a shell is only ever what this function says.
+
+    **It reaches further than the flag does, and only through bash.**
+    ISSUE-307 recorded that ``-o pipefail`` stops at one shell, so a pipeline
+    inside a ``bash script.sh`` was unguarded again. An environment variable is
+    inherited, so it is not. That is more coverage and also a larger behaviour
+    change, in the direction the project has already chosen twice: a status
+    wrong in the alarming direction makes a reader look, one wrong in the
+    reassuring direction gets acted on. **What it does not reach is anything
+    that is not bash**, and the boundary is the host's rather than a rule: a
+    ``#!/bin/sh`` script gets the option on macOS, where ``/bin/sh`` is bash in
+    sh-mode and imports the variable, and not on Debian, where ``/bin/sh`` is
+    dash and has no ``pipefail`` at all. So a ``make`` recipe, an ``npm``
+    lifecycle script or a ``subprocess(shell=True)`` is covered on the
+    standalone install and not on the server. Do not write either behaviour
+    into a doc as though it were the rule.
+
+    **Two more measured edges.** Bash 3.2 in POSIX mode (``--posix``, not
+    sh-mode) refuses the variable outright — ``SHELLOPTS: readonly variable``
+    on stderr, option not applied — which is the macOS system bash and not
+    Debian's. And an option name bash does not know makes it complain on
+    stderr and carry on rather than refuse to start, so a future value that is
+    wrong degrades to the old behaviour instead of breaking every command.
+
+    **The two costs are the ones ISSUE-307 already paid for.** ``yes | head``
+    and ``cmd | grep -q`` now report 141, which has a fixed code and is
+    annotated by :data:`SIGPIPE_NOTE`. A non-final stage that exits non-zero to
+    *report* rather than to fail now colours the whole pipeline — ``grep -c x f
+    | wc -l`` returns 1 where it returned 0 — which nothing can distinguish
+    from a real failure and is documented instead.
+
+    **One caller, and the asymmetry is deliberate.** ``build_clean_env`` uses
+    this, so a model subprocess has the option at every depth. The cron
+    ``command:`` and heartbeat ``shell-command`` paths build their env with
+    ``build_stripped_env`` and get ``pipefail`` from ``shell_argv`` alone, at
+    depth one — a pipeline inside a script such a row invokes is unguarded.
+    Folding this in there too would be consistent, and it is not done: those
+    commands are *operator*-authored, the operator can put ``set -euo
+    pipefail`` at the top of their own script, and changing the meaning of a
+    deployed cron row's exit status at depth is a second behaviour change with
+    a different blast radius from the one ISSUE-321 asked for.
+
+    A fresh dict each call: callers merge it into an env they go on to mutate.
+    """
+    return {SHELLOPTS_VAR: PIPEFAIL_SHELLOPTS}
+
+
 def _warn_no_pipefail() -> None:
     """Say once that this host cannot honour the guarantee the docs promise.
 

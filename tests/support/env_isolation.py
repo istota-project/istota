@@ -102,6 +102,16 @@ _KEEP_PREFIXES = (
 )
 _KEEP_NAMES = frozenset({
     "ISTOTA_IMAGE_TAG",
+    # The golden-regeneration switch, which is a harness input like the tier
+    # selectors above but matches neither keep-prefix. Scrubbing it did not
+    # merely disable the feature — it made the documented command
+    # (`ISTOTA_UPDATE_GOLDEN=1 uv run pytest tests/test_prompt_golden.py -n0`,
+    # in AGENTS.md and `.claude/rules/testbed.md`) report the goldens as
+    # *failing* while writing nothing, which reads as a real prompt regression.
+    # `test_prompt_golden.updating()` is what keeps a stale value from rubber
+    # stamping: it takes only affirmative/negative spellings and raises on
+    # anything else, so the strict parse is the guard rather than the scrub.
+    "ISTOTA_UPDATE_GOLDEN",
     "ISTOTA_DEVBOX_IMAGE_TAG",
     "ISTOTA_LINUX_TIER",
     # Contains TOKEN and so matches the credential rule, and is not one: it
