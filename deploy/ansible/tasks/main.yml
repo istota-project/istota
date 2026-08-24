@@ -2226,9 +2226,24 @@
 # the inverse: pass only where the migrator demonstrably ran to its own end.
 #
 # 0 is success, including "already migrated" and "nothing to migrate". 1 is a
-# refusal, which touched nothing at all — an ambiguous set of admins, a task in
-# flight, an unreadable root — so the play fails, the operator fixes the named
-# thing and re-runs. 2 is the interesting one and it covers two different
+# refusal, which touched nothing at all, and the reason decides whether it
+# stops the play — the migrator prints it as `refusal: <reason>` so this rule
+# reads a code rather than prose.
+#
+# `live_tasks` is the one that carries on. It is transient and self-resolving:
+# the tasks finish, and the next deploy migrates. Failing the play there buys
+# no safety, because it does not stop the code going live — the auto-update
+# path resets the checkout to `main` and restarts the units whatever this play
+# reports — so a hard failure leaves the same half-migrated host and stops the
+# rest of the deploy as well. It is reported loudly by the task below instead.
+# The refusal is also precise about what it means: the migrator only consults
+# the task table when a rename is actually pending, so `live_tasks` implies the
+# host is still on the old shape with work to move.
+#
+# Every other reason stops the play, and the difference is that none of them
+# resolves on its own — an ambiguous set of admins, an unreadable root, a
+# destination that is not contained. Retrying cannot help and a warning nobody
+# acts on would repeat for ever, so those stay hard failures. 2 covers two
 # states. Where the report carries a `FAILED:` line the marker was *not*
 # written, so a re-run retries and the play should stop. Where it carries only
 # `NOT repaired:` the moves landed, the marker is written and re-running has no
@@ -2253,9 +2268,14 @@
     or 'marker written' in (_repos_relocate.stderr | default(''))
   failed_when: >-
     _repos_relocate.rc != 0 and not (
-      _repos_relocate.rc == 2
-      and 'done: ' in (_repos_relocate.stderr | default(''))
-      and 'FAILED: ' not in (_repos_relocate.stderr | default(''))
+      (
+        _repos_relocate.rc == 2
+        and 'done: ' in (_repos_relocate.stderr | default(''))
+        and 'FAILED: ' not in (_repos_relocate.stderr | default(''))
+      ) or (
+        _repos_relocate.rc == 1
+        and 'refusal: live_tasks' in (_repos_relocate.stderr | default(''))
+      )
     )
   when:
     - not istota_web_only
@@ -2267,7 +2287,28 @@
   when:
     - _repos_relocate is defined
     - _repos_relocate is not skipped
-    - _repos_relocate.changed or _repos_relocate.rc == 2
+    - >-
+      _repos_relocate.changed or _repos_relocate.rc == 2
+      or 'refusal: live_tasks' in (_repos_relocate.stderr | default(''))
+
+# The deploy carried on past a migration that was due, so this is the only
+# place it is said. The host is still on the old shape: `developer.repos_dir`
+# holds `{namespace}/` directories the per-user bind cannot see, so a developer
+# task finds an empty tree until the migration lands. Re-running the play once
+# the tasks are idle is the whole fix, and it is a no-op on every host that has
+# already migrated.
+- name: Warn — repos migration deferred, a task was in flight
+  debug:
+    msg:
+      - "The developer repos tree was NOT migrated: a task was running."
+      - "This host is still on the shared layout, so developer tasks see an
+         empty repos directory until it is migrated."
+      - "Re-run this play when the scheduler is idle. Nothing was moved and
+         nothing is at risk; the migration is a no-op once it has run."
+  when:
+    - _repos_relocate is defined
+    - _repos_relocate is not skipped
+    - "'refusal: live_tasks' in (_repos_relocate.stderr | default(''))"
 
 # One-time migration: framework istota.db → per-user location.db.
 # Copies each user's location_pings/places/visits/dismissed_clusters/location_state
