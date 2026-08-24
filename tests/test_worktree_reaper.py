@@ -495,6 +495,35 @@ class TestReaps:
 
         assert "project--gone" not in _git(bare, "worktree", "list", "--porcelain")
 
+    def test_reaps_a_clone_one_level_deeper_under_a_user_directory(
+        self, repos, tmp_path,
+    ):
+        """`repos_dir` is a root of per-user subtrees, so a bare clone sits at
+        `{user}/{namespace}/{project}.git` — depth 3 rather than depth 2.
+
+        The scheduler sweeps the whole root with the daemon's own view and is
+        unchanged by that layout, because `find_git_dirs` walks to depth 4.
+        This is that claim asserted rather than assumed: at depth 3 the walk
+        reaches the clone, and a worktree beside it is swept exactly as one in
+        the flat layout is.
+        """
+        repos_dir, _, upstream = repos
+        deep = tmp_path / "repos" / "alice" / "acme" / "widget.git"
+        deep.parent.mkdir(parents=True, exist_ok=True)
+        _git(tmp_path, "clone", "-q", "--bare", str(upstream), str(deep))
+        _git(deep, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        _git(deep, "fetch", "-q", "origin")
+        _git(deep, "remote", "set-head", "origin", "-a")
+
+        worktree = _worktree(deep, "widget--main", "origin/main")
+        _age(worktree, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert "widget--main" in _names(outcomes), \
+            f"a clone under a per-user directory went unswept: {outcomes}"
+        assert not worktree.exists()
+
     def test_reaps_across_several_bare_clones(self, repos, tmp_path):
         repos_dir, bare, upstream = repos
         second = tmp_path / "repos" / "other" / "second.git"

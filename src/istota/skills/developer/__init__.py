@@ -1,8 +1,10 @@
 """Developer skill — setup_env hook.
 
-Sweeps ``repos_dir`` for credentials embedded in remote URLs and strips them
-(:mod:`istota.git_remote_scrub`, ISSUE-270) before generating anything, then
-generates, inside the task's user temp directory:
+Creates the task's own subtree of ``repos_dir`` (``{repos_dir}/{user_id}`` —
+the only part of that tree the sandbox binds) and sweeps it for credentials
+embedded in remote URLs, stripping them (:mod:`istota.git_remote_scrub`,
+ISSUE-270) before generating anything. Then generates, inside the task's user
+temp directory:
 
 - the credential-fetch helper and the per-platform git-credential-helper
   scripts, plus the ``GIT_CONFIG_*`` vars that point git at them;
@@ -395,6 +397,53 @@ def setup_env(ctx) -> dict[str, str]:
     # one directory per unpacked wheel. Pruned from the walk: none of them is a
     # repository, and this runs on every task.
     cache_root = config.security.sandbox_cache_dir
-    scrub_and_report(Path(dev.repos_dir), skip=[cache_root] if cache_root else [])
+    repos_root = _user_repos_dir(dev, ctx)
+    if repos_root is not None:
+        scrub_and_report(repos_root, skip=[cache_root] if cache_root else [])
 
     return env
+
+
+def _user_repos_dir(dev, ctx) -> Path | None:
+    """Create and return ``{repos_dir}/{user_id}``, or None.
+
+    The layout rule is ``executor.get_user_repos_dir``; this is the same rule
+    written a second time because a skill module cannot import the executor
+    that imports it. ``tests/test_sandbox.py::TestPerUserReposDir`` holds the
+    two equal, so a change to either without the other goes red.
+
+    Created here, at 0700, because ``build_bwrap_cmd``'s ``_bind`` skips a path
+    that does not exist. Without it a user's first developer task binds nothing
+    at all, the model's first ``mkdir -p`` under ``$DEVELOPER_REPOS_DIR`` lands
+    on bwrap's root tmpfs, and the clone it then spends minutes on disappears
+    when the task ends — a working first task and a confusing one differ by
+    this directory. Same shape as ``resolve_sandbox_cache_dir``'s creation of
+    the per-user cache directory, deliberately: ``mkdir`` is umask-dependent,
+    so the mode is set explicitly afterwards.
+
+    Never raises. This runs late in a hook whose exceptions
+    ``dispatch_setup_env_hooks`` swallows along with everything the hook
+    returned, so a failure here has to be reported rather than thrown — a task
+    that cannot clone is better than one that silently cannot authenticate.
+    """
+    user_id = getattr(getattr(ctx, "task", None), "user_id", "") or ""
+    if not user_id:
+        # The fallback would be the shared root, which is the cross-user reach
+        # the per-user layout exists to remove. Fail closed and say so.
+        logger.warning(
+            "developer: no user id on the task; not creating or scrubbing a "
+            "repos subtree under %s", dev.repos_dir,
+        )
+        return None
+    repos_root = Path(dev.repos_dir) / user_id
+    try:
+        repos_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(repos_root, 0o700)
+    except OSError as exc:
+        logger.warning(
+            "developer: could not prepare the repos subtree %s (%s); the task "
+            "will have no writable repos directory inside the sandbox",
+            repos_root, exc,
+        )
+        return None
+    return repos_root

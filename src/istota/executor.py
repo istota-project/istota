@@ -366,6 +366,39 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
     return config.temp_dir / user_id
 
 
+def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
+    """The task's own subtree of ``developer.repos_dir``, or None.
+
+    ``developer.repos_dir`` is a root of per-user subtrees rather than one
+    shared tree: ``{repos_dir}/{user_id}/{namespace}/{project}.git``. An admin
+    developer task binds only its own, so one admin cannot read or write
+    another's clones, worktrees, model-written git configs or package caches.
+    That is structural — there is no mask to emit and no argv ordering to
+    preserve, which is the whole of what ISSUE-319 had to get right.
+
+    The three places that need this path — the bwrap bind, the native brain's
+    write roots, and the developer skill's ``setup_env`` — must not disagree
+    about it, and the last of those cannot import this module (it is a skill
+    module; ``executor`` imports the skill package). So the rule is stated here
+    and repeated there against this docstring, with
+    ``tests/test_sandbox.py::TestPerUserReposDir`` holding the two equal.
+
+    ``user_id`` is joined plainly, exactly as :func:`get_user_temp_dir` joins
+    it. Deliberately one rule and not two: user ids already reach the
+    filesystem through that function, and a second, stricter spelling here
+    would mean a user whose task directory exists and whose repos directory
+    does not, silently.
+
+    None when the layout cannot be named — no configured root, or no user id.
+    The fallback for an empty user id would be the shared root itself, which is
+    the exposure this split exists to remove, so it fails closed instead.
+    """
+    root = config.developer.repos_dir
+    if not root or not user_id:
+        return None
+    return Path(root) / user_id
+
+
 def discover_calendars_for_task(
     task, config: Config,
 ) -> list[tuple[str, str, bool]]:
@@ -2545,9 +2578,14 @@ def build_bwrap_cmd(
         _bind(cache_dir)
 
     # --- Developer repos (RW) ---
-    if is_admin and config.developer.enabled and config.developer.repos_dir:
-        repos = Path(config.developer.repos_dir)
-        if repos.exists():
+    #
+    # The task's own subtree, never the shared root — see `get_user_repos_dir`.
+    # Created by the developer skill's `setup_env`, which runs before this;
+    # `_bind` skips a path that does not exist, so a user who has never run a
+    # developer task binds nothing rather than having the root stand in.
+    if is_admin and config.developer.enabled:
+        repos = get_user_repos_dir(config, task.user_id)
+        if repos is not None and repos.exists():
             _bind(repos)
 
     # --- Per-resource mounts ---
@@ -2976,9 +3014,11 @@ def native_fs_roots(
     if _native_cache_dir is not None:
         write_denied.extend(sandbox_cache_sibling_dirs(_native_cache_dir) or [])
 
-    # Developer repos (RW, admin only).
-    if is_admin and config.developer.enabled and config.developer.repos_dir:
-        _add(write, Path(config.developer.repos_dir))
+    # Developer repos (RW, admin only). The task's own subtree, mirroring the
+    # bind in `build_bwrap_cmd` — another user's is not a write root here for
+    # the same reason it is not in the namespace there.
+    if is_admin and config.developer.enabled:
+        _add(write, get_user_repos_dir(config, task.user_id))
 
     # Per-resource mounts (RW/RO) not already covered by the user dir.
     if mount:

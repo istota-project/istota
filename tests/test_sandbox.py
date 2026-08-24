@@ -346,28 +346,28 @@ class TestBuildBwrapCmdAdmin:
 
     def test_developer_repos_mounted(self, sandbox_config, make_sandbox_task, tmp_path):
         repos_dir = tmp_path / "repos"
-        repos_dir.mkdir()
+        (repos_dir / "alice").mkdir(parents=True)
         sandbox_config.developer = DeveloperConfig(
             enabled=True,
             repos_dir=str(repos_dir),
         )
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
-        repos_str = str(repos_dir.resolve())
+        own = str((repos_dir / "alice").resolve())
         bind_pairs = _get_bind_pairs(result, "--bind")
-        assert any(src == repos_str for src, _ in bind_pairs)
+        assert any(src == own for src, _ in bind_pairs)
 
     def test_no_repos_when_developer_disabled(self, sandbox_config, make_sandbox_task, tmp_path):
         repos_dir = tmp_path / "repos"
-        repos_dir.mkdir()
+        (repos_dir / "alice").mkdir(parents=True)
         sandbox_config.developer = DeveloperConfig(
             enabled=False,
             repos_dir=str(repos_dir),
         )
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
-        repos_str = str(repos_dir.resolve())
-        assert repos_str not in result
+        assert str(repos_dir.resolve()) not in result
+        assert str((repos_dir / "alice").resolve()) not in result
 
 
 class TestBuildBwrapCmdCredentials:
@@ -1093,6 +1093,237 @@ class TestNativeFsRoots:
         assert (user_temp.resolve() / ".developer") in denied
 
 
+class TestPerUserReposDir:
+    """`developer.repos_dir` is a root of per-user subtrees, not one tree.
+
+    Every admin developer task used to get the whole of `repos_dir` bound
+    read-write, so one admin's task could read and write another admin's
+    clones, worktrees, model-written git configs and package caches. ISSUE-319
+    was one instance of that — the shared package-cache root, closed with about
+    200 lines of sibling masks — and this is the class it came from. Binding
+    `{repos_dir}/{user_id}` closes it structurally: another user's tree is not
+    in the namespace at all, so there is no mask to emit and no argv ordering
+    to preserve.
+    """
+
+    def _setup(self, sandbox_config, tmp_path, users=("alice", "bob")):
+        repos = tmp_path / "repos"
+        for user in users:
+            # A clone in the documented layout, {user}/{namespace}/{project}.git
+            (repos / user / "acme" / "widget.git").mkdir(parents=True)
+        sandbox_config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(repos),
+        )
+        return repos
+
+    def test_the_bind_is_the_tasks_own_subtree_and_never_the_root(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        repos = self._setup(sandbox_config, tmp_path)
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), True)
+
+        pairs = _get_bind_pairs(result, "--bind")
+        own = str((repos / "alice").resolve())
+        assert any(src == own for src, _ in pairs), f"alice's subtree is not bound: {pairs}"
+        assert not any(src == str(repos.resolve()) for src, _ in pairs), \
+            "the shared repos root was bound, which is the exposure itself"
+
+    def test_another_users_subtree_is_not_in_the_namespace_at_all(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """The regression, stated as reachability rather than as a name.
+
+        Asserting that bob's path does not appear in the argv is the version of
+        this test that cannot fail: binding the shared root — the exposure
+        itself — exposes bob's whole tree while naming only `{repos_dir}`. So
+        what is asked of every bind is whether bob's subtree is *under* its
+        source, which is the question a `mount` inside the namespace would
+        answer.
+        """
+        repos = self._setup(sandbox_config, tmp_path)
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), True)
+
+        bob = (repos / "bob").resolve()
+        exposed = []
+        for verb in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind"):
+            for src, _dest in _get_bind_pairs(result, verb):
+                if bob == Path(src) or bob.is_relative_to(Path(src)):
+                    exposed.append((verb, src))
+        assert exposed == [], f"bob's tree is reachable from alice's sandbox: {exposed}"
+
+    def test_two_users_get_two_different_subtrees(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        repos = self._setup(sandbox_config, tmp_path)
+        (sandbox_config.nextcloud_mount_path / "Users" / "bob").mkdir(parents=True)
+
+        alice = _run_bwrap(sandbox_config, make_sandbox_task(), True)
+        bob = _run_bwrap(sandbox_config, make_sandbox_task(user_id="bob"), True)
+
+        def _repos_binds(argv):
+            root = str(repos.resolve())
+            return [
+                src for src, _ in _get_bind_pairs(argv, "--bind")
+                if src.startswith(root + os.sep)
+            ]
+
+        assert _repos_binds(alice) == [str((repos / "alice").resolve())]
+        assert _repos_binds(bob) == [str((repos / "bob").resolve())]
+
+    def test_a_non_admin_gets_no_repos_bind(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """Unchanged: the admin gate sits in front of the per-user split, not
+        behind it."""
+        repos = self._setup(sandbox_config, tmp_path)
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
+        assert str((repos / "alice").resolve()) not in result
+        assert str(repos.resolve()) not in result
+
+    def test_a_user_with_no_subtree_yet_binds_nothing(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """`_bind` skips a path that does not exist. The root must not stand in
+        for it — that is the whole change, undone by a fallback."""
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+
+        result = _run_bwrap(sandbox_config, make_sandbox_task(), True)
+        assert str(repos.resolve()) not in result
+
+    def test_an_empty_user_id_binds_nothing(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """`{repos_dir}/""` is `{repos_dir}`, so a fallback here would hand the
+        shared root to a task whose user id went missing. Fail closed."""
+        repos = self._setup(sandbox_config, tmp_path)
+        result = _run_bwrap(sandbox_config, make_sandbox_task(user_id=""), True)
+
+        root = str(repos.resolve())
+        assert not any(
+            src == root or src.startswith(root + os.sep)
+            for src, _ in _get_bind_pairs(result, "--bind")
+        )
+
+    def test_the_native_file_tools_write_only_the_tasks_own_subtree(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """NativeBrain's Read/Write/Edit run in the daemon process with no
+        namespace at all, so a bind narrowed on one path and not the other
+        leaves the whole exposure open on a `native` brain — which is also the
+        configured fallback for an anthropic primary."""
+        repos = self._setup(sandbox_config, tmp_path)
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        with patch("istota.executor._bwrap_available", return_value=True):
+            read, write, _ = native_fs_roots(
+                sandbox_config, make_sandbox_task(), True, [], user_temp,
+            )
+
+        assert (repos / "alice").resolve() in write
+        assert (repos / "bob").resolve() not in write
+        assert (repos / "bob").resolve() not in read
+        assert repos.resolve() not in write
+        assert repos.resolve() not in read
+
+    def test_the_user_id_is_joined_the_same_way_the_temp_dir_joins_it(
+        self, sandbox_config, tmp_path,
+    ):
+        """One rule for how a user id becomes a path component, not two.
+
+        User ids already reach the filesystem through `get_user_temp_dir`. A
+        stricter spelling here would mean a user whose task directory exists
+        and whose repos directory silently does not; a laxer one would be a new
+        hole. So the two are held equal instead, and a deployment that wants to
+        constrain user ids constrains them in one place.
+        """
+        from istota.executor import get_user_repos_dir, get_user_temp_dir
+
+        sandbox_config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"),
+        )
+        for user_id in ("alice", "user.with-dots", "MiXeD"):
+            repos = get_user_repos_dir(sandbox_config, user_id)
+            temp = get_user_temp_dir(sandbox_config, user_id)
+            assert repos is not None
+            assert repos.name == temp.name
+            assert repos.parent == Path(sandbox_config.developer.repos_dir)
+
+    def test_no_configured_root_and_no_user_id_are_both_none(self, sandbox_config, tmp_path):
+        from istota.executor import get_user_repos_dir
+
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir="")
+        assert get_user_repos_dir(sandbox_config, "alice") is None
+        sandbox_config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"),
+        )
+        assert get_user_repos_dir(sandbox_config, "") is None
+
+    def test_the_developer_hook_creates_the_directory_the_sandbox_binds(
+        self, sandbox_config, make_sandbox_task, tmp_path,
+    ):
+        """The first-task case, end to end across the two modules that state
+        the layout separately.
+
+        `setup_env` runs before `build_bwrap_cmd` and is the only thing that
+        creates the subtree. Without it a user's first developer task binds
+        nothing, the model's first `mkdir -p` lands on bwrap's root tmpfs, and
+        the clone it spent minutes on disappears when the task ends.
+        """
+        from istota.skills.developer import setup_env
+
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+        task = make_sandbox_task()
+
+        class _Ctx:
+            config = sandbox_config
+            user_temp_dir = str(user_temp)
+
+        ctx = _Ctx()
+        ctx.task = task
+        setup_env(ctx)
+
+        own = repos / "alice"
+        assert own.is_dir(), "setup_env did not create the task's repos subtree"
+        assert own.stat().st_mode & 0o777 == 0o700
+
+        result = _run_bwrap(sandbox_config, task, True)
+        assert any(
+            src == str(own.resolve()) for src, _ in _get_bind_pairs(result, "--bind")
+        ), "the directory setup_env created is not the one build_bwrap_cmd binds"
+
+    def test_the_hook_creates_nothing_without_a_user_id(
+        self, sandbox_config, tmp_path,
+    ):
+        """The same fail-closed rule on the creating side. A missing user id
+        must not turn into a scrub of, and a chmod on, the shared root."""
+        from istota.skills.developer import setup_env
+
+        repos = tmp_path / "repos"
+        repos.mkdir()
+        repos.chmod(0o755)
+        sandbox_config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True, exist_ok=True)
+
+        class _Ctx:
+            config = sandbox_config
+            user_temp_dir = str(user_temp)
+
+        ctx = _Ctx()
+        ctx.task = None
+        setup_env(ctx)
+
+        assert list(repos.iterdir()) == []
+        assert repos.stat().st_mode & 0o777 == 0o755
+
+
 class TestBuildBwrapCmdSandboxCacheDir:
     """`security.sandbox_cache_dir` — a disk-backed home for package caches.
 
@@ -1305,27 +1536,33 @@ class TestSandboxCacheDirCannotOvermountABind:
 class TestSandboxCacheSiblingMasks:
     """Every *other* user's cache is masked when a later bind covers the root.
 
-    The documented placement puts `security.sandbox_cache_dir` under
-    `developer.repos_dir`, and the repos bind is emitted seven lines after the
-    cache bind. bwrap applies argv in order, so that later ancestor bind covers
-    the per-user cache bind and hands the whole root — every user's
-    subdirectory, read-write — to every admin developer task (ISSUE-319).
+    A cache root under a bind emitted after it is covered by that bind, and
+    bwrap applies argv in order — so the whole root, every user's subdirectory,
+    read-write, reaches every task the covering bind belongs to (ISSUE-319).
 
     The covering bind is not the defect and is not removed: it is the mount
-    that lets `link(2)` work, and both a cache root outside `repos_dir` and one
-    carved back out with a nested bind were measured returning EXDEV. The
-    exposure is closed by masking the siblings instead.
+    that lets `link(2)` work, and both a cache root outside the covering bind
+    and one carved back out with a nested bind were measured returning EXDEV.
+    The exposure is closed by masking the siblings instead.
+
+    **The covering bind is now `{repos_dir}/{user_id}`, not `repos_dir`**, so
+    that is where these fixtures put the cache root. A cache root at
+    `{repos_dir}/.package-caches` is no longer covered by anything and needs no
+    mask — which is the layout change, not a weakening: with one owner per
+    subtree there is no sibling to mask in the first place. The masks stay
+    under test until the derivation moves the cache inside the user's own
+    subtree and this machinery is deleted with it.
     """
 
     def _setup(self, sandbox_config, tmp_path, users=("alice", "bob")):
         repos = tmp_path / "repos"
-        cache_root = repos / ".package-caches"
+        cache_root = repos / "alice" / ".package-caches"
         for user in users:
             (cache_root / user).mkdir(parents=True)
         sandbox_config.developer.enabled = True
         sandbox_config.developer.repos_dir = str(repos)
         sandbox_config.security.sandbox_cache_dir = str(cache_root)
-        return repos, cache_root
+        return repos / "alice", cache_root
 
     def _argv(self, sandbox_config, task, is_admin=True, userns=True):
         with patch(
@@ -1406,10 +1643,10 @@ class TestSandboxCacheSiblingMasks:
     ):
         """The repos bind is admin-gated, so nothing covers the cache root and
         the siblings were never in the namespace to begin with."""
-        repos, cache_root = self._setup(sandbox_config, tmp_path)
+        user_repos, cache_root = self._setup(sandbox_config, tmp_path)
         result = self._argv(sandbox_config, make_sandbox_task(), is_admin=False)
 
-        assert (str(repos), str(repos)) not in _get_bind_pairs(result, "--bind")
+        assert (str(user_repos), str(user_repos)) not in _get_bind_pairs(result, "--bind")
         assert str(cache_root / "bob") not in _tmpfs_masks(result)
         assert str(cache_root / "alice") in result
 
@@ -1418,12 +1655,12 @@ class TestSandboxCacheSiblingMasks:
     ):
         """A mask before the covering repos bind would be overmounted by it,
         which is the same ordering mistake read the other way round."""
-        repos, cache_root = self._setup(sandbox_config, tmp_path)
+        user_repos, cache_root = self._setup(sandbox_config, tmp_path)
         result = self._argv(sandbox_config, make_sandbox_task())
 
         repos_idx = max(
             i for i, a in enumerate(result)
-            if a == "--bind" and result[i + 1] == str(repos)
+            if a == "--bind" and result[i + 1] == str(user_repos)
         )
         mask_idx = result.index(str(cache_root / "bob"))
         assert repos_idx < mask_idx
@@ -1490,7 +1727,9 @@ class TestSandboxCacheSiblingMasksHardening:
     """
 
     def _setup(self, sandbox_config, repos, users=("alice", "bob")):
-        cache_root = repos / ".package-caches"
+        # Inside the task's own subtree, which is what the repos bind covers
+        # now — see `TestSandboxCacheSiblingMasks`.
+        cache_root = repos / "alice" / ".package-caches"
         for user in users:
             (cache_root / user).mkdir(parents=True)
         sandbox_config.developer.enabled = True
@@ -1522,7 +1761,8 @@ class TestSandboxCacheSiblingMasksHardening:
 
         result = self._argv(sandbox_config, make_sandbox_task())
         masks = _tmpfs_masks(result)
-        assert str(cache_root / "bob") in masks or str(real / ".package-caches" / "bob") in masks, \
+        real_bob = real / "alice" / ".package-caches" / "bob"
+        assert str(cache_root / "bob") in masks or str(real_bob) in masks, \
             f"a symlinked repos_dir left bob's cache unmasked: {masks}"
 
     def test_too_many_entries_refuses_the_cache(
