@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from istota import devbox_exec_client
 from istota.devbox_exec_protocol import (
     PROTOCOL_VERSION,
     SIGPIPE_EXIT,
@@ -149,6 +150,18 @@ class FakeServer:
             os.unlink(self.path)
         except OSError:
             pass
+
+
+def _client_copy_with_short_backstop(base: Path, seconds: float = 2.0) -> Path:
+    """A `{dev_bin}`-shaped copy of the client with a test-sized ack backstop."""
+    dev_bin = base / "short-backstop"
+    dev_bin.mkdir()
+    shutil.copy2(PROTOCOL, dev_bin / PROTOCOL.name)
+    source = CLIENT.read_text()
+    edited = source.replace("ACK_TIMEOUT_SECONDS = 60.0", f"ACK_TIMEOUT_SECONDS = {seconds}")
+    assert edited != source, "the backstop constant was renamed"
+    (dev_bin / CLIENT.name).write_text(edited)
+    return dev_bin / CLIENT.name
 
 
 @pytest.fixture
@@ -593,18 +606,24 @@ class TestTheFourTransportCodes:
         assert b"did not exit after SIGKILL" in done.stderr
         assert len(done.stderr.strip().splitlines()) == 1
 
-    def test_123_when_the_server_accepts_and_never_acknowledges(self, fake_server):
+    def test_123_when_the_server_accepts_and_never_acknowledges(
+        self, fake_server, tmp_path
+    ):
         """A socket that answers nothing is reachable: the socket directory is
         writable by a container root, which may unlink the server's inode and
-        bind its own. Unbounded, that hangs the shim for the whole task."""
-        srv = fake_server(lambda conn, line: time.sleep(30))
+        bind its own. Unbounded, that hangs the shim for the whole task.
+
+        Run against a copy of the client whose backstop is edited down, because
+        the shipped one is a minute — deliberately, so that a slow fork on a
+        container at its memory limit is not mistaken for a wedged listener,
+        which is why it is a constant rather than the connect budget."""
+        srv = fake_server(lambda conn, line: time.sleep(120))
+        client = _client_copy_with_short_backstop(tmp_path)
         started = time.monotonic()
-        done = run_client(
-            srv.path, "true", options=("--connect-timeout", "1"), timeout=25
-        )
+        done = run_client(srv.path, "true", client=client, timeout=30)
         assert done.returncode == EXIT_CONNECTION_LOST
         assert b"did not acknowledge" in done.stderr
-        assert time.monotonic() - started < 20
+        assert time.monotonic() - started < 25
 
     def test_123_against_a_real_server_that_dies_mid_command(self, server_factory):
         """What a container restart looks like from the client's side, with a
@@ -1015,8 +1034,9 @@ class TestTheCommandIsTakenVerbatim:
             stderr=subprocess.PIPE,
             timeout=RUN_TIMEOUT,
         )
-        assert done.returncode != 0
+        assert done.returncode == EXIT_NO_CONNECT
         assert b"--socket" in done.stdout
+        assert done.stderr.startswith(b"istota-devbox-exec: ")
 
 
 class TestTheTimeouts:
@@ -1045,6 +1065,164 @@ class TestTheTimeouts:
             "true",
             cwd=server.repos,
             options=("--timeout", "nan"),
+        )
+        assert done.returncode == EXIT_NO_CONNECT
+        assert b"finite" in done.stderr
+
+
+# --------------------------------------------------------------------------- #
+# What this process says, and where it says it
+# --------------------------------------------------------------------------- #
+
+
+class TestTheStderrLineItself:
+    def test_a_broken_stderr_does_not_rewrite_the_exit_status(self, server):
+        """Written through `sys.stderr`, a line that could not be delivered
+        stayed in the wrapper's buffer, CPython's shutdown flush failed, and the
+        process exited **120** — the "nothing ran" code — whatever the command
+        did. One keystroke from the tested case: `shimmed | head -1` reported
+        141 and `shimmed 2>&1 | head -1` reported 120 with no message.
+
+        The command has to make the client *say* something for this to
+        discriminate, and the pipe reader has to be gone by the time it does —
+        so: an exit 141, which carries the note, a line of output first so
+        `head` takes it and leaves, and a second in between."""
+        inner = " ".join(
+            shlex.quote(a)
+            for a in [
+                sys.executable,
+                str(CLIENT),
+                "--socket",
+                server.socket_path,
+                "--",
+                "sh",
+                "-c",
+                "echo line; sleep 1; exit 141",
+            ]
+        )
+        done = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", f"{inner} 2>&1 | head -1"],
+            cwd=str(server.repos),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_TIMEOUT,
+        )
+        assert done.returncode == SIGPIPE_EXIT
+        assert done.stdout == b"line\n"
+
+    def test_a_newline_from_the_server_cannot_forge_a_second_line(self, fake_server):
+        """The prefix is the discriminator of record, and part of what reaches
+        it is model-chosen: an argv[0] in a `spawn_failed` message, a refused
+        path. A message carrying a newline would forge a line of its own."""
+        srv = fake_server(
+            lambda conn, line: conn.sendall(
+                encode_ack_error(
+                    "spawn_failed", "npm\nistota-devbox-exec: everything is fine"
+                )
+            )
+        )
+        done = run_client(srv.path, "npm")
+        assert done.returncode == EXIT_NO_CONNECT
+        assert len(done.stderr.strip().splitlines()) == 1
+        assert b"everything is fine" in done.stderr
+
+
+class TestAnInterruptedShim:
+    def test_ctrl_c_says_one_line_and_reports_130(self, server):
+        """The file used to claim the default disposition handled this. It did
+        not: `KeyboardInterrupt` propagated out of `main` and printed a
+        traceback into the middle of the command's own stderr."""
+        client = subprocess.Popen(
+            [
+                sys.executable,
+                str(CLIENT),
+                "--socket",
+                server.socket_path,
+                "--",
+                "sleep",
+                "20",
+            ],
+            cwd=str(server.repos),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if "exec sleep" in server.log_text():
+                    break
+                time.sleep(0.05)
+            else:  # pragma: no cover - the command never started
+                raise AssertionError(f"the server never ran it: {server.log_text()}")
+            client.send_signal(signal.SIGINT)
+            _, stderr = client.communicate(timeout=RUN_TIMEOUT)
+        finally:
+            if client.poll() is None:  # pragma: no cover
+                client.kill()
+                client.communicate()
+        assert client.returncode == 130
+        assert b"Traceback" not in stderr
+        assert len(stderr.strip().splitlines()) == 1
+        assert stderr.startswith(b"istota-devbox-exec: ")
+
+
+class TestTheAcknowledgementBackstop:
+    def test_a_peer_that_dribbles_bytes_cannot_hold_the_read_open(self):
+        """`settimeout` restarts on every `recv`, so a per-call budget is no
+        budget at all against a peer sending one non-newline byte inside each
+        window — the same hang the bound exists to close, one byte at a time.
+        The bound is a deadline across the whole line.
+
+        Driven against a socketpair rather than through a subprocess, because
+        the backstop the client ships with is a minute and this is about the
+        arithmetic rather than about the number."""
+        ours, theirs = socket.socketpair()
+        stop = threading.Event()
+        outcome: list[str] = []
+
+        def dribble():
+            while not stop.is_set():
+                try:
+                    theirs.sendall(b" ")
+                except OSError:
+                    return
+                time.sleep(0.1)
+
+        def read():
+            try:
+                devbox_exec_client._read_ack(ours, timeout=1.0)
+                outcome.append("returned")
+            except TimeoutError:
+                outcome.append("timeout")
+            except Exception as e:  # pragma: no cover - a surprise is a failure
+                outcome.append(repr(e))
+
+        # In a thread joined with a deadline, not called directly: the whole
+        # point of this test is a read that might never return, and a regression
+        # that hangs the suite is a worse answer than one that fails it.
+        threading.Thread(target=dribble, daemon=True).start()
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(15)
+        stop.set()
+        ours.close()
+        theirs.close()
+        assert outcome == ["timeout"], f"the read was not bounded: {outcome}"
+
+    @pytest.mark.parametrize("flag", ["--timeout", "--connect-timeout"])
+    @pytest.mark.parametrize("value", ["nan", "inf"])
+    def test_a_non_finite_budget_is_refused_on_either_flag(self, server, flag, value):
+        """`nan > 0` is False, so it took the "no budget" branch and reinstated
+        the hang the budget closes; `inf` reached `settimeout` and raised
+        OverflowError out of the socket. Both are legal TOML floats, so both are
+        typeable in `[developer.container]`."""
+        done = run_client(
+            server.socket_path,
+            "true",
+            cwd=server.repos,
+            options=(flag, value),
         )
         assert done.returncode == EXIT_NO_CONNECT
         assert b"finite" in done.stderr

@@ -1297,6 +1297,32 @@ class TestTheScriptItself:
         assert done.returncode != 0
         assert "absolute path" in (done.stderr + done.stdout)
 
+    def test_the_default_working_directory_must_exist_and_must_not_have_moved(
+        self, tmp_path
+    ):
+        """`serve()` only warns when --home is missing, so the branch is live on
+        a deployment whose home was never created or whose bind mount failed.
+        And the default is admitted on the strength of being this process's own
+        constant, so a symlink dropped over it afterwards has to be refused
+        rather than followed — otherwise that claim stops being true."""
+        module = _load_server_module()
+        home = tmp_path / "home"
+        elsewhere = tmp_path / "elsewhere"
+        home.mkdir()
+        elsewhere.mkdir()
+        roots = module.Roots(str(tmp_path), str(home), str(home / ".istota-exec"))
+        assert roots.default_cwd() == str(home.resolve())
+
+        home.rmdir()
+        with pytest.raises(module.ProtocolError) as gone:
+            roots.default_cwd()
+        assert gone.value.code == ERR_NO_SUCH_CWD
+
+        home.symlink_to(elsewhere)
+        with pytest.raises(module.ProtocolError) as moved:
+            roots.default_cwd()
+        assert moved.value.code == ERR_PATH_REFUSED
+
     def test_the_root_test_is_a_prefix_test_on_components(self):
         """`/srv/repos/alice-evil` is not under `/srv/repos/alice`, and a naive
         startswith says it is."""

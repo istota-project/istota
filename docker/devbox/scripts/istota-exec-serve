@@ -227,10 +227,23 @@ class Roots:
         the whole of the distinction: ``check_cwd`` polices paths a caller
         supplied, and this is not one, so admitting it widens nothing — naming
         this same directory as a string is still refused.
+
+        Resolved again here rather than trusted from start-up. ``_absolute``
+        ran once, and a symlink put in place afterwards would move every
+        ``cwd: null`` command somewhere this process never agreed to — which
+        would make the sentence above false, and that sentence is the whole
+        argument for admitting a default at all.
         """
-        if not os.path.isdir(self.home):
-            raise ProtocolError(ERR_NO_SUCH_CWD, f"no such directory: {self.home}")
-        return self.home
+        resolved = os.path.realpath(self.home)
+        if resolved != self.home:
+            raise ProtocolError(
+                ERR_PATH_REFUSED,
+                f"the default working directory {self.home} now resolves to "
+                f"{resolved}; refusing to run anywhere it was moved to",
+            )
+        if not os.path.isdir(resolved):
+            raise ProtocolError(ERR_NO_SUCH_CWD, f"no such directory: {resolved}")
+        return resolved
 
     def check_cwd(self, raw: str) -> str:
         """Resolve and authorize a *caller-supplied* working directory.

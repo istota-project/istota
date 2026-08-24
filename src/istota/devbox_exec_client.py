@@ -43,9 +43,11 @@ why nothing here writes the command's output through ``sys.stdout``.)
 Two statuses inside a command's own range are reported deliberately, because in
 both cases the shim is standing in for a command that would have reported them
 itself: **141** when this client's own stdout is a closed pipe, which is what a
-real command takes SIGPIPE for in ``npm ls | head -1``, and **130** on Ctrl-C.
-Each still prints its line, so the prefix distinguishes them from a command
-that produced the same number.
+real command takes SIGPIPE for in ``npm ls | head -1``, and **130** when the
+shim is interrupted — which includes an interrupt taken before anything ran,
+since a Ctrl-C is a fact about the shim rather than about the command. Each
+still prints its line, so the prefix distinguishes them from a command that
+produced the same number.
 
 **123 is the point of the file.** A connection that ends after the ack and
 before the terminal frame is the one case with no exit status at all — a
@@ -62,23 +64,23 @@ differs from the directory the process is actually in — and the server's whole
 containment test is a ``realpath``. ``os.getcwd()`` returns the physical path,
 which is what that test wants, and it fails loudly on a deleted directory
 instead of sending a dead string for the server to have a rule about. ``--cwd``
-overrides it for the devbox skill, which passes a directory it was told about
-rather than one it is standing in.
+overrides it for a host-side caller that was *told* a directory rather than
+standing in one, which is a different question from where this process is.
 
 **This client always sends a string, and has no spelling for ``cwd: null``.**
 The wire carries ``string | null`` — ``null`` meaning "the server chooses",
 which resolves to its own ``/home/dev`` — and the caller that needs it is the
 devbox skill's ad-hoc verbs, which have no repository to stand in. They do not
 get it from here. That skill's CLI runs host-side in a Python process and has
-to import ``devbox_exec_protocol`` regardless, because four of its five verbs
-(``cp-in``, ``cp-out``, ``exec-file``'s write half and ``status``) are actions
-this client does not implement at all and never should — it runs one command
-and exits with its status. Giving it a ``--cwd=-`` or a ``--server-cwd`` would
-be a second mechanism for one verb of a caller that is already speaking the
-wire for the other four, and it would put a flag on the surface a shim bakes
-in, where every added spelling is one more thing a shim can get wrong. So the
-flag surface stays: ``--socket``, ``--cwd``, ``--stdin``, ``--timeout``,
-``--connect-timeout``, ``--``.
+to import ``devbox_exec_protocol`` regardless, because every action but
+``exec`` — ``write_file``, ``read_file``, ``stat`` and ``ping`` — is one this
+client does not implement at all and never should: it runs one command and
+exits with its status. Giving it a ``--cwd=-`` or a ``--server-cwd`` would be a
+second mechanism for one verb of a caller already speaking the wire for the
+rest, and it would put a flag on the surface a shim bakes in, where every added
+spelling is one more thing a shim can get wrong. So the flag surface stays:
+``--socket``, ``--cwd``, ``--stdin``, ``--timeout``, ``--connect-timeout``,
+``--``.
 
 No signal handlers
 ------------------
@@ -98,9 +100,11 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import select
 import socket
 import sys
 import threading
+import time
 from typing import Any
 
 if __package__ in (None, ""):
@@ -129,6 +133,16 @@ EXIT_INTERRUPTED = 130
 # it as `developer.container.connect_timeout_seconds`; a shim bakes it in
 # alongside the socket path, so nothing about it is read from the environment.
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
+
+# A backstop on the acknowledgement, deliberately *not* the connect budget and
+# deliberately far larger than any spawn. Unbounded, a socket that accepts and
+# never speaks hangs the shim for the whole task — which a process inside the
+# container can arrange, since it may unlink the server's inode and bind its
+# own in its place. Bounded by the connect budget instead, a fork slow enough
+# to miss five seconds on a container at its memory limit would have its
+# command killed, and Design 11 says that limit is reachable. Sixty seconds
+# separates a wedged listener from a loaded one without having to guess which.
+ACK_TIMEOUT_SECONDS = 60.0
 
 
 class _Usage(Exception):
@@ -161,11 +175,19 @@ def _say(message: str) -> None:
     the server and is model-chosen — an argv[0] in a ``spawn_failed`` message,
     a refused path — and a newline in it would forge a second line carrying
     this prefix, which the design calls the discriminator of record.
+
+    ``os.write(2, …)`` and not ``sys.stderr``, for the reason the exit-code
+    table gives for fd 1. A ``TextIOWrapper`` keeps what it could not write in
+    its buffer, CPython flushes it at interpreter shutdown, and a flush that
+    fails there makes the process exit **120** whatever ``main`` returned.
+    Measured, one keystroke apart: ``shimmed | head -1`` reports 141 and
+    ``shimmed 2>&1 | head -1`` reported 120 with no message at all — the
+    "nothing ran" code, on a command that ran. Every failure path in this file
+    calls this function, so the wrapper would have put that under all of them.
     """
     flat = "".join(c if c.isprintable() or c == " " else " " for c in str(message))
     try:
-        sys.stderr.write(f"{PREFIX}: {flat}\n")
-        sys.stderr.flush()
+        os.write(2, f"{PREFIX}: {flat}\n".encode(errors="replace"))
     except Exception:
         pass
 
@@ -225,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cwd",
         default=None,
-        help="run in this directory instead of the client's own (devbox skill)",
+        help="run in this directory rather than in the one this process is in",
     )
     parser.add_argument(
         "--stdin",
@@ -278,14 +300,26 @@ def split_argv(argv: list[str]) -> tuple[list[str], list[str]]:
 # ---- The conversation ------------------------------------------------------
 
 
-def _read_ack(sock: socket.socket) -> tuple[dict[str, Any], bytes]:
+def _read_ack(
+    sock: socket.socket, timeout: float = ACK_TIMEOUT_SECONDS
+) -> tuple[dict[str, Any], bytes]:
     """Read the acknowledgement line, returning it and whatever followed it.
 
     The server may write the ack and the first output frames into one segment,
     so the bytes past the newline are handed back rather than dropped.
+
+    The budget is a deadline across the whole line, not a socket timeout per
+    ``recv``. ``settimeout`` restarts on every call, so a peer sending one
+    non-newline byte inside each window holds this open indefinitely — which is
+    the same hang the bound exists to close, arrived at one byte at a time.
     """
+    deadline = time.monotonic() + timeout
     buf = b""
     while b"\n" not in buf:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("no acknowledgement within the budget")
+        sock.settimeout(remaining)
         chunk = sock.recv(proto.CHUNK_BYTES)
         if not chunk:
             raise proto.ProtocolError(
@@ -346,13 +380,21 @@ def _write_out(fileno: int, payload: bytes) -> None:
     that happens somewhere else.
 
     A broken pipe travels on unchanged, because that one is not a fault — it is
-    ``| head`` and it has its own answer. Every other descriptor failure gets
-    named as what it is rather than being reported as a lost connection.
+    ``| head`` and it has its own answer. ``EAGAIN`` is not a fault either: a
+    non-blocking descriptor is flow control, and a parent leaking ``O_NONBLOCK``
+    onto a shared stdout is the ordinary node-spawns-a-child case, on a box
+    whose reason for existing is running npm. Treating it as fatal truncated
+    the output of a command that exited 0 and reported 123 over the hole. Every
+    other descriptor failure gets named as what it is rather than being
+    reported as a lost connection.
     """
     view = memoryview(payload)
     while view:
         try:
             written = os.write(fileno, view)
+        except BlockingIOError:
+            select.select([], [fileno], [])
+            continue
         except BrokenPipeError:
             raise
         except OSError as e:
@@ -387,15 +429,16 @@ def _finish(body: dict[str, Any]) -> int:
     if code is None:
         # The server has no status to report and says so rather than inventing
         # one. Same answer as a connection that ended early, for the same
-        # reason: the command's fate is unknown, and it is never 0. Its reason
-        # is folded into this line rather than printed as a second one.
-        error = body.get("error")
-        message = body.get("message")
-        detail = f" ({error}: {message})" if error else ""
-        _say(
-            f"the server reported no exit status{detail}; the command's fate "
-            f"is unknown"
-        )
+        # reason: the command's fate is unknown, and it is never 0.
+        #
+        # Everything the frame carries is folded into this one line rather than
+        # printed as several — including `reason` and `truncated`, which the
+        # server sets independently of the null status and which are exactly
+        # what a reader needs here: a child that survived SIGKILL for the whole
+        # reap window reports no status *and* names the timeout that started
+        # the kill.
+        detail = "; ".join(_notes(body)) or "the server gave no reason"
+        _say(f"the server reported no exit status ({detail}); the command's fate is unknown")
         return EXIT_CONNECTION_LOST
     if isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 255:
         _say(f"the server reported an exit status this client cannot use: {code!r}")
@@ -446,13 +489,18 @@ def _run(argv: list[str]) -> int:
     if not command:
         _say("no command given after '--'")
         return EXIT_NO_CONNECT
-    if not math.isfinite(args.timeout):
-        # `float("nan")` is neither < 0 nor > 0, so it passes the protocol's
-        # range check, and `json.dumps` writes it as the non-standard token
-        # `NaN`. Both ends are this one module today; the day anything else
-        # parses a request, that is an interop failure with no error message.
-        _say(f"--timeout must be a finite number of seconds, got {args.timeout}")
-        return EXIT_NO_CONNECT
+    # `float("nan")` is neither < 0 nor > 0, which is what makes it dangerous
+    # on both of these. On `--timeout` it passes the protocol's range check and
+    # `json.dumps` writes it as the non-standard token `NaN`, so the day
+    # anything but this module parses a request it is an interop failure with
+    # no error message. On `--connect-timeout` it takes the "no budget" branch
+    # below and reinstates the hang that budget exists to close — and `inf`
+    # reaches `settimeout` and raises OverflowError out of the socket. Both are
+    # legal TOML floats, so both are typeable in `[developer.container]`.
+    for name, value in (("--timeout", args.timeout), ("--connect-timeout", args.connect_timeout)):
+        if not math.isfinite(value):
+            _say(f"{name} must be a finite number of seconds, got {value}")
+            return EXIT_NO_CONNECT
 
     if args.cwd is not None:
         cwd = args.cwd
@@ -495,20 +543,17 @@ def _run(argv: list[str]) -> int:
             return EXIT_NO_CONNECT
 
         try:
-            # Still under the connect budget, deliberately. This is the one
-            # read in the file that can be bounded without risking a wrong
-            # answer about a running command, and leaving it unbounded means a
-            # socket that accepts and never speaks hangs the shim for the whole
-            # task — which a hostile process inside the container can arrange,
-            # since it may unlink the socket and bind its own in its place.
+            # On its own backstop, not the connect budget. See
+            # ACK_TIMEOUT_SECONDS for why the two are different numbers.
             ack, leftover = _read_ack(sock)
         except TimeoutError:
-            # Not 120: a spawn slow enough to miss the budget has still
+            # Not 120: a spawn slow enough to miss even this has still
             # happened, and this client cannot tell that from a server that
             # never read the request. The one true statement is the 123 one.
             _say(
                 f"{args.socket}: the server accepted the connection and did not "
-                f"acknowledge within {budget}s; the command's fate is unknown"
+                f"acknowledge within {ACK_TIMEOUT_SECONDS}s; the command's fate "
+                f"is unknown"
             )
             return EXIT_CONNECTION_LOST
         except (proto.ProtocolError, OSError) as e:
@@ -559,9 +604,9 @@ def _run(argv: list[str]) -> int:
             # a shim reporting 141 and a command reporting 141 are different
             # facts and only the prefix separates them.
             _say(
-                "the reader of this command's output closed the pipe; the "
-                "command was abandoned and is reported as 141, the status a "
-                "command taking SIGPIPE would have produced"
+                "the reader of this command's output closed the pipe; reported "
+                "as 141, the status a command taking SIGPIPE would have "
+                "produced, whatever the command itself went on to report"
             )
             return EXIT_SIGPIPE
         except _OutputFailed as e:
@@ -579,8 +624,13 @@ def main(argv: list[str]) -> int:
     so a client fault would arrive as a failed build. Every deliberate failure
     already has a code; this is for the ones nobody thought of.
     """
-    _reserve_std_descriptors()
     try:
+        # Inside the guard, not above it: this was the one statement added to
+        # make nothing raise to the shim, and `os.open` raises EMFILE under a
+        # low RLIMIT_NOFILE — a traceback and an exit 1, which is a status a
+        # command produces. It still runs before anything else opens a
+        # descriptor, which is all its own correctness needs.
+        _reserve_std_descriptors()
         return _run(list(argv))
     except KeyboardInterrupt:
         _say("interrupted")
