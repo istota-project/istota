@@ -1648,38 +1648,67 @@ class _FakeEndpoint:
         pass
 
 
-class TestTheCacheProfilePathsAgree:
-    """`tests/smoke/test_sandbox_cache_masks.py` restates two container paths as
-    literals so the scenario reads as one thing. This is what keeps the
+class TestTheReposIsolationPathsAgree:
+    """`tests/smoke/test_sandbox_repos_isolation.py` restates three container
+    paths as literals so the scenario reads as one thing. This is what keeps the
     restatement honest, and it runs in the default suite because it needs no
     Docker — inside the smoke tier it would only go red on a run somebody was
     already making for another reason.
+
+    Every one of these is a way for the scenario to assert about a directory
+    nothing binds, which is the shape that passes for the wrong reason: a path
+    the daemon never heard of is missing from the sandbox exactly as reliably as
+    one the split removed.
     """
 
-    def test_the_probe_paths_match_the_profile_and_the_repos_dir(self):
+    SOURCE = REPO / "tests" / "smoke" / "test_sandbox_repos_isolation.py"
+
+    def test_the_probe_root_is_the_repos_dir_the_profile_configures(self):
         from testbed.services.gitlab import CONTAINER_REPOS_DIR
 
-        source = (REPO / "tests" / "smoke" / "test_sandbox_cache_masks.py").read_text()
-        cache_root = profiles.CACHE.config["ISTOTA_SECURITY_SANDBOX_CACHE_DIR"]
+        source = self.SOURCE.read_text()
 
-        assert f'CACHE_ROOT = "{cache_root}"' in source, (
-            "the scenario's CACHE_ROOT literal no longer matches the profile, "
-            "so every assertion in it runs against a directory nothing binds"
+        assert f'REPOS_DIR = "{CONTAINER_REPOS_DIR}"' in source, (
+            "the scenario's REPOS_DIR literal no longer matches what the forge "
+            "service renders into ISTOTA_DEVELOPER_REPOS_DIR, so every "
+            "assertion in it runs against a directory nothing binds"
         )
-        assert cache_root.startswith(CONTAINER_REPOS_DIR + "/"), (
-            "the cache root is no longer inside repos_dir, so the repos bind "
-            "does not cover it and there is nothing for the sibling masks to "
-            "close — the scenario would pass with the masks removed"
+
+    def test_the_cache_name_is_the_one_the_daemon_derives(self):
+        """The cache is derived rather than configured now, so the scenario's
+        literal answers to `executor` rather than to a profile."""
+        from istota.executor import SANDBOX_CACHE_ROOT_NAME
+
+        source = self.SOURCE.read_text()
+
+        assert f'CACHE_NAME = "{SANDBOX_CACHE_ROOT_NAME}"' in source, (
+            "the scenario looks for the package cache under a name the daemon "
+            "does not derive, so `own_writable` and the hardlink assertion are "
+            "about a directory that was never created"
+        )
+
+    def test_the_scenario_runs_on_a_profile_that_configures_a_repos_dir(self):
+        """A stack with no `developer.repos_dir` binds nothing under it, and
+        every absence the scenario asserts is then free."""
+        source = self.SOURCE.read_text()
+        declared = [p for p in profiles.ALL if f"profiles.{p.name.upper()}.name" in source]
+
+        assert declared, "the scenario declares no profile from testbed.profiles"
+        assert all("gitlab" in p.services for p in declared), (
+            "the scenario's profile runs no forge service, so nothing renders "
+            "ISTOTA_DEVELOPER_REPOS_DIR and there is no repos tree at all"
         )
 
     def test_the_probe_asks_about_a_user_the_stack_does_not_have(self):
-        """The masked directory has to be somebody else's.
+        """The missing subtree has to be somebody else's.
 
         `Stack.submit` defaults to `testuser`, so a probe naming that user would
-        read its own cache — which is bound, not masked — and the assertion
-        would be about the wrong directory in the direction that passes.
+        read the task's own subtree — which is bound — and the assertion would
+        be about the wrong directory in the direction that fails loudly rather
+        than the one that passes quietly. The own/other pair is what makes the
+        two halves of the scenario a comparison.
         """
-        source = (REPO / "tests" / "smoke" / "test_sandbox_cache_masks.py").read_text()
+        source = self.SOURCE.read_text()
 
         assert 'OWN_USER = "testuser"' in source
         assert 'OTHER_USER = "someone-else"' in source

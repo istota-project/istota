@@ -1,36 +1,41 @@
-"""Another user's package cache, read from inside a live task in the image.
+"""Another admin's repos subtree, looked for from inside a live task in the image.
 
-`security.sandbox_cache_dir` belongs under `developer.repos_dir`, and the repos
-bind is emitted after the cache bind and is an ancestor of it. bwrap applies
-argv in order, so that later bind covers the cache root and hands every user's
-subdirectory to every admin developer task, read-write (ISSUE-319).
+`developer.repos_dir` is a root of per-user subtrees —
+`{repos_dir}/{user_id}/{namespace}/{project}.git` — and `build_bwrap_cmd` binds
+`{repos_dir}/{user_id}`, never the root. So another user's clones, worktrees,
+model-written git configs and package cache are not in the namespace at all.
+That is a stronger property than the one this file used to assert, and a simpler
+one: there is nothing to mask, because there is nothing there.
 
-Removing the covering is not the fix and would cost the thing the placement
-exists for. `link(2)` compares mounts rather than devices, so with the cache on
-its own mount uv stops hardlinking into the venv and copies every wheel — the
-single covering bind is the only shape where it does not. So `build_bwrap_cmd`
-keeps the bind and masks the *sibling* directories with empty read-only tmpfs
-mounts instead, after both binds.
+**What this replaced, and why the shape of the assertion changed.** ISSUE-319
+was the same exposure under the shared root: the cache bind sat inside a repos
+bind emitted after it, so bwrap's argv ordering handed every user's cache to
+every admin developer task, read-write, and uv trusts its own unpacked wheels on
+read. The fix then was an empty read-only tmpfs over every *other* user's cache
+directory, and this file asserted that the mask was there and covered. A mask is
+a mount, so the old probe compared device numbers. A missing directory is not a
+mount, so the probe now asks whether the path resolves at all — and `ls`
+reporting `No such file or directory` is the answer, where an empty listing
+would mean present and empty, which is what the old shape produced.
 
-**Why this file exists rather than more argv assertions.** `tests/test_sandbox.py`
+**Why this file rather than more argv assertions.** `tests/test_sandbox.py`
 patches `_bwrap_available` and inspects the argv, so it proves the flags are
-emitted and nothing about what the kernel does with them. Here the mask is the
-whole boundary rather than defence behind the skill CLIs' `ISTOTA_USER_ID`
-scoping, which is a higher bar than the database masks have to clear, and the
-tier that can actually clear it is the one running a real bwrap in the shipped
-image.
+emitted and nothing about what the kernel does with them. The tier that runs a
+real bwrap in the shipped image is this one.
 
 Both halves are asserted, because either alone has a false pass. The negative
-half — the sibling is empty and unwritable — is equally true of a cache that
-was never bound at all, which is what every refusal path in
-`resolve_sandbox_cache_dir` produces. The positive half — the task's own cache
-is readable and writable, and `ln` into a directory under `repos_dir` succeeds
-— is what says the bind is there and still on one mount with the venv.
+half — the other user's subtree is not there — is equally true of a task whose
+sandbox never ran against `repos_dir` at all, which is what every refusal path
+in `resolve_sandbox_cache_dir` and every non-admin task produces. The positive
+half — the task's own cache is writable and `ln` from it into a directory beside
+it succeeds — is what says the bind is present and still on one mount with the
+venv, which is the whole reason the cache is derived inside the subtree.
 
-The in-session control below is not a formality either: it caught this file's
-first probe, which asked whether the sibling was a `tmpfs` and could not fail,
-because `/data/repos` is on a tmpfs in this container to begin with. What
-replaced it is in `CACHE_PROBE`.
+The in-session control is not a formality either: it caught this file's first
+probe under the old layout, which asked whether the sibling was a `tmpfs` and
+could not fail, because `/data/repos` is on a tmpfs in this container to begin
+with. Here the control reads the same paths through `docker compose exec`, where
+the seeded subtree is present, populated and writable.
 """
 
 from __future__ import annotations
@@ -41,111 +46,108 @@ from testbed import profiles
 
 pytestmark = pytest.mark.smoke
 
-#: Matches `CACHE.config["ISTOTA_SECURITY_SANDBOX_CACHE_DIR"]`, and
-#: `CONTAINER_REPOS_DIR` in `testbed/services/gitlab.py` is its parent. Restated
-#: rather than imported so a scenario reads as one thing; held equal by
-#: `test_the_probe_paths_match_the_profile` below.
-CACHE_ROOT = "/data/repos/.package-caches"
+#: `CONTAINER_REPOS_DIR` in `testbed/services/gitlab.py`, which the forge
+#: profile renders into `ISTOTA_DEVELOPER_REPOS_DIR`. Restated rather than
+#: imported so a scenario reads as one thing; held equal by
+#: `tests/test_smoke_tier.py::TestTheReposIsolationPathsAgree`.
+REPOS_DIR = "/data/repos"
 OWN_USER = "testuser"
 OTHER_USER = "someone-else"
 
-#: What the other user's cache holds. uv's unpacked-wheel cache is trusted on
-#: read and re-verified against no hash, so a file planted here is a file the
-#: next `uv sync` would hardlink into a venv and execute — which is why an empty
-#: listing inside the sandbox is the assertion and not a stylistic choice.
-PLANTED = "sitecustomize.py"
+OWN_SUBTREE = f"{REPOS_DIR}/{OWN_USER}"
+OTHER_SUBTREE = f"{REPOS_DIR}/{OTHER_USER}"
 
-#: Seven facts about three paths, read from inside the task.
+#: Derived by `resolve_sandbox_cache_dir`, not configured. Restated for the same
+#: reason as the paths above; `executor.SANDBOX_CACHE_ROOT_NAME` is the source.
+CACHE_NAME = ".package-caches"
+OWN_CACHE = f"{OWN_SUBTREE}/{CACHE_NAME}"
+
+#: What the other user's subtree holds. Two things, because the subtree carries
+#: two different kinds of secret and the exposure argument is different for
+#: each. In the cache, uv's unpacked-wheel store is trusted on read and
+#: re-verified against no hash, so a file planted there is one the next
+#: `uv sync` would hardlink into a venv and execute. In a clone's git config, a
+#: credential is printed back by ordinary git commands, which is ISSUE-270's
+#: half of the same tree.
+PLANTED_NAMESPACE = "acme"
+PLANTED_CLONE = "widget.git"
+PLANTED_IN_CACHE = "sitecustomize.py"
+
+#: Seven facts about four paths, read from inside the task.
 #:
-#: **The two device numbers are the discriminator, and `stat -f -c %T` is not.**
-#: The obvious probe — "is the sibling a tmpfs" — was written first and the
-#: control caught it: `/data/repos` is *itself* on a tmpfs in this container, so
-#: the answer is `tmpfs` inside the sandbox and outside it alike, and the
-#: assertion could not fail. Comparing the sibling's device against the task's
-#: own cache is immune to that: a mask is a fresh mount and its own device,
-#: while two directories in one bound tree share one. Inside the sandbox they
-#: must differ; from the daemon's own view they must match.
+#: **`other_present` is the discriminator and the listing is the diagnosis.**
+#: `ls -A` on a path that is not in the namespace exits non-zero and prints to
+#: stderr; on a present-but-empty directory it exits 0 and prints nothing. The
+#: old layout produced the second, so a test written against an empty listing
+#: would pass under both and say nothing about which one it got. `other_entries`
+#: carries `ls`'s error text into the marked block rather than swallowing it, so
+#: a failure reads as `[ls: ...]` and can be told from `[]`. `other_cache_entries`
+#: asks the same of the cache inside it, which is the directory ISSUE-319 was
+#: actually about and the one a listing of the subtree does not descend into.
 #:
-#: `other_entries` carries `ls`'s error text into the marked block rather than
-#: swallowing it, so a path that is not in the namespace at all reads as
-#: `[ls: ...]` and not as `[]`. An empty listing then means present and empty.
+#: `root_entries` is the same question asked from above: the shared root is a
+#: mountpoint's parent that bwrap created on its own root tmpfs, so it exists
+#: and holds exactly what was bound under it.
 #:
-#: The `ln` is the positive half and is the property the whole placement is for.
-#: It has to target a directory under `repos_dir` but outside the cache, which
-#: is what a venv is: on one mount it succeeds, and across a mount boundary it
-#: is `EXDEV` however identical the filesystems are.
-CACHE_PROBE = f"""
-echo CACHE_PROBE_BEGIN
-echo "other_dev=$(stat -c %d {CACHE_ROOT}/{OTHER_USER} 2>&1)"
-echo "own_dev=$(stat -c %d {CACHE_ROOT}/{OWN_USER} 2>&1)"
-echo "other_entries=[$(ls -A {CACHE_ROOT}/{OTHER_USER} 2>&1 | tr '\\n' ' ')]"
-if touch {CACHE_ROOT}/{OTHER_USER}/probe 2>/dev/null; then
+#: The `ln` is the positive half and is the property the derivation is for. It
+#: has to target a directory inside the user's own subtree but outside the
+#: cache, which is what a worktree's venv is: on one mount it succeeds, and
+#: across a mount boundary it is `EXDEV` however identical the filesystems are.
+REPOS_PROBE = f"""
+echo REPOS_PROBE_BEGIN
+if ls -A {OTHER_SUBTREE} >/dev/null 2>&1; then
+  echo "other_present=yes"
+else
+  echo "other_present=no"
+fi
+echo "other_entries=[$(ls -A {OTHER_SUBTREE} 2>&1 | tr '\\n' ' ')]"
+echo "other_cache_entries=[$(ls -A {OTHER_SUBTREE}/{CACHE_NAME} 2>&1 | tr '\\n' ' ')]"
+echo "root_entries=[$(ls -A {REPOS_DIR} 2>&1 | tr '\\n' ' ')]"
+if touch {OTHER_SUBTREE}/probe 2>/dev/null; then
   echo "other_writable=yes"
-  rm -f {CACHE_ROOT}/{OTHER_USER}/probe
+  rm -f {OTHER_SUBTREE}/probe
 else
   echo "other_writable=no"
 fi
-if touch {CACHE_ROOT}/{OWN_USER}/probe 2>/dev/null; then
+if touch {OWN_CACHE}/probe 2>/dev/null; then
   echo "own_writable=yes"
 else
   echo "own_writable=no"
 fi
-mkdir -p /data/repos/fake-venv 2>/dev/null
-if ln {CACHE_ROOT}/{OWN_USER}/probe /data/repos/fake-venv/linked 2>/dev/null; then
-  echo "hardlink=ok nlink=$(stat -c %h /data/repos/fake-venv/linked 2>&1)"
+mkdir -p {OWN_SUBTREE}/fake-venv 2>/dev/null
+if ln {OWN_CACHE}/probe {OWN_SUBTREE}/fake-venv/linked 2>/dev/null; then
+  echo "hardlink=ok nlink=$(stat -c %h {OWN_SUBTREE}/fake-venv/linked 2>&1)"
 else
   echo "hardlink=failed"
 fi
-rm -f {CACHE_ROOT}/{OWN_USER}/probe /data/repos/fake-venv/linked
-echo CACHE_PROBE_END
+rm -f {OWN_CACHE}/probe {OWN_SUBTREE}/fake-venv/linked
+echo REPOS_PROBE_END
 """
 
-CACHE_SCRIPT = [
+REPOS_SCRIPT = [
     {
         "tool_calls": [
             {
                 "id": "call-1",
                 "name": "Bash",
-                "arguments": {"command": CACHE_PROBE},
+                "arguments": {"command": REPOS_PROBE},
             }
         ]
     },
-    {"text": "I looked at the package caches"},
+    {"text": "I looked at the repos directory"},
 ]
-
-
-def _devices(observed: str) -> tuple[str, str]:
-    """The sibling's and the task's own device numbers, out of a probe block.
-
-    Both or neither: a missing line means `stat` printed an error the marked
-    block carried through, and comparing that error against the other value
-    would report "they differ" — the answer the masked case wants — for a probe
-    that never ran.
-    """
-    found: dict[str, str] = {}
-    for line in observed.splitlines():
-        for key in ("other_dev", "own_dev"):
-            if line.startswith(key + "="):
-                found[key] = line.split("=", 1)[1].strip()
-    missing = [k for k in ("other_dev", "own_dev") if not found.get(k, "").isdigit()]
-    if missing:
-        raise AssertionError(
-            f"{', '.join(missing)} is not a device number, so `stat` failed "
-            f"rather than answering\n--- probe ---\n{observed}"
-        )
-    return found["other_dev"], found["own_dev"]
 
 
 def probe_output(stack) -> str:
     """The marked block out of the endpoint transcript, or a readable failure."""
     transcript = stack.endpoint.transcript()
-    begin = transcript.find("CACHE_PROBE_BEGIN")
-    end = transcript.find("CACHE_PROBE_END", begin + 1)
+    begin = transcript.find("REPOS_PROBE_BEGIN")
+    end = transcript.find("REPOS_PROBE_END", begin + 1)
     if begin < 0 or end < 0:
         raise AssertionError(
-            "the cache probe's output never reached the model, so the Bash "
-            "tool did not run or its result was not sent back — this says "
-            "nothing about the masks either way\n"
+            "the probe's output never reached the model, so the Bash tool did "
+            "not run or its result was not sent back — this says nothing about "
+            "the binds either way\n"
             f"--- daemon logs ---\n{stack.logs(120)}"
         )
     return transcript[begin:end]
@@ -153,110 +155,149 @@ def probe_output(stack) -> str:
 
 @pytest.fixture
 def seeded(stack):
-    """Two user caches on the host side, the other one holding a file.
+    """A second user's repos subtree on the host side, with something in it.
 
-    Created here rather than at boot: the lean shape bypasses `entrypoint.sh`,
-    nothing in the image makes the root, and `resolve_sandbox_cache_dir` checks
-    that it is an existing writable directory on every task rather than once at
-    load — so a directory made after the daemon is up is one the next task
-    binds.
+    Created here rather than at boot: the lean shape bypasses `entrypoint.sh`
+    and nothing in the image makes a per-user subtree for a user who has never
+    run a task. The task's *own* subtree and its cache are deliberately not
+    seeded — `resolve_sandbox_cache_dir` creates both on every task, and having
+    the fixture make them would hide a daemon that had stopped doing so.
 
-    `0700` on each, matching what the resolver creates and what the Ansible role
-    sets on the root: every task runs as the same daemon uid, so the mode is
-    about other local accounts rather than about this boundary.
+    `0700` on each, matching what the daemon creates: every task runs as the
+    same daemon uid, so the mode is about other local accounts rather than about
+    this boundary.
     """
     stack.exec([
         "sh", "-c",
-        f"mkdir -p {CACHE_ROOT}/{OWN_USER} {CACHE_ROOT}/{OTHER_USER} && "
-        f"chmod 700 {CACHE_ROOT} {CACHE_ROOT}/{OWN_USER} {CACHE_ROOT}/{OTHER_USER} && "
-        f"echo 'import os' > {CACHE_ROOT}/{OTHER_USER}/{PLANTED}",
+        f"mkdir -p {OTHER_SUBTREE}/{CACHE_NAME} "
+        f"{OTHER_SUBTREE}/{PLANTED_NAMESPACE}/{PLANTED_CLONE} && "
+        f"chmod 700 {OTHER_SUBTREE} {OTHER_SUBTREE}/{CACHE_NAME} && "
+        f"echo 'import os' > {OTHER_SUBTREE}/{CACHE_NAME}/{PLANTED_IN_CACHE} && "
+        f"echo '[remote \"origin\"]' > "
+        f"{OTHER_SUBTREE}/{PLANTED_NAMESPACE}/{PLANTED_CLONE}/config",
     ])
     yield stack
-    stack.exec(["sh", "-c", f"rm -rf {CACHE_ROOT} /data/repos/fake-venv"])
+    stack.exec(["sh", "-c", f"rm -rf {OTHER_SUBTREE} {OWN_SUBTREE}/fake-venv"])
 
 
-@pytest.mark.profile(profiles.CACHE.name)
-class TestTheSiblingCacheMasks:
-    @pytest.mark.script(CACHE_SCRIPT)
-    def test_another_users_cache_is_empty_and_unwritable(self, seeded):
+@pytest.mark.profile(profiles.FORGE.name)
+class TestAnotherUsersSubtree:
+    @pytest.mark.script(REPOS_SCRIPT)
+    def test_it_is_not_in_the_namespace_at_all(self, seeded):
         stack = seeded
-        task_id = stack.submit("look at the package caches")
+        task_id = stack.submit("look at the repos directory")
         stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
         observed = probe_output(stack)
 
-        other_dev, own_dev = _devices(observed)
-        assert other_dev != own_dev, (
-            f"{CACHE_ROOT}/{OTHER_USER} is on the same device as the task's "
-            f"own cache ({other_dev}), so it is the bound directory rather than "
-            "a mask — either bwrap was skipped, the cache bind was refused "
-            "(check the daemon log for a `sandbox_cache_dir ... not binding "
-            "it` warning), or the mask was not emitted.\n"
-            f"--- probe ---\n{observed}\n"
+        assert "other_present=no" in observed, (
+            f"{OTHER_SUBTREE} resolves inside the sandbox. Either the bind is "
+            "the shared root again, or bwrap was skipped — check the daemon log "
+            f"for both.\n--- probe ---\n{observed}\n"
             f"--- daemon logs ---\n{stack.logs(120)}"
         )
-        assert "other_entries=[]" in observed, (
-            f"{CACHE_ROOT}/{OTHER_USER} is a tmpfs but is not empty, so "
-            f"something shows through the mask — {PLANTED} is the file the "
-            f"next `uv sync` would hardlink out\n--- probe ---\n{observed}"
+        assert "other_entries=[]" not in observed, (
+            f"{OTHER_SUBTREE} listed as present and empty, which is what a mask "
+            "over it would look like rather than an absence. The property this "
+            "layout claims is that the path is not there at all.\n"
+            f"--- probe ---\n{observed}"
+        )
+        assert "other_cache_entries=[]" not in observed, (
+            f"{OTHER_SUBTREE}/{CACHE_NAME} listed as present and empty. That is "
+            "the ISSUE-319 shape exactly — a mask over another user's package "
+            "cache rather than a cache that is not in the namespace.\n"
+            f"--- probe ---\n{observed}"
+        )
+        assert f"{OTHER_USER}" not in _root_entries(observed), (
+            f"{OTHER_USER} is an entry of {REPOS_DIR} inside the sandbox, so "
+            "the shared root was bound and the per-user split bought nothing\n"
+            f"--- probe ---\n{observed}"
         )
         assert "other_writable=no" in observed, (
-            "the sibling mask is writable, so a task can plant an archive at a "
-            "path the mask only pretends to cover. `--remount-ro` was not "
-            f"applied.\n--- probe ---\n{observed}"
+            f"a file was created under {OTHER_SUBTREE} from inside the task, "
+            f"which is the planting half of ISSUE-319\n--- probe ---\n{observed}"
         )
 
-    @pytest.mark.script(CACHE_SCRIPT)
-    def test_the_tasks_own_cache_still_works(self, seeded):
+    @pytest.mark.script(REPOS_SCRIPT)
+    def test_the_tasks_own_subtree_still_works(self, seeded):
         """The positive half, and it is not decoration.
 
         Every assertion above is an absence, and each one is equally true of a
-        cache that was never bound — which is what `resolve_sandbox_cache_dir`
-        produces on any refusal, silently, with one warning in a log the test
-        does not read. This is what says the bind is present and the placement
-        is doing its job.
+        task whose sandbox bound nothing under `repos_dir` — a non-admin, a
+        refused cache, a bwrap that was skipped. This is what says the bind is
+        present, the cache is inside it, and the two are on one mount.
         """
         stack = seeded
-        task_id = stack.submit("look at the package caches")
+        task_id = stack.submit("look at the repos directory")
         stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
         observed = probe_output(stack)
 
-        assert "own_writable=yes" in observed, (
-            "the task's own cache is not writable, so the cache bind was "
-            "refused or masked along with the siblings — every assertion in "
-            "the test above then passes for the wrong reason\n"
+        assert OWN_USER in _root_entries(observed), (
+            f"{OWN_SUBTREE} is not in the namespace either, so the test above "
+            "passes because nothing under repos_dir was bound at all\n"
             f"--- probe ---\n{observed}\n--- daemon logs ---\n{stack.logs(120)}"
         )
+        assert "own_writable=yes" in observed, (
+            "the task's own package cache is not writable, so the cache bind "
+            "was refused — every assertion in the test above then passes for "
+            f"the wrong reason\n--- probe ---\n{observed}\n"
+            f"--- daemon logs ---\n{stack.logs(120)}"
+        )
         assert "hardlink=ok" in observed, (
-            "link(2) from the cache into a directory under repos_dir failed, "
-            "so the two are on different mounts and uv will copy every wheel "
-            "instead of hardlinking it. That is the entire cost the placement "
-            f"exists to avoid.\n--- probe ---\n{observed}"
+            "link(2) from the cache into a directory beside it failed, so the "
+            "two are on different mounts and uv will copy every wheel instead "
+            "of hardlinking it. That is the entire cost the derivation exists "
+            f"to avoid.\n--- probe ---\n{observed}"
         )
 
-    def test_the_other_users_cache_is_there_to_be_masked(self, seeded):
+    def test_the_other_users_subtree_is_there_to_be_missing(self, seeded):
         """The control, in the same session rather than by hand.
 
         Reads the same paths through `docker compose exec`, which is the
-        daemon's own view and not inside the sandbox: there the planted file is
-        present and the directory is writable. So the test above is the
-        difference the masks make, and not a statement about how the image is
-        laid out or about a directory that was never populated.
+        daemon's own view and not inside the sandbox: there the seeded subtree
+        is present, holds both planted files and is writable. So the test above
+        is the difference the per-user bind makes, and not a statement about a
+        directory that was never created.
         """
         stack = seeded
-        result = stack.exec(["sh", "-c", CACHE_PROBE])
+        result = stack.exec(["sh", "-c", REPOS_PROBE])
 
         assert result.returncode == 0, result.stderr
-        other_dev, own_dev = _devices(result.stdout)
-        assert other_dev == own_dev, (
-            f"{CACHE_ROOT}/{OTHER_USER} is already on its own device in the "
-            "daemon's own view, so the device comparison above cannot tell a "
-            f"mask from the container's ordinary layout\n{result.stdout}"
+        assert "other_present=yes" in result.stdout, (
+            f"{OTHER_SUBTREE} is missing from the daemon's own view too, so "
+            f"`other_present=no` above proves nothing\n{result.stdout}"
         )
-        assert PLANTED in result.stdout, (
-            "the planted file is not in the daemon's own view either, so the "
-            f"empty listing above is not about the masks\n{result.stdout}"
+        assert PLANTED_IN_CACHE in result.stdout, (
+            f"{PLANTED_IN_CACHE} is not in {OTHER_SUBTREE}/{CACHE_NAME} in the "
+            "daemon's own view either, so the empty-cache assertion above is "
+            f"not about the binds\n{result.stdout}"
+        )
+        assert PLANTED_NAMESPACE in result.stdout, (
+            f"the seeded {PLANTED_NAMESPACE}/ namespace is not in the daemon's "
+            f"own view either\n{result.stdout}"
         )
         assert "other_writable=yes" in result.stdout, (
-            "the other user's cache is not writable from the daemon's own view "
-            f"either, so `other_writable=no` above proves nothing\n{result.stdout}"
+            "the other user's subtree is not writable from the daemon's own "
+            f"view either, so `other_writable=no` above proves nothing\n"
+            f"{result.stdout}"
         )
+        assert OTHER_USER in _root_entries(result.stdout), (
+            f"{OTHER_USER} is not an entry of {REPOS_DIR} in the daemon's own "
+            "view, so the root listing above cannot tell a per-user bind from "
+            f"an empty tree\n{result.stdout}"
+        )
+
+
+def _root_entries(observed: str) -> str:
+    """The `root_entries=[...]` payload, or a readable failure.
+
+    Returned as the raw string rather than a list: the assertions ask whether a
+    user id appears, and a missing line has to be an error rather than an empty
+    answer that reads as "the other user was not there".
+    """
+    for line in observed.splitlines():
+        if line.startswith("root_entries="):
+            return line.split("=", 1)[1]
+    raise AssertionError(
+        "the probe printed no root_entries line, so `ls` did not run\n"
+        f"--- probe ---\n{observed}"
+    )
