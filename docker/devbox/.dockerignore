@@ -1,0 +1,7 @@
+# The build context is this directory, and the two Python leaves in it are
+# imported by host-side tests — `docker/devbox/scripts/istota-exec-serve`
+# resolves its protocol module out of `lib/` when it runs from a checkout. So a
+# test run leaves `__pycache__/` here, which would otherwise go into the build
+# context, change its digest, and be COPYable into the image.
+__pycache__/
+*.pyc

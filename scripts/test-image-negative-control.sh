@@ -16,23 +16,25 @@
 # It covers both halves of the tier:
 #
 #   * the istota image, via docker/test/Dockerfile.no-forge;
-#   * the devbox image, via nine controls, because that file asserts nine
+#   * the devbox image, via ten controls, because that file asserts that many
 #     separable things and no single broken image reaches all of them. The
 #     forge-less image alone left four of the original thirteen assertions
 #     green, since /usr/local/bin/gh is a *copy* of the wrapper rather than a
 #     symlink into the directory being removed — the fourth control is what
-#     closed those. The last five arrived with the exec transport: the uid the
+#     closed those. The last six arrived with the exec transport: the uid the
 #     container runs as, the ownership of /home/dev, the vendored protocol
-#     module, whether the transport comes *up*, and the /home/dev repair. See
-#     the nine docker/test/Dockerfile.devbox-* files for what each one breaks
-#     and why, and read each one's note about what it deliberately does not
-#     break — several of them turn a neighbour's assertion red for the wrong
-#     reason, which is exactly what a second control exists to separate.
+#     module, whether the transport comes *up*, the /home/dev repair, and the
+#     absence of /workspace. Read each Dockerfile.devbox-* file's note about
+#     what it deliberately does *not* break — several turn a neighbour's
+#     assertion red for the wrong reason, which is exactly what a second
+#     control exists to separate.
 #
-# Three assertions in the devbox file have no control, deliberately, and they
-# are the ones that cannot pass vacuously: `test -x` against a named absolute
-# path, `python3 -c 'import …'` against a named directory, and a `Cmd` compared
-# to an exact list all fail closed. A mistake in any of them is red.
+# Five assertions in the devbox file have no control, deliberately, and each
+# fails closed: three positive existence checks (`test -x` against a named
+# absolute path, `python3 -c 'import …'` against a named directory, a `Cmd`
+# compared to an exact list), the graceful-stop assertion (a log line only a
+# graceful shutdown writes, plus an unlinked socket), and the unconfigured hold
+# (a process still alive and a message naming two literal variables).
 #
 #   scripts/test-image-negative-control.sh [amd64]
 #
@@ -274,12 +276,35 @@ run_devbox_control \
 # uv, rustup and the two forge CLIs — about half a minute on a warm cache, and
 # it needs the network on a cold one. The layers above it (apt, Node, Go) are
 # shared with the base build that already happened.
+#
+# **It is also the one that needs `--platform`.** Every other control is
+# `FROM ${BASE}` and inherits the base image's architecture. This one starts
+# from `debian:bookworm-slim`, which is multi-arch, so without the flag an
+# `amd64` run builds a native image and hands it to a pytest run that then adds
+# `--platform linux/amd64` to `docker run`. The control still goes red — with
+# `exec format error`, which is the "red for the right image, for the wrong
+# reason" failure this whole file exists to tell apart.
 echo
 echo "[control] devbox/devbox-wrong-uid: building the real recipe with DEV_UID=1234…"
 wrong_uid_tag="istota-test/devbox-wrong-uid:${control_suffix}"
-docker build -q -f docker/devbox/Dockerfile \
-    --build-arg DEV_UID=1234 --build-arg DEV_GID=1234 \
-    -t "$wrong_uid_tag" docker/devbox >/dev/null
+if [ -n "$platform" ]; then
+    # `amd64` is what a person types at this script and `linux/amd64` is what
+    # Docker wants; `resolve_platform` normalizes for the pytest side and this
+    # is the same rule for the build side. Getting it wrong builds natively
+    # while the flag claims otherwise, which is the failure being avoided.
+    case "$platform" in
+        */*) docker_platform="$platform" ;;
+        *) docker_platform="linux/${platform}" ;;
+    esac
+    docker build -q -f docker/devbox/Dockerfile \
+        --platform "$docker_platform" \
+        --build-arg DEV_UID=1234 --build-arg DEV_GID=1234 \
+        -t "$wrong_uid_tag" docker/devbox >/dev/null
+else
+    docker build -q -f docker/devbox/Dockerfile \
+        --build-arg DEV_UID=1234 --build-arg DEV_GID=1234 \
+        -t "$wrong_uid_tag" docker/devbox >/dev/null
+fi
 
 require_devbox_failures \
     "devbox-wrong-uid" \
@@ -328,3 +353,4 @@ echo
 echo "[control] OK: both halves of the image tier can see a broken artifact,"
 echo "[control] and every assertion in the devbox file that could pass"
 echo "[control] vacuously has one that reaches it."
+echo "[control] The five without one all fail closed; the header says which."

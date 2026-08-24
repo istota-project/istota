@@ -85,12 +85,20 @@ import time
 # trick forge_cli uses for its policy file, and deliberately not an environment
 # variable: a path this process reads out of its environment is one more thing
 # to reason about in a process whose whole job is refusing paths.
+#
+# The candidate is admitted on the *module file* being in it, not on the
+# directory existing. Installed at /usr/local/bin, this script's checkout
+# fallback resolves to /usr/local/lib — which exists in the image, is on
+# nothing's path today, and would go to the front of `sys.path` ahead of the
+# stdlib, so a `pip install --prefix=/usr/local` dropping a top-level module
+# there would shadow one this server imports.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for _candidate in (
     "/usr/local/lib/istota_devbox_exec",
     os.path.join(os.path.dirname(_HERE), "lib"),
 ):
-    if os.path.isdir(_candidate) and _candidate not in sys.path:
+    _module = os.path.join(_candidate, "istota_devbox_exec_protocol.py")
+    if os.path.isfile(_module) and _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
 from istota_devbox_exec_protocol import (  # noqa: E402

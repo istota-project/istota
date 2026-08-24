@@ -86,6 +86,13 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 # allocates system uids from 100 upward and so does the istota role, so a
 # collision is reachable — and `useradd`'s own "UID 42 is not unique" arrives at
 # deploy time, in a build log, naming neither the arg nor the account it hit.
+#
+# One consequence is worth naming rather than discovering: the preflight also
+# refuses `DEV_UID=0`, which is the answer for a compose deployment, whose
+# istota service runs as root. Nothing here supports that yet — this ships bare
+# metal only — and reusing the existing root account rather than creating a
+# second one is a different recipe, not a different argument. The refusal is at
+# least loud, and it says which account it collided with.
 ARG DEV_UID=1000
 ARG DEV_GID=1000
 RUN set -eux; \
@@ -254,11 +261,13 @@ RUN set -eux; \
 # `istota-exec-run` is the container's CMD below, not the server: a server as
 # PID 1 makes a server crash take every concurrent build with it, and a `sleep`
 # as PID 1 neither restarts anything nor reaps what reparents to it. The
-# service is declared with `init: true` so tini does the reaping.
+# per-user service is to be declared with `init: true` so tini does the
+# reaping — that half lands with the deployment template, and until it does
+# this script is PID 1 and forwards the stop signal itself.
 #
-# The three checks at the end are a build-time smoke, and none of them is
-# decorative — `--help` is what proves the vendored module is importable at the
-# path the server looks for it at, which a `COPY` cannot tell you.
+# The two checks at the end are a build-time smoke, and neither is decorative —
+# `--help` is what proves the vendored module is importable at the path the
+# server looks for it at, which a `COPY` cannot tell you.
 COPY lib/istota_devbox_exec_protocol.py /usr/local/lib/istota_devbox_exec/istota_devbox_exec_protocol.py
 COPY scripts/istota-exec-serve /usr/local/bin/istota-exec-serve
 COPY scripts/istota-exec-run /usr/local/bin/istota-exec-run
@@ -280,8 +289,10 @@ ENV ISTOTA_CRED_SOCK=/run/istota-cred/sock
 # `sleep infinity` and be an exec target; see Layer 7 for why neither half of
 # that survives, and `scripts/istota-exec-run` for what the supervisor does.
 #
-# The per-user service overrides `command` with the same value and adds
-# `init: true`. Setting it here as well is what makes a plain `docker run` of
-# this image the same thing the deployment runs, which is what the image tier
-# asserts against.
+# The per-user service will override `command` with the same value and add
+# `init: true`; that change lands with the deployment template, which still
+# says `sleep infinity` today, so this image change is inert on a deployment
+# until it does. Setting `CMD` here rather than only there is what makes a
+# plain `docker run` of this image the thing the image tier can assert
+# against — and what makes the two definitions agree once both exist.
 CMD ["/usr/local/bin/istota-exec-run"]

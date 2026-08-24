@@ -48,7 +48,7 @@ import subprocess
 
 import pytest
 
-from .conftest import REPO, assert_ok, require_docker, sh
+from .conftest import REPO, assert_ok, is_emulated, require_docker, sh
 
 pytestmark = pytest.mark.image
 
@@ -236,7 +236,8 @@ def _inspect(image, template: str) -> str:
 # as, which is the claim the whole uid design rests on.
 _WIRE_PROBE = r"""
 probe_wire() {
-    if ISTOTA_PROBE_SOCKET="$1" ISTOTA_PROBE_NOT_PID="${3:-}" python3 - <<'PY'
+    if ISTOTA_PROBE_SOCKET="$1" ISTOTA_PROBE_NOT_PID="${3:-}" \
+        ISTOTA_PROBE_BUDGET_SECONDS="$PROBE_BUDGET_SECONDS" python3 - <<'PY'
 import json
 import os
 import socket
@@ -248,11 +249,15 @@ import istota_devbox_exec_protocol as protocol
 
 path = os.environ["ISTOTA_PROBE_SOCKET"]
 not_pid = os.environ.get("ISTOTA_PROBE_NOT_PID") or None
+# Scaled by the caller, for the same reason `run_in` scales its own: a
+# qemu-emulated container is several times slower, and a fixed budget here
+# would fail the release run's `--platform amd64` against a working image.
+budget = float(os.environ["ISTOTA_PROBE_BUDGET_SECONDS"])
 
 
 def ask():
     sock = socket.socket(socket.AF_UNIX)
-    sock.settimeout(30)
+    sock.settimeout(budget)
     try:
         sock.connect(path)
         sock.sendall(protocol.encode_stat_request())
@@ -285,7 +290,7 @@ def ask():
         sock.close()
 
 
-deadline = time.monotonic() + 30
+deadline = time.monotonic() + budget
 last = "never attempted"
 while time.monotonic() < deadline:
     try:
@@ -300,7 +305,7 @@ while time.monotonic() < deadline:
             break
     time.sleep(0.2)
 else:
-    raise SystemExit(f"nothing answered on {path} within 30s ({last})")
+    raise SystemExit(f"nothing answered on {path} within {budget}s ({last})")
 PY
     then
         return 0
@@ -311,17 +316,20 @@ PY
 }
 """
 
-_PRELUDE = "set -eu\n" + _WIRE_PROBE
-
-
-def _script(body: str) -> str:
-    """The prelude plus a body, with `SUPERVISOR` and `STRANGER` filled in.
+def _script(image, body: str) -> str:
+    """The prelude plus a body, with the placeholders filled in.
 
     A plain replace rather than `str.format` or `%`: the bodies are shell, and
     both of those would make every `${...}` and `%u` in them an escaping
     problem.
+
+    `set -eu` on every one of them, so a setup step that failed takes the
+    script down instead of leaving a later assertion to compare two empty
+    strings and agree with itself.
     """
-    return _PRELUDE + body.replace("SUPERVISOR", EXEC_SUPERVISOR).replace(
+    budget = 240 if is_emulated(image) else 30
+    prelude = f"set -eu\nPROBE_BUDGET_SECONDS={budget}\n" + _WIRE_PROBE
+    return prelude + body.replace("SUPERVISOR", EXEC_SUPERVISOR).replace(
         "STRANGER", STRANGER_UID
     )
 
@@ -366,13 +374,24 @@ class TestTheDevUidBuildArgs:
         # image whose own /home/dev belongs to somebody else is broken before
         # any volume is involved, and the uv and rustup installs baked into it
         # are unreadable.
+        #
+        # Both sides are the image's own self-report, which is the shape of an
+        # assertion that agrees with itself on any image at all — on one with no
+        # `dev` account and no `/home/dev`, both substitutions come back empty
+        # and the comparison holds. `set -eu` from `_script` takes the script
+        # down first, and the non-empty check below is the belt to that brace.
         result = sh(
             devbox_image_under_test,
-            "echo \"OWNER $(stat -c '%u %g' /home/dev)\"; "
-            'echo "ACCOUNT $(id -u dev) $(id -g dev)"',
+            _script(
+                devbox_image_under_test,
+                'echo "OWNER $(stat -c \'%u %g\' /home/dev)"\n'
+                'echo "ACCOUNT $(id -u dev) $(id -g dev)"\n',
+            ),
         )
         out = assert_ok(result, "stat /home/dev")
 
+        assert len(_field(out, "OWNER").split()) == 2, _field(out, "OWNER")
+        assert len(_field(out, "ACCOUNT").split()) == 2, _field(out, "ACCOUNT")
         assert _field(out, "OWNER") == _field(out, "ACCOUNT"), (
             f"/home/dev is owned by {_field(out, 'OWNER')} and dev is "
             f"{_field(out, 'ACCOUNT')}; dev cannot write its own home"
@@ -448,6 +467,7 @@ class TestTheSupervisorStartsTheTransport:
         result = sh(
             devbox_image_under_test,
             _script(
+                devbox_image_under_test,
                 """
 mkdir -p /tmp/exec-dir /tmp/repos-root
 ISTOTA_EXEC_SOCKET=/tmp/exec-dir/exec.sock \
@@ -486,6 +506,7 @@ probe_wire /tmp/exec-dir/exec.sock /tmp/supervisor.log
         result = sh(
             devbox_image_under_test,
             _script(
+                devbox_image_under_test,
                 """
 mkdir -p /tmp/exec-dir /tmp/repos-root
 ISTOTA_EXEC_SOCKET=/tmp/exec-dir/exec.sock \
@@ -527,6 +548,7 @@ probe_wire /tmp/exec-dir/exec.sock /tmp/supervisor.log "$first"
         result = sh(
             devbox_image_under_test,
             _script(
+                devbox_image_under_test,
                 """
 mkdir -p /tmp/exec-dir /tmp/repos-root
 sudo -n chown -R STRANGER:STRANGER /home/dev
@@ -551,6 +573,7 @@ ISTOTA_EXEC_REPOS_ROOT=/tmp/repos-root \
     SUPERVISOR > /tmp/second.log 2>&1 &
 probe_wire /tmp/exec-dir/second.sock /tmp/second.log > /dev/null
 echo "FIRST_CHOWN_LINES $(grep -c 'chown /home/dev' /tmp/first.log || true)"
+echo "FIRST_FAILED_LINES $(grep -c 'chown /home/dev: FAILED' /tmp/first.log || true)"
 echo "SECOND_CHOWN_LINES $(grep -c 'chown /home/dev' /tmp/second.log || true)"
 """
             ),
@@ -571,10 +594,111 @@ echo "SECOND_CHOWN_LINES $(grep -c 'chown /home/dev' /tmp/second.log || true)"
         assert int(_field(out, "FIRST_CHOWN_LINES")) > 0, (
             "nothing was logged about the repair; an operator cannot see it happen"
         )
+        # Without this, the two assertions above are equally satisfied by a
+        # repair that failed part-way: `chown -R` sets the top directory even
+        # when it errors on a descendant, and the guard would then read the
+        # repaired top directory on the next boot and never retry. The
+        # supervisor puts the top directory back on a failure for that reason,
+        # and this is what notices if it stops.
+        assert _field(out, "FIRST_FAILED_LINES") == "0", (
+            "the repair reported a failure; the volume is half-chowned and the "
+            "guard is what decides whether the next start tries again"
+        )
         assert _field(out, "SECOND_CHOWN_LINES") == "0", (
             "the second start walked /home/dev again — the stat guard is not "
             "holding, and every boot pays a recursive chown of the whole volume"
         )
+
+
+    def test_a_stop_signal_lets_the_server_shut_down(self, devbox_image_under_test):
+        # Without a trap the server's whole shutdown path is unreachable, and
+        # the failure differs by shape: under `init: true` tini signals its
+        # direct child only, so an untrapped `sh` dies and the server goes with
+        # the pid namespace; as PID 1 the kernel delivers no default-disposition
+        # signal at all, so `docker stop` waits out its grace and SIGKILLs. Both
+        # skip the drain, the per-connection reap and the socket unlink.
+        #
+        # `stopped` is the server's own last log line, written after
+        # `wait_closed` and the unlink. It is the one thing only a graceful
+        # shutdown produces.
+        result = sh(
+            devbox_image_under_test,
+            _script(
+                devbox_image_under_test,
+                """
+mkdir -p /tmp/exec-dir /tmp/repos-root
+ISTOTA_EXEC_SOCKET=/tmp/exec-dir/exec.sock \
+ISTOTA_EXEC_REPOS_ROOT=/tmp/repos-root \
+    SUPERVISOR > /tmp/supervisor.log 2>&1 &
+supervisor=$!
+probe_wire /tmp/exec-dir/exec.sock /tmp/supervisor.log > /dev/null
+
+kill -TERM "$supervisor"
+i=0
+while kill -0 "$supervisor" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt 150 ]; then
+        echo "the supervisor was still running 30s after SIGTERM" >&2
+        cat /tmp/supervisor.log >&2 || true
+        exit 1
+    fi
+    sleep 0.2
+done
+echo "STOPPED_LINES $(grep -c 'istota-exec-serve INFO stopped' /tmp/supervisor.log || true)"
+echo "RESPAWNED_LINES $(grep -c 'restarting in' /tmp/supervisor.log || true)"
+echo "SOCKET_LEFT $(test -e /tmp/exec-dir/exec.sock && echo yes || echo no)"
+"""
+            ),
+        )
+        out = assert_ok(result, "stopping the supervisor")
+
+        assert _field(out, "STOPPED_LINES") != "0", (
+            "the server never reached its own shutdown path, so the drain, the "
+            "per-connection reap and the socket unlink were all skipped"
+        )
+        assert _field(out, "RESPAWNED_LINES") == "0", (
+            "the supervisor respawned the server during a deliberate stop"
+        )
+        assert _field(out, "SOCKET_LEFT") == "no", (
+            "the socket inode outlived the server, so the next client to reach "
+            "it connects to nothing and cannot tell that from a dead container"
+        )
+
+    def test_a_supervisor_with_no_settings_holds_rather_than_exiting(
+        self, devbox_image_under_test
+    ):
+        # The branch that keeps a misconfiguration from becoming a crash loop.
+        # Exiting would take the container down under `restart: unless-stopped`,
+        # which also removes the way in to diagnose it — so the transport is
+        # down, the container is up, and `doctor`'s transport check is what
+        # reports it. The log has to name both variables, because that message
+        # is the only thing an operator has to go on.
+        #
+        # No control: an assertion that the process is alive and that a log line
+        # contains two literal names fails closed.
+        result = sh(
+            devbox_image_under_test,
+            _script(
+                devbox_image_under_test,
+                """
+ISTOTA_EXEC_UNCONFIGURED_PAUSE_SECONDS=1 SUPERVISOR > /tmp/supervisor.log 2>&1 &
+supervisor=$!
+sleep 4
+echo "ALIVE $(kill -0 "$supervisor" 2>/dev/null && echo yes || echo no)"
+echo "NAMED_SOCKET $(grep -c 'ISTOTA_EXEC_SOCKET' /tmp/supervisor.log || true)"
+echo "NAMED_REPOS $(grep -c 'ISTOTA_EXEC_REPOS_ROOT' /tmp/supervisor.log || true)"
+kill -TERM "$supervisor" 2>/dev/null || true
+"""
+            ),
+        )
+        out = assert_ok(result, "the unconfigured supervisor")
+
+        assert _field(out, "ALIVE") == "yes", (
+            "the supervisor exited on a missing setting; under "
+            "`restart: unless-stopped` that is a crash loop"
+        )
+        assert _field(out, "NAMED_SOCKET") != "0"
+        assert _field(out, "NAMED_REPOS") != "0"
 
 
 class TestTheWorkspaceTmpfsIsGone:
