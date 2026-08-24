@@ -43,6 +43,19 @@ This is an accident guard, not a security boundary. Hitting it means you are abo
 2. **Response verification**: `gh pr create` and `glab mr create` exit non-zero on failure and print the URL on success, so check the exit status rather than scraping the output for error text. Then confirm the thing exists before reporting success: `gh pr view --json number,url,state` or `glab mr view -F json`.
 3. **No live source editing**: Never edit files under production installation paths (e.g., `/srv/app/*/src/`). All source changes must go through worktrees in `$DEVELOPER_REPOS_DIR` and be submitted as MRs/PRs.
 
+## Where Builds and Tests Run
+
+Some deployments run the package managers and language runtimes — `npm`, `npx`, `pnpm`, `yarn`, `node`, `uv`, `uvx`, `pip`, `pip3`, `cargo`, `rustc`, `rustup`, `go`, `bundle`, `gem` — inside a per-user Linux container instead of on the host. The worktree is the same directory on both sides at the same path, so the files you write with your ordinary tools are the files the build reads.
+
+Nothing about the invocation changes. `uv sync` is `uv sync`, output comes back as it is produced, and the exit status is the command's own — behind a pipe too, since each stage of a pipeline you type is routed on its own. Where the deployment does not do this, those commands run on the host as before and the rest of this section never comes up.
+
+Four things do change, and none is guessable from the error you get.
+
+- **A command that runs in the container sees only files under `$DEVELOPER_REPOS_DIR`.** Your scratch directory is not there. `uv run python /tmp/analyze.py` fails "no such file or directory" from a command that worked one directory over, and a `#!/usr/bin/env node` script written outside the repository does not run. Put the file in the worktree.
+- **`make` runs on the host, and so does everything it invokes.** That is deliberate: routing `make` would route every `git`, `gh` and `python3` in a recipe with it. A recipe calling `npm` or `cargo` is fine, because each of those routes on its own. A recipe calling `./node_modules/.bin/<tool>` by path is not, and neither is an absolute `.venv/bin/<tool>` you invoke yourself — that venv's interpreter exists only in the container. Use `uv run <tool>` instead.
+- **A background process does not outlive the command that started it.** `npm run dev &` dies when that command returns, and `nohup` does not save it. Start and use anything long-running inside one command.
+- **Four exit statuses are the transport reporting, not your command.** Each prints one stderr line starting `istota-devbox-exec:`. `120` — the container could not be reached; report that and do not retry. `121` — the two halves of the transport are different versions, which is an operator problem. `122` — a malformed reply. `123` — the connection dropped after the command had started, so **what it did is unknown**: say exactly that rather than reporting success or failure, and read the tree's state before repeating anything that writes.
+
 ## Directory Layout
 
 ```
@@ -203,7 +216,7 @@ A fresh worktree has the tracked files and nothing else.
 - **Install only the stack the task touches.** A repository with a Python service and a frontend has an install for each, and a task that only touches one has no use for the other. If the work reaches the other stack later, install it then.
 - **Never share a `node_modules` or a `.venv` between worktrees.** Vite, Vitest and esbuild resolve plugins and their native binaries through the real path of `node_modules`, so a borrowed tree fails at transform time and surfaces as dozens of unrelated red suites. Each worktree gets its own.
 - **Copy the gitignored files the stack needs to run** — `.env`, local config, test fixtures kept out of git. Never print their contents.
-- **A refused connection during an install is a boundary, not a flake.** npm and crates.io are reachable, and PyPI unless the operator turned it off; a package that fetches a binary from somewhere else — `node-gyp` headers, Playwright browsers, a GitHub release asset — is not, and no number of retries will change that. Say which host was refused and stop, rather than reinstalling. The operator adds hosts through `extra_hosts`; you cannot.
+- **A refused connection during an install is a boundary, not a flake.** npm and crates.io are reachable, and PyPI unless the operator turned it off; a package that fetches a binary from somewhere else — `node-gyp` headers, Playwright browsers, a GitHub release asset — is not, and no number of retries will change that. Say which host was refused and stop, rather than reinstalling. The operator adds hosts through `extra_hosts`; you cannot. Installs that run in the container (see "Where Builds and Tests Run") are not bounded this way, so a refusal there is a real network failure.
 - **Prove it can run tests, cheaply.** A collection step (`pytest --collect-only -q`, one small component test), not a full suite. The base branch was green when it was last committed, so a full pass here re-confirms what the last commit already established. What is unknown is whether *this worktree* can run anything.
 
 If the collection step fails, that is the environment and not the code. Fix the setup and retry. If it fails in a way you cannot explain, stop and report rather than starting work on a worktree you cannot run.

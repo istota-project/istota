@@ -625,9 +625,22 @@ class TestLoadBudget:
     the model retries an install that cannot succeed until the task's budget is
     gone. `docs/deployment/security.md` carries the operator-facing half; the
     model never reads that file.
+
+    761 -> 774 for the development container, same procedure again: the rules
+    file first, then this. Thirteen net lines, and the first raise that adds a
+    section rather than a rule. On a `[developer.container] backend = "devbox"`
+    deployment the package managers and language runtimes run inside the user's
+    container, and each of the four consequences is a failure the model cannot
+    read out of the error it gets. A file outside the repos root is "no such
+    file or directory" from a command that worked one directory over. An
+    absolute `.venv/bin/<tool>` is a missing interpreter. A backgrounded dev
+    server is gone with no message at all. And 120-123 are statuses no program
+    produces, one of which (123) means the command's fate is unknown and has to
+    be reported as neither success nor failure. Cutting the section means
+    picking which of those the model finds out by guessing.
     """
 
-    BUDGET_LINES = 761
+    BUDGET_LINES = 774
 
     def test_three_bodies_fit_the_budget(self):
         total = 0
