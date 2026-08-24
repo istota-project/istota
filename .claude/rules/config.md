@@ -85,12 +85,29 @@ enabled: bool = False        api_url: str = "http://localhost:9223"    vnc_url: 
 ### `DevboxConfig`
 ```
 enabled: bool = False                container_prefix: str = "devbox-"
-docker_cli: str = "/usr/bin/docker"  docker_socket: str = "/var/run/docker.sock"  # the *real* host socket (proxy upstream)
-exec_timeout_seconds: int = 300      max_output_bytes: int = 102_400
-api_proxy_enabled: bool = True       api_proxy_socket_dir: str = "/var/run/istota-docker"
-api_proxy_exec_ttl_seconds: int = 300  api_proxy_audit_log: str = ""
+docker_cli: str = "/usr/bin/docker"  # `reset` only; nothing else shells docker
+max_output_bytes: int = 102_400      # per stream, in the JSON envelope
 ```
-Per-user persistent Docker container — the agent's escape hatch for tasks the bwrap sandbox can't handle (installing packages, network diagnostics, raw sockets). When `enabled`, the executor exports `ISTOTA_DEVBOX_*` env vars (container name = `f"{container_prefix}{task.user_id}"`) and `build_bwrap_cmd` `--ro-bind`s `docker_cli` into the sandbox so the `devbox` skill CLI can issue `docker exec/cp/inspect/restart` against the user's own container. The **raw root-equivalent socket is no longer bound into the sandbox** — instead, when `api_proxy_enabled`, `build_bwrap_cmd` binds the per-user Docker-API allowlist proxy socket (`{api_proxy_socket_dir}/{user_id}.sock`, served by `src/istota/docker_proxy.py`) at the conventional in-sandbox path `/var/run/docker.sock` (the devbox CLI connects there by default, so it's unchanged). The proxy forwards only the allowlisted ops on the user's own container and refuses container create/run/build/privileged/host-mount, so it's safe to bind unconditionally (no selection gate). `api_proxy_exec_ttl_seconds` sweeps created-but-unstarted exec ids; `api_proxy_audit_log` is an optional file sink for the `istota.docker_proxy.audit` logger. Image is built from `docker/devbox/Dockerfile`, and the Ansible role is the only deployment that runs a container from it — `docker/docker-compose.yml` ships no devbox service, because nothing in that shape can reach one (`docs/deployment/docker.md`).
+Per-user persistent Docker container. When `enabled`, the executor exports `ISTOTA_DEVBOX_CONTAINER`, `ISTOTA_DEVBOX_DOCKER_CLI` and `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` (container name = `f"{container_prefix}{task.user_id}"`). The skill CLI reaches the container over the **exec transport** — a Unix socket into a server running inside it — for every verb but `reset`, which recreates a container and so runs `docker` host-side in the CLI's own process, with the daemon's environment and no `DOCKER_HOST`.
+
+**Six keys are retired, and the sweep in `tests/test_ansible_config_template.py` is what keeps them from coming back**: `docker_socket`, `exec_timeout_seconds`, `api_proxy_enabled`, `api_proxy_socket_dir`, `api_proxy_exec_ttl_seconds` and `api_proxy_audit_log`. `load_config` reads none of them, so a value left in a TOML file is inert. The Docker-API allowlist proxy they configured is deleted whole — module, both Ansible templates, the per-user units — because its only consumer in the tree was an unconditional bind of its socket into every sandbox, and nothing in a build needs Docker any more. `exec_timeout_seconds` went with the transport's own answer to timeouts: there is no default, the task's budget governs, and a caller wanting a kill passes `--timeout`.
+
+**There is deliberately no `exec_socket_dir` here.** The skill CLI resolves the socket through `config.exec_socket_path`, the same helper the executor's bwrap bind and the `doctor` transport check use, so `/run/istota-exec` has one spelling in the tree. A mirror in this block could only be dead code — `ContainerConfig.exec_socket_dir` carries a non-empty default, so its value always wins — or a second knob for a value the design says has one. `tests/test_skills_devbox.py::test_the_devbox_block_carries_no_second_spelling` holds the absence, so a later reader finds the decision rather than the gap.
+
+Image is built from `docker/devbox/Dockerfile`, and the Ansible role is the only deployment that runs a container from it — `docker/docker-compose.yml` ships no devbox service, because nothing in that shape can reach one (`docs/deployment/docker.md`).
+
+### `ContainerConfig` (`[developer.container]`, on `DeveloperConfig`)
+```
+backend: str = "none"                       # none | devbox
+exec_socket_dir: str = "/run/istota-exec"   # the parent; socket is {dir}/{user_id}/exec.sock
+connect_timeout_seconds: float = 5.0        idle_timeout_seconds: int = 3600
+shim_commands: list[str] = DEFAULT_SHIM_COMMANDS   # fifteen, listed below
+```
+Where project code builds and runs. A **deploy-time** choice, not a runtime one: within a deployment there is exactly one place a build happens, which is what keeps the property a per-command fallback would cost — nothing on the host ever consumes an environment the container built, so no parity rule has to hold. `"devbox"` writes one shim per entry in `shim_commands` into the task's shim directory and routes those commands into the user's devbox over the transport; `"none"` is the default and writes no shim, binds no socket and reaches no container. `_parse_container_block` corrects an unrecognised value rather than refusing, and never falls back to `devbox`.
+
+`DEFAULT_SHIM_COMMANDS` is `npm npx pnpm yarn node uv uvx pip pip3 cargo rustc rustup go bundle gem`. `_UNSHIMMABLE_COMMANDS` / `_UNSHIMMABLE_RE` refuse an operator's additions of the interpreter (`python`, `python3`, `python3.12`, …), the shells, `env`, `git`, `gh`, `glab` and `istota-skill`, whatever is written in config: the sandbox launches its own network bridge as `python3 {bridge_path}`, several recipes in `developer/skill.md` parse forge output with `python3 -c`, and the exec client is itself a Python script, so shimming the interpreter routes all three into a container that has none of them. `make` is merely *absent* from the default and stays configurable — shimming a driver inverts routing for everything beneath it, since the shim directory exists only in the sandbox's `PATH`, so a Makefile calling `git`, `gh` or `python3` would get the container's copies.
+
+**`developer.repos_dir` is a per-user root on every backend, `"none"` included.** The daemon derives `{repos_dir}/{user_id}` through `config.repos_root(config, user_id)`, and every consumer that scopes a task takes that: the bwrap bind, the native file-tool write root, `DEVELOPER_REPOS_DIR` (via the `config_per_user` `EnvSpec` source), `git_remote_scrub` and the devbox mount. Two consumers deliberately keep the **global** root, because neither has a user to scope to: `worktree_reaper`'s sweep, which is deployment-wide and would silently keep every worktree of a user missing from any list it was handed, and `_protected_cache_parents`, where equal-or-ancestor makes the global entry the stricter test. Helpers: `repos_root`, `container_backend`, `devbox_container_backend`, `exec_socket_dir`, `exec_socket_path`.
 
 ### `ConversationConfig`
 ```
@@ -626,8 +643,11 @@ devbox_proxy_socket_dir: str = "/var/run/istota"
 devbox_proxy_audit_log: str = ""
 worktree_reap_enabled: bool = True    # Reap landed worktrees, from the scheduler
 worktree_retention_hours: float = 24.0  # Idle time before one is a candidate; clamped to a 1h floor
+container: ContainerConfig   # [developer.container] — see its own entry above
 review: ReviewConfig
 ```
+
+`repos_dir` is a **per-user root**, on every value of `container.backend`. See the `ContainerConfig` entry above for the consumer list, the two that deliberately keep the global root, and the one-time move an upgraded host needs.
 
 `gitlab_reviewer` is the value the developer skill exports as `GITLAB_REVIEWER` and hands to `glab mr create --reviewer`, which resolves by username. `gitlab_reviewer_id` holds the same person's numeric id and is read by nothing — it kept its name and lost its consumer in ISSUE-289, where the name was the bug: operators put the id `users/<id>` reports into the field the skill consumed, `glab` answered `failed to find user by name`, and because the recipe builds the flag rather than failing, every agent-authored MR opened with nobody assigned. The `developer.gitlab_reviewer` doctor check WARNs on an all-digits username, and on an `_id` set with no username beside it — the shape a host that has not re-run Ansible is in.
 

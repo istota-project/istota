@@ -94,7 +94,7 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 
 | Variable | Source |
 |---|---|
-| `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` |
+| `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` **plus the task's user id**. The setting is a per-user root, so the value a task sees is `{repos_dir}/{user_id}` and never the unscoped directory |
 | `GITLAB_URL` | `config.developer.gitlab_url` |
 | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` |
 | `GITLAB_REVIEWER` | `config.developer.gitlab_reviewer` |
@@ -104,7 +104,7 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 | `DEVELOPER_AUTHOR_CREDIT` | `config.developer.author_credit` |
 | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth |
 | `GH_HOST`, `GITLAB_HOST` | Written by the forge wrapper into the real CLI's environment, derived from the two URLs |
-| `ISTOTA_PATH_PREPEND` | Internal. The task's `{user_temp_dir}/.developer` directory, which holds the `gh` / `glab` wrappers; the executor folds it onto `PATH` and strips the variable before the model sees it |
+| `ISTOTA_PATH_PREPEND` | Internal. The task's `{user_temp_dir}/.developer` directory, which holds the `gh` / `glab` wrappers, plus `.developer/exec-shims` where `[developer.container] backend = "devbox"`; the executor folds them onto `PATH` and strips the variable before the model sees it |
 
 ## Credential proxy
 
