@@ -33,8 +33,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from istota import config as istota_config
 
 # The forge-binary resolution rule lives in a stdlib-only leaf so `doctor` can
 # reach it without importing `istota.skills` (whose __init__ star-imports every
@@ -50,6 +53,30 @@ logger = logging.getLogger("istota.skills.developer")
 
 # Where the canonical wrapper lives, for copying into the task's .developer.
 _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
+
+# The exec transport's client and the protocol module it imports. Two files,
+# not one: a single standalone script would put the wire format in three places
+# (module, vendored container copy, client) with `scripts/sync-devbox-lib.sh`
+# covering only one of them.
+_EXEC_CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "devbox_exec_client.py"
+_EXEC_PROTOCOL_SOURCE = Path(__file__).resolve().parents[2] / "devbox_exec_protocol.py"
+
+# What the client is installed as. The shims exec it by absolute path, so the
+# name is only what an operator sees in a listing.
+_EXEC_CLIENT_NAME = "devbox-exec"
+# The protocol module's filename is *not* cosmetic: the client resolves it as
+# the file beside itself (`import devbox_exec_protocol`), so this has to be the
+# module name.
+_EXEC_PROTOCOL_NAME = "devbox_exec_protocol.py"
+
+# Where the shims live. A directory of their own inside `.developer`, rather
+# than beside the forge wrappers, for two reasons. A shim whose command left
+# `shim_commands` has to be *removed*, and sweeping a directory that also holds
+# the wrapper, the policy and the credential helpers means deciding which files
+# are shims from their contents. And `ISTOTA_PATH_PREPEND` is os.pathsep-
+# separated, so a second entry costs nothing — with `.developer` first, so the
+# forge wrappers win any collision.
+_SHIM_DIR_NAME = "exec-shims"
 
 
 def _atomic_write(dest: Path, data: str, mode: int) -> Path:
@@ -215,6 +242,181 @@ def _pinned_data_dir(dev_bin: Path, name: str) -> Path:
     return data
 
 
+def _ctx_user_id(ctx) -> str:
+    """The task's user id, or "" — never an AttributeError.
+
+    `dispatch_setup_env_hooks` wraps each hook in try/except and keeps only what
+    it returned, so a raise anywhere in here silently discards the credential
+    helper and the whole forge wiring, leaving a task that looks fine and cannot
+    authenticate. Read defensively for the same reason the config reads are.
+    """
+    return getattr(getattr(ctx, "task", None), "user_id", "") or ""
+
+
+def _shim_body(
+    command: str,
+    client: Path,
+    socket_path: Path,
+    connect_timeout: float,
+) -> str:
+    """One shim: exec the client, with both paths written in.
+
+    **Neither path is read from the environment, and that is the whole point.**
+    This script runs as a child of the model's own shell, so an env-supplied
+    path is a path the model chooses — the same reasoning the forge wrapper
+    already pays for. With the socket in a variable,
+    ``ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine npm ci`` would get an ``ok``
+    acknowledgement and a fabricated ``exit 0`` from a socket the model wrote,
+    with plausible output. Both values are interpolated as single-quoted
+    literals so a path carrying a space or a ``$`` cannot be re-read either.
+
+    **There is no ``--cwd``.** The client takes the working directory from
+    ``os.getcwd()``: ``$PWD`` is the *logical* path the parent shell recorded,
+    so a ``cd`` through a symlink yields a string whose meaning differs from the
+    directory the process is in — and the server's containment test is a
+    ``realpath``.
+
+    **Stdin is forwarded whenever it is not a terminal.** ``[ -t 0 ]`` tests
+    exactly the condition the server's refusal was written for: keeping a child
+    off the operator's tty under ``istota serve``. A pipe, a file and
+    ``/dev/null`` all forward, the last as an immediate EOF, which is correct.
+    Never setting it silently breaks every pipeline into a shimmed command
+    (``git diff | npx prettier --check -``) and, under the native Bash tool's
+    ``pipefail``, colours the result 141.
+    """
+    client_q = shlex.quote(str(client))
+    socket_q = shlex.quote(str(socket_path))
+    timeout_q = shlex.quote(f"{connect_timeout:g}")
+    command_q = shlex.quote(command)
+    return (
+        "#!/bin/sh\n"
+        f"# {command} — run in this user's devbox over the exec transport.\n"
+        "#\n"
+        "# The client path and the socket path are written in at task setup and\n"
+        "# neither is read from the environment: this runs as a child of the\n"
+        "# model's own shell, so an env-supplied path is a path the model picks.\n"
+        "#\n"
+        "# stdin is forwarded whenever it is not a terminal, so a pipeline into\n"
+        "# this command works. No --cwd: the client sends the physical working\n"
+        "# directory, which is what the server's realpath check wants.\n"
+        "if [ -t 0 ]; then\n"
+        f"  exec {client_q} --socket {socket_q}"
+        f" --connect-timeout {timeout_q} -- {command_q} \"$@\"\n"
+        "fi\n"
+        f"exec {client_q} --socket {socket_q}"
+        f" --connect-timeout {timeout_q} --stdin -- {command_q} \"$@\"\n"
+    )
+
+
+def _install_exec_transport(ctx, dev, dev_bin: Path) -> str:
+    """Write the client, the protocol module and one shim per command.
+
+    Returns the PATH entry for the shim directory, or ``""`` when this
+    deployment is not routing development work into a container.
+
+    **Gated on configuration alone** — ``developer.enabled``, a non-empty
+    ``repos_dir``, and ``backend = devbox`` — which is this hook's existing
+    self-gate plus one key. Not on skill *selection*: ``developer`` declares no
+    ``always_include`` and no ``source_types``, so it reaches
+    ``selected_skills`` only through sticky skills, which is to say on the
+    **second** turn of a conversation and not the first. A gate on selection
+    would leave the shims absent on a fresh "work on repo X", ``npm ci`` would
+    run host-side and 403 at the CONNECT proxy, and the whole feature would read
+    as flakiness. And ``authorized_skills`` cannot be asked for here either:
+    ``dispatch_setup_env_hooks`` runs *before* ``derive_authorized_skills`` by
+    design, because a hook-sourced credential is the only auto-auth signal a
+    ``source='setup_env'`` skill has.
+
+    The security half of the gate is elsewhere and is a different predicate:
+    ``build_bwrap_cmd`` binds the socket only when ``"developer" in
+    authorized_skills``, byte for byte what already decides whether this task's
+    CONNECT allowlist gets the package registries. So a task that is not
+    authorized has shims on ``PATH`` and no socket behind them, and one invoked
+    anyway exits 120 naming what it could not reach — the same class of loud
+    refusal a host-side ``npm ci`` gets from the CONNECT proxy today.
+
+    **It contacts nothing.** No ping, no socket, no I/O beyond writing files
+    into a directory this hook is already writing to. ``setup_env`` runs for
+    every skill on every task, so a round trip here would sit in front of every
+    Talk reply, every briefing, every cron row and every heartbeat tick, and a
+    devbox outage would become a failed briefing — the ISSUE-288 shape.
+    Liveness is a property of the deployment, so it lives in ``doctor``.
+    """
+    shim_dir = dev_bin / _SHIM_DIR_NAME
+    if not istota_config.devbox_container_backend(ctx.config):
+        # Backend off (or turned off since the last task on this user's temp
+        # directory, which persists). Take the shims away rather than leaving
+        # them to route a build into a socket nobody is serving.
+        _remove_shims(shim_dir, keep=set())
+        return ""
+
+    socket_path = istota_config.exec_socket_path(ctx.config, _ctx_user_id(ctx))
+    if socket_path is None:
+        # No user to scope to — the heartbeat builds a task with no user id.
+        # There is no per-user socket to name, so there is nothing to write.
+        _remove_shims(shim_dir, keep=set())
+        return ""
+
+    container = dev.container
+    commands = [c for c in container.shim_commands if c]
+    if not commands:
+        _remove_shims(shim_dir, keep=set())
+        return ""
+
+    try:
+        client = _atomic_write(
+            dev_bin / _EXEC_CLIENT_NAME, _EXEC_CLIENT_SOURCE.read_text(), 0o755,
+        )
+        # Beside the client, under its module name: the client prefers the copy
+        # that travelled with it over any installed package, because that is the
+        # framing it was tested against.
+        _atomic_write(
+            dev_bin / _EXEC_PROTOCOL_NAME, _EXEC_PROTOCOL_SOURCE.read_text(), 0o755,
+        )
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        for command in commands:
+            _atomic_write(
+                shim_dir / command,
+                _shim_body(
+                    command, client, socket_path, container.connect_timeout_seconds
+                ),
+                0o755,
+            )
+    except OSError as exc:
+        # `dispatch_setup_env_hooks` keeps only what a hook returned, so raising
+        # here would discard the credential helper and the forge wiring with it.
+        logger.error("developer: could not install the exec shims: %s", exc)
+        return ""
+
+    _remove_shims(shim_dir, keep=set(commands))
+    return str(shim_dir)
+
+
+def _remove_shims(shim_dir: Path, keep: set[str]) -> None:
+    """Drop shims for commands this task is not routing.
+
+    ``user_temp_dir`` persists across tasks, so a command taken out of
+    ``shim_commands`` — or a whole deployment flipped back to ``backend =
+    none`` — would otherwise leave a file on the model's PATH that still execs
+    the client. Removing rather than rewriting is the only honest answer: a
+    shim that is not wanted must not be *reachable*, and the model's shell
+    resolves by name.
+
+    Never raises: this runs on the setup path.
+    """
+    try:
+        entries = list(shim_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name in keep:
+            continue
+        try:
+            entry.unlink()
+        except OSError as exc:
+            logger.warning("developer: could not remove stale shim %s: %s", entry, exc)
+
+
 def setup_env(ctx) -> dict[str, str]:
     """Write helper scripts and return the GIT_CONFIG_* / forge-CLI env vars.
 
@@ -377,13 +579,36 @@ def setup_env(ctx) -> dict[str, str]:
         # property, not housekeeping.
         env["ISTOTA_PATH_PREPEND"] = str(dev_bin)
 
-    # ISSUE-270: strip any credential embedded in a git config under repos_dir
-    # before the model can read one. `repos_dir` is bound read-write into the
+    # --- The exec transport -----------------------------------------------
+    #
+    # Independent of the forge tokens above: a deployment routing builds into
+    # the devbox does so whether or not it has a forge configured. So the PATH
+    # entry is composed rather than assigned, and `.developer` stays first —
+    # the forge wrappers win any name collision with a shim.
+    shim_path = _install_exec_transport(ctx, dev, dev_bin)
+    if shim_path:
+        existing = env.get("ISTOTA_PATH_PREPEND", "")
+        env["ISTOTA_PATH_PREPEND"] = (
+            os.pathsep.join([existing, shim_path]) if existing else shim_path
+        )
+
+    # ISSUE-270: strip any credential embedded in a git config under the repos
+    # tree before the model can read one. That tree is bound read-write into the
     # sandbox a few steps from here, every worktree inherits its bare clone's
     # remotes, and `git remote -v` prints a URL in full — so a token in one
     # reaches the model's context as a matter of routine, around the helper
     # registered above. Nothing here writes such a config; this catches one
     # that arrived by hand.
+    #
+    # **The per-user root, not the global one**, and that direction is the one
+    # that matters rather than the obvious one: handed `repos_dir` whole, one
+    # user's task would walk and *rewrite git configs in* every other user's
+    # tree, on every developer-enabled task. Handed `{repos_dir}/{user_id}`,
+    # `git_remote_scrub._MAX_DEPTH = 4` needs no change at all — that constant
+    # is measured from the root it is given, and the documented layout sits at
+    # depth 2 below the per-user root exactly as it used to sit at depth 2 below
+    # `repos_dir`. A reviewer checking it against the global root will conclude
+    # the margin halved; it does not.
     #
     # Last, and after `env` is complete, deliberately. `dispatch_setup_env_hooks`
     # wraps each hook in `try/except` and keeps only what it returned, so an
@@ -391,6 +616,8 @@ def setup_env(ctx) -> dict[str, str]:
     # the credential helper, GIT_CONFIG_COUNT and the forge-CLI wiring, leaving
     # a task that looks fine and cannot authenticate. `scrub_and_report` holds a
     # never-raises contract of its own; this ordering is the second guard.
-    scrub_and_report(Path(dev.repos_dir))
+    user_repos = istota_config.repos_root(config, _ctx_user_id(ctx))
+    if user_repos is not None:
+        scrub_and_report(user_repos)
 
     return env

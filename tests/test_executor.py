@@ -692,6 +692,11 @@ class TestDeveloperEnvVars:
         ctx = _Ctx()
         ctx.config = config
         ctx.user_temp_dir = str(user_temp)
+        # A real `EnvContext` always carries the task; the per-user repos root
+        # and the exec socket are both derived from its user id.
+        ctx.task = db.Task(
+            id=1, prompt="p", user_id="alice", source_type="talk", status="running"
+        )
         return setup_env(ctx), user_temp
 
     def test_disabled_developer_returns_nothing(self, tmp_path):
