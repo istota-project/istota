@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from istota.config import (
+    devbox_container_backend,
     BriefingConfig,
     ChannelSleepCycleConfig,
     Config,
@@ -2929,23 +2930,30 @@ class TestTheDeveloperContainerBlock:
         return _parse_container_block(raw)
 
     def test_the_default_is_the_behaviour_every_deployment_already_had(self):
+        """No devbox, no container: development work runs on the host."""
+        from istota.config import Config, container_backend
+
+        assert container_backend(Config()) == "none"
+
+    def test_the_retired_backend_key_is_not_a_field(self):
         from istota.config import ContainerConfig
 
-        assert ContainerConfig().backend == "none"
+        assert not hasattr(ContainerConfig(), "backend")
 
-    def test_a_known_backend_is_taken(self):
-        assert self._parse({"backend": "devbox"})["backend"] == "devbox"
-        assert self._parse({"backend": " DEVBOX "})["backend"] == "devbox"
+    def test_the_retired_key_is_ignored_and_says_so(self, caplog):
+        """Silence would be the worst option available.
 
-    def test_an_unknown_backend_falls_back_to_none_and_says_so(self, caplog):
-        """Never to `devbox`. A routing decision taken from a typo would send
-        every build somewhere the operator did not choose; the startup line and
-        `doctor`'s backend check are what stop the fallback being silent."""
+        An operator who wrote `backend = "none"` to keep builds on the host had
+        that honoured until this release; on the next deploy their devbox
+        starts taking the work. Dropping the key without a word is how that
+        becomes a surprise at 2am rather than a line in the boot log.
+        """
         with caplog.at_level(logging.WARNING):
-            parsed = self._parse({"backend": "devbxo"})
+            parsed = self._parse({"backend": "none"})
 
         assert "backend" not in parsed
-        assert "devbxo" in caplog.text
+        assert "retired" in caplog.text
+        assert "[devbox] enabled" in caplog.text
 
     def test_a_relative_socket_dir_is_refused(self, caplog):
         """It would anchor on whatever directory the daemon was started in,
@@ -3034,14 +3042,15 @@ class TestTheDeveloperContainerBlock:
             'enabled = true\n'
             'repos_dir = "/srv/repos"\n\n'
             "[developer.container]\n"
-            'backend = "devbox"\n'
-            'shim_commands = ["npm", "cargo"]\n'
+            'shim_commands = ["npm", "cargo"]\n\n'
+            "[devbox]\n"
+            "enabled = true\n"
         )
 
         config = load_config(path)
 
-        assert config.developer.container.backend == "devbox"
         assert config.developer.container.shim_commands == ["npm", "cargo"]
+        assert devbox_container_backend(config) is True
 
     def test_an_absent_block_is_the_default(self, tmp_path):
         path = tmp_path / "config.toml"
@@ -3049,4 +3058,4 @@ class TestTheDeveloperContainerBlock:
 
         config = load_config(path)
 
-        assert config.developer.container.backend == "none"
+        assert devbox_container_backend(config) is False

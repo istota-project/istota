@@ -934,29 +934,37 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ----------------------------------------------------------------------------
 # Where project code builds and runs
 # ----------------------------------------------------------------------------
-# A deploy-time choice, not a runtime one: within a deployment there is exactly
-# one place a build happens, which is what keeps the property a per-command
-# fallback would cost — nothing on the host ever consumes an environment the
-# container built, so no parity rule has to hold.
+# **There is no key for this.** It is derived from `[devbox] enabled` together
+# with `[developer] enabled` and a non-empty `repos_dir`. A deploy-time choice,
+# not a runtime one: within a deployment there is exactly one place a build
+# happens, which is what keeps the property a per-command fallback would cost —
+# nothing on the host ever consumes an environment the container built, so no
+# parity rule has to hold.
 #
-# "none" is the default and is what every deployment did before this key
-# existed: npm, uv, cargo and the rest run on the host inside the task's bwrap
-# sandbox, where they cannot reach a registry that is not on the CONNECT
-# allowlist and cannot install a system package.
+# Without a devbox, npm, uv, cargo and the rest run on the host inside the
+# task's bwrap sandbox, where they cannot reach a registry that is not on the
+# CONNECT allowlist and cannot install a system package. With one, they run in
+# that user's devbox over a Unix-socket exec transport.
 #
-# "devbox" routes them into that user's devbox over a Unix-socket exec
-# transport. It needs `[devbox] enabled`, a container for the user, and the
-# devbox image rebuilt with the daemon's own uid — the Ansible role does the
-# last of those from a `getent` lookup. A mismatched uid is the one failure with
-# no error message anywhere that names it: the container cannot write into a
+# A `backend` key used to sit in the block below and say which. It is retired,
+# and a file still carrying it gets a warning at load and a WARN from `doctor`.
+# Retiring it removed two states rather than a knob: the devbox on with the
+# backend off offered the model a devbox skill whose every verb but `reset`
+# refused, and the backend on with the devbox off asked the developer skill to
+# reach a container nothing had built. If you set it to "none" to keep builds on
+# the host, turn `[devbox] enabled` off instead — that is now the one switch.
+#
+# The devbox image has to be built with the daemon's own uid; the Ansible role
+# does that from a `getent` lookup. A mismatched uid is the one failure with no
+# error message anywhere that names it: the container cannot write into a
 # worktree the daemon made, and once that is worked around the daemon cannot
 # unlink a tree the container made, so every worktree that ever ran a build
 # becomes permanently unreapable.
 #
 # Check it with `istota doctor --only developer.container`, which answers four
-# questions that each fail silently: does this file agree with the running
-# daemon, does the transport answer, do the two sides agree on uid and repos
-# root, and is the uv cache mounted.
+# questions that each fail silently: does this file derive what the running
+# daemon believes, does the transport answer, do the two sides agree on uid and
+# repos root, and is the uv cache mounted.
 #
 # Note `repos_dir` above is a *per-user root* **on every backend, including
 # "none"**: the daemon derives `{repos_dir}/{user_id}` and hands that to the
@@ -969,7 +977,6 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # restart into a state where the bind names an empty directory.
 
 # [developer.container]
-# backend = "none"                    # none | devbox
 # exec_socket_dir = "/run/istota-exec" # the parent; the socket is {dir}/{user}/exec.sock
 # connect_timeout_seconds = 5.0        # the client's connect budget
 # idle_timeout_seconds = 3600          # server-side backstop reap for an idle connection

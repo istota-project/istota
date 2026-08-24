@@ -585,13 +585,14 @@ worktree_retention_hours = {{ istota_developer_worktree_retention_hours }}
 [developer.review]
 timeout_seconds = {{ istota_developer_review_timeout_seconds }}
 
-# Where project code builds and runs. "none" runs it on the host inside the
-# task's sandbox, as every deployment did before this key existed; "devbox"
-# routes the commands below into the user's devbox over the exec transport.
-# `istota doctor --only developer.container` is what says whether this file and
-# the running daemon agree.
+# How the exec transport is configured — not whether it is used. That is
+# derived from `[devbox] enabled` together with `[developer] enabled` and a
+# non-empty `repos_dir`, so the two switches cannot disagree; the `backend` key
+# that used to sit here is retired, and a file still carrying it gets a warning
+# at load and a WARN from `istota doctor --only developer.container`. That check
+# re-derives from this file rather than reading a key, which is also what says
+# whether the file and the running daemon agree.
 [developer.container]
-backend = "{{ istota_developer_container_backend }}"
 exec_socket_dir = "{{ istota_developer_container_exec_socket_dir }}"
 connect_timeout_seconds = {{ istota_developer_container_connect_timeout_seconds }}
 idle_timeout_seconds = {{ istota_developer_container_idle_timeout_seconds }}

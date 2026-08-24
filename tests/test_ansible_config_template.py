@@ -39,7 +39,7 @@ import yaml
 from jinja2 import Environment, StrictUndefined
 
 from istota import config as config_module
-from istota.config import Config, load_config
+from istota.config import Config, devbox_container_backend, load_config
 
 REPO = Path(__file__).resolve().parent.parent
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -285,8 +285,8 @@ class TestTheForgePathsMatchWhatTheRoleInstalls:
         parsed = tomllib.loads(rendered)
 
         assert "container" in parsed["developer"], (
-            "config.toml.j2 no longer emits [developer.container], so an "
-            "operator has no way to switch the backend on"
+            "config.toml.j2 no longer emits [developer.container], so the exec "
+            "transport has no socket directory or timeouts to configure"
         )
         assert not sorted(_unknown_keys(parsed, Config, prefix=""))
 
@@ -308,14 +308,8 @@ class TestTheForgePathsMatchWhatTheRoleInstalls:
         )
 
     def test_the_rendered_container_block_loads_with_the_values_it_names(self):
-        config = load_config_from(
-            render(
-                istota_developer_enabled=True,
-                istota_developer_container_backend="devbox",
-            )
-        )
+        config = load_config_from(render(istota_developer_enabled=True))
 
-        assert config.developer.container.backend == "devbox"
         # A list, not a string. `shim_commands = "npm"` would iterate as
         # characters and install a shim called `n`; the loader refuses that, and
         # this is the assertion that the template does not produce it.
@@ -327,12 +321,39 @@ class TestTheForgePathsMatchWhatTheRoleInstalls:
         assert "make" not in config.developer.container.shim_commands
 
     def test_the_default_rendering_leaves_the_backend_off(self):
-        """A deploy-time choice an operator has to make: the key exists on every
-        host from now on, and on a host that has not opted in it must render the
-        behaviour that host already had."""
+        """A host that has not opted in must render the behaviour it already
+        had. The developer skill alone does not route builds anywhere: the
+        devbox has to be on too, and the role default for that is false."""
         config = load_config_from(render(istota_developer_enabled=True))
 
-        assert config.developer.container.backend == "none"
+        assert devbox_container_backend(config) is False
+
+    def test_the_template_no_longer_renders_the_retired_key(self):
+        """It would load as an unknown key and earn a WARN from `doctor` on
+        every host the role touches."""
+        parsed = tomllib.loads(render(istota_developer_enabled=True))
+
+        assert "backend" not in parsed["developer"]["container"]
+
+    def test_a_devbox_host_derives_the_devbox_backend(self):
+        """The other half: the role's own devbox switch is what turns it on,
+        with no second key to keep in step.
+
+        All three inputs, because `istota_developer_repos_dir` ships empty and
+        is load-bearing rather than incidental — it is the exec server's
+        containment root, so there is nothing to mount and nothing to contain
+        without one. A render with the devbox on and no repos_dir derives
+        `none`, which is the correct answer and not a bug in the template.
+        """
+        config = load_config_from(
+            render(
+                istota_developer_enabled=True,
+                istota_developer_repos_dir="/srv/app/istota/repos",
+                istota_devbox_enabled=True,
+            )
+        )
+
+        assert devbox_container_backend(config) is True
 
     def test_the_developer_block_is_absent_when_the_skill_is_off(self, parsed):
         # The role default is off, and an off skill should render no paths at

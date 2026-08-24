@@ -1830,9 +1830,19 @@ class TestConfigSecrets:
 # The development container
 
 
-def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice",), **overrides):
-    """A Config with `[developer.container]` wired and one devbox user."""
-    from istota.config import ContainerConfig, DeveloperConfig, SecurityConfig, UserConfig
+def _container_config(make_config, tmp_path, *, devbox=True, users=("alice",), **overrides):
+    """A Config with `[developer.container]` wired and one devbox user.
+
+    `devbox` is the switch the backend is derived from; there is no `backend`
+    key to set any more.
+    """
+    from istota.config import (
+        ContainerConfig,
+        DeveloperConfig,
+        DevboxConfig,
+        SecurityConfig,
+        UserConfig,
+    )
 
     repos = tmp_path / "repos"
     repos.mkdir(exist_ok=True)
@@ -1845,7 +1855,6 @@ def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice"
         for u in users:
             (exec_root / u).mkdir(exist_ok=True)
     container_fields = {
-        "backend": backend,
         "exec_socket_dir": str(exec_root),
         "connect_timeout_seconds": 0.5,
     }
@@ -1857,6 +1866,7 @@ def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice"
         developer=DeveloperConfig(
             enabled=True, repos_dir=repos_dir, container=ContainerConfig(**container_fields)
         ),
+        devbox=DevboxConfig(enabled=devbox),
         security=SecurityConfig(**overrides.pop("security", {})),
         users={u: UserConfig(display_name=u) for u in users},
         **overrides,
@@ -1993,8 +2003,8 @@ class TestTheDeveloperContainerChecks:
     def test_all_four_are_produced_whatever_happens(self, make_config, tmp_path):
         """A caller asserts on a name, never on a count — a check that vanishes
         under some configuration is a check nothing can require."""
-        for backend in ("none", "devbox"):
-            config = _container_config(make_config, tmp_path, backend=backend)
+        for devbox in (False, True):
+            config = _container_config(make_config, tmp_path, devbox=devbox)
             results = doctor.check_developer_container(config, probe=False)
             assert {r.name for r in results} == self.NAMES
 
@@ -2004,50 +2014,44 @@ class TestTheDeveloperContainerChecks:
     def test_the_backend_being_off_skips_the_three_that_need_a_container(
         self, make_config, tmp_path
     ):
-        config = _container_config(make_config, tmp_path, backend="none")
+        config = _container_config(make_config, tmp_path, devbox=False)
 
         by_name = _by_name(doctor.check_developer_container(config, probe=True))
 
         for name in self.NAMES - {"developer.container.backend"}:
             assert by_name[name].status == SKIP
 
-    def test_the_skip_names_the_devbox_skill_when_that_pair_is_configured(
-        self, make_config, tmp_path
-    ):
-        """The pair the transport created, and the one this check is the only
-        witness to.
-
-        `devbox.enabled = true` with `backend = none` offers the devbox skill on
-        a deployment where the role provisions no exec server, so every verb but
-        `reset` refuses. The skill CLI says so at the point of use; an operator
-        should hear it before a task does. Design 16 has the mirror-image pair
-        (`backend = devbox` with `devbox.enabled = false`) and its own gate
-        correction; this is the other direction.
+    def test_the_skip_names_whichever_input_is_off(self, make_config, tmp_path):
+        """This used to warn about a pair — the devbox skill offered while
+        `backend = none` meant every verb but `reset` refused. That state is
+        no longer configurable, so the detail's job is now to say which of the
+        three derivation inputs is the one holding the transport off.
         """
-        config = _container_config(make_config, tmp_path, backend="none")
-        config.devbox.enabled = True
+        config = _container_config(make_config, tmp_path, devbox=False)
 
         transport = _by_name(doctor.check_developer_container(config, probe=True))[
             "developer.container.transport"
         ]
 
         assert transport.status == SKIP
-        assert "devbox skill is offered" in transport.detail
-        assert "reset" in transport.detail
+        assert "[devbox] enabled is false" in transport.detail
 
-    def test_the_skip_says_nothing_extra_when_the_skill_is_off(
+    def test_the_skip_names_the_developer_skill_when_that_is_what_is_off(
         self, make_config, tmp_path
     ):
-        """Control: the sentence must not appear on the ordinary
-        `backend = none` deployment, which has no devbox and no problem."""
-        config = _container_config(make_config, tmp_path, backend="none")
-        config.devbox.enabled = False
+        """Control for the test above: a different input off has to produce a
+        different sentence, or the detail is decoration rather than a
+        diagnosis."""
+        config = _container_config(make_config, tmp_path, devbox=True)
+        config.developer.enabled = False
 
         transport = _by_name(doctor.check_developer_container(config, probe=True))[
             "developer.container.transport"
         ]
 
         assert transport.status == SKIP
+        assert "the developer skill is off" in transport.detail
+        assert "[devbox] enabled is false" not in transport.detail
         assert "devbox skill is offered" not in transport.detail
 
     def test_probe_false_opens_no_socket(self, make_config, tmp_path, monkeypatch):
@@ -2193,12 +2197,22 @@ class TestTheBackendAgreementCheck:
     is the wrong place for a property an operator needs to see on the host that
     has the problem."""
 
-    def _write(self, tmp_path, backend):
+    def _write(self, tmp_path, *, devbox, retired=None):
+        """A rendered config, described by its inputs rather than by a key.
+
+        The check has to re-derive from the file for the same reason the daemon
+        does; a version that read `[developer.container] backend` would report
+        OK on every deployment forever, since nothing writes that key any more.
+        """
         path = tmp_path / "config.toml"
-        path.write_text(
-            "[developer]\nenabled = true\n\n"
-            f'[developer.container]\nbackend = "{backend}"\n'
+        body = (
+            "[developer]\nenabled = true\n"
+            f'repos_dir = "{tmp_path / "repos"}"\n\n'
+            f"[devbox]\nenabled = {str(bool(devbox)).lower()}\n"
         )
+        if retired is not None:
+            body += f'\n[developer.container]\nbackend = "{retired}"\n'
+        path.write_text(body)
         return path
 
     def _backend_result(self, config):
@@ -2207,8 +2221,8 @@ class TestTheBackendAgreementCheck:
         ]
 
     def test_agreement_is_ok(self, make_config, tmp_path):
-        config = _container_config(make_config, tmp_path, backend="devbox")
-        config.config_path = self._write(tmp_path, "devbox")
+        config = _container_config(make_config, tmp_path, devbox=True)
+        config.config_path = self._write(tmp_path, devbox=True)
 
         assert self._backend_result(config).status == OK
 
@@ -2216,8 +2230,8 @@ class TestTheBackendAgreementCheck:
         """The file says one thing and the running process another, which is
         what an operator sees after editing config.toml and not restarting: a
         feature that was switched on and did not switch on."""
-        config = _container_config(make_config, tmp_path, backend="none")
-        config.config_path = self._write(tmp_path, "devbox")
+        config = _container_config(make_config, tmp_path, devbox=False)
+        config.config_path = self._write(tmp_path, devbox=True)
 
         result = self._backend_result(config)
 
@@ -2225,19 +2239,92 @@ class TestTheBackendAgreementCheck:
         assert "devbox" in result.detail and "none" in result.detail
         assert result.remedy
 
-    def test_an_invalid_value_is_not_reported_as_stale(self, make_config, tmp_path):
-        """The loader corrects an unknown backend to "none" with a warning, so
-        the two differ permanently. Reporting that as drift would send an
-        operator to restart the daemon — the one thing that cannot help — every
-        hour, on the only FAIL in this group."""
-        config = _container_config(make_config, tmp_path, backend="none")
-        config.config_path = self._write(tmp_path, "docker")
+    def test_the_drift_check_reads_every_input_not_just_the_devbox_switch(
+        self, make_config, tmp_path
+    ):
+        """The derivation is a conjunction, so the re-derivation has to be one
+        too. Reading `[devbox] enabled` alone would call a file with the devbox
+        on and no `repos_dir` a devbox deployment, and then report drift against
+        a daemon that correctly decided otherwise."""
+        config = _container_config(make_config, tmp_path, devbox=False)
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[developer]\nenabled = true\nrepos_dir = ""\n\n'
+            "[devbox]\nenabled = true\n"
+        )
+        config.config_path = path
+
+        assert self._backend_result(config).status == OK
+
+    def test_a_file_still_carrying_the_retired_key_is_reported(
+        self, make_config, tmp_path
+    ):
+        """The one case where intent and behaviour differ with no drift present.
+
+        An operator who wrote `backend = "none"` had builds on the host until
+        this release. The derivation now ignores the key, so a deployment can be
+        doing exactly the opposite of what its config file appears to say while
+        the file and the daemon agree perfectly.
+        """
+        config = _container_config(make_config, tmp_path, devbox=True)
+        config.config_path = self._write(tmp_path, devbox=True, retired="none")
+
+        result = self._backend_result(config)
+
+        assert result.status == WARN
+        assert "retired" in result.detail
+        assert result.remedy
+
+    def test_a_file_without_the_retired_key_does_not_warn(
+        self, make_config, tmp_path
+    ):
+        """Control: the WARN above must key on the stale key rather than on
+        anything the ordinary rendering also produces."""
+        config = _container_config(make_config, tmp_path, devbox=True)
+        config.config_path = self._write(tmp_path, devbox=True)
+
+        assert self._backend_result(config).status == OK
+
+    def test_the_retired_key_does_not_suppress_a_real_drift(
+        self, make_config, tmp_path
+    ):
+        """The ordering, and the reason it is not the obvious one.
+
+        Reporting the stale key and returning makes this check dead on exactly
+        the hosts most likely to have one: the Ansible template stopped
+        emitting it, so a managed host loses it on the next deploy, while a
+        hand-maintained `/etc/istota/config.toml` keeps it for ever. A WARN
+        about a key would then stand in, permanently, for a FAIL about a daemon
+        running the wrong thing.
+        """
+        config = _container_config(make_config, tmp_path, devbox=False)
+        config.config_path = self._write(tmp_path, devbox=True, retired="devbox")
 
         result = self._backend_result(config)
 
         assert result.status == FAIL
-        assert "not a valid backend" in result.detail
-        assert "restart" not in result.remedy.lower()
+        assert "restart" in result.remedy.lower()
+        # Named, but explicitly not blamed — deleting it would not clear this.
+        assert "retired" in result.detail
+        assert "not the cause" in result.detail
+
+    def test_a_whitespace_repos_dir_is_not_drift(self, make_config, tmp_path):
+        """Both derivations strip, so neither calls a blank path a root.
+
+        A mismatch here is the worst shape a check can take: a permanent FAIL
+        whose remedy is to restart a daemon that is already running the right
+        answer.
+        """
+        config = _container_config(make_config, tmp_path, devbox=True)
+        config.developer.repos_dir = "   "
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[developer]\nenabled = true\nrepos_dir = "   "\n\n'
+            "[devbox]\nenabled = true\n"
+        )
+        config.config_path = path
+
+        assert self._backend_result(config).status == OK
 
     def test_a_config_built_in_memory_skips(self, make_config, tmp_path):
         config = _container_config(make_config, tmp_path)

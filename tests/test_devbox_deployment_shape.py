@@ -108,16 +108,17 @@ def _render_service(**overrides) -> dict:
 
 @pytest.fixture(scope="module")
 def ansible_service() -> dict:
-    """The service as the defaults render it: `backend = none`."""
+    """The service as the defaults render it: no devbox transport."""
     return _render_service()
 
 
-#: What a deployment routing builds into the devbox sets. Values chosen so the
-#: three container mounts are distinguishable from each other and from anything
-#: the defaults already produce.
+#: What a deployment routing builds into the devbox sets. There is no `backend`
+#: variable — the template derives it from these, inside the
+#: `istota_devbox_enabled` gate the whole file sits behind. Values chosen so the
+#: container mounts are distinguishable from each other and from anything the
+#: defaults already produce.
 CONTAINER_VARS = {
     "istota_developer_enabled": True,
-    "istota_developer_container_backend": "devbox",
     "istota_developer_repos_dir": "/srv/repos",
     "istota_security_sandbox_cache_dir": "/srv/repos/.cache",
 }
@@ -125,8 +126,41 @@ CONTAINER_VARS = {
 
 @pytest.fixture(scope="module")
 def container_service() -> dict:
-    """The service with `backend = devbox` — the shape this whole design is for."""
+    """The service with the transport on — the shape this whole design is for."""
     return _render_service(**CONTAINER_VARS)
+
+
+class TestTheTransportGateIsReal:
+    """Both derivation inputs, proven to gate the mounts.
+
+    `CONTAINER_VARS` is what every assertion below runs against, so a template
+    that emitted the mounts unconditionally would satisfy all of them. These
+    take one input away at a time and require the mounts to go with it —
+    otherwise the whole file is asserting about a render nothing gates.
+    """
+
+    def _destinations(self, service: dict) -> set[str]:
+        return {v.split(":")[1] for v in service.get("volumes", []) if ":" in v}
+
+    #: The mount is per-user, so this is the destination — not the root. The
+    #: first cut of this class asserted on `/srv/repos`, which is a destination
+    #: in no rendering at all, so both negative tests passed against a template
+    #: that gates nothing. The positive test below is what caught it.
+    REPOS_MOUNT = "/srv/repos/alice"
+
+    def test_the_repos_mount_needs_the_developer_skill(self):
+        vars_ = {**CONTAINER_VARS, "istota_developer_enabled": False}
+
+        assert self.REPOS_MOUNT not in self._destinations(_render_service(**vars_))
+
+    def test_the_repos_mount_needs_a_repos_dir(self):
+        vars_ = {**CONTAINER_VARS, "istota_developer_repos_dir": ""}
+
+        assert self.REPOS_MOUNT not in self._destinations(_render_service(**vars_))
+
+    def test_both_together_produce_it(self):
+        """The positive half, so the two above cannot pass by rendering nothing."""
+        assert self.REPOS_MOUNT in self._destinations(_render_service(**CONTAINER_VARS))
 
 
 class TestTheAnsibleDevboxCarriesItsCredentialSocket:
@@ -402,14 +436,24 @@ class TestTheTwoSharedPathsAndNoThird:
     ):
         """One spelling per deployment, in the container's own environment,
         which the model cannot reach — which is what lets the protocol carry no
-        `env` field at all."""
+        `env` field at all.
+
+        **This test used to pin two wrong values**, which is why the defect
+        survived review: `npm_config_cache` at `/home/dev/.npm` and
+        `UV_CACHE_DIR` at the cache *root*. Both are self-consistent readings of
+        this file alone, and both disagree with what the host writes, so the
+        deployment kept two copies of every wheel and the sweeper could see only
+        one of them. Which folder each tool uses is now held against the host's
+        own constants in `tests/test_devbox_cache_parity.py`; this test keeps the
+        literals so a reader can see them, and the two files fail together.
+        """
         env = container_service.get("environment") or {}
-        assert env["npm_config_cache"] == "/home/dev/.npm"
         assert env["CARGO_HOME"] == "/home/dev/.cargo"
         assert env["GOMODCACHE"] == "/home/dev/go/pkg/mod"
         assert env["UV_PYTHON_INSTALL_DIR"] == "/home/dev/.uv-python"
-        # Derived inside this user's repos subtree, so it rides the repos mount.
-        assert env["UV_CACHE_DIR"] == "/srv/repos/alice/.package-caches"
+        # The two the host also writes, at the host's own subdirectories.
+        assert env["UV_CACHE_DIR"] == "/srv/repos/alice/.package-caches/uv"
+        assert env["npm_config_cache"] == "/srv/repos/alice/.package-caches/npm"
 
     def test_the_uv_cache_survives_an_unset_sandbox_cache_dir(self):
         """`security.sandbox_cache_dir` no longer decides this, and the old
@@ -426,7 +470,7 @@ class TestTheTwoSharedPathsAndNoThird:
             **{**CONTAINER_VARS, "istota_security_sandbox_cache_dir": ""}
         )
         env = service.get("environment") or {}
-        assert env["UV_CACHE_DIR"] == "/srv/repos/alice/.package-caches"
+        assert env["UV_CACHE_DIR"] == "/srv/repos/alice/.package-caches/uv"
         mounts = TestTheTwoSharedPathsAndNoThird._mounts(service)
         assert not any(".package-caches" in dest for dest in mounts)
 

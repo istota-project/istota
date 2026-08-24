@@ -94,8 +94,10 @@ def _start_devbox(monkeypatch) -> _Devbox:
         "enabled = true\n"
         f'repos_dir = "{repos}"\n'
         "\n"
+        "[devbox]\n"
+        "enabled = true\n"
+        "\n"
         "[developer.container]\n"
-        'backend = "devbox"\n'
         f'exec_socket_dir = "{base / "sock"}"\n'
     )
     monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config_path))
@@ -217,8 +219,10 @@ class TestTheHarnessIsNotAStub:
         """
         config = tmp_path / "config.toml"
         config.write_text(
-            "[developer.container]\n"
-            'backend = "devbox"\n'
+            "[developer]\nenabled = true\n"
+            f'repos_dir = "{tmp_path}"\n'
+            "\n[devbox]\nenabled = true\n"
+            "\n[developer.container]\n"
             f'exec_socket_dir = "{tmp_path}"\n'
         )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
@@ -304,8 +308,8 @@ def scripted(monkeypatch):
     config.write_text(
         "[developer]\nenabled = true\n"
         f'repos_dir = "{base / "repos"}"\n'
+        "\n[devbox]\nenabled = true\n"
         "\n[developer.container]\n"
-        'backend = "devbox"\n'
         f'exec_socket_dir = "{base / "sock"}"\n'
     )
     monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
@@ -679,13 +683,14 @@ class TestOutputIsBoundedInThisProcess:
 
 
 class TestTheBackendMustBeDevbox:
-    """The pair the transport created, and the message it used to produce.
+    """The refusal has to name a switch, not blame the container.
 
-    `exec_socket_dir` carries a non-empty default, so a path always resolves —
-    but the role provisions the socket only under `backend = devbox`. On the
-    shipped pair `devbox.enabled = true` with `backend = none`, every verb but
-    `reset` failed with "the container may be down", on a deployment where
-    nothing was down and where this skill worked before the transport existed.
+    `exec_socket_dir` carries a non-empty default, so a path always resolves
+    even where nothing is listening on it. Without this the verbs failed with
+    "the container may be down" on a deployment where nothing was down —
+    originally the shipped pair `devbox.enabled = true` with `backend = none`,
+    which is no longer configurable, and now any deployment whose devbox or
+    developer skill is simply off.
     """
 
     def test_it_names_the_key_rather_than_blaming_the_container(
@@ -698,7 +703,8 @@ class TestTheBackendMustBeDevbox:
         result = _exec("true")
 
         assert result["status"] == "error", result
-        assert "backend" in result["error"], result
+        # Names the switches an operator can act on, not a container's health.
+        assert "[devbox] enabled" in result["error"], result
         assert "may be down" not in result["error"], result
 
     def test_reset_still_works_with_the_backend_off(self, monkeypatch, tmp_path):
@@ -727,8 +733,10 @@ class TestTheConnectBudgetComesFromConfig:
     def test_it_reads_the_configured_value(self, monkeypatch, tmp_path):
         config = tmp_path / "config.toml"
         config.write_text(
-            "[developer.container]\n"
-            'backend = "devbox"\n'
+            "[developer]\nenabled = true\n"
+            f'repos_dir = "{tmp_path}"\n'
+            "\n[devbox]\nenabled = true\n"
+            "\n[developer.container]\n"
             f'exec_socket_dir = "{tmp_path}"\n'
             "connect_timeout_seconds = 1.5\n"
         )
@@ -748,8 +756,10 @@ class TestTheConnectBudgetComesFromConfig:
         from istota.config import Config
 
         config = Config()
+        config.developer.enabled = True
+        config.developer.repos_dir = str(tmp_path)
+        config.devbox.enabled = True
         config.developer.container.exec_socket_dir = str(tmp_path)
-        config.developer.container.backend = "devbox"
         config.developer.container.connect_timeout_seconds = value
         monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
 
@@ -1307,8 +1317,10 @@ class TestStatus:
     ):
         config = tmp_path / "config.toml"
         config.write_text(
-            "[developer.container]\n"
-            'backend = "devbox"\n'
+            "[developer]\nenabled = true\n"
+            f'repos_dir = "{tmp_path}"\n'
+            "\n[devbox]\nenabled = true\n"
+            "\n[developer.container]\n"
             f'exec_socket_dir = "{tmp_path}"\n'
         )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
@@ -1475,8 +1487,10 @@ class TestMain:
     def test_an_error_envelope_exits_nonzero(self, monkeypatch, capsys, tmp_path):
         config = tmp_path / "config.toml"
         config.write_text(
-            "[developer.container]\n"
-            'backend = "devbox"\n'
+            "[developer]\nenabled = true\n"
+            f'repos_dir = "{tmp_path}"\n'
+            "\n[devbox]\nenabled = true\n"
+            "\n[developer.container]\n"
             f'exec_socket_dir = "{tmp_path}"\n'
         )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
@@ -1512,8 +1526,10 @@ class TestTheSocketPathComesFromConfig:
     def test_it_derives_the_per_user_socket(self, monkeypatch, tmp_path):
         config = tmp_path / "config.toml"
         config.write_text(
-            "[developer.container]\n"
-            'backend = "devbox"\n'
+            "[developer]\nenabled = true\n"
+            f'repos_dir = "{tmp_path}"\n'
+            "\n[devbox]\nenabled = true\n"
+            "\n[developer.container]\n"
             f'exec_socket_dir = "{tmp_path}"\n'
         )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
@@ -1534,7 +1550,9 @@ class TestTheSocketPathComesFromConfig:
         from istota.config import Config
 
         config = Config()
-        config.developer.container.backend = "devbox"
+        config.developer.enabled = True
+        config.developer.repos_dir = "/srv/repos"
+        config.devbox.enabled = True
         config.developer.container.exec_socket_dir = ""
         monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
 

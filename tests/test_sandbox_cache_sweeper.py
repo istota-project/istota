@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -658,6 +659,51 @@ class TestTheTools:
         for call in toolbox.calls():
             if call[0] == "uv":
                 assert "--no-config" in call
+
+    def test_npms_two_config_paths_are_distinct(self, tmp_path, toolbox):
+        """npm refuses to load one file as two scopes, and exits before the verb.
+
+        Pointing `userconfig` and `globalconfig` at the same path — `/dev/null`
+        was the obvious way to disarm both — makes npm exit 1 with
+        `double-loading config "/dev/null" as "global", previously loaded as
+        "user"` during config resolution, so the cache verb never runs. Measured
+        on a live deployment, where every sweep logged `npm exited 1` and took
+        zero npm bytes while reporting the cache "reclaimed".
+        """
+        toolbox("uv")
+        toolbox("npm")
+        root = tmp_path / "caches"
+        _cache(root, "alice", npm=4 * MB)
+        _age(root, 86400)
+
+        sweep(root)
+
+        seen = toolbox.envs()
+        assert seen
+        for env in seen:
+            assert env["npm_config_userconfig"] != env["npm_config_globalconfig"]
+
+    def test_real_npm_accepts_the_environment_the_sweeper_builds(self, tmp_path):
+        """The assertion above cannot see npm's own opinion of the two paths.
+
+        `_tool_env` is the entire surface npm's config resolution reads, so this
+        runs the real binary through `_reclaim` and requires a clean note list.
+        Skipped where npm is not installed; on a machine that has one it is the
+        assertion that would have caught the `/dev/null` collision, because the
+        structural test only holds once you know what npm objects to.
+        """
+        npm_bin = shutil.which("npm")
+        if npm_bin is None:
+            pytest.skip("npm is not installed")
+        user_dir = tmp_path / "alice"
+        (user_dir / CACHE_NPM).mkdir(parents=True)
+
+        ran, missing, notes = sweeper._reclaim(
+            user_dir, ("prune", "verify"), None, npm_bin
+        )
+
+        assert notes == []
+        assert (ran, missing) == (1, 0)
 
 
 # ---------------------------------------------------------------------------

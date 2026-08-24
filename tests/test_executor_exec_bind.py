@@ -57,8 +57,10 @@ def sandbox(tmp_path):
     config.developer = DeveloperConfig(
         enabled=True,
         repos_dir=str(tmp_path / "repos"),
-        container=ContainerConfig(backend="devbox", exec_socket_dir=str(exec_root)),
+        container=ContainerConfig(exec_socket_dir=str(exec_root)),
     )
+    # The backend is derived, so this is what turns the transport on.
+    config.devbox = DevboxConfig(enabled=True)
     task = db.Task(
         id=1, prompt="p", user_id="alice", source_type="talk", status="running",
     )
@@ -114,9 +116,14 @@ class TestTheGate:
 
     def test_the_backend_being_off_binds_nothing(self, sandbox):
         """Authorization is necessary, not sufficient: a deployment that has not
-        opted in has no transport to reach."""
+        opted in has no transport to reach.
+
+        `[devbox] enabled` is what says so now — the `backend` key it replaced
+        could be off while the devbox was on, which is the pairing that made a
+        skill whose every verb refused.
+        """
         config, task, exec_root = sandbox
-        config.developer.container.backend = "none"
+        config.devbox.enabled = False
 
         argv = _argv(config, task, {"developer"})
 

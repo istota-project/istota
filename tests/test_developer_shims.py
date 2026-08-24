@@ -33,6 +33,7 @@ from istota import db
 from istota.config import (
     Config,
     ContainerConfig,
+    DevboxConfig,
     DeveloperConfig,
     SecurityConfig,
 )
@@ -62,15 +63,18 @@ class _Ctx:
         self.discovered_calendars = []
 
 
-def _make_config(tmp_path: Path, *, backend: str = "devbox", **container) -> Config:
+def _make_config(tmp_path: Path, *, devbox: bool = True, **container) -> Config:
     repos = tmp_path / "repos"
     repos.mkdir(exist_ok=True)
     config = Config()
     config.developer = DeveloperConfig(
         enabled=True,
         repos_dir=str(repos),
-        container=ContainerConfig(backend=backend, **container),
+        container=ContainerConfig(**container),
     )
+    # Where development work runs is derived, so `[devbox] enabled` is the
+    # switch these tests turn.
+    config.devbox = DevboxConfig(enabled=devbox)
     config.security = SecurityConfig(skill_proxy_enabled=True)
     return config
 
@@ -104,13 +108,13 @@ class TestTheCorrectedGate:
         assert (_shim_dir(user_temp) / "npm").is_file()
 
     def test_nothing_is_written_with_the_backend_off(self, tmp_path):
-        """`backend = none` is every deployment that has not opted in: no shim,
-        no client, nothing on PATH.
+        """A devbox-less deployment is every one that has not opted in: no
+        shim, no client, nothing on PATH.
 
         Not the same claim as "nothing changed" — `repos_dir` became a per-user
-        root on every backend — but this half of the feature is genuinely
-        absent."""
-        config = _make_config(tmp_path, backend="none")
+        root whether or not a container is in play — but this half of the
+        feature is genuinely absent."""
+        config = _make_config(tmp_path, devbox=False)
 
         _, user_temp = _run_hook(config, tmp_path)
 
@@ -119,14 +123,14 @@ class TestTheCorrectedGate:
 
     def test_a_shim_left_behind_by_a_previous_task_is_removed(self, tmp_path):
         """`user_temp_dir` persists across tasks. A command taken out of
-        `shim_commands` — or a whole deployment flipped back to `none` — must
+        `shim_commands` — or a deployment that turned its devbox off — must
         not leave a file on the model's PATH that still execs the client, since
         the shell resolves by name and nothing else would notice."""
         config = _make_config(tmp_path)
         _, user_temp = _run_hook(config, tmp_path)
         assert (_shim_dir(user_temp) / "cargo").is_file()
 
-        config.developer.container.backend = "none"
+        config.devbox.enabled = False
         _run_hook(config, tmp_path)
 
         assert not (_shim_dir(user_temp) / "cargo").exists()

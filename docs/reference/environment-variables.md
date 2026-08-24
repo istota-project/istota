@@ -104,7 +104,7 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 | `DEVELOPER_AUTHOR_CREDIT` | `config.developer.author_credit` |
 | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth |
 | `GH_HOST`, `GITLAB_HOST` | Written by the forge wrapper into the real CLI's environment, derived from the two URLs |
-| `ISTOTA_PATH_PREPEND` | Internal. The task's `{user_temp_dir}/.developer` directory, which holds the `gh` / `glab` wrappers, plus `.developer/exec-shims` where `[developer.container] backend = "devbox"`; the executor folds them onto `PATH` and strips the variable before the model sees it |
+| `ISTOTA_PATH_PREPEND` | Internal. The task's `{user_temp_dir}/.developer` directory, which holds the `gh` / `glab` wrappers, plus `.developer/exec-shims` where development work runs in the devbox (`[developer] enabled`, `[developer] repos_dir` and `[devbox] enabled` all set); the executor folds them onto `PATH` and strips the variable before the model sees it |
 
 ## Credential proxy
 

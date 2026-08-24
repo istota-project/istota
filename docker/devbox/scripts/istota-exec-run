@@ -107,16 +107,30 @@ MAX_RESPAWN_PAUSE="$(positive_int_or ISTOTA_EXEC_MAX_RESPAWN_PAUSE_SECONDS "$MAX
 HEALTHY_RUN_SECONDS="$(positive_int_or ISTOTA_EXEC_HEALTHY_RUN_SECONDS "$HEALTHY_RUN_SECONDS" 10)"
 UNCONFIGURED_PAUSE="$(positive_int_or ISTOTA_EXEC_UNCONFIGURED_PAUSE_SECONDS "$UNCONFIGURED_PAUSE" 300)"
 
-# The image gives `dev` passwordless sudo, so the chown below works whichever
-# uid this script runs as. Preferring a direct call when already root keeps the
-# common path free of sudo and keeps this working on a container started with
-# `--user root` for debugging.
+# The image gives `dev` passwordless sudo. Preferring a direct call when
+# already root keeps the common path free of sudo and keeps this working on a
+# container started with `--user root` for debugging.
+#
+# **The sudoers grant is not a guarantee that root is reachable.** A deployment
+# can set `no-new-privileges` daemon-wide in `/etc/docker/daemon.json` or per
+# service through `security_opt`, and that makes sudo refuse whatever the
+# sudoers file says — `sudo: The "no new privileges" flag is set, which
+# prevents sudo from running as root`. Measured on a live host, where it turned
+# the one self-healing step in this script into a no-op that reported failure
+# in misleading terms. `can_be_root` is what callers ask before assuming.
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
     else
         sudo -n "$@"
     fi
+}
+
+can_be_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        return 0
+    fi
+    sudo -n true 2>/dev/null
 }
 
 # --- Stopping ---------------------------------------------------------------
@@ -200,6 +214,25 @@ repair_home_ownership() {
     fi
 
     log "chown ${HOME_DIR}: owned by ${have_uid}:${have_gid}, dev is ${want_uid}:${want_gid}"
+
+    # Asked before the attempt rather than inferred from its failure, because
+    # the two failures need different words. A `chown -R` that dies part-way
+    # has changed the top directory and must be reverted or the next start
+    # reads the volume as repaired; a `chown -R` that could never run has
+    # changed nothing, so the next start retries on its own and saying
+    # otherwise sends an operator looking for damage that is not there. The
+    # second is what a `no-new-privileges` deployment gets, every boot.
+    if ! can_be_root; then
+        log "chown ${HOME_DIR}: no route to root — sudo is refused, which is" \
+            "what 'no-new-privileges' does to a container. Nothing was" \
+            "changed and the next start will try again, but nothing inside" \
+            "this container can fix it. Repair the volume from the host:" \
+            "docker run --rm --user 0:0 -v <home-volume>:/mnt <image>" \
+            "chown -R ${want_uid}:${want_gid} /mnt — which the Ansible role" \
+            "now does on every deploy."
+        return
+    fi
+
     if as_root chown -R "${want_uid}:${want_gid}" "$HOME_DIR"; then
         log "chown ${HOME_DIR}: done"
         return

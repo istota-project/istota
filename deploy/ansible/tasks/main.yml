@@ -2967,7 +2967,7 @@
 # --- The exec transport ----------------------------------------------------
 #
 # Where project code builds and runs, when
-# `istota_developer_container_backend == 'devbox'`. A server inside each devbox
+# `istota_devbox_enabled`, which the backend is derived from. A server in each devbox
 # listens on a Unix socket in a host directory both sides see; the daemon writes
 # one shim per configured command into the task's own sandbox, each execing a
 # client that speaks to that socket and exits with the command's real status.
@@ -2986,7 +2986,6 @@
     mode: "0644"
   when:
     - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-    - istota_developer_container_backend == 'devbox'
   notify:
     - "reload systemd-tmpfiles for the exec transport"
 
@@ -2999,7 +2998,6 @@
     mode: "0750"
   when:
     - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-    - istota_developer_container_backend == 'devbox'
 
 # 0770 rather than 0750: the *container* creates the socket in here, as the
 # daemon's own uid, so it needs write on the directory. That is bounded rather
@@ -3015,7 +3013,6 @@
   loop: "{{ istota_devbox_users }}"
   when:
     - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-    - istota_developer_container_backend == 'devbox'
 
 # --- Retiring the Docker-API allowlist proxy.
 #
@@ -3034,9 +3031,19 @@
 # orphan nobody is looking at.
 - name: Retire the docker-proxy units
   block:
+    # `--plain` is load-bearing, and its absence failed in the one direction
+    # nothing would notice. Without it systemd prefixes each line with a status
+    # glyph — a space for a healthy unit, `●` or `×` for a failed or not-found
+    # one — so `awk '{print $1}'` yields the unit name in the ordinary case and
+    # the bare glyph for exactly the units this block exists to retire. The stop
+    # below then ran against a unit named `●`, failed, and was swallowed by its
+    # own `failed_when: false`; the unit file was deleted out from under a unit
+    # still enabled and running, systemd tried to restart what no longer had a
+    # file, and the host kept a `not-found / failed (226/NAMESPACE)` entry.
+    # Verified on a live deployment, where the command returned `●` alone.
     - name: List existing docker-proxy instance units
       ansible.builtin.shell: |
-        systemctl list-units --type=service --all --no-legend \
+        systemctl list-units --type=service --all --no-legend --plain \
           '{{ istota_namespace }}-docker-proxy@*.service' \
           | awk '{print $1}' \
           || true
@@ -3069,7 +3076,127 @@
         - "/var/run/{{ istota_namespace }}-docker"
       notify:
         - "reload systemd for docker proxy"
+
+    # Stopping a unit does not clear its failed state, and neither does deleting
+    # its unit file: systemd keeps the entry until something resets it, so
+    # `systemctl --failed` stays dirty on every host that ever ran one of these
+    # — indefinitely, since nothing will ever start the unit again to clear it.
+    # It runs last so that it also clears residue this block's own removal
+    # provokes on a host still carrying the `--plain` bug above — there the unit
+    # was never stopped, so deleting its file is what puts it into the failed
+    # state in the first place. By name from the list above rather than by glob,
+    # so it cannot reach a unit this block did not retire.
+    - name: Clear the retired docker-proxy units' failed state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - reset-failed
+          - "{{ item }}"
+      loop: "{{ retired_docker_proxy_units.stdout_lines | default([]) }}"
+      when: item != ""
+      changed_when: false
+      failed_when: false
   when: not istota_web_only
+
+# --- The devbox home volume's ownership ------------------------------------
+#
+# Docker seeds a named volume from the image's own directory **only while the
+# volume is empty**, and never re-seeds a populated one. So a home volume
+# created before `DEV_UID` / `DEV_GID` existed keeps the uid the image had then
+# — 1000, the old default — while every rebuilt container's `dev` is the
+# daemon's uid. Nothing on either side closes that gap on its own.
+#
+# The container cannot repair itself, which is the part worth being exact
+# about, because `istota-exec-run` contains a `chown` that looks like it does.
+# That path runs `sudo`, and `no-new-privileges` — daemon-wide in
+# `/etc/docker/daemon.json` on at least one deployment — makes sudo refuse
+# outright. Measured, not inferred: the supervisor logged `chown /home/dev:
+# FAILED; parts of the volume stay unwritable by dev`, and the revert that
+# follows needs root too, so it failed as well.
+#
+# What that leaves is a `/home/dev` no build can write to, and the compose
+# `environment:` block puts `npm_config_cache`, `CARGO_HOME`, `GOMODCACHE` and
+# `UV_PYTHON_INSTALL_DIR` inside it — so the first `npm install` in the devbox
+# fails EACCES with nothing anywhere naming a uid.
+#
+# This is a standing guard rather than a one-off migration. The same divergence
+# appears any time the daemon's uid changes, which a rebuilt or re-provisioned
+# host can do without anyone deciding to.
+#
+# Only the top directory is stat'd, matching what `repair_home_ownership` in
+# `istota-exec-run` checks, so the two agree on when a volume counts as wrong.
+# `--network none` because the probe has no business reaching anything, and
+# `:ro` on the read so a check cannot be the thing that writes.
+- name: Read each devbox home volume's current ownership
+  ansible.builtin.shell: |
+    set -eu
+    vol='{{ istota_namespace }}-devbox-home-{{ item }}'
+    # `docker run -v` would create a missing volume, so ask first: a fresh
+    # install has no volume to repair and must not be given an empty one here,
+    # ahead of the seed that gives it the right ownership for free.
+    if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+      echo absent
+      exit 0
+    fi
+    # A distinct sentinel rather than empty stdout. Every way the probe can
+    # fail — image not built, daemon down, registry unreachable — otherwise
+    # lands as "" and skips the repair while the play reports `ok`, which is
+    # the silently-does-nothing property this whole block exists to remove.
+    docker run --rm --user 0:0 --network none \
+      -v "$vol":/mnt:ro {{ istota_devbox_image | quote }} \
+      stat -c '%u:%g' /mnt 2>/dev/null || echo unreadable
+  loop: "{{ istota_devbox_users }}"
+  register: devbox_home_owner
+  changed_when: false
+  failed_when: false
+  when: istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Repair a devbox home volume whose ownership predates the daemon's uid
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --user
+      - "0:0"
+      - --network
+      - none
+      - -v
+      - "{{ istota_namespace }}-devbox-home-{{ item.item }}:/mnt"
+      - "{{ istota_devbox_image }}"
+      - chown
+      - -R
+      - "{{ istota_devbox_uid }}:{{ istota_devbox_gid }}"
+      - /mnt
+  loop: "{{ devbox_home_owner.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - item.stdout is defined
+    - item.stdout | trim not in ['absent', '', 'unreadable']
+    - item.stdout | trim != istota_devbox_uid ~ ':' ~ istota_devbox_gid
+  # No handler notification: a chown is visible through the mount immediately
+  # and the running container caches nothing about it, so recreating the
+  # container would be churn rather than part of the repair.
+
+# Named rather than failed. The chown direction already fails closed — an
+# unreadable volume is simply not touched — so the risk here is not damage but
+# an operator believing a repair happened. A deploy that could not look says so.
+- name: Report a devbox home volume whose ownership could not be read
+  ansible.builtin.debug:
+    msg: >-
+      Could not read the ownership of the devbox home volume for
+      {{ item.item }}; it was left alone. If builds in that container fail with
+      permission errors under /home/dev, check that {{ istota_devbox_image }}
+      exists on this host and re-run.
+  loop: "{{ devbox_home_owner.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+    - item.stdout is defined
+    - item.stdout | trim == 'unreadable'
 
 - name: Check whether devbox compose currently has containers running
   shell: docker compose -f docker-compose.devbox.yml ps -q

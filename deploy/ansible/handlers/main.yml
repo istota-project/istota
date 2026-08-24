@@ -33,7 +33,6 @@
   command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-exec.conf
   when:
     - istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0)
-    - istota_developer_container_backend == 'devbox'
 
 - name: "reload systemd for devbox proxy"
   systemd:

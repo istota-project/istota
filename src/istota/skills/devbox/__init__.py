@@ -232,11 +232,12 @@ def _transport_settings() -> "tuple[_Transport | None, str | None]":
         return None, f"could not resolve the devbox exec socket from config: {e}"
     if backend != config_module.CONTAINER_BACKEND_DEVBOX:
         return None, (
-            f"This deployment's [developer.container] backend is {backend!r}, so "
-            f"no exec server is provisioned inside the devbox and every verb but "
-            f"`reset` has nothing to talk to. Set it to "
-            f"{config_module.CONTAINER_BACKEND_DEVBOX!r} and re-run the deploy. "
-            f"This is a deployment setting; a task cannot change it."
+            "This deployment runs development work on the host, so no exec "
+            "server is provisioned inside the devbox and every verb but `reset` "
+            "has nothing to talk to. That is derived from [devbox] enabled "
+            "together with developer.enabled and developer.repos_dir; turn them "
+            "on and re-run the deploy. This is a deployment setting; a task "
+            "cannot change it."
         )
     if path is None:
         return None, (

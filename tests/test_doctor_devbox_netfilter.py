@@ -419,19 +419,25 @@ class TestOurRulesAreMissingEntirely:
 # When the check must decline to answer
 
 
-class TestTheGateIsADisjunction:
-    """There are two switches now, and this is the only witness over the devbox
-    network boundary.
+class TestTheGateIsOneSwitch:
+    """This was a disjunction over two switches, and the second arm is gone.
 
-    `[devbox] enabled` gates the *skill's* capability. `[developer.container]
-    backend` gates the transport that routes every build into the container. So
-    `backend = devbox` with `devbox.enabled = false` is a deployment where every
-    build in the estate runs in a container whose egress filtering nothing
-    checks — a silent gap, of exactly the class this check exists to close.
+    `[devbox] enabled` used to gate only the *skill's* capability, while
+    `[developer.container] backend` gated the transport that routes every build
+    into the container. `backend = devbox` with `devbox.enabled = false` was
+    then a deployment where every build in the estate ran in a container whose
+    egress filtering nothing checked, so this check had to fire on either.
+
+    The backend is derived from `[devbox] enabled` now, so that pairing cannot
+    be configured and one arm covers both. That is only safe while the
+    derivation really does make the two inseparable, which is what the first
+    test here holds — delete it and the single gate silently becomes a hole
+    again the moment somebody reintroduces a way to route builds into a devbox
+    that `[devbox] enabled` does not describe.
     """
 
-    def _container_config(self, make_config, tmp_path):
-        from istota.config import ContainerConfig, DeveloperConfig
+    def _container_config(self, make_config, tmp_path, *, devbox: bool):
+        from istota.config import ContainerConfig, DeveloperConfig, DevboxConfig
 
         repos = tmp_path / "repos"
         repos.mkdir(exist_ok=True)
@@ -439,24 +445,41 @@ class TestTheGateIsADisjunction:
             developer=DeveloperConfig(
                 enabled=True,
                 repos_dir=str(repos),
-                container=ContainerConfig(backend="devbox"),
+                container=ContainerConfig(),
             ),
+            devbox=DevboxConfig(enabled=devbox),
         )
 
-    def test_the_backend_alone_makes_the_check_run(
+    def test_builds_cannot_route_into_a_devbox_this_gate_calls_disabled(
+        self, make_config, tmp_path
+    ):
+        """The invariant the single gate rests on, asserted directly.
+
+        Not "the check runs" — that is downstream. The claim is that there is
+        no configuration where the check skips and builds still land in a
+        container, which is a property of the derivation rather than of this
+        module.
+        """
+        from istota.config import devbox_container_backend
+
+        off = self._container_config(make_config, tmp_path, devbox=False)
+        on = self._container_config(make_config, tmp_path, devbox=True)
+
+        assert devbox_container_backend(off) is False
+        assert devbox_container_backend(on) is True
+
+    def test_a_devbox_deployment_makes_the_check_run(
         self, make_config, tmp_path, fake_iptables, boot_script
     ):
-        """The control for the exact gap the disjunction exists to close: the
-        skill's capability is off and every build still runs in the container."""
         boot_script(_our_destinations())
         calls = fake_iptables(_chain(*_our_rules()))
 
-        result = _run_check(self._container_config(make_config, tmp_path))
+        result = _run_check(self._container_config(make_config, tmp_path, devbox=True))
 
         assert calls, "the chain was not read for a deployment routing builds into it"
         assert result.status == OK
 
-    def test_the_backend_alone_still_finds_a_shadowed_chain(
+    def test_it_still_finds_a_shadowed_chain(
         self, make_config, tmp_path, fake_iptables, boot_script
     ):
         """Running is not the property; *finding* is. A gate correction that let
@@ -464,7 +487,7 @@ class TestTheGateIsADisjunction:
         boot_script(_our_destinations())
         fake_iptables(_chain("-A DOCKER-USER -j RETURN", *_our_rules()))
 
-        result = _run_check(self._container_config(make_config, tmp_path))
+        result = _run_check(self._container_config(make_config, tmp_path, devbox=True))
 
         assert result.status == FAIL
 

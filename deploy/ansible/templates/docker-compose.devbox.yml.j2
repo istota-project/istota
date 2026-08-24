@@ -64,7 +64,7 @@ services:
       # tenant isolation — container alice sees only alice's socket.
       - {{ istota_devbox_proxy_socket_dir }}/{{ devbox_user }}:/run/istota-cred
 {% endif %}
-{% if istota_developer_container_backend == 'devbox' %}
+{% if istota_developer_enabled and istota_developer_repos_dir %}
       # --- The three paths visible on both sides, each at one spelling -------
       #
       # The exec transport's socket directory. Same "mount the directory, never
@@ -108,7 +108,7 @@ services:
     # Not the server itself as `command`: a server crash would take the
     # container, and with it every concurrent build of that user's other tasks.
     command: ["/usr/local/bin/istota-exec-run"]
-{% if istota_developer_container_backend == 'devbox' %}
+{% if istota_developer_enabled and istota_developer_repos_dir %}
     # The supervisor's settings, in the *container's* own environment.
     #
     # That is a different thing from the model's environment, which the shims
@@ -128,16 +128,32 @@ services:
       # carried by a request. One spelling per deployment, the model cannot
       # reach it, and no request has to be trusted not to relocate a cache —
       # which is what lets the protocol carry no `env` field at all.
-      npm_config_cache: /home/dev/.npm
       CARGO_HOME: /home/dev/.cargo
       GOMODCACHE: /home/dev/go/pkg/mod
       UV_PYTHON_INSTALL_DIR: /home/dev/.uv-python
-      # The package cache is derived at `{repos_dir}/{user}/.package-caches`,
-      # which is inside the repos mount above — so it needs no mount of its own
-      # and no `security.sandbox_cache_dir`. One mount covers cache and venv,
-      # which is the only shape where uv hardlinks a wheel instead of copying
-      # it: `link(2)` compares mounts rather than devices.
-      UV_CACHE_DIR: {{ istota_developer_repos_dir }}/{{ devbox_user }}/.package-caches
+      # uv's and npm's caches are the two the host also writes, and both have
+      # to name the **same subdirectory** the host names or the deployment
+      # keeps two copies of every wheel and the sweeper can see only one of
+      # them. `executor.SANDBOX_CACHE_UV` / `SANDBOX_CACHE_NPM` are the host's
+      # spelling, `sandbox_cache_sweeper.CACHE_UV` / `CACHE_NPM` are what the
+      # reclaim walks, and these two lines are the third copy;
+      # `tests/test_devbox_cache_parity.py` holds all three equal.
+      #
+      # Measured on a live deployment before the fix: `UV_CACHE_DIR` pointed at
+      # the cache *root* rather than at `{root}/uv`, so the container wrote
+      # `archive-v0/` beside the host's `uv/` — 401 MB against 404 MB of the
+      # same wheels, re-downloaded because the warm copy was one directory
+      # over, and invisible to `uv cache prune`, which the sweeper only ever
+      # runs against `{root}/uv`. `npm_config_cache` was `/home/dev/.npm`,
+      # which is not on this mount at all: a second 62 MB copy, in the volume
+      # whose ownership is the other thing that goes wrong here.
+      #
+      # The directory is inside the repos mount above, so it needs no mount of
+      # its own and no `security.sandbox_cache_dir`. One mount covering cache
+      # and venv is the only shape where uv hardlinks a wheel instead of
+      # copying it: `link(2)` compares mounts rather than devices.
+      UV_CACHE_DIR: {{ istota_developer_repos_dir }}/{{ devbox_user }}/.package-caches/uv
+      npm_config_cache: {{ istota_developer_repos_dir }}/{{ devbox_user }}/.package-caches/npm
 {% endif %}
 {% endfor %}
 

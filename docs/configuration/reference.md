@@ -422,11 +422,12 @@ How the wrapper behind `gh_bin_path` / `glab_bin_path` actually works — where 
 
 ### `[developer.container]`
 
-Where project code builds and runs. A deploy-time choice, not a runtime one: within a deployment there is exactly one place a build happens, so nothing on the host ever consumes an environment the container built and no parity rule has to hold.
+The exec transport into the devbox. This block configures the transport; it no longer decides that there is one. Where project code builds and runs is derived from three settings, all of which have to be on: `[developer] enabled`, a non-empty `[developer] repos_dir`, and `[devbox] enabled`. With any of them off, `npm`, `uv`, `cargo` and the rest run on the host inside the task's sandbox, as they always did.
+
+A deploy-time choice, not a runtime one: within a deployment there is exactly one place a build happens, so nothing on the host ever consumes an environment the container built and no parity rule has to hold.
 
 | Setting | Default | Description |
 |---|---|---|
-| `backend` | `"none"` | `none` — npm, uv, cargo and the rest run on the host inside the task's sandbox, as before. `devbox` — they run in that user's devbox over the exec transport |
 | `exec_socket_dir` | `"/run/istota-exec"` | The **parent**. The socket is `{exec_socket_dir}/{user_id}/exec.sock`, and only the per-user subdirectory is ever mounted into a container |
 | `connect_timeout_seconds` | `5.0` | The client's connect budget, and the only timeout on the connect path |
 | `idle_timeout_seconds` | `3600` | Server-side backstop reap for a connection with no traffic either way. Deliberately longer than most task timeouts, so in practice it only fires on an orphan whose task is already gone. Do not lower it to something that would kill a long link step |
@@ -434,11 +435,13 @@ Where project code builds and runs. A deploy-time choice, not a runtime one: wit
 
 The default list is `npm npx pnpm yarn node uv uvx pip pip3 cargo rustc rustup go bundle gem`. Two absences are deliberate and one of them is not negotiable. `python3` is refused whatever you write here, because the sandbox launches its own network bridge with it — a shim would route that into the container and break egress for every developer-enabled task. So are the shells, `env`, `git`, `gh`, `glab` and `istota-skill`, each for the same class of reason. `make` is merely omitted: shimming a driver command inverts routing for everything beneath it, so a Makefile calling `git`, `gh` or `python3` would get the container's copies. Add it if you know your Makefiles; the cost of leaving it out is a recipe that calls `./node_modules/.bin/<tool>` by path.
 
-`backend = "devbox"` needs `[devbox] enabled`, a container for the user, and the devbox image rebuilt with the daemon's own uid. The Ansible role does the last of those from a `getent` lookup. **A mismatched uid is the one failure with no error message anywhere that names it**: the container cannot write into a worktree the daemon made, and once that is worked around the daemon cannot unlink a tree the container made, so every worktree that ever ran a build becomes permanently unreapable.
+Routing builds into the container needs the three settings above, a container for the user, and the devbox image rebuilt with the daemon's own uid. The Ansible role does the last of those from a `getent` lookup. **A mismatched uid is the one failure with no error message anywhere that names it**: the container cannot write into a worktree the daemon made, and once that is worked around the daemon cannot unlink a tree the container made, so every worktree that ever ran a build becomes permanently unreapable.
 
-`istota doctor --only developer.container` answers the four questions that each fail silently — does the rendered config agree with the running daemon, does the transport answer, do the two sides agree on uid and repos root, and is the derived package cache visible inside the container. That last one needs no configuration: the cache is `{repos_dir}/{user_id}/.package-caches`, inside the subtree the container already mounts, so cache and venv share one mount and uv hardlinks instead of copying. Leave `[security] sandbox_cache_dir` blank here — it is the fallback for a deployment without the developer skill.
+`backend` is retired. It used to sit in this block with the values `none` and `devbox`, and it could disagree with `[devbox] enabled`. Both pairings were bad: a devbox that was on alongside `backend = "none"` gave the model a devbox skill whose every verb but `reset` refused, and the reverse asked the developer skill to reach a container the role had never built. A file still carrying the key gets a WARNING at config load and a `WARN` from `istota doctor --only developer.container`. The value is ignored, not honoured. If you set it to `"none"` to keep builds on the host, turn `[devbox] enabled` off instead.
 
-**`[developer] repos_dir` is a per-user root on every backend, `none` included.** The daemon derives `{repos_dir}/{user_id}` and hands that to the sandbox bind, `DEVELOPER_REPOS_DIR` and the credential scrub. That is what stops one user's coding task reaching another's checkouts, and it has nothing to do with containers — so an upgraded host has to move its existing clones down a level before the developer skill can see them again. The Ansible role does the move; with more than one configured user it needs `istota_developer_repos_migrate_to` and fails the play until it gets one, because the old layout recorded no owner and a green play there is followed by a daemon restart into a state where the bind names an empty directory.
+`istota doctor --only developer.container` answers the four questions that each fail silently — does the rendered config derive what the running daemon is running (re-derived from the three inputs, since there is no key left to read), does the transport answer, do the two sides agree on uid and repos root, and is the derived package cache visible inside the container. That last one needs no configuration: the cache is `{repos_dir}/{user_id}/.package-caches`, inside the subtree the container already mounts, so cache and venv share one mount and uv hardlinks instead of copying. Leave `[security] sandbox_cache_dir` blank here — it is the fallback for a deployment without the developer skill.
+
+**`[developer] repos_dir` is a per-user root whether or not the devbox is on.** The daemon derives `{repos_dir}/{user_id}` and hands that to the sandbox bind, `DEVELOPER_REPOS_DIR` and the credential scrub. That is what stops one user's coding task reaching another's checkouts, and it has nothing to do with containers — so an upgraded host has to move its existing clones down a level before the developer skill can see them again. The Ansible role does the move; with more than one configured user it needs `istota_developer_repos_migrate_to` and fails the play until it gets one, because the old layout recorded no owner and a green play there is followed by a daemon restart into a state where the bind names an empty directory.
 
 ### `[developer.review]`
 
@@ -583,11 +586,11 @@ Explicit CalDAV override. When any field is set it wins over the value derived f
 
 ## `[devbox]`
 
-A persistent per-user Linux container. It is where the agent installs packages and compiles things, and — when `[developer.container]` below says so — where project code builds and runs.
+A persistent per-user Linux container. It is where the agent installs packages and compiles things. With `[developer] enabled` and a `repos_dir` set, `enabled` below is also what routes project builds into it over the [exec transport](#developercontainer) rather than onto the host.
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Enable the devbox skill |
+| `enabled` | `false` | Enable the devbox skill. With `[developer] enabled` and `repos_dir` set, this is also the switch that sends project builds into the container |
 | `container_prefix` | `"devbox-"` | Container name is `{prefix}{user_id}` |
 | `docker_cli` | `"/usr/bin/docker"` | Host path to the Docker CLI binary. Used by the `reset` verb and nothing else |
 | `max_output_bytes` | `102400` | Cap per output stream in the skill's JSON envelope |

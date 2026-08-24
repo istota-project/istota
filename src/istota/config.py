@@ -182,6 +182,15 @@ class DevboxConfig:
     The one verb still spoken in Docker is ``reset``, which recreates a
     container from this host-side CLI process using the daemon's own
     environment and no ``DOCKER_HOST`` — the real socket, as it always was.
+
+    **``enabled`` is one switch doing two jobs, on purpose.** It offers the
+    devbox skill *and* it is what :func:`devbox_container_backend` derives the
+    developer skill's execution target from. They used to be separate, and the
+    separation only ever produced states nobody wanted: ``enabled = true`` with
+    ``[developer.container] backend = "none"`` gave the model a devbox skill
+    whose every verb but ``reset`` refused, and the reverse asked the developer
+    skill to reach a container the role had not built. A deployment that runs a
+    devbox and does not develop in it is not a shape worth a config key.
     """
     enabled: bool = False
     container_prefix: str = "devbox-"           # container name = f"{prefix}{user_id}"
@@ -736,7 +745,13 @@ DEFAULT_SHIM_COMMANDS: tuple[str, ...] = (
     "go", "bundle", "gem",
 )
 
-#: ``developer.container.backend`` values.
+#: Labels for where development work runs. **Derived, never configured** —
+#: see :func:`container_backend`. They were the values of a
+#: ``[developer.container] backend`` key, which is retired: a deployment could
+#: hold ``[devbox] enabled = true`` alongside ``backend = "none"``, which
+#: offered the model a devbox skill whose every verb refused, and the reverse
+#: pairing asked the developer skill to reach a container the role never built.
+#: Neither is a shape anyone wants, so the pair is now one switch.
 CONTAINER_BACKEND_NONE = "none"
 CONTAINER_BACKEND_DEVBOX = "devbox"
 CONTAINER_BACKENDS = (CONTAINER_BACKEND_NONE, CONTAINER_BACKEND_DEVBOX)
@@ -751,10 +766,11 @@ class ContainerConfig:
     per-command fallback would cost: nothing on the host ever consumes an
     environment the container built, so no parity rule has to hold.
 
-    ``backend = "devbox"`` routes the commands in ``shim_commands`` into the
-    user's devbox over the exec transport (``devbox_exec_protocol``). ``"none"``
-    is the default, and no shim is written, no socket is bound and no container
-    is reached under it.
+    **Whether** the commands in ``shim_commands`` are routed into the user's
+    devbox over the exec transport is not settable here. It is derived, by
+    :func:`container_backend`, from ``[devbox] enabled`` together with
+    ``developer.enabled`` and a non-empty ``developer.repos_dir``. This table
+    configures the transport; it does not decide that there is one.
 
     **It is not, however, "nothing changed".** ``developer.repos_dir`` became a
     per-user root in the same change, and that applies on every backend —
@@ -769,7 +785,6 @@ class ContainerConfig:
     put every user's socket in every user's container, which is arbitrary
     command execution against another user's repositories.
     """
-    backend: str = CONTAINER_BACKEND_NONE
     exec_socket_dir: str = "/run/istota-exec"
     # The client's connect budget, and the only timeout on the connect path.
     connect_timeout_seconds: float = 5.0
@@ -2194,34 +2209,33 @@ def _parse_container_block(raw: object) -> dict:
     every host-side skill CLI the proxy spawns per call — a typo here must not
     stop any of them from starting.
 
-    The one field worth being careful about is ``backend``. An unknown value
-    falls back to ``none``, never to ``devbox``: a feature that silently
-    no-ops is how the compose devbox reached the state ``312f8fd5`` found it
-    in, but a *routing* decision taken from a typo is worse, and the startup
-    line plus ``doctor``'s ``developer.container.backend`` check are what stop
-    the no-op being silent.
+    ``backend`` is **retired** and a file still carrying it gets a warning
+    rather than silence. Ignoring a key that used to decide where every build
+    ran would be the worst of the three options: an operator who wrote
+    ``backend = "none"`` to keep work on the host had that honoured until this
+    release, and on the next deploy their devbox starts taking the work. Saying
+    so on every start is the least this can do, and ``doctor``'s
+    ``developer.container.backend`` check repeats it where someone will look.
     """
     if not isinstance(raw, dict):
         if raw:
             logger.warning(
-                "[developer.container] is not a table; ignoring it and running "
-                "backend = %s", CONTAINER_BACKEND_NONE,
+                "[developer.container] is not a table; ignoring it. Where "
+                "development work runs is derived from [devbox] enabled.",
             )
         return {}
 
     kwargs: dict = {}
 
     if "backend" in raw:
-        value = raw["backend"]
-        backend = str(value).strip().lower() if isinstance(value, str) else ""
-        if backend in CONTAINER_BACKENDS:
-            kwargs["backend"] = backend
-        else:
-            logger.warning(
-                "[developer.container] backend=%r is not one of %s; using %r. "
-                "Development commands will run on the host.",
-                value, ", ".join(CONTAINER_BACKENDS), CONTAINER_BACKEND_NONE,
-            )
+        logger.warning(
+            "[developer.container] backend=%r is retired and ignored. Where "
+            "development work runs is now derived from [devbox] enabled "
+            "together with developer.enabled and developer.repos_dir, so the "
+            "two switches cannot disagree. Delete the key; if you set it to "
+            "%r to keep builds on the host, turn [devbox] enabled off instead.",
+            raw["backend"], CONTAINER_BACKEND_NONE,
+        )
 
     if "exec_socket_dir" in raw:
         value = raw["exec_socket_dir"]
@@ -2310,23 +2324,47 @@ def _parse_container_block(raw: object) -> dict:
 
 
 def container_backend(config: "Config") -> str:
-    """``developer.container.backend``, defaulted for a config built by hand."""
-    dev = getattr(config, "developer", None)
-    container = getattr(dev, "container", None)
-    return getattr(container, "backend", CONTAINER_BACKEND_NONE)
+    """Where development work runs on this deployment: ``devbox`` or ``none``.
+
+    The label form of :func:`devbox_container_backend`, for a log line or a
+    ``doctor`` detail. Derived from three settings and nothing else, so the
+    answer cannot contradict what the Ansible role built.
+    """
+    return (
+        CONTAINER_BACKEND_DEVBOX if devbox_container_backend(config)
+        else CONTAINER_BACKEND_NONE
+    )
 
 
 def devbox_container_backend(config: "Config") -> bool:
     """Is this deployment routing development work into the devbox?
 
-    Configuration alone. It says nothing about whether a *task* may reach the
-    container — that is ``"developer" in authorized_skills``, decided in the
-    executor, which is where a security decision belongs.
+    **Configuration alone, and deliberately never availability.** Asking
+    whether the container is actually up would make a stopped devbox silently
+    reroute builds onto the host — the same commands, a different containment
+    posture, and no error anywhere. A configured-but-unreachable transport has
+    to fail loudly instead, which it does: the shims exit 120 and say why.
+
+    It also says nothing about whether a *task* may reach the container. That
+    is ``"developer" in authorized_skills``, decided in the executor, which is
+    where a security decision belongs.
+
+    ``developer.repos_dir`` is in the conjunction because the exec server takes
+    it as its containment root; there is nothing to mount and nothing to
+    contain without one.
     """
     dev = getattr(config, "developer", None)
-    if not getattr(dev, "enabled", False) or not getattr(dev, "repos_dir", ""):
+    if not getattr(dev, "enabled", False):
         return False
-    return container_backend(config) == CONTAINER_BACKEND_DEVBOX
+    # Stripped, so a whitespace-only value reads as absent. `doctor`'s
+    # re-derivation strips too, and a mismatch between the two produces a
+    # permanent false drift FAIL telling an operator to restart a daemon that
+    # is already running the right answer. Whitespace is worse than useless
+    # here on its own terms as well: the exec server takes this as its
+    # containment root.
+    if not str(getattr(dev, "repos_dir", "") or "").strip():
+        return False
+    return bool(getattr(getattr(config, "devbox", None), "enabled", False))
 
 
 def exec_socket_dir(config: "Config", user_id: str) -> Path | None:

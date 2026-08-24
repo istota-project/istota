@@ -268,8 +268,10 @@ _DEVELOPER_KEYS = {
 }
 
 # [developer.container] — where project code builds and runs.
+# No "backend" entry: the key is retired and where development work runs is
+# derived from `[devbox] enabled`. A mapping left here would keep writing a
+# variable the role no longer reads.
 _DEVELOPER_CONTAINER_KEYS = {
-    "backend": "istota_developer_container_backend",
     "exec_socket_dir": "istota_developer_container_exec_socket_dir",
     "connect_timeout_seconds": "istota_developer_container_connect_timeout_seconds",
     "idle_timeout_seconds": "istota_developer_container_idle_timeout_seconds",

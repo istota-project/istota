@@ -1939,32 +1939,20 @@ def check_developer_container(config: "Config", probe: bool) -> list[CheckResult
 
     dev = getattr(config, "developer", None)
     if backend != config_module.CONTAINER_BACKEND_DEVBOX:
-        # Two switches, and one of the four pairs is a deployment where the
-        # devbox *skill* is offered and cannot work. The role provisions the
-        # socket directory and sets `ISTOTA_EXEC_SOCKET` on the container only
-        # under `backend = devbox`, and since the skill moved onto this
-        # transport every verb but `reset` needs a server behind that socket. So
-        # `devbox.enabled = true` with `backend = none` is a skill in the menu
-        # whose commands all fail — which the skill CLI now says at the point of
-        # use, and which an operator should hear before a task finds out.
-        detail = (
-            "[developer.container] backend is not 'devbox'; development commands "
-            "run on the host"
-        )
-        if getattr(getattr(config, "devbox", None), "enabled", False):
-            detail += (
-                ". [devbox] enabled is true, so the devbox skill is offered — "
-                "but its exec, cp-in, cp-out, exec-file and status verbs all "
-                "need this transport and will refuse. Set backend to 'devbox' "
-                "and re-deploy, or turn [devbox] enabled off; `reset` is the "
-                "only verb that works either way"
-            )
-        return results + _container_results(names[1:], SKIP, detail)
-    if not getattr(dev, "enabled", False) or not getattr(dev, "repos_dir", ""):
+        # There used to be a fourth pair here worth warning about — the devbox
+        # skill offered while `[developer.container] backend = "none"` meant
+        # every verb but `reset` refused. The key is retired and the backend is
+        # derived from `[devbox] enabled`, so that state can no longer be
+        # configured and the detail only has to name whichever input is off.
+        if not getattr(dev, "enabled", False):
+            why = "the developer skill is off"
+        elif not getattr(dev, "repos_dir", ""):
+            why = "developer.repos_dir is empty, so there is no containment root"
+        else:
+            why = "[devbox] enabled is false"
         return results + _container_results(
             names[1:], SKIP,
-            "the developer skill is off or has no repos_dir, so nothing routes "
-            "into a container whatever backend says",
+            f"development commands run on the host: {why}",
         )
 
     users = sorted(getattr(config, "users", {}) or {})
@@ -1982,12 +1970,22 @@ def check_developer_container(config: "Config", probe: bool) -> list[CheckResult
 
 
 def _container_backend_result(config: "Config", backend: str, config_module) -> CheckResult:
-    """Does the file on disk say what the running process believes?
+    """Does the file on disk derive what the running process believes?
 
     The daemon holds the config it loaded at start-up. An operator who edited
     ``config.toml`` — or an Ansible run that rendered a new one — has changed
     nothing until the daemon restarts, and the symptom is a feature that was
     switched on and did not switch on.
+
+    Since the ``backend`` key was retired this has to re-derive rather than read
+    one value, from the same three inputs :func:`config.devbox_container_backend`
+    uses. That is the point of doing it here rather than comparing the key: a
+    check that reads a key nobody sets any more reports ``OK`` on every
+    deployment forever.
+
+    A file still carrying the retired key is reported whatever the derivation
+    says, because it is the one case where an operator's stated intent and the
+    running behaviour can differ without any drift being present.
     """
     name = f"{CONTAINER_GROUP}.backend"
     path = getattr(config, "config_path", None)
@@ -2011,37 +2009,61 @@ def _container_backend_result(config: "Config", backend: str, config_module) -> 
             f"checked against it: {exc}",
             remedy="Fix or re-render the config file the daemon was started with.",
         )
-    block = (data.get("developer") or {}).get("container") or {}
-    on_disk = block.get("backend", config_module.CONTAINER_BACKEND_NONE)
-    if isinstance(on_disk, str):
-        on_disk = on_disk.strip().lower()
-    if on_disk == backend:
-        return CheckResult(
-            name, OK, f"{path} and this process agree: backend={backend!r}",
+
+    developer = data.get("developer") or {}
+    on_disk = (
+        config_module.CONTAINER_BACKEND_DEVBOX
+        if (
+            developer.get("enabled", False)
+            and str(developer.get("repos_dir", "") or "").strip()
+            and (data.get("devbox") or {}).get("enabled", False)
         )
-    if on_disk not in config_module.CONTAINER_BACKENDS:
-        # Not drift. The loader corrected it to "none" with a warning, so the
-        # two differ permanently and a restart changes nothing — reporting this
-        # as a stale process would send an operator to do the one thing that
-        # cannot help, hourly.
-        return CheckResult(
-            name, FAIL,
-            f"{path} says backend={on_disk!r}, which is not a valid backend; "
-            f"this process corrected it to {backend!r}",
-            remedy=(
-                "Set [developer.container] backend to one of "
-                f"{', '.join(config_module.CONTAINER_BACKENDS)} and re-render "
-                "the config."
-            ),
+        else config_module.CONTAINER_BACKEND_NONE
+    )
+
+    retired = (developer.get("container") or {}).get("backend")
+
+    # **Drift is asked first, and the retired key never suppresses it.** The
+    # obvious order — report the stale key and return — makes this check dead
+    # on exactly the hosts most likely to have one: `config.toml.j2` stopped
+    # emitting the key, so an Ansible-managed host loses it on the next deploy,
+    # while a hand-maintained `/etc/istota/config.toml` keeps it for ever. On
+    # those, a WARN about a key would stand in for a FAIL about a daemon
+    # running the wrong thing, permanently and silently, which is the failure
+    # class this check exists for.
+    if on_disk != backend:
+        detail = (
+            f"{path} derives backend={on_disk!r} and this process is running "
+            f"backend={backend!r}"
         )
-    return CheckResult(
-        name, FAIL,
-        f"{path} says backend={on_disk!r} and this process is running "
-        f"backend={backend!r}",
-        remedy=(
+        remedy = (
             "Restart the daemon so it loads the rendered config. Until it does, "
             "development commands run wherever the *running* value says."
-        ),
+        )
+        if retired is not None:
+            detail += (
+                f". The file also still sets [developer.container] "
+                f"backend={retired!r}, which is retired and ignored — it is not "
+                f"the cause of this drift and deleting it will not clear it"
+            )
+        return CheckResult(name, FAIL, detail, remedy=remedy)
+
+    if retired is not None:
+        return CheckResult(
+            name, WARN,
+            f"{path} still sets [developer.container] backend={retired!r}, which "
+            f"is retired and ignored; this deployment derives backend="
+            f"{on_disk!r} from [devbox] enabled",
+            remedy=(
+                "Delete the key. If it was set to 'none' to keep builds on the "
+                "host, turn [devbox] enabled off instead — that is now the one "
+                "switch, and leaving the stale key in place hides which of the "
+                "two an operator meant."
+            ),
+        )
+
+    return CheckResult(
+        name, OK, f"{path} and this process agree: backend={backend!r}",
     )
 
 
@@ -2292,24 +2314,17 @@ def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
     silence the check exists to break.
     """
     name = "security.devbox_netfilter"
-    # **The disjunction, not `devbox.enabled` alone.** There are two switches
-    # now: `[devbox] enabled` gates the skill's capability, and
-    # `[developer.container] backend` gates the transport that routes every
-    # build into the container. So `backend = devbox` with `devbox.enabled =
-    # false` is a deployment where every build in the estate runs in a container
-    # whose egress filtering nothing checks — and this is the only witness over
-    # that boundary.
-    from . import config as config_module  # noqa: PLC0415 - a cycle at module scope
-
+    # This was a disjunction over two switches, guarding the pair where
+    # `backend = devbox` with `devbox.enabled = false` put every build in the
+    # estate inside a container whose egress filtering nothing checked. The
+    # backend is derived from `[devbox] enabled` now, so it can no longer be on
+    # while this is off and the second arm could never fire. One switch, and it
+    # is the one the Ansible role gates the rules themselves on.
     devbox_on = getattr(getattr(config, "devbox", None), "enabled", False)
-    container_on = (
-        config_module.container_backend(config) == config_module.CONTAINER_BACKEND_DEVBOX
-    )
-    if not devbox_on and not container_on:
+    if not devbox_on:
         return CheckResult(
             name, SKIP,
-            "devbox is disabled ([devbox] enabled) and [developer.container] "
-            "backend is not 'devbox'; the role adds no rules",
+            "devbox is disabled ([devbox] enabled); the role adds no rules",
         )
     if not probe:
         return CheckResult(

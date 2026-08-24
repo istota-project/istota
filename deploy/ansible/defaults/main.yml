@@ -1114,19 +1114,31 @@ istota_developer_author_credit: ""                # Appended to every commit (e.
 
 # --- Where project code builds and runs ([developer.container]) -------------
 #
-# A deploy-time choice, not a runtime one. "none" (the default) is what every
-# deployment did before this existed: npm, uv, cargo and the rest run on the
-# host, inside the task's bwrap sandbox, where they cannot reach a registry that
-# is not on the CONNECT allowlist and cannot install a system package.
+# **There is no variable here for that any more.** It is derived, from
+# istota_devbox_enabled together with istota_developer_enabled and a non-empty
+# istota_developer_repos_dir. With the devbox on, npm, uv, cargo and the rest
+# run inside the user's devbox over a Unix-socket exec transport; with it off
+# they run on the host inside the task's bwrap sandbox, where they cannot reach
+# a registry off the CONNECT allowlist and cannot install a system package.
 #
-# "devbox" routes them into the user's devbox over a Unix-socket exec transport.
-# It needs istota_devbox_enabled and istota_devbox_users to name the user, and
-# it needs the image rebuilt with the daemon's own uid — the role does that for
-# you (see the DEV_UID build args in the compose template). `istota doctor
-# --only developer.container` is the check; a deployment where the rendered
-# config and the running daemon disagree is reported there rather than found by
-# a task failing hours later.
-istota_developer_container_backend: "none"        # none | devbox
+# `istota_developer_container_backend` used to say which, and retiring it
+# removed two states rather than a knob. A deployment could hold the devbox on
+# with the backend off, which offered the model a devbox skill whose every verb
+# but `reset` refused; or the backend on with the devbox off, which asked the
+# developer skill to reach a container this role had never built. Note that
+# every `when:` in this role that tested the backend already carried
+# istota_devbox_enabled as its other conjunct, so no task runs on more hosts
+# than it did. The compose template is where the change shows: its two
+# conditional blocks key on istota_developer_enabled and a non-empty
+# istota_developer_repos_dir now, so a host that had the container on and the
+# backend unset gains the two mounts and the transport's environment.
+#
+# `istota doctor --only developer.container` is the check, and it re-derives
+# from the rendered file rather than reading a key — a deployment where the file
+# and the running daemon disagree is reported there rather than found by a task
+# failing hours later. It also reports a config.toml still carrying the retired
+# key, since that is where an operator's stated intent can differ from the
+# running behaviour with no drift present.
 # The parent directory holding one socket directory per user. Only the per-user
 # subdirectory is ever mounted into a container: mounting the parent would put
 # every user's socket in every user's container, which is arbitrary command

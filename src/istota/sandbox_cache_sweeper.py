@@ -111,8 +111,10 @@ a symlink inside the window.
 
 For the same reason the tools are run with their cwd in a fresh temporary
 directory rather than in the cache, with ``uv --no-config``, with npm's user
-and global config files pointed at ``os.devnull``, and with an environment
-built from an allowlist rather than inherited whole — the daemon's own
+and global config files pointed at two names inside that directory (two, never
+one: npm refuses a path it has already loaded under another scope, so pointing
+both at ``os.devnull`` exited 1 before the cache verb ran), and with an
+environment built from an allowlist rather than inherited whole — the daemon's own
 environment carries the secret key and every module credential, and a process
 whose job is to unlink files needs none of it. The per-user cache is
 model-written by construction; a host-side tool started with its cwd inside it
@@ -541,17 +543,32 @@ def _still_the_same(path: Path, pinned: tuple[int, int] | None) -> bool:
 _INHERITED_ENV = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
 
 
-def _tool_env(uv_dir: Path, npm_dir: Path) -> dict[str, str]:
-    """A minimal environment with the cache locations pinned and config disarmed."""
+def _tool_env(uv_dir: Path, npm_dir: Path, scratch: Path) -> dict[str, str]:
+    """A minimal environment with the cache locations pinned and config disarmed.
+
+    ``scratch`` is the throwaway working directory the round already runs in.
+    The two npm config paths are named inside it rather than both at
+    :data:`os.devnull`, and the distinctness is the whole point: npm resolves
+    its configuration by loading each scope in turn and **refuses a path it has
+    already loaded under another scope**, exiting 1 with ``double-loading config
+    "/dev/null" as "global", previously loaded as "user"`` before it reaches the
+    cache verb. So the obvious way to disarm both files disarmed the reclaim
+    instead — measured on a live deployment, where every sweep logged
+    ``npm exited 1`` and took zero npm bytes while reporting a cache reclaimed.
+
+    Neither file is created. A path that does not exist is an empty config to
+    npm, which is what ``--no-config`` buys from uv on the other side, and
+    naming them under a directory this module just made is what keeps them out
+    of reach: ``~/.npmrc`` and ``/usr/etc/npmrc`` are outside this module's
+    control and inside the model's on some deployments.
+    """
     env = {
         key: os.environ[key] for key in _INHERITED_ENV if key in os.environ
     }
     env["UV_CACHE_DIR"] = str(uv_dir)
     env["npm_config_cache"] = str(npm_dir)
-    # ~/.npmrc and /usr/etc/npmrc are outside this module's control and inside
-    # the model's reach on some deployments; `--no-config` is uv's equivalent.
-    env["npm_config_userconfig"] = os.devnull
-    env["npm_config_globalconfig"] = os.devnull
+    env["npm_config_userconfig"] = str(scratch / "npmrc-user")
+    env["npm_config_globalconfig"] = str(scratch / "npmrc-global")
     return env
 
 
@@ -613,12 +630,12 @@ def _reclaim(
     """
     uv_dir = user_dir / CACHE_UV
     npm_dir = user_dir / CACHE_NPM
-    env = _tool_env(uv_dir, npm_dir)
     ran = 0
     missing = 0
     notes: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="istota-cache-sweep-") as cwd:
+        env = _tool_env(uv_dir, npm_dir, Path(cwd))
         for binary, name, directory, argv in (
             (uv_bin, "uv", uv_dir, _uv_argv(uv_bin or "", uv_dir, verbs[0])),
             (npm_bin, "npm", npm_dir, _npm_argv(npm_bin or "", npm_dir, verbs[1])),

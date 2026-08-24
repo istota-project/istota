@@ -2680,14 +2680,17 @@ def build_bwrap_cmd(
     # the package registries and the forge. The exec socket is bound exactly
     # where the package registries are allowed.
     #
-    # **The docker-proxy bind above is ungated and this one is not, and the
-    # difference is the mechanism rather than the caution.** That proxy is an
-    # allowlist: it refuses create, run, build, privileged and host-mount, so
-    # even an untrusted-content task reaching it with `curl --unix-socket`
-    # cannot escalate. This is an unauthenticated arbitrary-command channel into
-    # a container with permissive egress, so binding it into every task's
-    # sandbox would hand an email, feed or browse task a route straight around
-    # `_build_network_allowlist`, which is per task and skill-scoped.
+    # **The gate is about the mechanism, not caution.** The retired docker
+    # socket proxy this replaced was bound into every sandbox ungated, and that
+    # was defensible because it was an allowlist: it refused create, run, build,
+    # privileged and host-mount, so even an untrusted-content task reaching it
+    # with `curl --unix-socket` could not escalate. This is the opposite shape —
+    # an unauthenticated arbitrary-command channel into a container with
+    # permissive egress — so binding it into every task's sandbox would hand an
+    # email, feed or browse task a route straight around
+    # `_build_network_allowlist`, which is per task and skill-scoped. Nothing
+    # binds a Docker socket at any path now; the contrast is why this one is
+    # gated, not a description of a bind that still exists.
     #
     # The *directory*, not the socket file: a server restart unlinks and
     # recreates the inode, and a bind of the file itself strands this side

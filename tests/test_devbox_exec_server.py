@@ -1447,6 +1447,7 @@ class TestTheDoctorProbeSpeaksToTheRealServer:
             Config,
             ContainerConfig,
             DeveloperConfig,
+            DevboxConfig,
             UserConfig,
         )
 
@@ -1459,10 +1460,10 @@ class TestTheDoctorProbeSpeaksToTheRealServer:
                 enabled=True,
                 repos_dir=str(server.repos.parent),
                 container=ContainerConfig(
-                    backend="devbox",
                     exec_socket_dir=str(Path(server.socket_path).parent.parent),
                 ),
             ),
+            devbox=DevboxConfig(enabled=True),
             users={user: UserConfig(display_name=user)},
         )
         # `_start_server` names the socket directory `sock`, not the user, so
@@ -1506,6 +1507,7 @@ class TestAShimReachesThisServerEndToEnd:
             Config,
             ContainerConfig,
             DeveloperConfig,
+            DevboxConfig,
             SecurityConfig,
         )
         from istota.skills.developer import setup_env
@@ -1527,11 +1529,11 @@ class TestAShimReachesThisServerEndToEnd:
                 enabled=True,
                 repos_dir=str(server.repos.parent),
                 container=ContainerConfig(
-                    backend="devbox",
                     exec_socket_dir=str(socket_parent),
                     shim_commands=["sh"],
                 ),
             ),
+            devbox=DevboxConfig(enabled=True),
             security=SecurityConfig(skill_proxy_enabled=False),
         )
 
