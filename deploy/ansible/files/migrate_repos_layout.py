@@ -109,28 +109,90 @@ def _is_reconstructible(path: str) -> bool:
     return any(part in RECONSTRUCTIBLE for part in Path(path).parts)
 
 
-def _looks_like_a_repository(entry: Path) -> bool:
-    """A bare clone, an ordinary clone, or neither."""
-    if (entry / "HEAD").exists() and (entry / "objects").is_dir():
-        return True
-    return (entry / ".git").exists()
+#: How far below a top-level directory to look for a repository. The documented
+#: layout is `{repos_dir}/<namespace>/<project>.git`, so the thing that moves is
+#: the *namespace* directory and the repository is one level inside it; the
+#: extra level covers a repository filed one deeper by hand. Same reasoning and
+#: the same figure as `git_remote_scrub._MAX_DEPTH`, which this cannot import
+#: because the role copies this file to the host on its own.
+_MAX_DEPTH = 3
 
 
-def _blocking_reason(entry: Path) -> str:
-    """Why this directory must not move, or "" when it may.
+def _is_git_dir(path: Path) -> bool:
+    """A bare clone or the `.git` of an ordinary one."""
+    return all((path / marker).exists() for marker in ("HEAD", "config", "objects"))
 
-    Checks the repository *and* every worktree registered against it: moving a
-    bare clone out from under a checkout that is somewhere else entirely leaves
-    a worktree pointing at a path that no longer exists.
+
+def _repositories_under(entry: Path) -> list[Path]:
+    """Every git directory at or below `entry`, pruning at each one.
+
+    Returns the *git directory* — the bare clone itself, or the `.git` of an
+    ordinary one — because that is where `git worktree list` has to run.
     """
-    code, listing = _git(entry, "worktree", "list", "--porcelain")
-    if code != 0:
-        return "git could not list its worktrees"
+    if _is_git_dir(entry):
+        return [entry]
 
-    checkouts: list[Path] = []
-    for line in listing.splitlines():
+    found: list[Path] = []
+    for dirpath, dirnames, _filenames in os.walk(entry, onerror=lambda _e: None):
+        here = Path(dirpath)
+        depth = len(here.relative_to(entry).parts)
+        if _is_git_dir(here):
+            found.append(here)
+            dirnames[:] = []
+            continue
+        if ".git" in dirnames and _is_git_dir(here / ".git"):
+            found.append(here / ".git")
+            dirnames[:] = []
+            continue
+        if depth >= _MAX_DEPTH:
+            dirnames[:] = []
+    return found
+
+
+def _checkouts(git_dir: Path) -> list[Path] | None:
+    """Every non-bare worktree registered against `git_dir`, or None on failure.
+
+    A record is a run of lines ending at a blank one. The `bare` line marks the
+    bare clone's own entry, which has no work tree at all — `git status` there
+    exits non-zero with "this operation must be run in a work tree", so counting
+    it would hold every bare clone in the tree for a reason that has nothing to
+    do with its contents. That is the documented layout, so getting this wrong
+    means the migration never moves anything.
+    """
+    code, listing = _git(git_dir, "worktree", "list", "--porcelain")
+    if code != 0:
+        return None
+
+    found: list[Path] = []
+    current: Path | None = None
+    is_bare = False
+    for line in listing.splitlines() + [""]:
         if line.startswith("worktree "):
-            checkouts.append(Path(line[len("worktree ") :].strip()))
+            current = Path(line[len("worktree ") :].strip())
+            is_bare = False
+            continue
+        if line.strip() == "bare":
+            is_bare = True
+            continue
+        if line.strip():
+            continue
+        if current is not None and not is_bare:
+            found.append(current)
+        current, is_bare = None, False
+    return found
+
+
+def _blocking_reason(git_dir: Path, entry: Path) -> str:
+    """Why this repository must not move, or "" when it may.
+
+    Checks every worktree registered against it: moving a bare clone out from
+    under a checkout that is somewhere else entirely leaves a worktree pointing
+    at a path that no longer exists, and `worktree repair` run from the new
+    location cannot reach it.
+    """
+    checkouts = _checkouts(git_dir)
+    if checkouts is None:
+        return "git could not list its worktrees"
 
     for checkout in checkouts:
         if not checkout.is_dir():
@@ -151,11 +213,11 @@ def _blocking_reason(entry: Path) -> str:
         for line in status.splitlines():
             if not line.strip():
                 continue
-            state, _, path = line.partition(" ")
-            path = path.strip().strip('"')
-            if line.startswith("!!") and _is_reconstructible(path):
-                continue
-            if line.startswith("??") and _is_reconstructible(path):
+            # `XY path`, with `!!` for ignored and `??` for untracked. Anything
+            # else is a tracked modification or a staged change and holds the
+            # move outright.
+            path = line[3:].strip().strip('"')
+            if line.startswith(("!!", "??")) and _is_reconstructible(path):
                 continue
             return f"uncommitted work in {checkout}: {line.strip()}"
     return ""
@@ -181,43 +243,57 @@ def main(argv: list[str]) -> int:
 
     known = {u.strip() for u in args.known_user.split(",") if u.strip()}
 
-    candidates: list[Path] = []
+    # A candidate is a top-level directory holding at least one repository —
+    # not one that *is* one. The documented layout puts the bare clone at
+    # `{root}/<namespace>/<project>.git`, so the thing that moves is the
+    # namespace directory, and a rule that looked for a repository at the top
+    # level would find nothing on every host in that shape and report the tree
+    # as already migrated.
+    candidates: list[tuple[Path, list[Path]]] = []
     for entry in sorted(root.iterdir()):
         if not entry.is_dir() or entry.is_symlink():
             continue
         if entry.name in known:
             continue
-        if not _looks_like_a_repository(entry):
+        repositories = _repositories_under(entry)
+        if not repositories:
             continue
-        candidates.append(entry)
+        candidates.append((entry, repositories))
 
     if not candidates:
         print(f"OK {root} is already in the per-user layout")
         return 0
 
     if not args.user:
-        for entry in candidates:
+        for entry, _ in candidates:
             print(f"WOULD-MOVE {entry} (set istota_developer_repos_migrate_to to move it)")
         return 0
 
     destination_root = root / args.user
     if args.dry_run:
-        for entry in candidates:
+        for entry, _ in candidates:
             print(f"WOULD-MOVE {entry} -> {destination_root / entry.name}")
         return 0
 
     destination_root.mkdir(parents=True, exist_ok=True)
 
     failures = 0
-    for entry in candidates:
+    for entry, repositories in candidates:
         destination = destination_root / entry.name
         if destination.exists():
             print(f"HELD {entry}: {destination} already exists; not merging")
             continue
-        reason = _blocking_reason(entry)
+        # Every repository under it, not just the first: the whole directory
+        # moves, so one dirty checkout anywhere inside holds all of them.
+        reason = next(
+            (r for r in (_blocking_reason(g, entry) for g in repositories) if r), ""
+        )
         if reason:
             print(f"HELD {entry}: {reason}")
             continue
+        # Captured *before* the move, because afterwards every path in the
+        # listing names a directory that no longer exists.
+        registered = {g: (_checkouts(g) or []) for g in repositories}
         try:
             shutil.move(str(entry), str(destination))
         except OSError as exc:
@@ -228,8 +304,23 @@ def main(argv: list[str]) -> int:
         # link record one. `git worktree repair` rewrites both from where the
         # repository now is; without it every worktree is registered against a
         # path that no longer exists.
-        code, _ = _git(destination, "worktree", "repair")
-        if code != 0:
+        problems = 0
+        for git_dir, checkouts in registered.items():
+            moved_git_dir = destination / git_dir.relative_to(entry)
+            # **The new worktree paths are arguments**, and that is the whole
+            # difference between a repaired worktree and a broken one. A bare
+            # `repair` fixes worktrees whose administrative entry it can still
+            # find — but here the *repository and its worktrees moved together*,
+            # so every path in that entry is gone and git has nothing to look
+            # at. Git's own instruction for this case is to name the new
+            # locations.
+            moved_checkouts = [
+                str(destination / checkout.relative_to(entry)) for checkout in checkouts
+            ]
+            code, _ = _git(moved_git_dir, "worktree", "repair", *moved_checkouts)
+            if code != 0:
+                problems += 1
+        if problems:
             print(f"MOVED {entry} -> {destination} (worktree repair reported a problem)")
         else:
             print(f"MOVED {entry} -> {destination}")
