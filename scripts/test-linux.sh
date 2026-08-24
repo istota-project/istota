@@ -285,8 +285,8 @@ host_bwrap_failure() {
 #
 # **The units cannot be named in advance.** The Ansible role writes
 # `/etc/systemd/system/{{ istota_namespace }}-scheduler.service` and the same
-# for `-web`, `-webhooks`, `-devbox-proxy@`, `-docker-proxy@` and
-# `-devbox-iptables`, and `istota_namespace` is an inventory variable — so a
+# for `-web`, `-webhooks`, `-devbox-proxy@` and `-devbox-iptables`, and
+# `istota_namespace` is an inventory variable — so a
 # probe asking `is-active istota-scheduler.service` by name is blind on every
 # install that set it, which includes the production host. Enumerate what is
 # running and match on the suffix instead. Both managers, since a per-user
@@ -323,6 +323,10 @@ host_runs_deployment() {
         for manager in --system --user; do
             units="$(systemctl "$manager" list-units --type=service --state=active \
                 --no-legend --no-pager 2>/dev/null || true)"
+            # `-docker-proxy@` is a *retired* unit and is still matched on
+            # purpose: the role tears those down, but a host that has not run
+            # the play since is exactly one running the daemon, and a false
+            # negative here is what puts an unsandboxed suite beside it.
             case "$units" in
                 *-scheduler.service*|*-webhooks.service*|*-devbox-proxy@*|\
                 *-docker-proxy@*|*-devbox-iptables.service*)

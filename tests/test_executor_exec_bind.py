@@ -8,15 +8,17 @@ authorized_skills`, byte for byte the predicate at `_build_network_allowlist`
 that already decides whether this task's CONNECT allowlist gets the package
 registries and the forge.
 
-**Why the two binds in this file are not symmetric.** The docker-proxy socket is
-bound with no gate at all, and that is correct on its own terms: the proxy is an
-allowlist, refusing create, run, build, privileged and host-mount, so even an
-untrusted-content task reaching it with `curl --unix-socket` cannot escalate.
-The exec socket is an unauthenticated arbitrary-command channel into a container
-with permissive egress. Ungated, it would hand an email, feed or browse task a
+**Why the docker-proxy socket is in this file at all, having been deleted.** It
+used to be bound with no gate whatever, and that was correct on its own terms:
+the proxy was an allowlist, refusing create, run, build, privileged and
+host-mount, so even an untrusted-content task reaching it with
+`curl --unix-socket` could not escalate. The exec socket is a different
+mechanism — an unauthenticated arbitrary-command channel into a container with
+permissive egress — so ungated it would hand an email, feed or browse task a
 route straight around `_build_network_allowlist`, which is per task and
-skill-scoped. Same file, opposite answers, for a reason about the mechanism
-rather than about caution.
+skill-scoped. That asymmetry is why one bind could be ungated and this one
+cannot, and `TestTheDockerProxySocket` stays as the standing check that the
+retired one did not come back.
 """
 
 from __future__ import annotations
@@ -154,12 +156,16 @@ class TestTheGate:
 
 
 class TestTheDockerProxySocket:
-    """Its removal is the *next* stage's — the bind and its replacement must not
-    coexist in a release, so it goes in the same change that stops the devbox
-    skill needing it. What holds today is only that it is not reached by
-    accident: `devbox.enabled` defaults False, so a deployment that switched the
-    exec transport on without switching the skill's capability on has no docker
-    socket in its sandboxes at all.
+    """Gone, in both directions, and that is the whole of this class.
+
+    The bind used to be unconditional: `cp`, `restart`, `inspect` and the raw
+    HTTP surface were reachable from every task of every user on a devbox
+    deployment. It went in the same change that stopped the devbox skill needing
+    it, so the two never coexisted in a release.
+
+    The capability being *on* is the case worth naming, because that is the one
+    that used to bind. A deployment with `devbox.enabled` and a live devbox
+    still gets no Docker socket and no `docker` binary in any sandbox.
     """
 
     def test_it_is_absent_while_the_devbox_capability_is_off(self, sandbox):
@@ -169,21 +175,19 @@ class TestTheDockerProxySocket:
             argv = _argv(config, task, authorized)
             assert "/var/run/docker.sock" not in argv
 
-    def test_it_is_still_bound_where_the_capability_is_on(self, sandbox, tmp_path):
-        """Stated as the current behaviour rather than asserted as desirable, so
-        that the next stage's deletion turns this red and is noticed rather than
-        landing beside a test that never mentioned it."""
+    def test_it_is_absent_where_the_capability_is_on(self, sandbox, tmp_path):
         config, task, _ = sandbox
-        proxy_dir = tmp_path / "docker-proxy"
-        proxy_dir.mkdir()
-        (proxy_dir / "alice.sock").write_text("")
-        config.devbox = DevboxConfig(
-            enabled=True, api_proxy_enabled=True, api_proxy_socket_dir=str(proxy_dir),
-        )
+        cli = tmp_path / "docker"
+        cli.write_text("#!/bin/sh\n")
+        config.devbox = DevboxConfig(enabled=True, docker_cli=str(cli))
 
-        argv = _argv(config, task, {"email"})
-
-        assert "/var/run/docker.sock" in argv
+        for authorized in ({"developer"}, {"email"}):
+            argv = _argv(config, task, authorized)
+            assert "/var/run/docker.sock" not in argv
+            # The CLI binary went with the socket: a `docker` client with
+            # nothing to talk to is a confusing failure rather than a safe one.
+            assert str(cli) not in _bind_sources(argv)
+            assert str(cli) not in argv
 
 
 class TestTheRepoBindIsPerUser:

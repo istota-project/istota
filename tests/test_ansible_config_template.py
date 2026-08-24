@@ -340,6 +340,86 @@ class TestTheForgePathsMatchWhatTheRoleInstalls:
         assert "developer" not in parsed
 
 
+class TestTheDockerApiProxyLeftNothingBehindInTheRole:
+    """The Design 14 deletion, checked as a *whole-role* property.
+
+    A partial retirement is the failure mode worth naming: a `defaults` entry
+    with no template, a template with no task, or a task notifying a handler
+    that no longer exists. Any of those is a play that either does nothing or
+    fails on a host, and neither shows up in a rendered config. So this greps
+    every file in the role rather than the one template.
+
+    The teardown block is the deliberate exception, and it is matched by name:
+    the units it removes are on every host that ever enabled a devbox, and
+    leaving a per-user HTTP intermediary listening with no consumer is exactly
+    the state this design refused to leave the compose devbox in.
+    """
+
+    #: Where the retirement task is allowed to keep saying the name.
+    _TEARDOWN_MARKER = "Retire the docker-proxy units"
+
+    def _role_files(self):
+        for path in sorted(ANSIBLE.rglob("*")):
+            if path.is_file() and path.suffix in {".yml", ".yaml", ".j2", ".py"}:
+                yield path
+
+    def test_the_sweep_reads_something(self):
+        """A grep that matched no files would pass against anything."""
+        files = list(self._role_files())
+        assert len(files) > 5, files
+        assert TEMPLATE in files and DEFAULTS_FILE in files and TASKS_FILE in files
+
+    def test_no_api_proxy_key_survives_anywhere_in_the_role(self):
+        offenders = [
+            f"{path.relative_to(ANSIBLE)}:{n}: {line.strip()}"
+            for path in self._role_files()
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1)
+            if "api_proxy" in line
+        ]
+        assert not offenders, (
+            "the Docker-API allowlist proxy is retired; these still name its "
+            "config keys or variables:\n" + "\n".join(offenders)
+        )
+
+    def test_the_only_remaining_docker_proxy_mentions_are_the_teardown(self):
+        tasks = TASKS_FILE.read_text()
+        assert self._TEARDOWN_MARKER in tasks, (
+            "the teardown block is gone, so an upgraded host keeps a per-user "
+            "HTTP intermediary listening with nothing to serve"
+        )
+        for path in self._role_files():
+            if path == TASKS_FILE:
+                continue
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                if "docker-proxy" in line or "docker_proxy" in line:
+                    assert "retire" in line.lower() or path.name == "main.yml", (
+                        f"{path.relative_to(ANSIBLE)}:{n} still deploys the "
+                        f"retired proxy: {line.strip()}"
+                    )
+
+    def test_the_templates_are_gone(self):
+        for name in (
+            "istota-docker-proxy@.service.j2",
+            "istota-docker-proxy.tmpfiles.j2",
+        ):
+            assert not (ANSIBLE / "templates" / name).exists(), name
+
+    def test_the_devbox_block_names_no_retired_key(self):
+        rendered = render(istota_devbox_enabled=True)
+        parsed = tomllib.loads(rendered)
+
+        assert "devbox" in parsed, "the [devbox] block stopped rendering entirely"
+        for retired in (
+            "api_proxy_enabled",
+            "api_proxy_socket_dir",
+            "api_proxy_exec_ttl_seconds",
+            "api_proxy_audit_log",
+            "docker_socket",
+            "exec_timeout_seconds",
+        ):
+            assert retired not in parsed["devbox"], retired
+
+
 def load_config_from(rendered: str) -> Config:
     import tempfile
 

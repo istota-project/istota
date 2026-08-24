@@ -843,15 +843,14 @@ istota_browser_daily_restart_cron: "0 5 * * *"  # cron schedule for the proactiv
 
 # Devbox container (per-user persistent dev / network-diagnostics environment).
 # When enabled, one container per entry in istota_devbox_users is brought up
-# via docker-compose. The skill CLI shells in over the host docker socket; the
-# bwrap sandbox in executor.py bind-mounts the socket only when the [devbox]
-# block is rendered into config.toml.
+# via docker-compose. The skill CLI reaches it over the exec transport, on the
+# per-user socket the same role provisions; no Docker socket is bound into a
+# sandbox any more. `istota_devbox_docker_cli` is for `reset` alone, which
+# recreates a container and runs host-side.
 istota_devbox_enabled: false
 istota_devbox_image: "istota-devbox:latest"
 istota_devbox_container_prefix: "devbox-"
 istota_devbox_docker_cli: "/usr/bin/docker"
-istota_devbox_docker_socket: "/var/run/docker.sock"
-istota_devbox_exec_timeout_seconds: 300
 istota_devbox_max_output_bytes: 102400
 # Raised from 2g when the devbox became the place project code builds. It is now
 # shared by *all* of one user's concurrent tasks (per-user concurrency is about
@@ -916,16 +915,12 @@ istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
 # path to also tail audit lines into a file.
 istota_devbox_proxy_audit_log: ""
 
-# Docker-API allowlist proxy. One systemd unit per devbox user forwards only
-# exec/cp/inspect/restart on the user's own container, refusing
-# create/run/build/privileged/host-mount. The executor binds this socket into the
-# sandbox at /var/run/docker.sock instead of the raw socket. Defaults on when
-# devbox is on. Maps to [devbox] api_proxy_* in config.toml.
-istota_devbox_api_proxy_enabled: true
-istota_docker_proxy_socket_dir: "/var/run/{{ istota_namespace }}-docker"
-istota_devbox_api_proxy_exec_ttl_seconds: 300
-# Empty string → audit lines go to the journal only. Absolute path → also a file.
-istota_devbox_api_proxy_audit_log: ""
+# The Docker-API allowlist proxy is retired and every variable that configured
+# it went with it. Nothing in a task reaches Docker any more: project code goes
+# to the container over the exec transport, and the devbox skill's one Docker
+# verb, `reset`, runs host-side against the real socket. The role tears down any
+# surviving units. `tests/test_ansible_config_template.py` sweeps the whole role
+# for the retired key names, which is why none is written out even in a comment.
 
 # ntfy push notifications are configured per-user via the encrypted secrets
 # table (`istota secret ensure -s ntfy ...` or web settings). There is no

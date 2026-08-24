@@ -272,8 +272,10 @@ class TestTheAnsibleVolumeMountsAreHeldInLine:
     )
     def test_it_does_not_mount_the_host_in(self, forbidden, ansible_service):
         """Named rather than inferred. The docker socket is root-equivalent, and
-        binding it into a container the model drives would hand it the daemon —
-        the whole reason `docker_proxy.py` exists for the sandbox."""
+        binding it into a container the model drives would hand it the daemon.
+        There used to be an allowlist proxy standing in front of it for the
+        sandbox; that is retired, and nothing on either side of the boundary
+        reaches Docker now."""
         for entry in ansible_service.get("volumes", []):
             source = str(entry).split(":")[0] if not isinstance(entry, dict) else \
                 entry.get("source", "")

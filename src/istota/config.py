@@ -169,26 +169,32 @@ class BrowserConfig:
 class DevboxConfig:
     """Per-user devbox container — persistent Linux workbench.
 
-    The scheduler exposes an ``istota-skill devbox`` CLI that shells into
-    ``devbox-<user_id>`` via the host's Docker socket. Everything else
-    (image, network, volume) is provisioned by docker-compose / Ansible.
+    The ``istota-skill devbox`` CLI speaks the **exec transport** to a server
+    running inside ``devbox-<user_id>``, over the per-user socket at
+    ``{exec_socket_dir}/{user_id}/exec.sock``. Everything else (image, network,
+    volume) is provisioned by Ansible.
+
+    **Nothing here reaches the Docker API from a sandbox any more.** The
+    allowlist proxy that used to be bound in at ``/var/run/docker.sock`` is
+    retired with its only consumer: ``docker exec`` through it could not return
+    an exit status, which is what forced the transport, and once nothing in a
+    build needed the socket the bind went and the proxy had no consumer left.
+    The one verb still spoken in Docker is ``reset``, which recreates a
+    container from this host-side CLI process using the daemon's own
+    environment and no ``DOCKER_HOST`` — the real socket, as it always was.
     """
     enabled: bool = False
     container_prefix: str = "devbox-"           # container name = f"{prefix}{user_id}"
-    docker_cli: str = "/usr/bin/docker"         # host path to the Docker CLI binary
-    docker_socket: str = "/var/run/docker.sock"  # host path to the *real* Docker socket (proxy upstream)
-    exec_timeout_seconds: int = 300             # default per-exec timeout
-    max_output_bytes: int = 102_400             # stdout/stderr cap per stream
-    # Docker-API allowlist proxy. The raw docker socket is root-equivalent, so
-    # the executor never binds it into the sandbox; it binds this per-user proxy
-    # socket at the conventional in-sandbox path /var/run/docker.sock instead.
-    # The proxy forwards only exec/cp/inspect/restart on the user's own
-    # container and refuses create/run/privileged/host-mount. One daemon per
-    # devbox user (systemd @-instance); listen socket = {dir}/{user_id}.sock.
-    api_proxy_enabled: bool = True
-    api_proxy_socket_dir: str = "/var/run/istota-docker"
-    api_proxy_exec_ttl_seconds: int = 300       # sweep created-but-unstarted exec ids after this
-    api_proxy_audit_log: str = ""               # optional file sink for the audit logger
+    docker_cli: str = "/usr/bin/docker"         # host path to the Docker CLI binary (`reset` only)
+    max_output_bytes: int = 102_400             # stdout/stderr cap per stream in the JSON envelope
+    #
+    # **There is deliberately no `exec_socket_dir` here.** The skill CLI reads
+    # `[developer.container] exec_socket_dir` through `config.exec_socket_path`,
+    # the same helper the executor's bwrap bind and the `doctor` transport check
+    # use, so there is one spelling of `/run/istota-exec` in the tree. A mirror
+    # of it in this block could only ever be dead — `ContainerConfig` carries a
+    # non-empty default, so its value always wins — or a second knob for a value
+    # the design says must have one.
 
 
 @dataclass
@@ -2334,6 +2340,12 @@ def exec_socket_dir(config: "Config", user_id: str) -> Path | None:
     server restart unlinks and recreates the inode, and a bind mount of the file
     itself strands the other side against a dead target. Same precedent as
     ``devbox_proxy._default_socket_path``.
+
+    **One spelling, and this is it.** Three callers resolve the socket through
+    here — the executor's bwrap bind, ``doctor``'s transport check, and the
+    devbox skill CLI, which reads it in its own host-side process rather than
+    from an environment variable a model could set. ``[devbox]`` carries no
+    mirror of the key for that reason.
     """
     dev = getattr(config, "developer", None)
     container = getattr(dev, "container", None)
@@ -2808,13 +2820,7 @@ def load_config(config_path: Path | None = None) -> Config:
             enabled=dx.get("enabled", False),
             container_prefix=dx.get("container_prefix", "devbox-"),
             docker_cli=dx.get("docker_cli", "/usr/bin/docker"),
-            docker_socket=dx.get("docker_socket", "/var/run/docker.sock"),
-            exec_timeout_seconds=dx.get("exec_timeout_seconds", 300),
             max_output_bytes=dx.get("max_output_bytes", 102_400),
-            api_proxy_enabled=dx.get("api_proxy_enabled", True),
-            api_proxy_socket_dir=dx.get("api_proxy_socket_dir", "/var/run/istota-docker"),
-            api_proxy_exec_ttl_seconds=dx.get("api_proxy_exec_ttl_seconds", 300),
-            api_proxy_audit_log=dx.get("api_proxy_audit_log", ""),
         )
 
     if "ntfy" in data:

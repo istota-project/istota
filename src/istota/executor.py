@@ -2256,29 +2256,24 @@ def build_bwrap_cmd(
         if path.exists():
             _ro_bind(path)
 
-    # --- Devbox: Docker CLI + Docker-API allowlist proxy ---
-    # The raw Docker socket is root-equivalent on the host: anything inside the
-    # sandbox that can write to it can launch a privileged container that mounts
-    # the host root. So we never bind the raw socket. Instead we bind the
-    # per-user Docker-API allowlist proxy (src/istota/docker_proxy.py) at the
-    # conventional in-sandbox path /var/run/docker.sock — the docker client
-    # connects there by default, so the devbox CLI is unchanged. The proxy
-    # forwards only exec/cp/inspect/restart on the user's own container and
-    # refuses create/run/build/privileged/host-mount, so it is safe to bind
-    # unconditionally (no selection-time gate): even an untrusted-content task
-    # that reaches the socket directly (curl --unix-socket) can't escalate.
-    if config.devbox.enabled and config.devbox.api_proxy_enabled:
-        docker_cli = Path(config.devbox.docker_cli)
-        if docker_cli.exists():
-            _ro_bind(docker_cli)
-        proxy_docker_sock = Path(config.devbox.api_proxy_socket_dir) / f"{task.user_id}.sock"
-        # Bind the proxy socket at the *literal* conventional dest path so the
-        # docker client finds it by default. dest is kept unresolved (mirrors
-        # the old raw-socket bind, where /var/run was never otherwise mapped);
-        # bwrap creates the intermediate mount point.
-        resolved_proxy = proxy_docker_sock.resolve()
-        if resolved_proxy.exists():
-            args.extend(["--bind", str(resolved_proxy), config.devbox.docker_socket])
+    # --- No Docker API reaches a task, and no `docker` binary either ---
+    # This used to bind the Docker CLI read-only and, at the conventional
+    # in-sandbox path /var/run/docker.sock, a per-user allowlist proxy in front
+    # of the root-equivalent socket. Both are gone, and the proxy with them.
+    #
+    # The bind was safe on its own terms — the proxy refused create, run, build,
+    # privileged and host-mount, so a task reaching it with `curl --unix-socket`
+    # could not escalate — but it was also *unconditional*, which is what makes
+    # its removal worth stating: `cp`, `restart`, `inspect` and the raw HTTP
+    # surface were reachable from every task of every user on a devbox
+    # deployment, including tasks built from email, feeds and fetched pages.
+    #
+    # Nothing in a build needs it now. Project code reaches the container over
+    # the exec transport, whose socket is bound above and gated on
+    # `"developer" in authorized_skills` — an arbitrary-command channel into a
+    # permissive-egress container is not an allowlist, so unlike the proxy's it
+    # cannot be ungated. The devbox skill's one remaining Docker verb, `reset`,
+    # runs host-side in the skill CLI process and never wanted a bind.
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
@@ -4455,24 +4450,26 @@ def execute_task(
             env["BROWSER_API_URL"] = config.browser.api_url
             env["BROWSER_VNC_URL"] = config.browser.vnc_url
 
-        # Devbox: the agent's persistent dev container. Skill CLI shells
-        # into ``devbox-<user_id>`` via the host docker socket.
+        # Devbox: the agent's persistent dev container. The skill CLI speaks the
+        # exec transport to a server inside it; only `reset` still runs
+        # `docker`, host-side in the CLI's own process.
         #
-        # ``config.devbox.docker_socket`` is deliberately not exported here
-        # (ISSUE-284). Nothing read it — the CLI invokes ``docker`` and lets
-        # the client resolve its own socket — and the field carries two
-        # meanings: the real root-equivalent socket ``docker_proxy`` connects
-        # to upstream, and the in-sandbox mount point ``build_bwrap_cmd`` binds
-        # the allowlist proxy at. Putting that name in the model's own
-        # environment invites a later reader to treat it as a socket it may use.
+        # No socket path is exported, and that is load-bearing rather than
+        # tidiness (ISSUE-284, and Design 5 of the devbox transport). This
+        # environment is the *model's*, so a path named here is a path the model
+        # can replace: `ISTOTA_DEVBOX_EXEC_SOCKET=/tmp/mine` would buy an `ok`
+        # acknowledgement and a fabricated exit 0 from a socket the model wrote.
+        # The CLI reads its socket from the config file instead, in a host-side
+        # process the model cannot reach.
+        #
+        # `ISTOTA_DEVBOX_EXEC_TIMEOUT` went with the 300-second default it
+        # carried: the transport imposes no timeout, the task's own budget
+        # governs, and a caller wanting a kill passes `--timeout`.
         if config.devbox.enabled:
             env["ISTOTA_DEVBOX_CONTAINER"] = (
                 f"{config.devbox.container_prefix}{task.user_id}"
             )
             env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
-            env["ISTOTA_DEVBOX_EXEC_TIMEOUT"] = str(
-                config.devbox.exec_timeout_seconds
-            )
             env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
                 config.devbox.max_output_bytes
             )
