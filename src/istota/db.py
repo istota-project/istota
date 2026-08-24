@@ -6280,6 +6280,30 @@ def get_running_task_pids(conn: sqlite3.Connection) -> list[tuple[int, int]]:
     return [(int(row["id"]), int(row["worker_pid"] or 0)) for row in cursor.fetchall()]
 
 
+def get_users_with_live_tasks(conn: sqlite3.Connection) -> set[str]:
+    """User ids whose work is in the hands of a worker right now.
+
+    ``locked`` as well as ``running``: a locked row has been claimed and its
+    worker is setting the task up, which is exactly when a package cache is
+    about to be written and before anything has been.
+
+    ``pending_confirmation`` is deliberately outside the set. A parked task has
+    no live process — it resumes as a new one later — so its cache is not in
+    use, and counting it would hold a user's cache back for the two hours a
+    confirmation can sit unanswered.
+
+    The caller is the package-cache sweep (ISSUE-317), which uses this as the
+    guard that stops it wiping a cache a ``uv sync`` is reading. That is why it
+    returns a set rather than rows: the question is membership, and a user with
+    no id (there is none today) would be a hole in a guard rather than a blank
+    row.
+    """
+    cursor = conn.execute(
+        "SELECT DISTINCT user_id FROM tasks WHERE status IN ('locked', 'running')"
+    )
+    return {row["user_id"] for row in cursor.fetchall() if row["user_id"]}
+
+
 def set_task_model_used(conn: sqlite3.Connection, task_id: int, model: str) -> None:
     """Record the model that actually ran a task (resolved canonical ID).
 

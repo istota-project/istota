@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The setting that moves a task's package downloads out of memory and onto disk now has something that prunes what it leaves behind. It runs on a timer and gives each user's cache the package managers' own cleanup first, which keeps the entries still in use; a cache still over its size limit afterwards is emptied. Nothing is deleted by hand, and a user with a task running is skipped rather than raced. The setting itself is still off by default while where the directory should live is settled.
+
 - A deploy can now be told to rebuild the dev container and recreate it from scratch, with `-e istota_devbox_force_recreate=true`. It normally rebuilds on its own when the container's definition or any file inside it changes, which covers the ordinary case; this is for the case it cannot see, such as a container someone changed by hand or an image left half-built by a failed run. It reuses cached build layers, so a stale base image still needs one build by hand.
 
 - A bell in the app bar now shows what is waiting on you, from every page rather than only from the chat. Two things could be held for your answer — an email from an unknown sender, and a reply the bot drafted but has not sent — and both were only visible if you happened to open the chat, so a message held while you were on the money pages sat there until you did. Clicking the bell lists what is open, with the same Confirm and Discard buttons as before, and a "Needs action" filter for the items that want a decision rather than a look.
@@ -122,6 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Very long messages and very large attachments are now capped before they are read. The whole body went into the prompt, so one long message was expensive on its own; it is now truncated with a note saying so, and the full message stays in the mailbox. Attachments have a size budget per message and per check, and anything skipped for size is named in the message the bot reads, so it never answers as though an attachment had never been sent.
 
 ### Fixed
+
+- Abandoned coding worktrees are now cleaned up when the branch they were cut from ends in a merge commit. The sweep refuses to remove a checkout whose latest commit is a merge, because it cannot see what a merge resolved, and it was asking that before asking whether the commit was already on the main branch — which, for a worktree nobody has committed to, it always is. On a project that lands its changes as merges, that kept every checkout from a task that did no work, forever, at up to a gigabyte each; the refusal still applies wherever the merge is genuinely not upstream yet.
+
+- The same sweep no longer counts a lock file that has already been released as a sign of work. It gave a checkout another full day whenever anything added or removed an entry in the directory git keeps its bookkeeping in, which taking a lock does even for an operation that writes nothing, and the stamp outlived the lock by the whole window. It now reads the bookkeeping files themselves, so a lock still being held reads as work in progress and holds the checkout, and one that has been let go leaves nothing behind.
 
 - Coding tasks now check that a package install actually finished. `npm install` exits 0 when a package's post-install step cannot download the binary it needs, and npm hides that error by default — so installing Puppeteer or Playwright reported success, left an empty directory, and the task only found out much later when a test could not start the browser. The assistant is now told that a zero exit is not proof, which packages behave this way, and what the same blocked host looks like to a Node script: a DNS failure rather than a refused connection, which reads like a flake and invites exactly the retry it is meant to stop.
 

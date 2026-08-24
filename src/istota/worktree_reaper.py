@@ -23,8 +23,12 @@ are true of every one that goes:
 - it is inside the ``repos_dir`` the sweep was handed, and is not a
   repository's own main worktree;
 - git holds no lock on it;
-- nothing has touched it, or its administrative directory, inside the retention
-  window;
+- nothing has touched it, or any entry in its administrative directory, inside
+  the retention window — every entry there rather than the directory's own
+  mtime, which any ``.lock`` create-and-remove stamps for the whole window
+  without a byte of work having happened, and rather than a list of names,
+  which misses the ``FETCH_HEAD`` of the fetch the developer skill runs at the
+  start of every task (ISSUE-316);
 - ``git status --porcelain -z --untracked-files=all --ignored=matching`` reports
   nothing but reconstructible build directories, so there is no uncommitted
   edit, no scratch file and no gitignored ``.env`` — and that check is repeated
@@ -35,21 +39,35 @@ are true of every one that goes:
   (ISSUE-304): those are the largest thing a worktree holds, they hold nothing
   that is not derivable from committed files, and counting them pinned every
   worktree that had ever run an install;
-- its head is not a merge commit, which ``git cherry`` does not examine;
-- ``git cherry refs/remotes/origin/HEAD <head>`` reports no commit unique to it.
+- either its head is reachable from ``refs/remotes/origin/HEAD``, or it is not
+  a merge commit — which ``git cherry`` does not examine — and
+  ``git cherry refs/remotes/origin/HEAD <head>`` reports no commit unique to
+  it.
 
-That last one is the merged test, and it is ``git cherry`` rather than
-``merge-base --is-ancestor`` deliberately. A squash or rebase merge is the
-ordinary way an MR lands and leaves the branch an ancestor of nothing, while
-every commit on it has a patch-id equivalent upstream. The ancestor test is
-correct and would fire on almost nothing real; ``git cherry`` answers the
-question actually being asked — is there a commit here that exists nowhere else.
-An unrelated history, a rebase that dropped a commit from the head, a branch
-that never merged: all still report a ``+`` line and are held back.
+That last one is the merged test. Two questions in sequence, and the order is
+load-bearing. ``merge-base --is-ancestor`` runs first because a head reachable
+from upstream needs no patch-id reasoning at all: the commit, its delta and any
+conflict resolution it carries are already upstream. Asking the merge-head
+refusal first held every worktree cut from a merge tip and never committed to —
+the developer skill cuts from ``origin/HEAD``, so that is the state of every
+abandoned probe on a branch that lands MRs as merges, and it is the exact set
+with nothing in it to lose (ISSUE-316).
+
+The ancestor test does not replace ``git cherry``, and adding it takes nothing
+away from why ``git cherry`` is here. A squash or rebase merge is the ordinary
+way an MR lands and leaves the branch an ancestor of nothing, while every commit
+on it has a patch-id equivalent upstream — so the ancestor test alone would fire
+on almost nothing that did real work, and ``git cherry`` is what answers the
+question actually being asked there: is there a commit here that exists nowhere
+else. An unrelated history, a rebase that dropped a commit from the head, a
+branch that never merged: all still report a ``+`` line and are held back.
 
 What ``git cherry`` cannot see is a merge commit's own conflict resolution — it
-reports the merged-in commits and never the merge's delta — so a head that is a
-merge commit is refused outright rather than trusted.
+reports the merged-in commits and never the merge's delta — so a merge head is
+refused rather than trusted, in the case where that resolution could exist
+nowhere else. Once the merge itself is reachable from upstream there is nothing
+left for it to hide, which is why the ancestor test is allowed to answer first
+and why the refusal keeps every case it was written for.
 
 **Reading the listing.** ``--porcelain -z``, never plain ``--porcelain``. Git
 does not quote a newline in a worktree path in the line-oriented form: a path
@@ -365,6 +383,32 @@ def _upstream_head(bare: Path) -> str:
     return out.strip() if code == 0 else ""
 
 
+def _is_ancestor(bare: Path, head: str, upstream: str) -> bool:
+    """Whether ``head`` is reachable from ``upstream``. False when unanswerable.
+
+    The cheapest containment answer there is, and the only one that needs no
+    patch-id reasoning at all: if the head commit is reachable from upstream
+    then the commit itself, its delta and any conflict resolution it carries
+    are already there, and losing the worktree cannot lose them. That is what
+    lets this run *before* the merge-head refusal — the hazard that refusal
+    exists for is content living only in a merge that has **not** landed
+    (ISSUE-316).
+
+    It does not replace :func:`_has_unique_commits`. A squash or rebase merge
+    is the ordinary way an MR lands and leaves the branch an ancestor of
+    nothing, so this answers False on most branches that really did land.
+
+    ``--is-ancestor`` exits 0 for contained and 1 for not; anything else is an
+    error — an unresolvable sha, a missing object, git not running at all —
+    and reads as "not contained" so the remaining checks decide. Returning
+    True there would turn a broken repository into a licence to delete.
+    """
+    if not head or not upstream:
+        return False
+    code, _ = _git(bare, "merge-base", "--is-ancestor", head, upstream)
+    return code == 0
+
+
 def _is_merge_commit(bare: Path, head: str) -> bool | None:
     """Whether ``head`` has more than one parent. ``None`` when git could not say.
 
@@ -540,29 +584,63 @@ def _touched_since(worktree: Path, cutoff: float) -> bool:
     candidate — a checkout with a `node_modules` and a `.venv` is six figures —
     before the two cheap git checks even ran.
 
-    The administrative directory goes first for the same reason: a task that
-    only runs git touches nothing in the working tree, and a task that only
-    edits files touches nothing in the admin directory, so both halves are
-    needed — but the git half is the one that answers soonest for work in
-    progress.
+    The administrative directory goes first because it is the half that answers
+    soonest for work in progress: a task that only runs git touches nothing in
+    the working tree, and a task that only edits files touches nothing in the
+    admin directory, so both halves are needed.
 
-    Unreadable is treated as touched. On a delete path an unanswerable question
-    holds the worktree.
+    There it reads every **entry**, and deliberately not the directory's own
+    mtime (ISSUE-316). A directory is stamped whenever an entry is created or
+    removed in it, and a `.lock` does both even for an operation that writes
+    nothing — so the stamp outlives the lock by the whole retention window and
+    a worktree got a fresh day of exemption on evidence that no work had
+    happened. Measured on the live clone: an administrative directory 5h26m
+    newer than the newest file in it, every one of which was from the previous
+    day.
+
+    An entry's own mtime does not have that problem, in either direction. A
+    lock that has been created and removed leaves nothing behind to find, and
+    one that is still there carries the time it was taken — which is a git
+    process running *now*, and exactly the thing the window exists to protect.
+
+    Every entry rather than a list of names, and that is not thoroughness for
+    its own sake. `git fetch` in a linked worktree writes `FETCH_HEAD` and
+    touches neither `index`, nor `HEAD`, nor the reflog — and the developer
+    skill fetches at the start of every task, so a list of the names anyone
+    thought to write down read a live checkout as idle and deleted it while
+    its task was still reading code. The same gap covered `rebase-merge/`,
+    `sequencer/`, `BISECT_LOG`, `MERGE_MSG` and `config.worktree`. Reading the
+    directory costs one `readdir` over a handful of entries and needs no
+    revision the next time git writes somewhere new.
+
+    `logs/HEAD` is stated on top of that because it sits one level down and is
+    rewritten in place, which does not restamp `logs/`.
+
+    Unreadable is treated as touched: a missing file is an answer (a worktree
+    that has never had an `ORIG_HEAD` simply has none), while a permission or
+    I/O error is a question that could not be answered, and on a delete path
+    that holds the worktree.
     """
 
     def newer(path: Path) -> bool:
         try:
             return path.stat().st_mtime > cutoff
-        except OSError:
+        except FileNotFoundError:
             return False
+        except OSError:
+            return True
 
     admin = _admin_dir(worktree)
     if admin is not None:
-        if newer(admin):
+        try:
+            entries = list(os.scandir(admin))
+        except OSError:
             return True
-        for name in ("index", "HEAD", "ORIG_HEAD", "logs/HEAD", "gitdir"):
-            if newer(admin / name):
+        for entry in entries:
+            if newer(Path(entry.path)):
                 return True
+        if newer(admin / "logs" / "HEAD"):
+            return True
 
     try:
         if newer(worktree):
@@ -636,6 +714,15 @@ def _classify(
     if dirty is None or dirty:
         return REASON_DIRTY
 
+    # Asked before the merge-head refusal, and that order is the whole of
+    # ISSUE-316. A worktree is cut from `origin/HEAD`, so before its task's
+    # first commit its head *is* the upstream tip — and on a branch that lands
+    # MRs as merge commits, that tip is usually a merge. Refusing first held
+    # every never-committed worktree forever, which is exactly the set with
+    # nothing in it to lose.
+    if _is_ancestor(bare, record.head, upstream):
+        return REASON_MERGED
+
     merge_head = _is_merge_commit(bare, record.head)
     if merge_head is None or merge_head:
         return REASON_MERGE_HEAD
@@ -663,11 +750,21 @@ def _remove(bare: Path, record: WorktreeRecord) -> bool:
     Re-checking does not close it, but it shrinks it from seconds to
     microseconds.
 
-    No ``--force``, so git's refusal on a tracked modification or a lock is
-    still the last thing standing behind all of it.
+    No ``--force``, so git's refusal on a tracked modification is still the
+    last thing standing behind all of it. That refusal is narrower than it
+    sounds and the margin is this module's to cover: measured, ``worktree
+    remove`` without ``--force`` returns 0 and deletes the checkout with an
+    ``index.lock`` present and with a rebase in progress. The lock it does
+    honour is the administrative one ``git worktree lock`` sets, which is a
+    different thing and is checked separately in :func:`_classify`. A git
+    process running *now* is caught by the retention window instead, which is
+    why that window reads a still-held ``.lock`` as activity.
 
     The branch ref goes with ``update-ref -d`` and its **old value**, which is
-    the head ``git cherry`` actually approved. Without the old value the delete
+    the head the containment checks actually approved — whichever of them
+    answered, since ``_classify`` reaches ``REASON_MERGED`` by the ancestor
+    test or by ``git cherry`` and both are about ``record.head``. Without the
+    old value the delete
     takes whatever the ref points at now, so a branch that advanced between the
     listing and here would lose the new commits. ``update-ref`` rather than
     ``branch -d`` because a bare clone's HEAD deliberately points at a deleted

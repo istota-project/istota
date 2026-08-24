@@ -914,6 +914,44 @@
     - "{{ istota_home }}/.config"
   when: not istota_update_only and not istota_web_only
 
+# `resolve_sandbox_cache_dir` refuses a root that is not already an existing
+# writable directory, and falls open to the pre-ISSUE-305 behaviour when it
+# does — a warning in the log and the caches back on bubblewrap's root tmpfs.
+# So the role has to create the root; nothing else will. Only the root: the
+# per-user `{root}/{user_id}` subdirectories are made by the daemon at 0700, and
+# the role has no list of users at this point in the play.
+#
+# 0700 rather than 0755. This holds one directory per user of package archives
+# that uv trusts on read and never re-verifies against a hash, and each is bound
+# read-write into that user's sandbox — so keeping the root unreadable to
+# everything but the daemon is what stops another local account planting an
+# archive for the next `uv sync` to hardlink into a venv.
+#
+# Only fires for an operator who has set the key by hand: the shipped default is
+# still blank while the placement question in defaults/main.yml is open.
+#
+# Both directories, not just the cache root. Nothing in the tree creates
+# `repos_dir` — on the reference deployment it exists because an operator made
+# it a mount — so creating only the leaf would have `mkdir -p` produce the
+# parent as a side effect, with whatever owner and mode that leaves. The daemon
+# writes worktrees there, so it is named explicitly and given to the daemon.
+- name: Create the developer repos and package-cache directories
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ istota_developer_repos_dir }}"
+      mode: "0755"
+    - path: "{{ istota_security_sandbox_cache_dir }}"
+      mode: "0700"
+  when:
+    - istota_security_sandbox_cache_dir | length > 0
+    - not istota_update_only
+    - not istota_web_only
+
 - name: "Create /var/log/{{ istota_namespace }} directory"
   file:
     path: "/var/log/{{ istota_namespace }}"
