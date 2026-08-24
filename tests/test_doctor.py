@@ -1824,3 +1824,262 @@ class TestConfigSecrets:
         config = make_config()
         config.users = {"loop": config}
         doctor.config_secrets(config)
+
+
+# ---------------------------------------------------------------------------
+# The development container
+
+
+def _container_config(make_config, tmp_path, *, backend="devbox", users=("alice",), **overrides):
+    """A Config with `[developer.container]` wired and one devbox user."""
+    from istota.config import ContainerConfig, DeveloperConfig, SecurityConfig, UserConfig
+
+    repos = tmp_path / "repos"
+    repos.mkdir(exist_ok=True)
+    exec_root = tmp_path / "run" / "exec"
+    exec_root.mkdir(parents=True, exist_ok=True)
+    container_fields = {
+        "backend": backend,
+        "exec_socket_dir": str(exec_root),
+        "connect_timeout_seconds": 0.5,
+    }
+    container_fields.update(overrides.pop("container", {}))
+    return make_config(
+        developer=DeveloperConfig(
+            enabled=True, repos_dir=str(repos), container=ContainerConfig(**container_fields)
+        ),
+        security=SecurityConfig(**overrides.pop("security", {})),
+        users={u: UserConfig(display_name=u) for u in users},
+        **overrides,
+    )
+
+
+def _ping_reply(socket_path, payload, timeout):
+    return [{"pong": True, "protocol": 1}, {"exit_code": 0}], ""
+
+
+def _agreeing_container(repos_root, *, uid_offset=0, cache_exit=0):
+    """A fake server that answers ping, stat and `test -d` the way a healthy one does."""
+    import os as _os
+
+    def _reply(socket_path, payload, timeout):
+        body = payload.decode()
+        if '"ping"' in body:
+            return [{"pong": True, "protocol": 1}, {"exit_code": 0}], ""
+        if '"stat"' in body:
+            return (
+                [{"uid": _os.getuid() + uid_offset, "repos_root": repos_root},
+                 {"exit_code": 0}],
+                "",
+            )
+        return [{"exit_code": cache_exit}], ""
+
+    return _reply
+
+
+class TestTheDeveloperContainerChecks:
+    """Four properties, each of which fails silently on its own.
+
+    Registered as one entry so a single connection per user answers three of
+    them; the fourth reads the rendered config file and opens nothing.
+    """
+
+    GROUP = "developer.container"
+    NAMES = {
+        "developer.container.backend",
+        "developer.container.transport",
+        "developer.container.identity",
+        "developer.container.uv_cache",
+    }
+
+    def test_all_four_are_produced_whatever_happens(self, make_config, tmp_path):
+        """A caller asserts on a name, never on a count — a check that vanishes
+        under some configuration is a check nothing can require."""
+        for backend in ("none", "devbox"):
+            config = _container_config(make_config, tmp_path, backend=backend)
+            results = doctor.check_developer_container(config, probe=False)
+            assert {r.name for r in results} == self.NAMES
+
+    def test_the_group_is_in_the_registry(self):
+        assert self.GROUP in {name for name, _ in CHECKS}
+
+    def test_the_backend_being_off_skips_the_three_that_need_a_container(
+        self, make_config, tmp_path
+    ):
+        config = _container_config(make_config, tmp_path, backend="none")
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+
+        for name in self.NAMES - {"developer.container.backend"}:
+            assert by_name[name].status == SKIP
+
+    def test_probe_false_opens_no_socket(self, make_config, tmp_path, monkeypatch):
+        """Doctor runs on the daemon's start-up path; `probe=False` must connect
+        to nothing."""
+        called = []
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            lambda *a, **k: (called.append(a), ([], "unreachable"))[1],
+        )
+        config = _container_config(make_config, tmp_path)
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=False))
+
+        assert not called
+        assert by_name["developer.container.transport"].status == SKIP
+
+    def test_a_dead_container_is_a_fail_naming_the_socket(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            lambda socket_path, payload, timeout: ([], f"could not connect to {socket_path}"),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        transport = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.transport"
+        ]
+
+        assert transport.status == FAIL
+        assert "alice" in transport.detail
+        assert transport.remedy
+
+    def test_a_live_container_that_agrees_is_ok(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice")),
+        )
+        config = _container_config(
+            make_config, tmp_path,
+            security={"sandbox_cache_dir": str(tmp_path / "cache")},
+        )
+
+        by_name = _by_name(doctor.check_developer_container(config, probe=True))
+
+        assert by_name["developer.container.transport"].status == OK
+        assert by_name["developer.container.identity"].status == OK
+        assert by_name["developer.container.uv_cache"].status == OK
+
+    def test_a_uid_mismatch_fails_and_says_what_it_costs(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """Untreated, uid drift ends in worktrees that can never be reaped, and
+        there is no error message anywhere that says so."""
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice"), uid_offset=1),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        identity = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.identity"
+        ]
+
+        assert identity.status == FAIL
+        assert "uid" in identity.detail
+        assert "reap" in identity.remedy
+
+    def test_a_repos_root_mismatch_fails(self, make_config, tmp_path, monkeypatch):
+        """The two sides must spell the tree identically: the shim sends
+        `os.getcwd()` and the server checks it with `realpath` against its own
+        root, so a disagreement refuses every real working directory."""
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request", _agreeing_container("/somewhere/else"),
+        )
+        config = _container_config(make_config, tmp_path)
+
+        identity = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.identity"
+        ]
+
+        assert identity.status == FAIL
+        assert "/somewhere/else" in identity.detail
+
+    def test_an_unset_cache_dir_warns_rather_than_passing(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """A deployment without it is merely slow — every `uv sync` pays a full
+        copy instead of a hardlink — and merely-slow is what nobody
+        investigates."""
+        monkeypatch.setattr(doctor, "_exec_transport_request", _ping_reply)
+        config = _container_config(make_config, tmp_path)
+
+        cache = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.uv_cache"
+        ]
+
+        assert cache.status == WARN
+        assert cache.remedy
+
+    def test_a_missing_cache_mount_warns(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            doctor, "_exec_transport_request",
+            _agreeing_container(str(tmp_path / "repos" / "alice"), cache_exit=1),
+        )
+        config = _container_config(
+            make_config, tmp_path,
+            security={"sandbox_cache_dir": str(tmp_path / "cache")},
+        )
+
+        cache = _by_name(doctor.check_developer_container(config, probe=True))[
+            "developer.container.uv_cache"
+        ]
+
+        assert cache.status == WARN
+        assert "alice" in cache.detail
+
+
+class TestTheBackendAgreementCheck:
+    """Design 1 asks for this and an earlier draft put it in a unit test, which
+    is the wrong place for a property an operator needs to see on the host that
+    has the problem."""
+
+    def _write(self, tmp_path, backend):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\nenabled = true\n\n"
+            f'[developer.container]\nbackend = "{backend}"\n'
+        )
+        return path
+
+    def _backend_result(self, config):
+        return _by_name(doctor.check_developer_container(config, probe=False))[
+            "developer.container.backend"
+        ]
+
+    def test_agreement_is_ok(self, make_config, tmp_path):
+        config = _container_config(make_config, tmp_path, backend="devbox")
+        config.config_path = self._write(tmp_path, "devbox")
+
+        assert self._backend_result(config).status == OK
+
+    def test_a_daemon_running_the_old_value_fails(self, make_config, tmp_path):
+        """The file says one thing and the running process another, which is
+        what an operator sees after editing config.toml and not restarting: a
+        feature that was switched on and did not switch on."""
+        config = _container_config(make_config, tmp_path, backend="none")
+        config.config_path = self._write(tmp_path, "devbox")
+
+        result = self._backend_result(config)
+
+        assert result.status == FAIL
+        assert "devbox" in result.detail and "none" in result.detail
+        assert result.remedy
+
+    def test_a_config_built_in_memory_skips(self, make_config, tmp_path):
+        config = _container_config(make_config, tmp_path)
+        config.config_path = None
+
+        assert self._backend_result(config).status == SKIP
+
+    def test_an_unreadable_file_warns_rather_than_claiming_agreement(
+        self, make_config, tmp_path
+    ):
+        config = _container_config(make_config, tmp_path)
+        config.config_path = tmp_path / "gone.toml"
+
+        result = self._backend_result(config)
+
+        assert result.status == WARN
+        assert result.remedy
