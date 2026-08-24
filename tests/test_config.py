@@ -2912,3 +2912,177 @@ class TestValidateForgeClis:
         broken = self._dev(tmp_path)
         broken.forge_cli_permit = None  # a shape nothing should produce
         _validate_forge_clis(Config(developer=broken))
+
+
+class TestTheDeveloperContainerBlock:
+    """`[developer.container]` — where project code builds and runs.
+
+    Corrects rather than refuses, one WARNING per correction, because
+    `load_config` runs in the scheduler, the web app, the webhook receiver and
+    every host-side skill CLI the proxy spawns per call. A typo on a knob must
+    not stop any of them from starting.
+    """
+
+    def _parse(self, raw):
+        from istota.config import _parse_container_block
+
+        return _parse_container_block(raw)
+
+    def test_the_default_is_the_behaviour_every_deployment_already_had(self):
+        from istota.config import ContainerConfig
+
+        assert ContainerConfig().backend == "none"
+
+    def test_a_known_backend_is_taken(self):
+        assert self._parse({"backend": "devbox"})["backend"] == "devbox"
+        assert self._parse({"backend": " DEVBOX "})["backend"] == "devbox"
+
+    def test_an_unknown_backend_falls_back_to_none_and_says_so(self, caplog):
+        """Never to `devbox`. A routing decision taken from a typo would send
+        every build somewhere the operator did not choose; the startup line and
+        `doctor`'s backend check are what stop the fallback being silent."""
+        with caplog.at_level(logging.WARNING):
+            parsed = self._parse({"backend": "devbxo"})
+
+        assert "backend" not in parsed
+        assert "devbxo" in caplog.text
+
+    def test_a_relative_socket_dir_is_refused(self, caplog):
+        """It would anchor on whatever directory the daemon was started in,
+        which is not a boundary anyone chose."""
+        with caplog.at_level(logging.WARNING):
+            parsed = self._parse({"exec_socket_dir": "run/exec"})
+
+        assert "exec_socket_dir" not in parsed
+        assert "absolute" in caplog.text
+
+    def test_a_bare_string_shim_list_is_refused(self, caplog):
+        """`shim_commands = "npm"` iterates as *characters*, so it would install
+        a shim called `n` and one called `p` — the same failure
+        `sandbox_ro_paths` had, and it gets the same explicit refusal."""
+        with caplog.at_level(logging.WARNING):
+            parsed = self._parse({"shim_commands": "npm"})
+
+        assert "shim_commands" not in parsed
+
+    @pytest.mark.parametrize("entry", ["../evil", "/bin/sh", "a b", "", ".hidden"])
+    def test_a_shim_entry_that_is_not_a_command_name_is_dropped(self, entry):
+        """The name becomes a filename in a directory on the model's PATH, so a
+        `/` would write outside it."""
+        parsed = self._parse({"shim_commands": ["npm", entry]})
+
+        assert parsed["shim_commands"] == ["npm"]
+
+    @pytest.mark.parametrize("interpreter", ["python", "python3"])
+    def test_the_interpreter_cannot_be_shimmed(self, interpreter, caplog):
+        """Not a preference. `build_bwrap_cmd` starts the sandbox's own network
+        bridge as `python3 {bridge_path}` inside the namespace with the model's
+        PATH in force, so a shim would route the bridge into a container that
+        has neither the script nor the socket — breaking egress for every
+        developer-enabled task, not only the ones running a build."""
+        with caplog.at_level(logging.WARNING):
+            parsed = self._parse({"shim_commands": ["npm", interpreter]})
+
+        assert parsed["shim_commands"] == ["npm"]
+        assert interpreter in caplog.text
+
+    def test_make_is_merely_absent_and_an_operator_may_add_it(self):
+        """The routing argument against it is real — shimming a driver inverts
+        routing for everything beneath it — but it is a judgement about
+        Makefiles rather than a mechanism, so the key stays open."""
+        from istota.config import DEFAULT_SHIM_COMMANDS
+
+        assert "make" not in DEFAULT_SHIM_COMMANDS
+        assert self._parse({"shim_commands": ["make"]})["shim_commands"] == ["make"]
+
+    def test_duplicates_collapse(self):
+        assert self._parse({"shim_commands": ["npm", "npm"]})["shim_commands"] == ["npm"]
+
+    @pytest.mark.parametrize(
+        "value", [float("nan"), float("inf"), "5", True, None]
+    )
+    def test_a_bad_timeout_takes_the_default(self, value):
+        """`int(float("inf"))` raises OverflowError and `int(float("nan"))`
+        raises ValueError, and TOML spells both."""
+        assert "connect_timeout_seconds" not in self._parse(
+            {"connect_timeout_seconds": value}
+        )
+
+    def test_timeouts_are_floored_rather_than_refused(self):
+        parsed = self._parse(
+            {"connect_timeout_seconds": 0, "idle_timeout_seconds": -1}
+        )
+
+        assert parsed["connect_timeout_seconds"] > 0
+        assert parsed["idle_timeout_seconds"] >= 1
+
+    def test_a_non_table_is_ignored(self):
+        assert self._parse("devbox") == {}
+
+    def test_the_block_loads_from_toml(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[developer]\n"
+            'enabled = true\n'
+            'repos_dir = "/srv/repos"\n\n'
+            "[developer.container]\n"
+            'backend = "devbox"\n'
+            'shim_commands = ["npm", "cargo"]\n'
+        )
+
+        config = load_config(path)
+
+        assert config.developer.container.backend == "devbox"
+        assert config.developer.container.shim_commands == ["npm", "cargo"]
+
+    def test_an_absent_block_is_the_default(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text('[developer]\nenabled = true\nrepos_dir = "/srv/repos"\n')
+
+        config = load_config(path)
+
+        assert config.developer.container.backend == "none"
+
+
+class TestTheRepoRootHelper:
+    """One helper behind every per-task consumer of the repos tree.
+
+    They must not disagree — a bind at one spelling and a credential scrub at
+    another is a directory the model can reach and nothing sweeps.
+    """
+
+    def _config(self, repos_dir):
+        from istota.config import DeveloperConfig
+
+        return Config(developer=DeveloperConfig(enabled=True, repos_dir=repos_dir))
+
+    def test_it_appends_the_user_id(self):
+        from istota.config import repos_root
+
+        assert str(repos_root(self._config("/srv/repos"), "alice")) == "/srv/repos/alice"
+
+    def test_it_returns_the_path_as_written(self, tmp_path):
+        """Not resolved. `_bind` uses the string it is handed as the sandbox
+        destination, so resolving here would put a symlinked `repos_dir` and a
+        cache under it at two names inside the namespace, hence on two mounts,
+        and `link(2)` returns EXDEV between them."""
+        from istota.config import repos_root
+
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+
+        assert str(repos_root(self._config(str(link)), "alice")) == f"{link}/alice"
+
+    def test_no_user_means_no_root(self):
+        """The heartbeat builds a task with an empty user id, and
+        `{repos_dir}/` is the global root wearing a per-user spelling."""
+        from istota.config import repos_root
+
+        assert repos_root(self._config("/srv/repos"), "") is None
+
+    def test_no_repos_dir_means_no_root(self):
+        from istota.config import repos_root
+
+        assert repos_root(self._config(""), "alice") is None

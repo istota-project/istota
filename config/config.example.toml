@@ -917,6 +917,58 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # worktree_retention_hours = 24.0
 
 # ----------------------------------------------------------------------------
+# Where project code builds and runs
+# ----------------------------------------------------------------------------
+# A deploy-time choice, not a runtime one: within a deployment there is exactly
+# one place a build happens, which is what keeps the property a per-command
+# fallback would cost — nothing on the host ever consumes an environment the
+# container built, so no parity rule has to hold.
+#
+# "none" is the default and is what every deployment did before this key
+# existed: npm, uv, cargo and the rest run on the host inside the task's bwrap
+# sandbox, where they cannot reach a registry that is not on the CONNECT
+# allowlist and cannot install a system package.
+#
+# "devbox" routes them into that user's devbox over a Unix-socket exec
+# transport. It needs `[devbox] enabled`, a container for the user, and the
+# devbox image rebuilt with the daemon's own uid — the Ansible role does the
+# last of those from a `getent` lookup. A mismatched uid is the one failure with
+# no error message anywhere that names it: the container cannot write into a
+# worktree the daemon made, and once that is worked around the daemon cannot
+# unlink a tree the container made, so every worktree that ever ran a build
+# becomes permanently unreapable.
+#
+# Check it with `istota doctor --only developer.container`, which answers four
+# questions that each fail silently: does this file agree with the running
+# daemon, does the transport answer, do the two sides agree on uid and repos
+# root, and is the uv cache mounted.
+#
+# Note `repos_dir` above is a *per-user root* once this is on: the daemon
+# derives `{repos_dir}/{user_id}` and mounts only that into the user's
+# container.
+
+# [developer.container]
+# backend = "none"                    # none | devbox
+# exec_socket_dir = "/run/istota-exec" # the parent; the socket is {dir}/{user}/exec.sock
+# connect_timeout_seconds = 5.0        # the client's connect budget
+# idle_timeout_seconds = 3600          # server-side backstop reap for an idle connection
+#
+# # The commands fronted by a shim. Two absences are deliberate and one of them
+# # is not negotiable. `python3` is refused whatever you write here: the sandbox
+# # starts its own network bridge with it, so a shim would route that into the
+# # container and break egress for every developer-enabled task. `make` is
+# # merely omitted — shimming a *driver* inverts routing for everything beneath
+# # it, so a Makefile calling git, gh or python3 would get the container's
+# # copies. Add it if you know your Makefiles; the cost of leaving it out is a
+# # Makefile that calls ./node_modules/.bin/foo by path.
+# shim_commands = [
+#     "npm", "npx", "pnpm", "yarn", "node",
+#     "uv", "uvx", "pip", "pip3",
+#     "cargo", "rustc", "rustup",
+#     "go", "bundle", "gem",
+# ]
+
+# ----------------------------------------------------------------------------
 # Code review (`istota-skill code_review run`)
 # ----------------------------------------------------------------------------
 # One or two text-only reviewers over a branch diff, run daemon-side through the

@@ -3,6 +3,7 @@
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -697,11 +698,87 @@ class ReviewConfig:
     max_calls_per_task: int = 8
 
 
+#: The commands the container backend fronts with a shim. Named, never
+#: inferred, and two absences are deliberate.
+#:
+#: ``python3`` is not here: the sandbox launches its own network bridge as
+#: ``python3 {bridge_path}`` inside the namespace, several recipes in
+#: ``developer/skill.md`` parse forge output with ``python3 -c``, and the exec
+#: client is itself a Python script. Shimming it routes all three into a
+#: container that has none of them.
+#:
+#: ``make`` is not here either, and that one is a routing argument rather than
+#: a plumbing one. Shimming a *driver* inverts routing for everything beneath
+#: it: once ``make`` runs in the container, nothing it invokes routes back,
+#: because the shim directory exists only in the sandbox's ``PATH``. A Makefile
+#: calling ``git``, ``gh``, ``python3`` or ``istota-skill`` would get the
+#: container's copies — no credential helper, no forge policy wrapper, possibly
+#: no interpreter. Left on the host, each ``npm`` or ``cargo`` it invokes routes
+#: individually, which is the correct semantics; it breaks only where a Makefile
+#: calls ``./node_modules/.bin/foo`` by path, which is loud and narrow. The key
+#: is configurable for an operator who knows their Makefiles.
+DEFAULT_SHIM_COMMANDS: tuple[str, ...] = (
+    "npm", "npx", "pnpm", "yarn", "node",
+    "uv", "uvx", "pip", "pip3",
+    "cargo", "rustc", "rustup",
+    "go", "bundle", "gem",
+)
+
+#: ``developer.container.backend`` values.
+CONTAINER_BACKEND_NONE = "none"
+CONTAINER_BACKEND_DEVBOX = "devbox"
+CONTAINER_BACKENDS = (CONTAINER_BACKEND_NONE, CONTAINER_BACKEND_DEVBOX)
+
+
+@dataclass
+class ContainerConfig:
+    """``[developer.container]`` — where project code builds and runs.
+
+    A **deploy-time** choice, not a runtime one. Within a deployment there is
+    exactly one place a build happens, which is what keeps the property a
+    per-command fallback would cost: nothing on the host ever consumes an
+    environment the container built, so no parity rule has to hold.
+
+    ``backend = "devbox"`` routes the commands in ``shim_commands`` into the
+    user's devbox over the exec transport (``devbox_exec_protocol``). ``"none"``
+    is the default and is byte-identical to the behaviour before this existed.
+
+    ``exec_socket_dir`` is the **parent**; the socket is
+    ``{exec_socket_dir}/{user_id}/exec.sock``, and only the per-user
+    subdirectory is ever mounted into a container — mounting the parent would
+    put every user's socket in every user's container, which is arbitrary
+    command execution against another user's repositories.
+    """
+    backend: str = CONTAINER_BACKEND_NONE
+    exec_socket_dir: str = "/run/istota-exec"
+    # The client's connect budget, and the only timeout on the connect path.
+    connect_timeout_seconds: float = 5.0
+    # Server-side backstop reap for a connection with no traffic in either
+    # direction. Deliberately longer than most values of
+    # `scheduler.task_timeout_minutes`, so in practice it only ever fires on an
+    # orphan whose task is already gone. That is the right shape for a backstop:
+    # do not "fix" it to something aggressive enough to kill a long link step.
+    idle_timeout_seconds: int = 3600
+    shim_commands: list[str] = field(
+        default_factory=lambda: list(DEFAULT_SHIM_COMMANDS)
+    )
+
+
 @dataclass
 class DeveloperConfig:
     """Developer skill configuration for git + GitLab/GitHub workflows."""
     enabled: bool = False
-    repos_dir: str = ""           # Base directory for repo clones/worktrees
+    # Base directory for repo clones/worktrees. **A per-user root**: the daemon
+    # derives `{repos_dir}/{user_id}` (`config.repos_root`) and everything that
+    # scopes a task — the bwrap bind, the native file-tool write root, the
+    # `DEVELOPER_REPOS_DIR` manifest var, `git_remote_scrub` — is handed that
+    # rather than this. One rule closing three holes: a devbox mounting the
+    # global root would give user B write access to user A's worktrees; a
+    # non-admin with a devbox would reach past the admin-only bwrap bind
+    # through the transport; and a shared uv cache under it would re-create the
+    # cross-user unpacked-wheel path `resolve_sandbox_cache_dir` was written to
+    # remove.
+    repos_dir: str = ""
     gitlab_url: str = "https://gitlab.com"
     gitlab_token: str = ""        # API token (read_api + write_repository scope recommended)
     gitlab_username: str = ""     # GitLab username for HTTPS auth
@@ -773,6 +850,7 @@ class DeveloperConfig:
     # floor — a shorter window reaps the checkout a task is still setting up.
     worktree_retention_hours: float = 24.0
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    container: ContainerConfig = field(default_factory=ContainerConfig)
 
 
 @dataclass
@@ -2043,6 +2121,208 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     )
 
 
+#: What a `shim_commands` entry may look like. A shim's name becomes a filename
+#: in a directory on the model's PATH.
+_SHIM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+#: Names `shim_commands` may not carry, whatever an operator writes. See the
+#: refusal's own comment for why this is breakage rather than taste.
+_UNSHIMMABLE_COMMANDS = frozenset({"python", "python3"})
+
+
+def _parse_container_block(raw: object) -> dict:
+    """Coerce ``[developer.container]`` into ``ContainerConfig`` kwargs.
+
+    Corrects rather than refuses, one WARNING per correction, because
+    ``load_config`` runs in the scheduler, the web app, the webhook receiver and
+    every host-side skill CLI the proxy spawns per call — a typo here must not
+    stop any of them from starting.
+
+    The one field worth being careful about is ``backend``. An unknown value
+    falls back to ``none``, never to ``devbox``: a feature that silently
+    no-ops is how the compose devbox reached the state ``312f8fd5`` found it
+    in, but a *routing* decision taken from a typo is worse, and the startup
+    line plus ``doctor``'s ``developer.container.backend`` check are what stop
+    the no-op being silent.
+    """
+    if not isinstance(raw, dict):
+        if raw:
+            logger.warning(
+                "[developer.container] is not a table; ignoring it and running "
+                "backend = %s", CONTAINER_BACKEND_NONE,
+            )
+        return {}
+
+    kwargs: dict = {}
+
+    if "backend" in raw:
+        value = raw["backend"]
+        backend = str(value).strip().lower() if isinstance(value, str) else ""
+        if backend in CONTAINER_BACKENDS:
+            kwargs["backend"] = backend
+        else:
+            logger.warning(
+                "[developer.container] backend=%r is not one of %s; using %r. "
+                "Development commands will run on the host.",
+                value, ", ".join(CONTAINER_BACKENDS), CONTAINER_BACKEND_NONE,
+            )
+
+    if "exec_socket_dir" in raw:
+        value = raw["exec_socket_dir"]
+        if isinstance(value, str) and value.strip().startswith("/"):
+            kwargs["exec_socket_dir"] = value.strip().rstrip("/") or "/"
+        else:
+            logger.warning(
+                "[developer.container] exec_socket_dir=%r is not an absolute "
+                "path; using the default. A relative socket directory would "
+                "anchor on whatever directory the daemon was started in.",
+                value,
+            )
+
+    for name, caster, floor in (
+        ("connect_timeout_seconds", float, 0.1),
+        ("idle_timeout_seconds", int, 1),
+    ):
+        if name not in raw:
+            continue
+        value = raw[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            logger.warning(
+                "[developer.container] %s=%r is not a number; using the default",
+                name, value,
+            )
+            continue
+        if not math.isfinite(value):
+            # `int(float("inf"))` raises OverflowError and `int(float("nan"))`
+            # raises ValueError, and TOML spells both.
+            logger.warning(
+                "[developer.container] %s=%r is not finite; using the default",
+                name, value,
+            )
+            continue
+        kwargs[name] = caster(max(value, floor))
+
+    if "shim_commands" in raw:
+        value = raw["shim_commands"]
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            # A bare string iterates as characters, which would install a shim
+            # called `n` and one called `p`. Same failure `sandbox_ro_paths`
+            # had, so it gets the same explicit refusal.
+            logger.warning(
+                "[developer.container] shim_commands=%r is not a list; using "
+                "the default set", value,
+            )
+        else:
+            commands: list[str] = []
+            for entry in value:
+                name = str(entry).strip() if isinstance(entry, str) else ""
+                # A shim is a file written into a directory on the model's PATH,
+                # so the name has to be a bare command and nothing else. A `/`
+                # would write outside `{dev_bin}`; a dot-prefix or a shell
+                # metacharacter is not a command anyone means.
+                if not name or not _SHIM_NAME_RE.match(name):
+                    logger.warning(
+                        "[developer.container] shim_commands entry %r is not a "
+                        "plain command name; skipping it", entry,
+                    )
+                    continue
+                if name in _UNSHIMMABLE_COMMANDS:
+                    # Not a preference. `build_bwrap_cmd` starts the sandbox's
+                    # own network bridge as `python3 {bridge_path}` *inside* the
+                    # namespace, with the model's PATH in force, so a `python3`
+                    # shim would route the bridge into a container that has
+                    # neither the script nor the socket — breaking egress for
+                    # every developer-enabled task, not only the ones running a
+                    # build. The exec client is itself a Python script, and
+                    # several `developer/skill.md` recipes parse forge output
+                    # with `python3 -c`.
+                    logger.warning(
+                        "[developer.container] shim_commands entry %r is refused: "
+                        "shimming it would route the sandbox's own network bridge "
+                        "into the container. Leave the interpreter on the host.",
+                        name,
+                    )
+                    continue
+                if name not in commands:
+                    commands.append(name)
+            kwargs["shim_commands"] = commands
+
+    return kwargs
+
+
+def repos_root(config: "Config", user_id: str) -> Path | None:
+    """This user's subdirectory of ``developer.repos_dir``, or None.
+
+    The one helper behind every per-task consumer of the repos tree: the bwrap
+    RW bind, the native brain's file-tool write root, the protected-cache-parent
+    list, ``git_remote_scrub``'s sweep root and the container's bind mount. They
+    must not disagree — a bind at one spelling and a scrub at another is a
+    directory the model can reach and nothing sweeps.
+
+    Returned **as written**, not resolved, for the reason
+    ``resolve_sandbox_cache_dir`` states at length: ``_bind`` uses the string it
+    is handed as the sandbox destination, so resolving here would put a
+    symlinked ``repos_dir`` and a cache under it at two names inside the
+    namespace, hence on two mounts, and ``link(2)`` returns EXDEV between them.
+
+    None when the skill has no ``repos_dir``, or when there is no user to scope
+    to — the heartbeat builds a task with an empty user id, and a root of
+    ``{repos_dir}/`` is the global root wearing a per-user spelling.
+    """
+    raw = getattr(getattr(config, "developer", None), "repos_dir", "")
+    if not raw or not user_id:
+        return None
+    return Path(raw) / user_id
+
+
+def container_backend(config: "Config") -> str:
+    """``developer.container.backend``, defaulted for a config built by hand."""
+    dev = getattr(config, "developer", None)
+    container = getattr(dev, "container", None)
+    return getattr(container, "backend", CONTAINER_BACKEND_NONE)
+
+
+def devbox_container_backend(config: "Config") -> bool:
+    """Is this deployment routing development work into the devbox?
+
+    Configuration alone. It says nothing about whether a *task* may reach the
+    container — that is ``"developer" in authorized_skills``, decided in the
+    executor, which is where a security decision belongs.
+    """
+    dev = getattr(config, "developer", None)
+    if not getattr(dev, "enabled", False) or not getattr(dev, "repos_dir", ""):
+        return False
+    return container_backend(config) == CONTAINER_BACKEND_DEVBOX
+
+
+def exec_socket_dir(config: "Config", user_id: str) -> Path | None:
+    """The per-user directory holding this user's exec socket, or None.
+
+    The *directory*, never the socket file, is what gets mounted and bound: a
+    server restart unlinks and recreates the inode, and a bind mount of the file
+    itself strands the other side against a dead target. Same precedent as
+    ``devbox_proxy._default_socket_path``.
+    """
+    dev = getattr(config, "developer", None)
+    container = getattr(dev, "container", None)
+    parent = getattr(container, "exec_socket_dir", "")
+    if not parent or not user_id:
+        return None
+    return Path(parent) / user_id
+
+
+def exec_socket_path(config: "Config", user_id: str) -> Path | None:
+    """``{exec_socket_dir}/{user_id}/exec.sock``, or None."""
+    directory = exec_socket_dir(config, user_id)
+    return None if directory is None else directory / EXEC_SOCKET_NAME
+
+
+#: The socket's filename inside the per-user directory. A constant rather than a
+#: setting: both sides compose the path themselves and there is nothing to
+#: negotiate, and the shims bake the result in.
+EXEC_SOCKET_NAME = "exec.sock"
+
+
 def _validate_sandbox_ro_paths(raw: object) -> list[str]:
     """Coerce ``[security] sandbox_ro_paths`` to a safe list of absolute paths.
 
@@ -3069,6 +3349,7 @@ def load_config(config_path: Path | None = None) -> Config:
             )
             if name in rev
         }
+        container_kwargs = _parse_container_block(dev.get("container", {}))
         config.developer = DeveloperConfig(
             enabled=dev.get("enabled", False),
             repos_dir=dev.get("repos_dir", ""),
@@ -3095,6 +3376,7 @@ def load_config(config_path: Path | None = None) -> Config:
             worktree_reap_enabled=dev.get("worktree_reap_enabled", True),
             worktree_retention_hours=dev.get("worktree_retention_hours", 24.0),
             review=ReviewConfig(**review_kwargs),
+            container=ContainerConfig(**container_kwargs),
             **extra,
         )
 
