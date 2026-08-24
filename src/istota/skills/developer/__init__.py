@@ -24,10 +24,13 @@ has paths to that directory that neither the bind nor the deny root covers.
 Same posture as the policy itself: it stops a mistake, not a decision. The
 boundary that does the real work is the forge token's own scope.
 
-Static env vars (DEVELOPER_REPOS_DIR, GITLAB_URL, GITHUB_URL, the optional
+Static env vars (GITLAB_URL, GITHUB_URL, the optional
 namespace/owner/reviewer/credit knobs, GITLAB_TOKEN, GITHUB_TOKEN) come
 from the manifest's ``env:`` block — this hook only handles the parts
-that aren't expressible as static EnvSpecs.
+that aren't expressible as static EnvSpecs. ``DEVELOPER_REPOS_DIR`` is one
+of those parts now: it is the task's own subtree of ``developer.repos_dir``
+rather than the configured value, so the hook owns it and the manifest
+entry is ``from: setup_env``.
 """
 
 from __future__ import annotations
@@ -393,6 +396,17 @@ def setup_env(ctx) -> dict[str, str]:
     # the credential helper, GIT_CONFIG_COUNT and the forge-CLI wiring, leaving
     # a task that looks fine and cannot authenticate. `scrub_and_report` holds a
     # never-raises contract of its own; this ordering is the second guard.
+    #
+    # That all-or-nothing return now costs `DEVELOPER_REPOS_DIR` too, since the
+    # manifest is no longer a second source of it, and moving the assignment
+    # earlier would not help — the hook's whole return value goes, wherever in
+    # it the raise happened. What is worth knowing is that the two new
+    # consequences are quiet: `$DEVELOPER_REPOS_DIR/<ns>/<project>.git` expands
+    # to an absolute path on the sandbox root tmpfs, and `code_review` takes its
+    # `repos_root_unavailable` skip, which is exit 0 and non-blocking by design.
+    # So a raise anywhere above lands work unreviewed rather than failing. The
+    # fix for that is in `dispatch_setup_env_hooks`, which should not be
+    # swallowing a setup failure into an empty dict at all.
     # The package caches sit under repos_dir by default (ISSUE-319) and hold
     # one directory per unpacked wheel. Pruned from the walk where the walk
     # reaches them — none of them is a repository, and this runs on every task.
@@ -419,6 +433,23 @@ def setup_env(ctx) -> dict[str, str]:
         # Absent for a non-admin, matching `_user_repos_dir`'s gate and the
         # bind's: a variable with no bind behind it names a directory on the
         # root tmpfs, which is the defect this stage closes, one gate out.
+        #
+        # **The authorization gate is gone, and that is deliberate.** The
+        # manifest resolved this through `build_skill_env(authorized_skills,
+        # …)`, so a deployment with `[developer]` configured but no forge token
+        # had the config key and no variable. A hook is dispatched over the
+        # whole skill index whatever the task selected, so every admin task on
+        # a developer-enabled deployment now carries it. That widens what the
+        # model is *told*, not what it can reach: `build_bwrap_cmd` gates the
+        # bind on `is_admin and config.developer.enabled` alone — never on
+        # skill selection — so the directory is already in the namespace of
+        # exactly this set of tasks, and naming it adds nothing. Two things did
+        # depend on the old gate and were corrected with this change: the smoke
+        # tier's authorization control (`tests/smoke/test_secret_isolation.py`,
+        # which now reads `GITLAB_URL`, a var that is still manifest-resolved
+        # and so still gated) and the pre-commit hook's unattended-shell marker,
+        # whose meaning shifted from "authorized for the developer skill" to
+        # "an admin task on a developer-enabled deployment" — see AGENTS.md.
         env["DEVELOPER_REPOS_DIR"] = str(repos_root)
         scrub_and_report(repos_root, skip=[cache_root] if cache_root else [])
 

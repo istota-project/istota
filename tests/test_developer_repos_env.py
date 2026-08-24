@@ -64,9 +64,13 @@ def _base_config(tmp_path: Path, *, bundled: Path | None = None) -> Config:
     return Config(
         db_path=tmp_path / "data" / "istota.db",
         module_data_dir=tmp_path / "data" / "modules",
-        nextcloud=NextcloudConfig(
-            url="https://nc.example.com", username="bot", app_password="nc_secret",
-        ),
+        # No Nextcloud URL, and that is load-bearing rather than tidiness.
+        # `execute_task`'s memory path reaches `ensure_user_directories_v2`,
+        # which POSTs an OCS share — measured at 32 DNS lookups across this
+        # file with a URL set. It costs nothing here (nothing asserts on
+        # Nextcloud) and a test that opens a socket is a test that lies about
+        # what it runs against; `_no_sockets` below keeps it that way.
+        nextcloud=NextcloudConfig(),
         nextcloud_mount_path=mount,
         skills_dir=overrides,
         bundled_skills_dir=bundled,
@@ -74,6 +78,30 @@ def _base_config(tmp_path: Path, *, bundled: Path | None = None) -> Config:
         scheduler=SchedulerConfig(task_timeout_minutes=5),
         security=SecurityConfig(skill_proxy_enabled=True, skill_proxy_timeout=30),
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_sockets(monkeypatch):
+    """Nothing here may reach the network, and it has to be enforced.
+
+    Every caller on the memory path swallows exceptions for graceful
+    degradation, so a guard that only raised would be caught and the property
+    would quietly revert to a claim. Record, refuse, and assert at teardown —
+    the same shape as `tests/test_prompt_golden.py::_no_sockets`, and for the
+    same reason.
+    """
+    import socket
+
+    attempts: list[str] = []
+
+    def _refuse(*args, **kwargs):
+        attempts.append(str(args[:2]))
+        raise OSError("network access is not allowed in this test")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _refuse)
+    monkeypatch.setattr(socket.socket, "connect", _refuse)
+    yield
+    assert attempts == [], f"this test reached for the network: {attempts}"
 
 
 def _run_task(config: Config, user_id: str = "alice") -> dict:

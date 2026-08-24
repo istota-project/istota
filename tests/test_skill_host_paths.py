@@ -312,13 +312,44 @@ class TestDeveloperReposRoot:
         monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(tmp_path / "repos" / "bob"))
         assert developer_repos_root() is None
 
-    def test_a_symlinked_user_component_is_refused(self, tmp_path, monkeypatch):
+    def test_a_root_symlinked_to_the_callers_own_subtree_is_refused(
+        self, tmp_path, monkeypatch,
+    ):
+        """The case only the *as-written* half of the check catches.
+
+        Every other refusal here is caught by the resolved name alone, so
+        deleting `Path(raw).name != user_id` would leave them all green. Here
+        the raw name is `bob` and the resolved one is `alice`, so a check on
+        the resolved name says yes to a variable naming somebody else's
+        directory. Harmless in itself — the link points at this caller's own
+        tree — but it is the half of the guard that answers "is the variable
+        the one the layout describes", and without it that question is not
+        being asked at all.
+        """
+        root = tmp_path / "repos"
+        (root / "alice").mkdir(parents=True)
+        (root / "bob").symlink_to(root / "alice")
+        monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root / "bob"))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        assert developer_repos_root() is None
+
+    @pytest.mark.parametrize("target_name", ["elsewhere", "alice"])
+    def test_a_symlinked_user_component_is_refused(
+        self, tmp_path, monkeypatch, target_name,
+    ):
         """`{repos_dir}` was bound read-write for every admin for as long as it
         was shared, so `{repos_dir}/{user_id}` may already be a symlink a task
         left behind. `executor.get_user_repos_dir` refuses to bind one; this
-        refuses to contain against one, so the two seams agree."""
-        elsewhere = tmp_path / "elsewhere"
-        elsewhere.mkdir()
+        refuses to contain against one, so the two seams agree.
+
+        **The target's own name is the parameter, and `alice` is the case that
+        matters.** A planted link would be named for its victim, so its target
+        can be too — and against a check that compares the *resolved* basename
+        to the user id, that one passes. Only the second case distinguishes the
+        structural rule from a second name comparison.
+        """
+        elsewhere = tmp_path / "outside" / target_name
+        elsewhere.mkdir(parents=True)
         root = tmp_path / "repos"
         root.mkdir()
         (root / "alice").symlink_to(elsewhere)

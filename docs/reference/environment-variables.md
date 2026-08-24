@@ -94,7 +94,7 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 
 | Variable | Source |
 |---|---|
-| `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` |
+| `DEVELOPER_REPOS_DIR` | `{config.developer.repos_dir}/{user_id}`, derived by the developer skill's `setup_env` hook. Admin tasks only — it is the subtree the sandbox binds, and a non-admin has no bind behind it. |
 | `GITLAB_URL` | `config.developer.gitlab_url` |
 | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` |
 | `GITLAB_REVIEWER` | `config.developer.gitlab_reviewer` |

@@ -181,9 +181,10 @@ class TestAMissingGitleaksFailsClosedForAnAgent:
         assert "did not run" in result.stdout
 
     def test_a_sandboxed_task_is_refused_even_without_the_developer_skill(self, repo):
-        """`DEVELOPER_REPOS_DIR` only appears for a task authorized for the
-        developer skill. `ISTOTA_SANDBOXED` is set for every task the model
-        runs, so it covers the commits the narrower marker would miss."""
+        """`DEVELOPER_REPOS_DIR` only appears for an admin task on a
+        developer-configured deployment. `ISTOTA_SANDBOXED` is set for every
+        task the model runs where the sandbox is in effect, so it covers the
+        commits the narrower marker would miss."""
         result = run_hook(repo, ISTOTA_SANDBOXED="1")
         assert result.returncode == 1
 

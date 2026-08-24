@@ -1,4 +1,10 @@
-"""Keep credentials out of the git configs under ``DEVELOPER_REPOS_DIR``.
+"""Keep credentials out of the git configs under ``developer.repos_dir``.
+
+The two callers hand this module different roots and neither is the whole tree
+any more: the developer skill's ``setup_env`` sweeps one user's own subtree
+(which is what ``DEVELOPER_REPOS_DIR`` now names), ``worktree_reaper`` sweeps
+the configured root from the scheduler. See ``_MAX_DEPTH`` below, which is the
+one place that difference is load-bearing.
 
 ``repos_dir`` is bound read-write into the admin sandbox (``build_bwrap_cmd``,
 the "Developer repos (RW)" bind) and every worktree cut from a bare clone

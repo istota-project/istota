@@ -173,10 +173,30 @@ def developer_repos_root() -> Path | None:
 
     Two checks, mirroring `executor.get_user_repos_dir`. The name as written
     must be the user id, which refuses a root one level too high or one naming
-    somebody else; and the name after resolution must be the user id too, which
-    refuses a symlink standing where that subtree should be. The tree was bound
-    read-write and shared for as long as the old layout stood, so such a link
-    is model-plantable rather than hypothetical.
+    somebody else; and the resolved path must equal the resolved *parent* plus
+    that name, which refuses a symlink standing where the subtree should be.
+    The tree was bound read-write and shared for as long as the old layout
+    stood, so such a link is model-plantable rather than hypothetical. The
+    second is deliberately not a second `.name` test — a planted link would be
+    named for its victim, so `{repos_dir}/alice -> /anywhere/alice` resolves to
+    a name that still passes one.
+
+    **What it does not check** is that the parent is `developer.repos_dir`, so
+    `/anywhere/at/all/alice` passes. It cannot: this is a stdlib-only leaf with
+    no access to the loaded config, which is why `executor.get_user_repos_dir`
+    — which does know the configured root — is the seam that spells the whole
+    equality out. Read `{repos_dir}/{ISTOTA_USER_ID}` above as the shape this
+    checks *against*, not as an equality enforced here.
+
+    One consequence is worth naming because it looks like a bug and is not
+    fixable from here: where the user id happens to equal the last component of
+    `developer.repos_dir` (`repos_dir = /srv/dev`, user `dev`), the shared root
+    and that user's subtree are indistinguishable to this function and the
+    shared root is accepted. `/srv/dev` is a legitimate per-user root for `dev`
+    under `repos_dir = /srv`, and nothing in the environment says which. The
+    boundary against that is upstream, where the value is derived. Nothing
+    reaches this today that could steer it: the variable is daemon-set and is
+    never model-supplied.
 
     None when the variable is unset or blank, when `ISTOTA_USER_ID` is unset or
     blank, or when either check fails. Refusing is this module's posture for a
@@ -207,7 +227,25 @@ def developer_repos_root() -> Path | None:
     # components is the shallowest plausible real root (`/srv/alice`).
     if len(root.parts) < 3:
         return None
-    if Path(raw).name != user_id or root.name != user_id:
+    # Two checks, and the second is structural rather than a second name
+    # comparison. The name as written must be the user id — that refuses a root
+    # one level too high, or one naming somebody else. Then the *resolved* path
+    # must be the child that name denotes inside the resolved parent, which is
+    # `executor.get_user_repos_dir`'s rule with the one term this module cannot
+    # know (`developer.repos_dir`) replaced by the parent it was given. A
+    # second `.name` test would not do: `{repos_dir}/alice -> /anywhere/alice`
+    # resolves to a path whose name is still `alice`, and a planted link would
+    # of course be named for its victim.
+    #
+    # Resolving the parent separately is what keeps a symlinked deployment root
+    # (`/srv/repos` -> `/data/repos`) working: that link is above the user
+    # component, so both sides resolve through it and agree.
+    if Path(raw).name != user_id:
+        return None
+    try:
+        if Path(raw).parent.resolve() / user_id != root:
+            return None
+    except (OSError, ValueError):
         return None
     return root
 

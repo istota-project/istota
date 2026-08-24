@@ -116,7 +116,7 @@ Not covered by any of this: a deployment where bwrap is unavailable (Docker with
 | Money | `MONEY_USER` | The istota user_id (in-process facade; config resolved from the per-user money DB via `resolve_for_user`). `MONEY_CONFIG` is gone — there is no standalone money config path. |
 | Feeds | `FEEDS_USER` | From the user's `feeds` resource (in-process; defaults to istota user_id) |
 | Location | `LOCATION_DB_PATH` | `istota.location.resolve_for_user(user_id, config).db_path` via the location skill's `setup_env` hook. Per-user `{workspace}/location/data/location.db`. Skill subcommands needing the framework geocode caches (`reverse_geocode`, `day_summary`) open a second conn to `ISTOTA_DB_PATH`. |
-| Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
+| Developer | `DEVELOPER_REPOS_DIR` | `{config.developer.repos_dir}/{user_id}` via the developer skill's `setup_env` hook (if enabled, and the task is an admin's). The per-user subtree, matching the bind — never the shared root. |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
 | Developer | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` (if enabled + set) |
 | Developer | `GITLAB_REVIEWER` | `config.developer.gitlab_reviewer` (if enabled + set) — the reviewer's GitLab username |
