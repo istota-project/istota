@@ -53,6 +53,15 @@ from istota.git_remote_scrub import scrub_and_report
 
 logger = logging.getLogger("istota.skills.developer")
 
+#: The package-cache directory's name inside a user's repos subtree.
+#:
+#: ``executor.SANDBOX_CACHE_ROOT_NAME``, restated for the same reason
+#: ``_user_repos_dir`` restates the layout rule: a skill module cannot import
+#: the executor that imports it (``istota.skills`` star-imports every skill, so
+#: the executor's import graph would ride along on every path touching one).
+#: ``tests/test_sandbox.py::TestPerUserReposDir`` holds the two equal.
+SANDBOX_CACHE_ROOT_NAME = ".package-caches"
+
 # Where the canonical wrapper lives, for copying into the task's .developer.
 _FORGE_CLI_SOURCE = Path(__file__).resolve().parents[2] / "forge_cli.py"
 
@@ -407,13 +416,17 @@ def setup_env(ctx) -> dict[str, str]:
     # So a raise anywhere above lands work unreviewed rather than failing. The
     # fix for that is in `dispatch_setup_env_hooks`, which should not be
     # swallowing a setup failure into an empty dict at all.
-    # The package caches sit under repos_dir by default (ISSUE-319) and hold
-    # one directory per unpacked wheel. Pruned from the walk where the walk
-    # reaches them — none of them is a repository, and this runs on every task.
-    # Inert while the configured cache root is outside `{repos_dir}/{user_id}`,
-    # which is now the whole of what is walked.
-    cache_root = config.security.sandbox_cache_dir
+    # The package caches sit *inside* the subtree this walks —
+    # `{repos_dir}/{user_id}/.package-caches`, derived by
+    # `executor.resolve_sandbox_cache_dir` — and hold one directory per
+    # unpacked wheel, none of them a repository. So the skip is not an
+    # optimization that happens to be inert: with the derivation in place the
+    # walk reaches the cache on every task, and `git_remote_scrub`'s depth
+    # budget would be spent on wheels. Named from the constant rather than from
+    # `security.sandbox_cache_dir`, which the resolver does not read while
+    # `repos_dir` is set.
     repos_root = _user_repos_dir(dev, ctx)
+    cache_root = repos_root / SANDBOX_CACHE_ROOT_NAME if repos_root else None
     if repos_root is not None:
         # The one place that knows the layout. `DEVELOPER_REPOS_DIR` is the
         # task's own subtree, exactly the path `build_bwrap_cmd` binds, so the

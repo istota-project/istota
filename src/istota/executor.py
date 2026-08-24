@@ -4,7 +4,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -1958,15 +1957,15 @@ _cache_dir_refusals: set[str] = set()
 SANDBOX_CACHE_UV = "uv"
 SANDBOX_CACHE_NPM = "npm"
 
-#: How many entries the cache root may hold before the cache is refused.
+#: The cache directory's name inside a user's own repos subtree.
 #:
-#: One per user in normal operation, so this is not a capacity limit — it is the
-#: bound on how much argv a task can make the *next* task carry. The root lives
-#: inside ``developer.repos_dir``, which is bound read-write, so the entry count
-#: is model-controlled; each masked sibling costs up to four argv entries, and
-#: enough of them push ``execve`` past ``E2BIG`` and fail every later task at
-#: launch. Refusing the cache costs RAM, which is the cheaper of the two.
-MAX_SANDBOX_CACHE_SIBLINGS = 512
+#: ``{developer.repos_dir}/{user_id}/{this}``, derived rather than configured.
+#: The subtree is bound read-write and the cache sits inside it, which is what
+#: puts the cache and a worktree's venv on one mount — ``link(2)`` compares
+#: mounts rather than devices, so a cache anywhere else makes uv copy every
+#: wheel instead of hardlinking it. Dotted so it does not read as a namespace
+#: directory in a listing of the user's clones.
+SANDBOX_CACHE_ROOT_NAME = ".package-caches"
 
 
 def _sandbox_bind_targets(config: Config) -> list[Path]:
@@ -1997,12 +1996,21 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     was both the documented home for the cache *and* an entry on this list,
     bound in full seven lines after it, so the documented shape put every
     user's cache directory inside an ancestor bind emitted later, read-write,
-    for every admin developer task (ISSUE-319). The bind is per-user now, so
-    what an admin task can reach through it is that admin's own subtree — but
-    this list keeps naming the whole root, because the question it answers is
-    what the cache can *swallow*, and a cache mounted over the root would still
-    cover every subtree beneath it. The other direction is
-    ``_sandbox_cache_covering_targets``, which does take a user id.
+    for every admin developer task (ISSUE-319).
+
+    That whole family is gone: the bind is one user's subtree and the cache is
+    derived inside it, so there is no other user's cache in the namespace to
+    reach. The ``repos_dir`` entry below survives the demolition and is worth a
+    word, because with the derivation in place nothing can currently produce a
+    configured cache root while ``repos_dir`` is set —
+    ``resolve_sandbox_cache_dir`` reads ``security.sandbox_cache_dir`` only on
+    the branch where ``repos_dir`` is *unset*, and this entry is only appended
+    when it is set. So it cannot fire today. It stays because this list is the
+    answer to one question — what must a cache never be mounted above — and
+    ``repos_dir`` is on that list on the merits: a cache mounted over the root
+    would cover every user's subtree beneath it. A future second reader of
+    ``sandbox_cache_dir`` would want the entry already here rather than
+    discover its absence the way ISSUE-319 was discovered.
     """
     home = Path(os.environ.get("HOME", "/tmp"))
     targets: list[Path] = [
@@ -2027,151 +2035,8 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     return targets
 
 
-def _sandbox_cache_covering_targets(config: Config, user_id: str) -> list[Path]:
-    """Bind destinations ``build_bwrap_cmd`` emits *after* the cache bind.
-
-    The other direction from ``_sandbox_bind_targets``. One of these being an
-    ancestor of the cache *root* covers the whole root inside the sandbox —
-    every user's subdirectory, read-write — because bwrap applies argv in order
-    and the later mount wins (ISSUE-319).
-
-    That covering bind is not a bug to remove, and this is the part that is
-    counter-intuitive enough to be worth stating: it is the mount that makes
-    ``link(2)`` work. Measured on the deployment, a cache root *outside*
-    ``repos_dir`` and a cache root carved back out of the repos bind with a
-    nested bind both return EXDEV, because ``do_linkat`` compares mounts rather
-    than devices and refuses across a boundary even on one filesystem. So the
-    only shape where uv hardlinks out of its cache into a venv is the one where
-    a single bind covers both. The exposure is closed by masking the sibling
-    directories instead — see ``sandbox_cache_sibling_dirs``.
-
-    Today the developer repos bind is the only entry, and it is that task's own
-    subtree (``get_user_repos_dir``) rather than the configured root — which is
-    why this takes a user id at all. The root is not a bind destination any
-    more, and listing it here would answer a question about a mount nothing
-    emits: over-broad in the refusal it feeds, and wrong in the accounting
-    check in ``build_bwrap_cmd``, which compares this list against the real
-    argv and logs an error per task when a coverer is missing from it.
-
-    The per-resource mounts are the other binds emitted after the cache and
-    cannot reach it: they live under ``nextcloud_mount_path``, which
-    ``_validate_workspace_dir`` already forbids a cache root from overlapping
-    in either direction. Listed without the ``is_admin`` gate the bind itself
-    carries: this feeds a refusal, and refusing a cache for a task that was not
-    exposed costs RAM, where allowing one for a task that was costs the
-    boundary.
-    """
-    repos = get_user_repos_dir(config, user_id)
-    return [repos] if repos is not None else []
-
-
-def _sandbox_cache_is_covered(
-    config: Config, user_id: str, resolved_root: Path,
-) -> Path | None:
-    """The later bind that covers *resolved_root*, or None."""
-    for target in _sandbox_cache_covering_targets(config, user_id):
-        try:
-            resolved_target = target.resolve()
-        except OSError:
-            continue
-        if resolved_root == resolved_target or _is_relative_to(resolved_root, resolved_target):
-            return resolved_target
-    return None
-
-
-def sandbox_cache_sibling_dirs(cache_dir: Path) -> list[Path] | None:
-    """Other users' cache directories beside *cache_dir*, or None if unknowable.
-
-    ``cache_dir`` is ``{root}/{user_id}``; the siblings are every other
-    subdirectory of ``{root}``. ``build_bwrap_cmd`` masks them when a later bind
-    covers the root.
-
-    **Enumerated from the filesystem, not from config.** ``user_profiles`` is
-    not the set that matters — ``resolve_sandbox_cache_dir`` creates a
-    subdirectory lazily on that user's first task, so a list derived from config
-    would miss a user added since the daemon started, and it is precisely the
-    directory that exists that is exposed.
-
-    **A symlink is refused, not masked.** ``Path.is_dir()`` follows symlinks, so
-    a symlinked entry would take a tmpfs at its own name while its target stayed
-    reachable through the covering bind — a mask that reads as protection and is
-    not one. There is no safe way to mask it, so the answer is None and the
-    caller drops the cache bind.
-
-    **None means degrade closed, and that is the opposite of this module's
-    usual instinct.** Everywhere else a cache problem falls open to the
-    pre-ISSUE-305 tmpfs cache, because the alternative is a config typo that
-    fails every task. Here an unlistable root means the sibling set is unknown,
-    and binding uncovered would hand out exactly what the mask exists to stop.
-    Falling back to the root tmpfs costs RAM; falling back to an unmasked shared
-    cache costs the boundary.
-
-    Never raises. The remaining window is a user directory created between this
-    listing and the ``exec`` — milliseconds, and the writer is the daemon
-    itself, but it is a window rather than a proof.
-    """
-    root = cache_dir.parent
-    try:
-        entries = sorted(root.iterdir())
-    except OSError as exc:
-        logger.debug("sandbox_cache_dir %s cannot be listed (%s)", root, exc)
-        return None
-
-    try:
-        own = cache_dir.resolve()
-    except OSError:
-        own = cache_dir
-
-    if len(entries) > MAX_SANDBOX_CACHE_SIBLINGS:
-        # Every mask costs up to four argv entries, and the root is inside
-        # `repos_dir`, which a task can write. Twenty thousand `mkdir`s there
-        # would take the argv past `execve`'s limit and fail *every* later task
-        # at launch — a denial of service on the whole daemon, from inside one
-        # sandbox. The ceiling is far above any real user count, so crossing it
-        # is a fact about the directory rather than about the deployment.
-        logger.debug(
-            "sandbox_cache_dir %s holds %d entries, over the %d ceiling",
-            root, len(entries), MAX_SANDBOX_CACHE_SIBLINGS,
-        )
-        return None
-
-    siblings: list[Path] = []
-    for entry in entries:
-        try:
-            if entry.is_symlink():
-                logger.debug(
-                    "sandbox_cache_dir %s contains a symlink (%s)", root, entry.name,
-                )
-                return None
-            if not entry.is_dir():
-                # A stray file is not a user's cache, and bwrap cannot mount a
-                # tmpfs over one anyway.
-                continue
-            if entry.resolve() == own:
-                continue
-        except OSError as exc:
-            # An entry that cannot be classified is an unknown sibling, and this
-            # function's posture is degrade-closed. The earlier version appended
-            # it — reasoning about a directory it had not established it had —
-            # which is wrong in both directions: `Path.is_symlink` swallows only
-            # ENOENT/ENOTDIR/ELOOP/EINVAL/EBADF, so an EACCES here would mask a
-            # *symlink* at its own name and leave the target reachable, which is
-            # the exact shape the symlink branch above refuses; and a plain file
-            # would be handed to bwrap as `--tmpfs <file>`, which cannot be
-            # mounted, failing every task on the deployment before it runs.
-            if entry == cache_dir:
-                continue
-            logger.debug(
-                "sandbox_cache_dir %s entry %s cannot be classified (%s)",
-                root, entry.name, exc,
-            )
-            return None
-        siblings.append(entry)
-    return siblings
-
-
 def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
-    """This user's ``security.sandbox_cache_dir`` subdirectory, or None.
+    """This user's package-cache directory, or None.
 
     One predicate for two decisions — the RW bind in ``build_bwrap_cmd`` and the
     ``UV_CACHE_DIR`` / ``XDG_CACHE_HOME`` group in ``execute_task``. They must
@@ -2179,32 +2044,56 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
     that exists inside the namespace only on bwrap's root tmpfs, which is the
     RAM-backed cache ISSUE-305 is about, at a new name.
 
-    **Per user, not per deployment.** The configured value is a root; each user
-    gets ``{root}/{user_id}``, created here. A single shared directory would be
-    the first RW surface a non-admin task and an admin task hold in common, and
-    it persists across tasks by construction — and uv's unpacked-wheel cache is
-    trusted on read, never re-verified against a hash, so a planted archive is
-    executed by the next ``uv sync`` that hardlinks out of it. Per-user costs
-    nothing the placement argument was about: hardlink sharing is between one
-    user's worktrees, which stay inside one subdirectory.
+    **Two shapes, and the first one is derived rather than configured.**
+
+    * ``developer.repos_dir`` set: ``{repos_dir}/{user_id}/.package-caches``.
+      The repos bind is ``{repos_dir}/{user_id}`` and is emitted after the cache
+      bind, so it is an ancestor and covers it — one mount, which is the only
+      shape where uv hardlinks a wheel into a venv instead of copying it
+      (``link(2)`` compares mounts rather than devices, measured four ways on
+      the reference deployment). What that covering used to also expose was
+      every *other* user's cache, because the root was shared; it is one user's
+      own subtree now, so there is nothing beside the cache to reach and no
+      mask to emit. ``security.sandbox_cache_dir`` is not consulted at all on
+      this branch — the derivation is the layout, not a default for a key.
+    * ``developer.repos_dir`` unset: ``{security.sandbox_cache_dir}/{user_id}``,
+      unchanged. That serves a deployment running the sandbox without the
+      developer skill, where ISSUE-305 still applies and there is no repos tree
+      to put a cache in. Nothing binds an ancestor of it, so it is its own
+      mount and a venv in the task workspace pays the copy — the same cost it
+      paid before, not a regression introduced here.
+
+    **Per user in both shapes.** A single shared directory would be the first RW
+    surface a non-admin task and an admin task hold in common, and it persists
+    across tasks by construction — and uv's unpacked-wheel cache is trusted on
+    read, never re-verified against a hash, so a planted archive is executed by
+    the next ``uv sync`` that hardlinks out of it. Per-user costs nothing the
+    placement argument was about: hardlink sharing is between one user's
+    worktrees, which stay inside one subtree.
+
+    **The containment assertion is the whole layout in one line.** The
+    directory this returns must be the one the layout names, resolved: a child
+    of the root, at the expected name. The cache's parent is bound read-write
+    into the task's own sandbox on the derived branch, so the entry is
+    model-plantable — a symlink at ``.package-caches`` pointing at another
+    user's subtree would otherwise be created, ``chmod 0700``-ed and bound RW by
+    the daemon, which is ISSUE-319 back through a name. Same equality rule
+    ``get_user_repos_dir`` and ``sandbox_cache_sweeper`` use, applied on both
+    branches because the configured root was model-adjacent too under the old
+    default.
 
     Returned **as written**, not resolved, though every check below runs against
     the resolved path. ``_bind`` uses the string it was handed as the sandbox
-    destination, and the developer-repos bind passes ``repos_dir`` unresolved —
-    so resolving here would put a symlinked ``repos_dir`` and a cache under it
-    at two different names inside the namespace, hence on two mounts, and
+    destination, and the repos bind passes ``{repos_dir}/{user_id}`` unresolved
+    — so resolving here would put a symlinked ``repos_dir`` and the cache under
+    it at two different names inside the namespace, hence on two mounts, and
     ``link(2)`` returns EXDEV between them. That is the exact cost the
-    recommendation to put the cache under ``repos_dir`` exists to avoid, failing
-    silently.
+    derivation exists to avoid, failing silently.
 
     Never raises. Every rejection falls open to the pre-ISSUE-305 behaviour,
     because both callers run on the task path — for NativeBrain, per Bash call —
     and the alternative to failing open is a config typo that fails every task.
     """
-    raw = config.security.sandbox_cache_dir
-    if not raw:
-        return None
-
     def _refuse(message: str) -> None:
         # Called from `build_bwrap_cmd` and from `execute_task`, on every task,
         # for what is a fact about the config file. Warn once per process per
@@ -2212,6 +2101,36 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         if message not in _cache_dir_refusals:
             _cache_dir_refusals.add(message)
             logger.warning("%s", message)
+
+    # Which shape, and with it the three things that differ: the root the leaf
+    # is created under, the leaf's name, and which directory the *operator* is
+    # responsible for having created. On the derived branch that last one is
+    # `repos_dir` itself — `{repos_dir}/{user_id}` is made here (with parents)
+    # for a non-admin, whose subtree the developer skill's `setup_env`
+    # deliberately does not create, since no sandbox binds it.
+    if config.developer.repos_dir:
+        repos_root = get_user_repos_dir(config, user_id)
+        if repos_root is None:
+            # `get_user_repos_dir` has already said why. No fall back to
+            # `security.sandbox_cache_dir`: with `repos_dir` set, that key is
+            # not this deployment's cache location, and the reasons the join
+            # fails — no user id, a planted symlink — are reasons to give this
+            # task no disk-backed cache rather than to reach for another path.
+            _refuse(
+                f"sandbox cache: {config.developer.repos_dir} has no usable subtree "
+                f"for user {user_id!r}; not binding a cache. Package caches stay on "
+                "the sandbox's root tmpfs, in RAM."
+            )
+            return None
+        raw = str(repos_root)
+        leaf = SANDBOX_CACHE_ROOT_NAME
+        must_exist = Path(config.developer.repos_dir)
+    else:
+        raw = config.security.sandbox_cache_dir
+        if not raw:
+            return None
+        leaf = user_id
+        must_exist = Path(raw)
 
     try:
         root = Path(raw)
@@ -2223,11 +2142,21 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
             return None
 
         resolved_root = root.resolve()
-        if not (resolved_root.is_dir() and os.access(resolved_root, os.W_OK | os.X_OK)):
+        # `must_exist` is `root` on the configured branch and the operator's
+        # `repos_dir` on the derived one, where `{repos_dir}/{user_id}` may not
+        # exist yet and is created below with its parents. The daemon creating
+        # a whole tree of directories out of a value it was configured with is
+        # what this check refuses in both shapes: a typo should read as a
+        # warning and a cache in RAM, not as a new directory tree.
+        resolved_must_exist = must_exist.resolve()
+        if not (
+            resolved_must_exist.is_dir()
+            and os.access(resolved_must_exist, os.W_OK | os.X_OK)
+        ):
             _refuse(
-                f"sandbox_cache_dir {resolved_root} is not a directory the daemon can "
-                "write; not binding it. Package caches stay on the sandbox's root "
-                "tmpfs, in RAM."
+                f"sandbox cache root {resolved_must_exist} is not a directory the "
+                "daemon can write; not binding a cache. Package caches stay on the "
+                "sandbox's root tmpfs, in RAM."
             )
             return None
 
@@ -2239,10 +2168,11 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
                 continue
             if resolved_target == resolved_root or _is_relative_to(resolved_target, resolved_root):
                 _refuse(
-                    f"sandbox_cache_dir {resolved_root} is at or above {resolved_target}, "
-                    "which the sandbox mounts; not binding it, because the cache bind "
-                    "would cover that mount. Put it inside a directory instead of above "
-                    "one — somewhere under developer.repos_dir is the intended home."
+                    f"sandbox cache root {resolved_root} is at or above "
+                    f"{resolved_target}, which the sandbox mounts; not binding a "
+                    "cache, because the cache bind would cover that mount. Set "
+                    "developer.repos_dir and let the cache derive from it, or point "
+                    "security.sandbox_cache_dir inside a directory instead of above one."
                 )
                 return None
 
@@ -2263,8 +2193,9 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         for db_dir in db_dirs:
             if resolved_root == db_dir or _is_relative_to(resolved_root, db_dir):
                 _refuse(
-                    f"sandbox_cache_dir {resolved_root} is under the database directory "
-                    f"{db_dir}, which the sandbox masks read-only; not binding it."
+                    f"sandbox cache root {resolved_root} is under the database "
+                    f"directory {db_dir}, which the sandbox masks read-only; not "
+                    "binding a cache."
                 )
                 return None
 
@@ -2273,59 +2204,56 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         # workspace already uses. Same posture: an operator-named RW bind.
         _validate_workspace_dir(config, resolved_root)
 
-        # A covered root is the documented placement and the only one where uv
-        # hardlinks, but it makes every user's cache reachable through the
-        # covering bind, and the sibling masks are what close that. A mask is
-        # not a revocation: a process that can `unshare -Urm` holds
-        # CAP_SYS_ADMIN in the nested namespace and can umount the tmpfs to
-        # reveal what was underneath. For the database masks that is acceptable
-        # — the real boundary there is the skill CLIs scoping on
-        # ISTOTA_USER_ID, and the masks are defence behind it. Here the mask
-        # *is* the boundary, so `--disable-userns` is a precondition rather
-        # than hardening. Refused here rather than in `build_bwrap_cmd` so the
-        # bind and the UV_CACHE_DIR group cannot disagree.
-        covered_by = _sandbox_cache_is_covered(config, user_id, resolved_root)
-        if covered_by is not None and not _bwrap_supports_disable_userns():
+        # The containment assertion. Two checks, because neither catches the
+        # other's cases — the same pair `get_user_repos_dir` runs, for the same
+        # reason. The lexical one refuses a leaf that never became a child (an
+        # empty `user_id` collapses `root / ""` to the root itself, which is
+        # the shared cache the per-user split exists to prevent, and which the
+        # old code produced silently); the resolved one refuses a symlink,
+        # which is a child by name and somewhere else on disk.
+        #
+        # This is the invariant the whole layout rests on. On the derived
+        # branch the parent is bound read-write into this very task's sandbox,
+        # so a task can plant `.package-caches` as a symlink into another
+        # user's subtree — and without this the daemon would `mkdir` through
+        # it, `chmod 0700` its target and bind that target RW on the next task.
+        cache_dir = root / leaf
+        if cache_dir.parent != root or cache_dir.resolve() != resolved_root / leaf:
             _refuse(
-                f"sandbox_cache_dir {resolved_root} is inside {covered_by}, which the "
-                "sandbox binds after it, and this bwrap does not support "
-                "--disable-userns; not binding it. Other users' caches would be "
-                "reachable by unmounting the masks from a nested user namespace. "
-                "Package caches stay on the sandbox's root tmpfs, in RAM."
+                f"sandbox cache {cache_dir} does not resolve to the directory named "
+                f"by {leaf!r} inside {resolved_root}; not binding it. A symlink there "
+                "would put the cache in another user's tree. Package caches stay on "
+                "the sandbox's root tmpfs, in RAM."
             )
             return None
 
-        cache_dir = root / user_id
+        # `parents=True` matters on the derived branch: the developer skill's
+        # `setup_env` creates `{repos_dir}/{user_id}` for an *admin* only,
+        # matching the bind's gate, and a non-admin still gets a cache here —
+        # ISSUE-305 applies to any task that runs a package manager.
+        #
+        # The intermediate directory is mode-set separately and best-effort. A
+        # parent created by `parents=True` takes the umask, and this one holds a
+        # user's clones on the admin path; but `mkdir(exist_ok=True)` succeeds
+        # on a directory another uid owns and `chmod` then raises EPERM, and
+        # losing the whole cache to that would be trading the thing this
+        # function exists for against a mode it does not own. The cache
+        # directory's own 0700 below is not best-effort, because that one is
+        # this function's to get right.
+        parent_missing = not root.exists()
         cache_dir.mkdir(parents=True, exist_ok=True)
+        if parent_missing:
+            try:
+                os.chmod(root, 0o700)
+            except OSError as exc:
+                logger.warning(
+                    "sandbox cache: could not set 0700 on %s (%s); the cache "
+                    "inside it is still 0700", root, exc,
+                )
         os.chmod(cache_dir, 0o700)
-
-        if covered_by is not None and sandbox_cache_sibling_dirs(cache_dir) is None:
-            # An unlistable root, or a symlink in it: the sibling set the masks
-            # need cannot be established, so the masks cannot be emitted.
-            #
-            # **This refusal belongs here and not in `build_bwrap_cmd`**, which
-            # is where it was first written and where it was actively wrong.
-            # Dropping only the bind leaves `execute_task` pointing
-            # `UV_CACHE_DIR` at a path that is still *in* the namespace — the
-            # covering bind puts the whole root there — so uv would write into
-            # the shared root with every other user's cache beside it and no
-            # mask over any of them. That is not the pre-ISSUE-305 fallback it
-            # was described as; it is ISSUE-319 unmitigated, reachable by a
-            # task planting one symlink in a directory it can write.
-            #
-            # One `iterdir` of a directory holding one entry per user, on a path
-            # NativeBrain takes per Bash call. That is the price of the three
-            # callers agreeing, and the docstring above is what says they must.
-            _refuse(
-                f"sandbox_cache_dir {resolved_root} is inside {covered_by}, which the "
-                "sandbox binds after it, and the set of other users' caches there "
-                "cannot be established (unreadable, or it holds a symlink); not "
-                "binding it. Package caches stay on the sandbox's root tmpfs, in RAM."
-            )
-            return None
         return cache_dir
     except Exception as exc:  # never raise: both callers are on the task path
-        _refuse(f"sandbox_cache_dir {raw} rejected ({exc}); not binding it.")
+        _refuse(f"sandbox cache {raw} rejected ({exc}); not binding it.")
         return None
 
 
@@ -2342,14 +2270,6 @@ def custom_system_prompt_path(config: Config) -> Path | None:
     if path.is_absolute():
         return path
     return Path(os.path.abspath(path))
-
-
-#: Every bwrap verb taking ``SRC DEST``. Matched rather than listed so a verb
-#: added to `build_bwrap_cmd` cannot slip past the covering scan, whose claim is
-#: that it reads the argv rather than a list of what the argv is believed to
-#: hold. bwrap's own set is `--bind`, `--bind-try`, `--dev-bind`,
-#: `--dev-bind-try`, `--ro-bind` and `--ro-bind-try`.
-_BWRAP_BIND_VERBS = re.compile(r"^--(ro-|dev-)?bind(-try)?$")
 
 
 def _is_relative_to(path: Path, other: Path) -> bool:
@@ -2584,52 +2504,25 @@ def build_bwrap_cmd(
     # bwrap's root tmpfs. `execute_task` points UV_CACHE_DIR and XDG_CACHE_HOME
     # at whatever this returns, so the bind and the environment cannot disagree.
     #
-    # `{configured root}/{user_id}`, not the root itself — see
+    # One user's own directory, never a shared root — see
     # `resolve_sandbox_cache_dir` for why a shared cache is a cross-user code
     # path. This is emitted late, after the `.developer` read-only re-bind and
     # the huggingface bind, so a destination *above* either would cover it;
     # `_sandbox_bind_targets` is what refuses that. Still before the masks,
     # which stay last.
     #
-    # The bind stays *before* the developer repos bind, deliberately. Where the
-    # cache root is inside `{repos_dir}/{user_id}`, that later bind is an
-    # ancestor and covers this one, which is what puts the cache and the venv
-    # on a single mount and is the only shape where uv can hardlink rather than
-    # copy — moving this bind after it makes the cache its own mount again and
-    # costs the full byte copy. A cache root elsewhere under `repos_dir` is not
-    # covered by anything now that the bind is per-user, and pays that copy.
-    # Where there is a covering bind it also exposes every *other* user's cache
-    # directory in that root, and the masks below are what close that; see
-    # `_sandbox_cache_covering_targets`.
+    # The bind stays *before* the developer repos bind, deliberately. With
+    # `developer.repos_dir` set the cache is `{repos_dir}/{user_id}/`
+    # `.package-caches`, so that later bind is an ancestor and covers this one,
+    # which is what puts the cache and a worktree's venv on a single mount and
+    # is the only shape where uv can hardlink rather than copy — moving this
+    # bind after it makes the cache its own mount again and costs the full byte
+    # copy. What that covering exposes is the rest of *this* user's subtree,
+    # which is already bound RW for exactly these tasks; there is no other
+    # user's cache in the namespace to mask, which is what retired the ISSUE-319
+    # machinery rather than merely satisfying it.
     cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
-    cache_sibling_masks: list[Path] = []
-    # -1 until the bind is emitted, and the mask block below gates on it rather
-    # than on `cache_dir`. The two are equivalent today and only one of them
-    # says so locally: an index read out of a conditional binding is a NameError
-    # waiting for someone to move the assignment.
-    cache_bind_index = -1
-    cache_root_mask: Path | None = None
     if cache_dir is not None:
-        siblings = sandbox_cache_sibling_dirs(cache_dir)
-        if siblings is None:
-            # The root changed between `resolve_sandbox_cache_dir`'s own check,
-            # microseconds ago, and this one — it asks the same question and
-            # returns None rather than a path when the answer is no, so getting
-            # here means a symlink or a permission change landed in between.
-            #
-            # Not the same fallback as a refusal at the resolver. There the
-            # environment does not name the cache either, so the write goes to
-            # the root tmpfs and costs RAM. Here it does, and the covering bind
-            # would put that path in the namespace with every other user's
-            # cache beside it. So the whole root is masked instead: uv fails
-            # loudly on a read-only cache directory, which is the right outcome
-            # for a directory that mutated mid-setup, and nothing is exposed.
-            cache_root_mask = cache_dir.parent
-            cache_dir = None
-        else:
-            cache_sibling_masks = siblings
-    if cache_dir is not None:
-        cache_bind_index = len(args)
         _bind(cache_dir)
 
     # --- Developer repos (RW) ---
@@ -2784,111 +2677,6 @@ def build_bwrap_cmd(
             # the module root when the db_dir mask had been *refused* — leaving
             # it unmasked for want of a cover that was never mounted.
             _mask_dir(module_root)
-
-    # Other users' package caches, when a later bind covers the cache root.
-    #
-    # Decided from the argv that was actually built, not from a list of binds
-    # this function is believed to emit. ISSUE-319 was invisible to review for
-    # exactly that reason — the ordering constraint lived in a comment, and the
-    # comment asserted the wrong half — so the question is asked of the real
-    # thing: is any bind emitted after the cache bind an ancestor of the cache
-    # root? Move a bind and this answer moves with it.
-    #
-    # Nothing is emitted when the answer is no. A sibling that is not in the
-    # namespace needs no mask, and masking it would make bwrap `mkdir` the path
-    # on the root tmpfs and invent a directory that was never there.
-    if cache_root_mask is not None:
-        _mask_dir(cache_root_mask)
-    elif cache_bind_index >= 0 and cache_dir is not None and cache_sibling_masks:
-        # Both names for the root, against both names for each destination.
-        #
-        # `_bind` uses the path **as written** as its sandbox destination and
-        # the repos bind passes `{repos_dir}/{user_id}` unresolved, while
-        # `resolve_sandbox_cache_dir` returns the cache as written for the same
-        # reason. So under a symlinked deployment root (`/srv/repos` ->
-        # `/data/repos`) a resolved-only comparison finds no coverer, emits no
-        # masks, and disagrees with `_sandbox_cache_is_covered`, which resolves
-        # both sides and does find one — in the direction that exposes. Same
-        # trap `_mask_dir` already handles by masking at every name a path
-        # answers to.
-        cache_root = cache_dir.parent
-        cache_root_names = {cache_root}
-        try:
-            cache_root_names.add(cache_root.resolve())
-        except OSError:
-            pass
-
-        def _covers(dest: str) -> bool:
-            names = {Path(dest)}
-            try:
-                names.add(Path(dest).resolve())
-            except OSError:
-                pass
-            return any(_is_relative_to(r, d) for r in cache_root_names for d in names)
-
-        # Every bind verb, not the two that happen to be emitted today: each
-        # takes src+dest, and a `--bind-try` or `--dev-bind` added above the
-        # cache root must not be invisible to a check whose whole claim is that
-        # it reads the real argv.
-        covering = [
-            args[i + 2] for i in range(cache_bind_index, len(args) - 2)
-            if _BWRAP_BIND_VERBS.match(args[i]) and _covers(args[i + 2])
-        ]
-        if covering:
-            accounted: set[Path] = set()
-            for target in _sandbox_cache_covering_targets(config, task.user_id):
-                try:
-                    accounted.add(target.resolve())
-                except OSError:
-                    continue
-            unaccounted = [c for c in covering if Path(c).resolve() not in accounted]
-            if unaccounted:
-                # A bind nobody accounted for covers the cache. The masks below
-                # still go out, but the `--disable-userns` precondition in
-                # `resolve_sandbox_cache_dir` was never applied to it, so say so
-                # rather than let the next move of a bind be silent.
-                logger.error(
-                    "sandbox cache root %s is covered by binds "
-                    "%s that _sandbox_cache_covering_targets does not list; "
-                    "masking the siblings anyway. Add them to that list.",
-                    cache_root, ", ".join(unaccounted),
-                )
-            # A refused mask is not a skip here. `_mask_dir` was written for the
-            # database masks, where a refusal costs defence in depth behind the
-            # skill CLIs and the honest answer is to log and carry on; on this
-            # path the mask *is* the boundary, so an uncovered sibling means the
-            # cache must not be reachable at all. The bind is already in `args`
-            # and the masks run last, so the way to take it back is to mask the
-            # whole root over it — uv then fails loudly on a read-only cache
-            # directory, which is the right end for a mask that did not land.
-            #
-            # A list, not a generator: `all` short-circuits, and stopping at the
-            # first refusal would leave every later sibling unmasked *and*
-            # unattempted. Every mask goes out, then the verdict is read.
-            landed = [_mask_dir(sibling) for sibling in cache_sibling_masks]
-            if not all(landed):
-                logger.error(
-                    "sandbox cache root %s: a sibling could not be masked, so "
-                    "the whole root is masked instead and the cache is "
-                    "unusable for this task. See the refusal logged above.",
-                    cache_root,
-                )
-                if not _mask_dir(cache_dir.parent):
-                    # `_mask_dir` refuses exactly one thing: a candidate holding
-                    # a path the sandbox needs. Every such path is under the
-                    # root whenever it is under a sibling, so this branch is the
-                    # first one that cannot be reached by fixing the other — and
-                    # there is nothing left to try. Say so at the top of the
-                    # volume rather than build a sandbox whose cache boundary is
-                    # known not to hold.
-                    logger.error(
-                        "sandbox cache root %s could not be masked either: it "
-                        "holds a path the sandbox needs. Every other user's "
-                        "package cache is reachable read-write from this task. "
-                        "Move security.sandbox_cache_dir, or move the workspace "
-                        "and source tree out from under it.",
-                        cache_root,
-                    )
 
     if _bwrap_supports_disable_userns():
         # Both, or neither: bwrap exits 1 on `--disable-userns` without
@@ -3047,28 +2835,13 @@ def native_fs_roots(
     _native_cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
     _add(write, _native_cache_dir)
 
-    # Every *other* user's cache, denied (ISSUE-319). The bwrap counterpart is
-    # a read-only tmpfs over each one, emitted after the repos bind that would
-    # otherwise expose them; here the equivalent is a deny root, for a cache
-    # root inside the per-user repos subtree added below, which is a write
-    # root. Without this the sibling masks are a bwrap-only property and the
-    # native brain's in-process file tools walk straight past them. A cache
-    # root elsewhere is reached by neither seam and the denial is inert.
-    #
-    # Same shape as the `.developer` denial above and for the same reason: a
-    # carve-out nested inside a write root, which containment alone cannot say.
-    #
-    # **Not parity with the bwrap mask, and the gap is stated rather than
-    # implied.** A tmpfs hides a directory; `write_denied_roots` only refuses
-    # writes into it (`session/tools/env.py`), and this seam has no read-deny to
-    # reach for. So on NativeBrain another user's cache stays *readable*. That
-    # closes the path ISSUE-319 is about — planting an archive that the victim's
-    # next `uv sync` hardlinks out and executes is a write — and leaves the
-    # lesser one, which is that a task can see which packages another user
-    # resolved. Closing it too wants a read-deny on the seam, which is a change
-    # to the tool environment rather than to this list.
-    if _native_cache_dir is not None:
-        write_denied.extend(sandbox_cache_sibling_dirs(_native_cache_dir) or [])
+    # No deny root for another user's cache, and its absence is the point.
+    # ISSUE-319 needed one here because the cache root was shared and sat inside
+    # a write root, so the bwrap sibling masks were a namespace-only property
+    # the native brain's in-process file tools walked straight past. The cache
+    # is derived inside this user's own subtree now — there is no other user's
+    # cache under any root this function hands out, so there is nothing to deny
+    # and no second seam to keep in step with a first.
 
     # Developer repos (RW, admin only). The task's own subtree, mirroring the
     # bind in `build_bwrap_cmd` — another user's is not a write root here for

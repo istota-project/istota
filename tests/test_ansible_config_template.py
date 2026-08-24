@@ -292,72 +292,76 @@ def load_config_from(rendered: str) -> Config:
 
 
 class TestThePackageCacheRoot:
-    """ISSUE-317 and ISSUE-319 — the root, the sweep keys, and the bind order.
+    """ISSUE-305, ISSUE-317, ISSUE-319 — the root, the sweep keys, the bind order.
 
-    The root now derives from `istota_developer_repos_dir`, which is where uv
-    can hardlink out of its cache and into a venv. The repos bind still covers
-    the cache bind, and that covering is what makes the hardlink work: a cache
-    root outside `repos_dir` and one carved back out with a nested bind were
-    both measured returning EXDEV. What it also exposes — every other user's
-    cache directory — is closed by the sibling masks ISSUE-319 added, not by
-    moving either bind.
+    **This key has moved twice and the reasons are different, which is why the
+    third reader gets a paragraph.** It shipped blank because there was nowhere
+    good to put a package cache. `cc691d6f` derived it from
+    `istota_developer_repos_dir` — `{repos_dir}/.package-caches` — because uv
+    hardlinks out of its cache and `link(2)` compares mounts, so the cache has
+    to be inside the bind that also holds the venv, and the repos bind was the
+    only such bind. That root was shared by every user, which is ISSUE-319, and
+    it cost about 200 lines of sibling masks to make safe.
+
+    It is blank again now, and *not* for the original reason. The daemon derives
+    the cache itself, per user, at `{repos_dir}/{user_id}/.package-caches`, and
+    `resolve_sandbox_cache_dir` does not read this key at all while `repos_dir`
+    is set. A value here would name the fallback path — what a deployment
+    running the sandbox *without* the developer skill uses — while reading like
+    the intended one. So the assertion below is not "the key is unused"; it is
+    "the developer deployment must not set it".
     """
 
-    def test_the_root_derives_from_the_repos_dir(self):
-        """Blank `repos_dir` leaves the root blank: with no repos bind there is
-        no mount to share and nothing the placement argument was about."""
-        assert "sandbox_cache_dir" not in tomllib.loads(
-            render(istota_developer_repos_dir="")
-        )["security"]
+    def test_the_root_stays_blank_whatever_the_repos_dir_says(self):
+        """Both ways. A blank `repos_dir` has no tree to derive from, and a set
+        one derives inside the per-user subtree without consulting this key."""
+        for repos_dir in ("", "/srv/example/repos"):
+            rendered = tomllib.loads(render(istota_developer_repos_dir=repos_dir))
+            assert "sandbox_cache_dir" not in rendered["security"], (
+                f"the role set a cache root for repos_dir={repos_dir!r}; the "
+                "daemon derives it and would ignore this value"
+            )
 
-        rendered = tomllib.loads(
-            render(istota_developer_repos_dir="/srv/example/repos")
-        )
-        assert rendered["security"]["sandbox_cache_dir"] == (
-            "/srv/example/repos/.package-caches"
-        )
+    def test_the_default_render_puts_the_cache_inside_the_bind_that_covers_it(
+        self, tmp_path,
+    ):
+        """The rendered default tied to the argv it produces.
 
-    def test_the_bind_order_the_masks_depend_on_is_still_what_it_was(self, tmp_path):
-        """Two properties in one argv, and the sibling masks need both.
-
-        The repos bind has to come *after* the cache bind — that is the single
-        mount uv hardlinks across — and the masks have to come after both, or
-        the covering bind would overmount them. Move any of the three and this
-        goes red.
+        The repos bind has to come *after* the cache bind: that is the single
+        mount uv hardlinks across, and the whole reason the cache is derived
+        rather than configured. Move either bind and this goes red. What is
+        *not* asserted any more is a mask after both — there is no other user's
+        cache in the namespace to mask, which is the property that replaced it.
         """
         from unittest.mock import patch
 
-        from istota.config import Config, DeveloperConfig, SecurityConfig
         from istota.db import Task
         from istota.executor import build_bwrap_cmd
 
         repos = tmp_path / "repos"
-        cache_root = repos / ".package-caches"
-        (cache_root / "bob").mkdir(parents=True)
+        (repos / "alice").mkdir(parents=True)
         user_temp = tmp_path / "temp" / "alice"
         user_temp.mkdir(parents=True)
 
-        config = Config()
+        config = load_config_from(render(
+            istota_developer_enabled=True, istota_developer_repos_dir=str(repos),
+        ))
         config.temp_dir = tmp_path / "temp"
-        config.developer = DeveloperConfig(enabled=True, repos_dir=str(repos))
-        config.security = SecurityConfig(sandbox_cache_dir=str(cache_root))
+        assert config.security.sandbox_cache_dir == ""
         task = Task(id=1, prompt="x", user_id="alice", source_type="cli", status="running")
 
-        with patch("istota.executor._bwrap_available", return_value=True), \
-                patch("istota.executor._bwrap_supports_disable_userns", return_value=True):
+        with patch("istota.executor._bwrap_available", return_value=True):
             argv = build_bwrap_cmd(["claude"], config, task, True, [], user_temp)
 
         binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
-        assert str(cache_root / "alice") in binds
-        assert str(repos) in binds
-        assert binds.index(str(repos)) > binds.index(str(cache_root / "alice")), (
+        cache = str(repos / "alice" / ".package-caches")
+        assert cache in binds
+        assert str(repos / "alice") in binds
+        assert binds.index(str(repos / "alice")) > binds.index(cache), (
             "the repos bind no longer covers the cache bind — uv stops "
-            "hardlinking, and the sibling masks now cover nothing"
+            "hardlinking and every worktree pays a full copy"
         )
-        assert argv.index(str(cache_root / "bob")) > argv.index(str(repos)), (
-            "bob's cache is masked before the bind that exposes it, so the "
-            "bind overmounts the mask"
-        )
+        assert str(repos) not in binds, "the shared root was bound"
 
     def test_the_sweep_keys_render_when_an_operator_sets_the_root(self):
         rendered = tomllib.loads(
