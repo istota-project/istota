@@ -27,6 +27,7 @@ from istota.brain.tmux_claude import (
     reset_circuit_breaker,
 )
 from istota.config import BrainConfig, TmuxBrainConfig
+from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 
 
 @pytest.fixture(autouse=True)
@@ -665,6 +666,50 @@ class TestRootSandboxEnv:
         monkeypatch.setattr(brain, "_capture", lambda *a: "")
         brain._run_session(_req(tmp_path, env={"IS_SANDBOX": "custom"}), attempt=0)
         assert captured.get("IS_SANDBOX") == "custom"
+
+
+class TestPipefailReachesThePane:
+    """ISSUE-321. The pane is where a `TmuxClaudeBrain` task's commands run.
+
+    `build_clean_env` puts SHELLOPTS in `req.env`, but this brain does not hand
+    that dict to a subprocess — it re-renders it as `-e KEY=VALUE` arguments to
+    `tmux new-session`, because a pane attached to an already-running tmux
+    server would otherwise inherit the *server's* environment. That translation
+    is a real step with real logic, so it is pinned rather than assumed.
+
+    **Both of these pass against the pre-fix code**, and say so here rather
+    than reading as evidence for the fix: they inject the variable into
+    `req.env` themselves, so what they hold is that this brain does not drop it
+    on the way to the pane. What the fix put in `req.env` is
+    `build_clean_env`'s, and the test that goes red without it is in
+    `tests/test_security.py::TestBuildCleanEnvTurnsPipefailOn`.
+    """
+
+    def test_the_session_env_carries_it(self, monkeypatch, tmp_path):
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session", lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(
+            _req(tmp_path, env={SHELLOPTS_VAR: PIPEFAIL_SHELLOPTS}), attempt=0,
+        )
+        assert captured.get(SHELLOPTS_VAR) == PIPEFAIL_SHELLOPTS
+
+    def test_new_session_renders_it_as_a_tmux_e_argument(self, monkeypatch):
+        """The half a captured dict cannot see.
+
+        `_new_session` receiving the variable proves nothing about the pane if
+        it never reaches the argv.
+        """
+        brain = TmuxClaudeBrain()
+        args = []
+        monkeypatch.setattr(brain, "_tmux", lambda *a: args.extend(a))
+        brain._new_session("sess", {SHELLOPTS_VAR: PIPEFAIL_SHELLOPTS})
+        assert "-e" in args
+        assert f"{SHELLOPTS_VAR}={PIPEFAIL_SHELLOPTS}" in args
 
 
 class TestAdvisorEnvTmux:
