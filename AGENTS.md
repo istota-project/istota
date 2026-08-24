@@ -151,7 +151,7 @@ Markdown with TOML `[[jobs]]`. Types: `prompt`, `prompt_file`, `command`. Per-jo
 
 Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces, everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
 
-Python is **linted but not formatted**. `ruff check` runs clean over `src/`, `tests/` and `testbed/`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
+Python is **linted but not formatted**. `ruff check` runs clean over `src/`, `tests/`, `testbed/` and `docker/devbox/`; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules — no line-length, whitespace or indentation checks. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 525 of 637 files and carry `git blame` with it. A deliberate unused import (a re-export, an import kept for a side effect) is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
 
 ## Verification
 
@@ -160,9 +160,11 @@ There is no single entry point. Run the checks directly, and run only the half t
 Python:
 
 ```bash
-ruff check --output-format concise src tests testbed
+ruff check --output-format concise src tests testbed docker/devbox
 scripts/qtest uv run pytest      # pyproject deselects every marker below; `-n auto`
 ```
+
+`docker/devbox/` is in that first command because three of the Python programs the devbox image ships carry no `.py` suffix — they are on the container's `PATH` and invoked by name — so ruff, which discovers by extension, walked past the exec server, the credential helper and the policy seeder and reported the directory clean. `[tool.ruff] extend-include` names those three one by one; a `scripts/*` glob would hand ruff the supervisor beside them, which is `/bin/sh`.
 
 **What to install: `uv sync --extra test`.** A bare `uv sync` is never right — everything the suite needs from `[project.optional-dependencies]` is left out, and the result is hundreds of `ModuleNotFoundError` collection errors that read as a code regression. `--all-extras` works and costs about 1.1 GB in the venv; the `test` extra is `all` minus the two heavy ML ones and costs 291 MB, which matters because the venv is per-worktree and per-container. It is what `scripts/setup.sh` and `docker/test/Dockerfile` install. The difference is `memory-search` (torch, sentence-transformers) and `whisper` (faster-whisper, av, onnxruntime); every heavy import in `src/` is inside a function, deliberately, so nothing needs them to collect, and the one test that needs them at run time carries the `ml` marker. Use `--all-extras` when you want that test or the real libraries to hand-test against. Test-only dependencies belong in the `dev` group, never in an extra — `jinja2` and `psutil` used to arrive as somebody else's transitive, and `tests/test_lean_install.py` is what keeps that from happening again.
 

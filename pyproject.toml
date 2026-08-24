@@ -177,6 +177,18 @@ target-version = "py311"
 # formatter by hand lands near the tree's own shape (p95 is 80 chars). It is
 # not enforced: E501 is not in the rule set below.
 line-length = 100
+# Three Python programs that ship in the devbox image carry no `.py` suffix,
+# because they are on the container's `PATH` and are invoked by name. Ruff
+# discovers a file by extension, so without these entries `ruff check
+# docker/devbox` walked past the exec server — the process that makes every
+# containment decision in the container — and reported the directory clean.
+# Named one by one rather than as `scripts/*`: `istota-exec-run` beside them is
+# `/bin/sh`, and a glob would hand ruff a shell script to parse as Python.
+extend-include = [
+    "docker/devbox/scripts/git-credential-istota",
+    "docker/devbox/scripts/istota-exec-serve",
+    "docker/devbox/scripts/seed-forge-policy",
+]
 
 [tool.ruff.lint]
 # The default rule set, stated explicitly so it cannot drift with a ruff
