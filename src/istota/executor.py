@@ -61,6 +61,7 @@ from .brain._fallback import (
     get_availability_breaker,
 )
 from .events import EventWriter, random_progress_message
+from .shell_exec import pipefail_env
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 
@@ -1064,7 +1065,7 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
     "APP_PASSWORD", "NC_PASS", "PRIVATE_KEY",
 })
 
-#: Shell startup files, stripped by exact name rather than by substring.
+#: Shell startup controls, stripped by exact name rather than by substring.
 #:
 #: Cron ``command:`` rows and heartbeat shell commands run under bash now
 #: (``shell_exec.shell_argv``) where they used to run under ``/bin/sh``. Bash
@@ -1074,6 +1075,22 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
 #: it needs control of the daemon's environment — but it is a capability the
 #: previous interpreter did not have, so it goes.
 #:
+#: ``SHELLOPTS`` and ``BASHOPTS`` are the same mechanism one step along: bash
+#: imports them at startup, before any startup file, and they are readonly
+#: thereafter. They name options rather than a file, so neither is an exec
+#: inlet — but an inherited ``SHELLOPTS=xtrace`` would echo every expanded
+#: command line, credential values the manifest injected included, into the
+#: captured output of every cron job, and ``noexec`` would have each one parse
+#: its script and run nothing while exiting 0. ``shell_argv``'s ``-o pipefail``
+#: cannot undo either. Reachability is low, since bash only exports
+#: ``SHELLOPTS`` if it imported it in the first place, so this closes a gap
+#: rather than a live bug.
+#:
+#: **``build_clean_env`` filters by this set and then re-adds ``SHELLOPTS``
+#: deliberately**, to a fixed value it owns (``shell_exec.pipefail_env``,
+#: ISSUE-321). Strip first, set second: the point is that no *inherited* value
+#: survives, not that the variable is absent.
+#:
 #: ``ENV`` is deliberately **not** here. POSIX shells read it only for
 #: *interactive* shells, and bash invoked as ``bash -c`` is not in POSIX mode
 #: and reads ``BASH_ENV`` instead — so stripping it would buy nothing and would
@@ -1081,7 +1098,7 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
 #:
 #: Exact match, because these go through a substring test above: ``ENV`` as a
 #: substring would strip most of the environment.
-_SHELL_STARTUP_ENV_VARS = frozenset({"BASH_ENV"})
+_SHELL_STARTUP_ENV_VARS = frozenset({"BASH_ENV", "SHELLOPTS", "BASHOPTS"})
 
 _bwrap_checked: bool | None = None
 
@@ -1450,6 +1467,20 @@ def build_clean_env(config: Config) -> dict[str, str]:
         if identity_val is not None:
             env[identity_key] = identity_val
     for key in config.security.passthrough_env_vars:
+        # A shell-startup control is never passed through, whatever the
+        # operator listed. This env is otherwise an allowlist built from
+        # scratch, so the passthrough loop was the one way an inherited
+        # `BASH_ENV` could reach a model subprocess — and that is a file bash
+        # sources before every command the model runs. `build_stripped_env`
+        # has filtered the same set since the interpreter swap; this is the
+        # sibling path, which never did (found in review of ISSUE-321, whose
+        # own comment below claimed the protection this line supplies).
+        if key.upper() in _SHELL_STARTUP_ENV_VARS:
+            logger.warning(
+                "passthrough_env_vars names %s, which is a shell-startup "
+                "control — ignoring it. Remove it from the config.", key,
+            )
+            continue
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
@@ -1474,6 +1505,38 @@ def build_clean_env(config: Config) -> dict[str, str]:
     # command/skill-task env builders.
     if config.config_path is not None:
         env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
+    # `pipefail` on for every bash below this process (ISSUE-321).
+    #
+    # Here rather than in the brains because this is the env every model
+    # subprocess is built from, and the defect is not one brain's: a
+    # `ClaudeCodeBrain` or `TmuxClaudeBrain` task runs its commands through the
+    # CLI's own Bash tool, which istota launches and does not instrument, so
+    # `shell_exec.shell_argv` — which fixes the shells istota spawns itself —
+    # cannot reach it. `NativeBrain` already passes `-o pipefail` on its own
+    # argv and gains only depth here, which is what keeps the two brains
+    # answering an identical command string identically. That divergence was
+    # the stated reason ISSUE-307 left this site alone; it is what closes now.
+    #
+    # Applied last, so it wins over a `passthrough_env_vars` entry naming
+    # SHELLOPTS. That is deliberate: the alternative hands the model's shell
+    # whatever the daemon's environment carried, which is usually nothing and
+    # silently restores the bug. `set +o pipefail` inside a command remains the
+    # per-command escape hatch, and there is no deployment-wide one — a switch
+    # to turn a correctness fix back off is not worth the shape it would give
+    # the config, and neither ISSUE-307 nor `shell_argv` shipped one either.
+    #
+    # This env is an allowlist built from scratch and the passthrough loop
+    # above refuses the whole shell-startup family, so nothing inherited can
+    # arrive carrying `xtrace` and the value here is the only one there is.
+    # That loop is what makes the claim true; it did not filter until ISSUE-321
+    # was reviewed, and this comment asserted the protection anyway.
+    #
+    # Reaches the host-side skill CLIs too, via the `proxy_base_env` snapshot
+    # in `execute_task` — those run unsandboxed as the daemon user, so anything
+    # set here is worth a second thought. This one is a fixed option name with
+    # no interpolation and no file behind it, and the CLIs spawn no shell at
+    # all (nothing under `src/` passes `shell=True`), so it is inert there.
+    env.update(pipefail_env())
     return env
 
 
@@ -4019,6 +4082,29 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "\n- Reading web pages: WebFetch fetches a URL and extracts content against your prompt."
         )
 
+    # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
+    # once because it changes what an exit status means.
+    #
+    # Eager, here, rather than only in `developer/skill.md` where the rest of
+    # the rule lives: `developer` is a menu skill with no `always_include` and
+    # no `source_types`, so it reaches the prompt through sticky skills — the
+    # *second* turn of a conversation. A first-turn `… | head` therefore
+    # returned an unexplained 141 to a model with no rule for it, on the
+    # surface where most tool calls happen. Nothing in istota annotates that
+    # number on this path either: `shell_exec.SIGPIPE_NOTE` covers the shells
+    # istota builds, and the CLI's own Bash tool appends a bare
+    # `[exit code: 141]` that nothing here touches.
+    bash_tool = (
+        "\n- Bash: pipelines run with `pipefail` on, so a pipeline's status is the "
+        "first stage that failed rather than the last command — `<runner> … | tail` "
+        "reports a failure the run actually had. Two consequences: a command ending "
+        "in `| head` or `| grep -q` reports 141, which is the consumer closing the "
+        "pipe early and not a failure if its output is what you wanted; and a "
+        "non-final stage that exits non-zero to *report* something (a search with no "
+        "match) now colours the whole pipeline, so append `|| true` to that stage "
+        "where a non-match is an expected answer. `set +o pipefail` opts one command out."
+    )
+
     # CLI skills list (generated from skill index metadata)
     cli_skills_section = cli_skills_text or ""
 
@@ -4180,7 +4266,7 @@ Output target: {output_target or 'text'}{per_user_email_line}
 {memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}{playbooks_section}## Available tools
 
 You have access to:
-{file_tools}{browser_tool}{web_tools}
+{file_tools}{browser_tool}{web_tools}{bash_tool}
 {cli_skills_section}{db_tool_line}
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 

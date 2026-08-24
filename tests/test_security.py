@@ -2,8 +2,12 @@
 
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 from istota import db
@@ -14,6 +18,7 @@ from istota.config import (
 )
 from istota.executor import (
     _PROXY_LOOKUP_BLOCKED,
+    _SHELL_STARTUP_ENV_VARS,
     _split_credential_env,
     build_allowed_tools,
     build_clean_env,
@@ -26,6 +31,7 @@ from istota.executor import (
     derive_skill_credential_map,
     execute_task,
 )
+from istota.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 from istota.skills._env import EnvContext, build_identity_env, build_skill_env
 from istota.skills._types import EnvSpec, SkillMeta
 
@@ -155,6 +161,98 @@ class TestBuildCleanEnv:
         with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
             env = build_clean_env(config)
         assert "ISTOTA_CONFIG_PATH" not in env
+
+
+class TestBuildCleanEnvTurnsPipefailOn:
+    """ISSUE-321. The Claude Code CLI runs its Bash tool in a shell istota
+    never sees, so the option has to arrive through the env the CLI inherits.
+
+    This is the *only* lever that reaches that shell: `shell_argv` fixes shells
+    istota spawns itself, and the CLI spawns its own.
+    """
+
+    def test_the_env_carries_shellopts(self):
+        config = Config()
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
+            env = build_clean_env(config)
+        assert env[SHELLOPTS_VAR] == PIPEFAIL_SHELLOPTS
+
+    def test_a_shell_startup_control_is_never_passed_through(self):
+        """The hole the ISSUE-321 review found, and the reason it mattered.
+
+        BASH_ENV names a *file* bash sources before every non-interactive
+        shell, so forwarding one is arbitrary code execution before every
+        command the model runs. `build_stripped_env` has filtered
+        `_SHELL_STARTUP_ENV_VARS` since the interpreter swap; `build_clean_env`
+        never did, and its passthrough loop was an unfiltered
+        `env[key] = os.environ[key]` — so an operator listing BASH_ENV in
+        `passthrough_env_vars` got it forwarded, while the comment added
+        alongside the pipefail fix claimed the strip covered this path.
+
+        This is the discriminating case: without the filter the variable is in
+        the returned env. The allowlist alone does not cover it, which is why
+        asserting `"BASH_ENV" not in env` with an empty passthrough list proves
+        nothing — it was never read there.
+        """
+        config = Config(security=SecurityConfig(
+            passthrough_env_vars=["BASH_ENV", "LANG"],
+        ))
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin", "HOME": "/home/test",
+            "BASH_ENV": "/tmp/evil.sh", "LANG": "en_US.UTF-8",
+        }, clear=True):
+            env = build_clean_env(config)
+        assert "BASH_ENV" not in env
+        assert env["LANG"] == "en_US.UTF-8", (
+            "control: the loop must still pass through an ordinary variable"
+        )
+
+    def test_an_inherited_shellopts_is_stripped_before_ours_is_set(self):
+        """Strip first, set second.
+
+        The point is not that SHELLOPTS is absent — the fix sets it — but that
+        no *inherited* value survives. An operator whose daemon environment
+        carried `SHELLOPTS=xtrace` would otherwise have every expanded command
+        line, credential values included, echoed into the model's tool output.
+        """
+        config = Config(security=SecurityConfig(
+            passthrough_env_vars=[SHELLOPTS_VAR],
+        ))
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin", "HOME": "/home/test",
+            SHELLOPTS_VAR: "xtrace:verbose",
+        }, clear=True):
+            env = build_clean_env(config)
+        assert env[SHELLOPTS_VAR] == PIPEFAIL_SHELLOPTS
+        assert "xtrace" not in env[SHELLOPTS_VAR]
+
+    def test_the_startup_family_is_named_in_one_place(self):
+        """Both filters read the same set, so neither can drift alone."""
+        assert {"BASH_ENV", "SHELLOPTS", "BASHOPTS"} <= _SHELL_STARTUP_ENV_VARS
+        assert "ENV" not in _SHELL_STARTUP_ENV_VARS, (
+            "deliberately excluded — POSIX shells read it only when "
+            "interactive, and an operator may use it as a deployment name"
+        )
+
+    @pytest.mark.skipif(not shutil.which("bash"), reason="no bash on this host")
+    def test_a_bash_started_under_this_env_reports_the_failing_stage(self):
+        """The reported bug, run through the env the code actually builds.
+
+        A dict assertion cannot make this claim: `SHELLOPTS` sitting in an env
+        bash ignores would satisfy one and fix nothing. Pre-fix this returns 0.
+        """
+        config = Config()
+        env = build_clean_env(config)
+        failing = subprocess.run(
+            ["bash", "-c", "false | head -1"],
+            env={**os.environ, **env}, capture_output=True, timeout=30,
+        )
+        passing = subprocess.run(
+            ["bash", "-c", "echo hi | head -1"],
+            env={**os.environ, **env}, capture_output=True, timeout=30,
+        )
+        assert failing.returncode != 0
+        assert passing.returncode == 0, "control: a good pipeline must still pass"
 
 
 class TestSandboxCacheDirEnv:

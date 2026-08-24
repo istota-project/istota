@@ -181,6 +181,7 @@ class TestThePolicy:
             "ISTOTA_DEVBOX_IMAGE_TAG",
             "ISTOTA_LINUX_TIER",
             "ISTOTA_UPGRADE_FROM",
+            "ISTOTA_UPDATE_GOLDEN",
             "ISTOTA_UPGRADE_SHAPES",
             # Ordinary shell furniture. Deleting any of these breaks every
             # test that spawns a subprocess.

@@ -7,16 +7,23 @@ these execute what `shell_argv` returned.
 """
 
 import logging
+import os
+import re
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
 from istota import shell_exec
 from istota.shell_exec import (
+    PIPEFAIL_SHELLOPTS,
+    SHELLOPTS_VAR,
     SIGPIPE_NOTE,
     POSIX_SH,
     is_sigpipe_failure,
+    pipefail_env,
     shell_argv,
 )
 
@@ -144,3 +151,171 @@ class TestTheArgvActuallyBehaves:
             capture_output=True, text=True, timeout=30,
         )
         assert out.stdout.split() == ["pipefail", "on"], out.stdout
+
+
+class TestPipefailEnv:
+    """The env-side half of the same rule (ISSUE-321).
+
+    `shell_argv` can only fix a shell istota spawns itself. The Claude Code CLI
+    spawns its own Bash tool, so the option has to arrive through the
+    environment the CLI inherits.
+    """
+
+    def test_it_names_shellopts(self):
+        assert pipefail_env() == {SHELLOPTS_VAR: PIPEFAIL_SHELLOPTS}
+
+    def test_it_returns_a_fresh_dict_each_call(self):
+        """Callers merge it into an env they then mutate."""
+        first = pipefail_env()
+        first["SOMETHING"] = "else"
+        assert "SOMETHING" not in pipefail_env()
+
+    def test_the_value_names_only_shell_options(self):
+        """The reason this is SHELLOPTS and not BASH_ENV.
+
+        BASH_ENV names a *file* bash sources before every non-interactive
+        shell, which is why `executor._SHELL_STARTUP_ENV_VARS` strips it. Bash
+        parses SHELLOPTS as a colon-separated list of option names and rejects
+        anything else as an invalid option name, so it cannot carry code.
+        """
+        assert re.fullmatch(r"[a-z_]+(:[a-z_]+)*", PIPEFAIL_SHELLOPTS)
+
+
+class TestTheEnvActuallyBehaves:
+    """Run a real bash under the env the helper returns.
+
+    Same reasoning as `TestTheArgvActuallyBehaves`: the property is not "the
+    variable is in the dict", it is that a bash started with that variable
+    reports the failing stage. These would all have passed before the fix if
+    they asserted on the dict alone.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _needs_bash(self):
+        if not shutil.which("bash"):
+            pytest.skip("no bash on this host")
+
+    def _run(self, command: str, *, argv: list[str] | None = None):
+        return subprocess.run(
+            argv or ["bash", "-c", command],
+            env={**os.environ, **pipefail_env()},
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_a_failing_stage_is_the_pipelines_status(self):
+        """The reported bug, reproduced through the env rather than the argv.
+
+        Pre-fix this is 0: `bash -c` starts with pipefail off, and nothing in
+        the environment turned it on.
+        """
+        assert self._run("false | head -1").returncode != 0
+
+    def test_a_succeeding_pipeline_is_still_zero(self):
+        """Control. Without it a shell that failed everything would pass above."""
+        assert self._run("echo hi | head -1").returncode == 0
+
+    def test_the_option_is_really_set_in_the_shell_that_runs(self):
+        out = self._run("set -o | grep pipefail")
+        assert out.stdout.split() == ["pipefail", "on"], out.stdout
+
+    def test_it_survives_a_sourced_shell_snapshot(self):
+        """The shape the CLI's Bash tool actually runs.
+
+        Claude Code invokes `bash -c 'source <shell-snapshot> && eval <cmd>'`.
+        The snapshot restores functions, aliases and PATH, and the real ones on
+        the machine where this was written contain no `set -o` or `shopt` line,
+        so the environment's option survives being sourced.
+
+        **What this pins is the shape, not the artifact.** The fixture below is
+        three lines written by the test, and the snapshot is a third-party file
+        this repo neither generates nor version-pins — so a future Claude Code
+        that emitted `set +o pipefail` into one would revert the fix with this
+        test still green. The snapshots inspected were also all zsh-derived; a
+        bash-derived one, which is what a Debian daemon user's login shell
+        would produce, has not been looked at. Recorded as a known limit of the
+        evidence rather than dressed up: the honest version of this test is a
+        live task asserting on its own shell, which needs a real model.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "snapshot.sh"
+            snapshot.write_text(
+                "greet() { echo hi; }\nalias ll='ls -l'\nexport PATH=\"$PATH\"\n",
+                encoding="utf-8",
+            )
+            out = self._run(f"source '{snapshot}' >/dev/null 2>&1; false | head -1")
+        assert out.returncode != 0
+
+    def test_it_reaches_a_nested_bash_script(self):
+        """Deeper than `-o pipefail` on one argv reaches.
+
+        ISSUE-307 recorded that the flag stops at one shell, so a pipeline
+        inside a `bash script.sh` was unguarded again. An environment variable
+        is inherited, so it is not.
+
+        Three things this needs to be worth running, all of them found in
+        review. The script has to be invoked *from* a shell, or it is the
+        top-level bash the class already covers and nothing is nested. The
+        interpreter comes from `shutil.which`, because a hardcoded
+        `#!/bin/bash` on a host with only `/opt/homebrew/bin/bash` fails to
+        exec and returns 126, which is `!= 0` and green for the wrong reason.
+        And it takes both controls below: a nested pipeline that succeeds, and
+        the same nesting under `-o pipefail` with no environment, which is the
+        contrast the docstring rests on.
+        """
+        bash = shutil.which("bash")
+        with tempfile.TemporaryDirectory() as tmp:
+            failing = self._nested_script(tmp, "failing.sh", "false | head -1", bash)
+            passing = self._nested_script(tmp, "passing.sh", "true | head -1", bash)
+
+            assert self._run(f"{bash} {failing}").returncode != 0
+            assert self._run(f"{bash} {passing}").returncode == 0, (
+                "control: a good nested pipeline must still pass"
+            )
+
+            # The contrast: the flag on the outer argv does not descend.
+            flagged = subprocess.run(
+                [bash, "-o", "pipefail", "-c", f"{bash} {failing}"],
+                env={k: v for k, v in os.environ.items() if k != SHELLOPTS_VAR},
+                capture_output=True, text=True, timeout=30,
+            )
+            assert flagged.returncode == 0, (
+                "control: -o pipefail is supposed to stop at one shell; if this "
+                "fails the test is measuring nothing"
+            )
+
+    @staticmethod
+    def _nested_script(tmp: str, name: str, body: str, bash: str | None) -> Path:
+        script = Path(tmp) / name
+        script.write_text(f"#!{bash}\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+        return script
+
+    def test_a_command_can_still_opt_out_and_back_in(self):
+        """The escape hatch, pinned — and it is the *toggle* that is measured.
+
+        Asserting only that `set +o pipefail` yields rc=0 would pass against
+        the pre-fix shell, where the option was off to begin with and the line
+        did nothing. So this walks all three states in one shell: on by
+        inheritance, off after `+o`, on again after `-o`.
+
+        SHELLOPTS itself is readonly in bash, so a command cannot unset the
+        variable; `set +o pipefail` is the supported way to want the old
+        behaviour for one pipeline.
+        """
+        out = self._run(
+            "false | head -1; echo a=$?; "
+            "set +o pipefail; false | head -1; echo b=$?; "
+            "set -o pipefail; false | head -1; echo c=$?"
+        )
+        assert "a=1" in out.stdout, out.stdout
+        assert "b=0" in out.stdout, out.stdout
+        assert "c=1" in out.stdout, out.stdout
+
+    def test_the_two_documented_costs_reproduce(self):
+        """ISSUE-307 paid for these; they arrive here unchanged.
+
+        141 is SIGPIPE and has a fixed code, so `shell_exec.SIGPIPE_NOTE` can
+        annotate it. The second has no marker and is documented instead.
+        """
+        assert self._run("yes | head -1 >/dev/null").returncode == shell_exec.SIGPIPE_EXIT
+        assert self._run("grep -c zzz /etc/hosts | wc -l >/dev/null").returncode != 0

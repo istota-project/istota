@@ -665,6 +665,22 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   second cost has no marker and is documented rather than detected: a non-final
   stage exiting non-zero to *report* something (`grep` with no match) now
   colours the pipeline.
+- **So do the two CLI brains, by a different route (ISSUE-321).** A
+  `ClaudeCodeBrain` or `TmuxClaudeBrain` task runs its commands through the
+  Claude Code CLI's *own* Bash tool, which builds `bash -c 'source
+  <shell-snapshot> && eval <cmd>'` in a process istota launches and does not
+  instrument — so `shell_argv` cannot reach it and that shell started with the
+  option off, on the surface where the great majority of tool calls happen. The
+  environment is the only lever that does: `executor.build_clean_env` sets
+  `SHELLOPTS=pipefail` (`shell_exec.pipefail_env`), which bash reads at startup
+  and which survives the sourced snapshot — measured; the snapshot restores
+  functions, aliases and PATH and touches no `set -o` option. `SHELLOPTS`
+  rather than `BASH_ENV` because it carries option *names* and cannot name a
+  file to source, so it opens no exec inlet; see `.claude/rules/executor.md`
+  under `build_clean_env` for the full comparison. Being inherited rather than
+  an argv flag, it also reaches a pipeline inside a nested `bash script.sh`,
+  which `-o pipefail` does not — the two brains therefore agree on an identical
+  command string, which is what ISSUE-307 wanted when it left this alone.
 
 NativeBrain hardening (2026-07-18 audit, NB-1…NB-24 — see the audit doc in the
 project notes for the full list):

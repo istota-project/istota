@@ -279,7 +279,7 @@ run_devbox_control \
 #
 # **It is also the one that needs `--platform`.** Every other control is
 # `FROM ${BASE}` and inherits the base image's architecture. This one starts
-# from `debian:bookworm-slim`, which is multi-arch, so without the flag an
+# from `debian:trixie-slim`, which is multi-arch, so without the flag an
 # `amd64` run builds a native image and hands it to a pytest run that then adds
 # `--platform linux/amd64` to `docker run`. The control still goes red — with
 # `exec format error`, which is the "red for the right image, for the wrong
