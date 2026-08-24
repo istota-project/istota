@@ -88,9 +88,17 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
         return getattr(ctx.task, "user_id", None) or None
 
     elif spec.source == "setup_env":
-        # Value comes from the skill's setup_env(ctx) hook; the manifest
-        # entry exists so derive_credential_set / derive_skill_credential_map
-        # see the var (especially when sensitive=true).
+        # Value comes from a setup_env(ctx) hook; the manifest entry exists so
+        # derive_credential_set / derive_skill_credential_map see the var
+        # (especially when sensitive=true).
+        #
+        # Usually the *declaring* skill's own hook, but not necessarily — hooks
+        # are dispatched over the whole index and their output is merged into
+        # one dict, so a skill may declare a var another skill's hook produces.
+        # `code_review` declares DEVELOPER_REPOS_DIR that way; the developer
+        # skill's hook is what sets it. Declaring it is still worth doing: it
+        # is how the var appears in the manifest-derived sets, and it is where
+        # a reader looks to find out the CLI needs it.
         return None
 
     elif spec.source == "secret":

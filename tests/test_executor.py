@@ -652,7 +652,10 @@ class TestDeveloperEnvVars:
         (skills_dir / "files.md").write_text("File operations guide.")
         kw = dict(
             enabled=developer_enabled,
-            repos_dir="/srv/repos",
+            # Under tmp_path, never a real host path: the hook creates
+            # `{repos_dir}/{user_id}` and sweeps it, so a literal `/srv/repos`
+            # here would have the suite writing outside its own directory.
+            repos_dir=str(tmp_path / "repos"),
             gitlab_url="https://gitlab.example.com",
             gitlab_token="glpat-test",
             gitlab_username="istotabot",
@@ -692,6 +695,17 @@ class TestDeveloperEnvVars:
         ctx = _Ctx()
         ctx.config = config
         ctx.user_temp_dir = str(user_temp)
+        # The hook creates and scrubs the repos subtree only for an admin,
+        # matching the bind's own gate.
+        ctx.is_admin = True
+        # The hook reads the task's user id to name the repos subtree it
+        # creates and sweeps; without one it takes the fail-closed branch and
+        # every assertion below would be made against a hook that did half its
+        # work.
+        ctx.task = db.Task(
+            id=1, prompt="test", user_id="alice",
+            source_type="talk", status="running", conversation_token="",
+        )
         return setup_env(ctx), user_temp
 
     def test_disabled_developer_returns_nothing(self, tmp_path):

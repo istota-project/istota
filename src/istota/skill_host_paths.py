@@ -33,6 +33,13 @@ task's own `{mount}/Channels/{ISTOTA_CONVERSATION_TOKEN}` — plus `{mount}/Talk
 for reads only, matching its read-only bind. With no `ISTOTA_USER_ID` in the
 environment the mount contributes nothing; the deferred dir stands alone.
 
+`DEVELOPER_REPOS_DIR` is scoped the same way, and it did not used to be. It
+named the whole of `developer.repos_dir`, one tree shared by every admin, so
+`code_review --worktree <another admin's checkout>` passed containment and came
+back as reviewer-prompt text. The variable is now the caller's own subtree and
+`developer_repos_root` re-derives that scope from `ISTOTA_USER_ID` rather than
+trusting it.
+
 **Callers must use the returned resolved path.** Validating one path and then
 opening the original re-walks every symlink in it, so a link swapped in between
 lands outside the allowlist with the check already passed. The resolved path
@@ -146,22 +153,64 @@ def validate_host_path(
 
 
 def developer_repos_root() -> Path | None:
-    """The resolved `DEVELOPER_REPOS_DIR`, or None when it is unset or blank.
+    """The calling task's own subtree of the developer repos tree, or None.
 
     Separate from `allowed_host_roots` on purpose. The mount roots scope a path
     the model names inside its own workspace; this scopes a *worktree* the model
     names, which lives somewhere else entirely. Mixing the two would let a
     review read the user's workspace and a `kv --value-file` read a checkout.
 
-    **This resolves the root; it does not decide who may use it.** The env spec
-    that sets `DEVELOPER_REPOS_DIR` gates on `developer.enabled` and
-    `developer.repos_dir` with no admin condition, while `build_bwrap_cmd` binds
-    the directory only when the caller is an admin. So a non-admin task has the
-    variable set and no bind behind it, and a non-`None` return here says
-    nothing about authorization. The `is_admin` check belongs to the calling CLI.
+    **The root is one user's subtree, and that is checked here rather than
+    assumed.** `developer.repos_dir` is a root of per-user subtrees; the
+    developer skill's `setup_env` derives `DEVELOPER_REPOS_DIR` as
+    `{repos_dir}/{ISTOTA_USER_ID}` and `build_bwrap_cmd` binds the same path.
+    While the variable named the shared root, `resolve_under_repos` admitted
+    another admin's checkout — and that path runs *host-side*, outside the
+    sandbox, so none of the bwrap-side scoping reached it. Re-deriving the
+    scope from `ISTOTA_USER_ID` is what the rest of this module does with the
+    mount root, and it means a variable that regresses to the shared root is
+    refused here instead of quietly widening containment to every user's tree.
+
+    Two checks, mirroring `executor.get_user_repos_dir`. The name as written
+    must be the user id, which refuses a root one level too high or one naming
+    somebody else; and the resolved path must equal the resolved *parent* plus
+    that name, which refuses a symlink standing where the subtree should be.
+    The tree was bound read-write and shared for as long as the old layout
+    stood, so such a link is model-plantable rather than hypothetical. The
+    second is deliberately not a second `.name` test — a planted link would be
+    named for its victim, so `{repos_dir}/alice -> /anywhere/alice` resolves to
+    a name that still passes one.
+
+    **What it does not check** is that the parent is `developer.repos_dir`, so
+    `/anywhere/at/all/alice` passes. It cannot: this is a stdlib-only leaf with
+    no access to the loaded config, which is why `executor.get_user_repos_dir`
+    — which does know the configured root — is the seam that spells the whole
+    equality out. Read `{repos_dir}/{ISTOTA_USER_ID}` above as the shape this
+    checks *against*, not as an equality enforced here.
+
+    One consequence is worth naming because it looks like a bug and is not
+    fixable from here: where the user id happens to equal the last component of
+    `developer.repos_dir` (`repos_dir = /srv/dev`, user `dev`), the shared root
+    and that user's subtree are indistinguishable to this function and the
+    shared root is accepted. `/srv/dev` is a legitimate per-user root for `dev`
+    under `repos_dir = /srv`, and nothing in the environment says which. The
+    boundary against that is upstream, where the value is derived. Nothing
+    reaches this today that could steer it: the variable is daemon-set and is
+    never model-supplied.
+
+    None when the variable is unset or blank, when `ISTOTA_USER_ID` is unset or
+    blank, or when either check fails. Refusing is this module's posture for a
+    root it cannot resolve, and an unscoped root is one it cannot resolve.
+
+    **This resolves the root; it does not decide who may use it.** A non-`None`
+    return says nothing about authorization; the `is_admin` check belongs to the
+    calling CLI.
     """
     raw = os.environ.get("DEVELOPER_REPOS_DIR", "").strip()
     if not raw:
+        return None
+    user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
+    if not user_id:
         return None
     try:
         root = Path(raw).resolve()
@@ -175,14 +224,40 @@ def developer_repos_root() -> Path | None:
     # `/` passes every containment check there is. Refusing an unset variable
     # "rather than widening to the whole filesystem" and then accepting the one
     # value that widens to the whole filesystem is not a boundary. Two
-    # components is the shallowest plausible real root (`/srv/repos`).
+    # components is the shallowest plausible real root (`/srv/alice`).
     if len(root.parts) < 3:
+        return None
+    # Two checks, and the second is structural rather than a second name
+    # comparison. The name as written must be the user id — that refuses a root
+    # one level too high, or one naming somebody else. Then the *resolved* path
+    # must be the child that name denotes inside the resolved parent, which is
+    # `executor.get_user_repos_dir`'s rule with the one term this module cannot
+    # know (`developer.repos_dir`) replaced by the parent it was given. A
+    # second `.name` test would not do: `{repos_dir}/alice -> /anywhere/alice`
+    # resolves to a path whose name is still `alice`, and a planted link would
+    # of course be named for its victim.
+    #
+    # Resolving the parent separately is what keeps a symlinked deployment root
+    # (`/srv/repos` -> `/data/repos`) working: that link is above the user
+    # component, so both sides resolve through it and agree.
+    if Path(raw).name != user_id:
+        return None
+    try:
+        if Path(raw).parent.resolve() / user_id != root:
+            return None
+    except (OSError, ValueError):
         return None
     return root
 
 
 def resolve_under_repos(path: str | Path) -> tuple[Path | None, str | None]:
-    """Validate a worktree directory against `DEVELOPER_REPOS_DIR`.
+    """Validate a worktree directory against the caller's own repos subtree.
+
+    The root is whatever `developer_repos_root` returns, which is
+    `{developer.repos_dir}/{ISTOTA_USER_ID}` — so another user's checkout is
+    outside it and refused. Nothing in the body changed when the layout split;
+    containment has always been against whatever that function answers, which
+    is why the fix belongs there and not here.
 
     Returns `(resolved, None)` on success or `(None, error)` on refusal, the
     same shape as `resolve_host_path` — one module, one error convention, and
@@ -220,8 +295,10 @@ def resolve_under_repos(path: str | Path) -> tuple[Path | None, str | None]:
     root = developer_repos_root()
     if root is None:
         return None, (
-            "DEVELOPER_REPOS_DIR is unset, so no worktree path can be validated. "
-            "Refusing rather than widening to the whole filesystem."
+            "No developer repos root resolved for this task, so no worktree "
+            "path can be validated. DEVELOPER_REPOS_DIR must be set and must "
+            "name this task's own subtree (ISTOTA_USER_ID). Refusing rather "
+            "than widening to the whole filesystem."
         )
 
     # `Path("")` is `.`, which would resolve to wherever the daemon happens to

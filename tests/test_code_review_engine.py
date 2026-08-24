@@ -91,10 +91,16 @@ def commit(repo: Path, message: str) -> None:
 
 @pytest.fixture
 def repos_root(tmp_path, monkeypatch) -> Path:
-    """A `DEVELOPER_REPOS_DIR` with nothing in it yet."""
-    root = tmp_path / "repos"
-    root.mkdir()
+    """A `DEVELOPER_REPOS_DIR` with nothing in it yet.
+
+    The variable is one user's own subtree of `developer.repos_dir`, which is
+    what `setup_env` derives and what `build_bwrap_cmd` binds, so
+    `developer_repos_root` requires it to be named for `ISTOTA_USER_ID`.
+    """
+    root = tmp_path / "repos" / "alice"
+    root.mkdir(parents=True)
     monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     return root.resolve()
 
 
@@ -254,13 +260,14 @@ class TestGitHardening:
         self, tmp_path, monkeypatch
     ):
         outer = tmp_path / "outer"
-        root = outer / "repos"
+        root = outer / "repos" / "alice"
         plain = root / "plain"
         plain.mkdir(parents=True)
         run_git(outer, "init", "-q", "-b", "main", ".")
         (outer / "outer_secret.py").write_text("OUTER_SENTINEL = 1\n")
         commit(outer, "outer")
         monkeypatch.setenv("DEVELOPER_REPOS_DIR", str(root))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
 
         # Positive control: git really does search upward out of the root.
         found = subprocess.run(

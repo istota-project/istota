@@ -3,7 +3,7 @@ name: developer
 triggers: [git, gitlab, github, repo, repository, commit, branch, merge request, MR, pull request, PR, code review, develop, worktree, clone]
 description: Git repository management, GitLab merge requests, and GitHub pull requests
 companion_skills: [commit, code_review, untrusted_input]
-env: [{"var":"DEVELOPER_REPOS_DIR","from":"config","config_path":"developer.repos_dir","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER","from":"config","config_path":"developer.gitlab_reviewer","when":["developer.enabled","developer.gitlab_reviewer"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
+env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"},{"var":"GITLAB_URL","from":"config","config_path":"developer.gitlab_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITHUB_URL","from":"config","config_path":"developer.github_url","when":["developer.enabled","developer.repos_dir"]},{"var":"GITLAB_DEFAULT_NAMESPACE","from":"config","config_path":"developer.gitlab_default_namespace","when":["developer.enabled","developer.gitlab_default_namespace"]},{"var":"GITLAB_REVIEWER","from":"config","config_path":"developer.gitlab_reviewer","when":["developer.enabled","developer.gitlab_reviewer"]},{"var":"GITHUB_DEFAULT_OWNER","from":"config","config_path":"developer.github_default_owner","when":["developer.enabled","developer.github_default_owner"]},{"var":"GITHUB_REVIEWER","from":"config","config_path":"developer.github_reviewer","when":["developer.enabled","developer.github_reviewer"]},{"var":"DEVELOPER_AUTHOR_CREDIT","from":"config","config_path":"developer.author_credit","when":["developer.enabled","developer.author_credit"]},{"var":"GITLAB_TOKEN","from":"config","config_path":"developer.gitlab_token","when":["developer.enabled","developer.repos_dir","developer.gitlab_token"],"sensitive":true},{"var":"GITHUB_TOKEN","from":"config","config_path":"developer.github_token","when":["developer.enabled","developer.repos_dir","developer.github_token"],"sensitive":true}]
 ---
 # Developer Skill — Git, GitLab & GitHub
 
@@ -13,7 +13,7 @@ Work in git repositories, manage merge requests on GitLab and pull requests on G
 
 | Variable | Description |
 |---|---|
-| `DEVELOPER_REPOS_DIR` | Base directory for repo clones and worktrees |
+| `DEVELOPER_REPOS_DIR` | Your own base directory for repo clones and worktrees. Every path below is relative to it; nothing outside it is reachable |
 | `GITLAB_URL` | GitLab instance URL (e.g., `https://gitlab.com`) |
 | `GITLAB_DEFAULT_NAMESPACE` | Default GitLab namespace (user/group) for resolving short repo names |
 | `GITLAB_REVIEWER` | GitLab username to assign as MR reviewer |
@@ -49,11 +49,11 @@ This is an accident guard, not a security boundary. Hitting it means you are abo
 $DEVELOPER_REPOS_DIR/
 ├── namespace/project.git/                    # bare clone
 ├── namespace/project--istota-42-add-auth/      # worktree for task 42
-└── namespace/project--istota-55-fix-bug/       # worktree for task 55
+├── namespace/project--istota-55-fix-bug/       # worktree for task 55
+└── .package-caches/                          # uv + npm caches; leave it alone
 ```
 
-- Bare clones go in `<namespace>/<project>.git/`
-- Worktrees are siblings: `<namespace>/<project>--<branch-slug>/`
+- Bare clones go in `<namespace>/<project>.git/`; worktrees are siblings, `<namespace>/<project>--<branch-slug>/`
 
 ## Cloning a Repository
 

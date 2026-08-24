@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from istota.worktree_reaper import (
     parse_worktree_list,
@@ -494,6 +495,35 @@ class TestReaps:
         reap_worktrees(repos_dir, retention_hours=24)
 
         assert "project--gone" not in _git(bare, "worktree", "list", "--porcelain")
+
+    def test_reaps_a_clone_one_level_deeper_under_a_user_directory(
+        self, repos, tmp_path,
+    ):
+        """`repos_dir` is a root of per-user subtrees, so a bare clone sits at
+        `{user}/{namespace}/{project}.git` — depth 3 rather than depth 2.
+
+        The scheduler sweeps the whole root with the daemon's own view and is
+        unchanged by that layout, because `find_git_dirs` walks to depth 4.
+        This is that claim asserted rather than assumed: at depth 3 the walk
+        reaches the clone, and a worktree beside it is swept exactly as one in
+        the flat layout is.
+        """
+        repos_dir, _, upstream = repos
+        deep = tmp_path / "repos" / "alice" / "acme" / "widget.git"
+        deep.parent.mkdir(parents=True, exist_ok=True)
+        _git(tmp_path, "clone", "-q", "--bare", str(upstream), str(deep))
+        _git(deep, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        _git(deep, "fetch", "-q", "origin")
+        _git(deep, "remote", "set-head", "origin", "-a")
+
+        worktree = _worktree(deep, "widget--main", "origin/main")
+        _age(worktree, 48)
+
+        outcomes = reap_worktrees(repos_dir, retention_hours=24)
+
+        assert "widget--main" in _names(outcomes), \
+            f"a clone under a per-user directory went unswept: {outcomes}"
+        assert not worktree.exists()
 
     def test_reaps_across_several_bare_clones(self, repos, tmp_path):
         repos_dir, bare, upstream = repos
@@ -1423,6 +1453,78 @@ class TestSchedulerIntegration:
         from istota.scheduler import check_worktree_reap
 
         assert check_worktree_reap(self._config(tmp_path / "nope")) == []
+
+    def test_the_package_caches_are_pruned_from_the_walk(self, repos):
+        """The skip used to name `security.sandbox_cache_dir`, which is blank on
+        any deployment that has a repos tree to derive a cache from — so it went
+        inert the moment the cache moved inside the per-user subtree.
+
+        Not cosmetic. A git directory inside the cache within `_MAX_DEPTH` is
+        found by the walk and evaluated as a reap candidate, and evaluating one
+        runs `git fetch` against a model-written `remote.origin.url` from the
+        unsandboxed scheduler, outside the CONNECT allowlist, on every sweep.
+        The cache is bound read-write into the task's own sandbox, so it is
+        exactly where such a directory turns up. The cheaper cost is the walk
+        listing every unpacked wheel and then logging that thousands of
+        directories went unswept for credentials.
+
+        The in-test control is the second `find_git_dirs` call: without the
+        skip the same fixture *is* found, so a green assertion means the prune
+        did it and not the depth limit or the git-dir test.
+        """
+        from istota.git_remote_scrub import find_git_dirs
+        from istota.scheduler import _package_cache_dirs
+
+        repos_dir, _bare, _ = repos
+        planted = repos_dir / "alice" / ".package-caches" / "uv" / "evil.git"
+        planted.mkdir(parents=True)
+        (planted / "HEAD").write_text("ref: refs/heads/main\n")
+        (planted / "config").write_text("")
+        (planted / "objects").mkdir()
+
+        skip = _package_cache_dirs(str(repos_dir))
+        assert repos_dir / "alice" / ".package-caches" in skip
+
+        assert planted.resolve() in find_git_dirs(repos_dir), \
+            "the control failed: the fixture is out of the walk's reach anyway"
+        assert planted.resolve() not in find_git_dirs(repos_dir, skip=skip), \
+            "the package cache is still walked for repositories"
+
+    def test_check_worktree_reap_passes_the_derived_skips(self, repos):
+        """The wiring, separately from the prune. The two halves fail
+        independently: a correct `_package_cache_dirs` that the call site does
+        not pass is exactly the state this commit found the code in."""
+        from istota.scheduler import check_worktree_reap
+
+        repos_dir, _bare, _ = repos
+        (repos_dir / "alice" / ".package-caches").mkdir(parents=True)
+
+        with patch("istota.worktree_reaper.reap_and_report", return_value=[]) as reap:
+            check_worktree_reap(self._config(repos_dir))
+
+        skip = reap.call_args.kwargs["skip"]
+        assert repos_dir / "alice" / ".package-caches" in skip, reap.call_args
+        # One entry per top-level directory, each naming a cache and nothing
+        # else — the fixture's own namespace directory is in there too, and a
+        # skip that named a *repository* would prune real work out of the sweep.
+        assert all(p.name == ".package-caches" for p in skip), skip
+
+    def test_the_cache_name_matches_the_executors(self):
+        """Restated in the scheduler rather than imported, like the developer
+        skill's copy. Two spellings drifting apart puts the walk back inside the
+        cache with nothing to say so."""
+        from istota.executor import SANDBOX_CACHE_ROOT_NAME
+        from istota.scheduler import _SANDBOX_CACHE_ROOT_NAME
+
+        assert _SANDBOX_CACHE_ROOT_NAME == SANDBOX_CACHE_ROOT_NAME
+
+    def test_the_cache_enumeration_never_raises(self, tmp_path):
+        """It feeds a delete path's walk. An unreadable root costs a noisy
+        sweep, which is the right way to be wrong: `skip` only prunes, so an
+        empty answer loses performance rather than safety."""
+        from istota.scheduler import _package_cache_dirs
+
+        assert _package_cache_dirs(str(tmp_path / "nope")) == []
 
     def test_the_developer_setup_hook_no_longer_reaps(self, repos, tmp_path):
         """The hook still writes the credential wiring; it must not delete."""

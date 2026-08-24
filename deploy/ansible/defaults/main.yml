@@ -1312,48 +1312,45 @@ istota_security_skill_proxy_timeout: 300          # timeout for proxied skill co
 # framework DB and every user's module DB to every task. Keep entries narrow;
 # the DB directories are masked after this list either way.
 istota_security_sandbox_ro_paths: []
-# Root of a disk-backed directory for the package managers' caches (uv, npm,
-# and anything else honouring XDG_CACHE_HOME). Each user gets {root}/{user_id},
-# bound RW into their sandbox. Empty leaves the caches on bubblewrap's own root
-# tmpfs, which is RAM the host cannot attribute and which is discarded at task
-# exit, so every task re-downloads.
+# FALLBACK root for the package managers' caches (uv, npm, and anything else
+# honouring XDG_CACHE_HOME) — for a deployment running the sandbox WITHOUT the
+# developer skill. Each user gets {root}/{user_id}, bound RW into their sandbox.
+# Empty leaves the caches on bubblewrap's own root tmpfs, which is RAM the host
+# cannot attribute and which is discarded at task exit, so every task
+# re-downloads (ISSUE-305).
 #
-# Put it under istota_developer_repos_dir when that is set: uv hardlinks out of
-# its cache and link(2) returns EXDEV across a mount boundary, so a cache on
-# any other mount makes every worktree pay for a full copy. Do not point it AT
-# repos_dir, at the temp dir, or at ~/.cache — a bind above an existing mount
-# covers it, and the daemon refuses those values rather than doing so.
+# Blank by default, and this is the second time the key has moved. It was blank
+# because there was no good place to put the cache; it was briefly derived from
+# istota_developer_repos_dir (ISSUE-319, commit cc691d6f); it is blank again
+# because the daemon now derives the cache itself, per user, at
+# {repos_dir}/{user_id}/.package-caches. Setting it here would name the fallback
+# path rather than the one a developer deployment actually uses, so the value
+# would be read only where the derivation does not apply — and would read as
+# the intended location to anyone who found it.
 #
-# Derived from istota_developer_repos_dir, and blank when that is blank: with
-# no repos bind there is no shared mount to put the cache on, and the whole
-# placement argument is about that mount.
+# The derivation exists for the mount, not for tidiness: uv populates a venv by
+# hardlinking out of its cache, link(2) compares MOUNTS rather than devices, and
+# the per-user repos bind is emitted after the cache bind and is an ancestor of
+# it. That single covering bind is the only shape where uv hardlinks instead of
+# copying every wheel; a cache root anywhere else returns EXDEV even on the same
+# filesystem, measured on the reference deployment. Set this key and the caches
+# go on their own mount and pay that copy.
 #
-# The repos bind is emitted AFTER this one and is an ancestor of it, so it
-# covers the cache root — which is the point, not an accident. link(2) compares
-# mounts rather than devices, so a cache root outside repos_dir returns EXDEV
-# even on the same filesystem, and so does one carved back out with a nested
-# bind; both were measured on the reference deployment (ISSUE-319). The single
-# covering bind is the only shape where uv hardlinks instead of copying every
-# wheel.
-#
-# What that covering also exposes — every other user's cache directory,
-# read-write, to every admin developer task — is closed by build_bwrap_cmd
-# masking the sibling directories with empty read-only tmpfs mounts, after both
-# binds. Here the mask IS the boundary rather than defence behind one, so the
-# daemon refuses to bind a covered cache at all on a bwrap without
-# --disable-userns, and refuses one whose root it cannot list or that holds a
-# symlink. Each refusal costs RAM and nothing else.
-istota_security_sandbox_cache_dir: >-
-  {{ (istota_developer_repos_dir ~ '/.package-caches')
-     if istota_developer_repos_dir else '' }}
+# Do not point it at the temp dir or at ~/.cache — a bind above an existing
+# mount covers it, and the daemon refuses those values rather than doing so.
+istota_security_sandbox_cache_dir: ""
 # Bounding what that directory grows to (ISSUE-317). Every sweep runs the cheap
 # reclaim the package managers ship (uv cache prune, npm cache verify); a
 # per-user cache still over the ceiling afterwards is wiped with their own clean
 # verbs. A ceiling in bytes rather than an age window because one
 # `uv sync --all-extras` writes about 1.8 GB in a single command. Cadence is
-# istota_scheduler_sandbox_cache_sweep_interval; the sweep is inert while
-# istota_security_sandbox_cache_dir is empty. A user with a task in flight is
+# istota_scheduler_sandbox_cache_sweep_interval. A user with a task in flight is
 # skipped rather than raced.
+#
+# The sweep follows the cache rather than the key: with the developer skill on
+# it walks {repos_dir}/{user_id}/.package-caches for each user the daemon knows
+# about, and with it off it walks this key's root as before. So a blank value
+# above switches nothing off.
 istota_security_sandbox_cache_sweep_enabled: true
 # Per user, clamped to a 1 GiB floor by the sweeper. Sized against two figures
 # from the reference deployment: one `uv sync --all-extras` writes about 1.8 GB,

@@ -1,4 +1,4 @@
-"""Bound the on-disk package caches ``security.sandbox_cache_dir`` creates (ISSUE-317).
+"""Bound the on-disk package caches the sandbox creates per user (ISSUE-317).
 
 ISSUE-305 moved a task's uv and npm caches off bubblewrap's root tmpfs and onto
 disk, because a cache in RAM is unattributable, capped at half the box's memory,
@@ -82,14 +82,32 @@ shows up as a growing number rather than as silence. Skipping is the right way
 round — a cache one interval too large costs disk, a wipe one second too early
 costs a task.
 
-**Containment.** ``resolve_sandbox_cache_dir`` creates ``{root}/{user_id}`` and
-nothing deeper, so a candidate is a directory whose *resolved* parent is the
-resolved root — one rule, which a symlink fails by construction. Anything else
-is refused by name. That matters because the root's parent is normally
-``developer.repos_dir``, which is bound read-write into an admin developer
-task's sandbox — so the entries under the root are model-adjacent, and a
-symlink planted there would otherwise aim a package manager's reclaim verb at a
-directory of the model's choosing.
+**Two layouts, because ``resolve_sandbox_cache_dir`` has two branches.** With
+``developer.repos_dir`` set the cache is derived at
+``{repos_dir}/{user_id}/{CACHE_ROOT_NAME}``; without it the cache is
+``{security.sandbox_cache_dir}/{user_id}``. ``user_ids`` on
+:func:`sweep_caches` selects which, and the difference is not cosmetic — it
+decides where the *user id* comes from.
+
+**Containment, and why the id's provenance is the crux.** The rule is an
+equality in both shapes: a candidate must resolve to exactly the path the
+layout names, which a symlink fails by construction. What changes is what a
+name is worth. Under one level the root is an operator-named directory outside
+``repos_dir``, so an entry that resolves to its own name inside it is that
+user's cache and the name can be trusted. Under two levels the root *is*
+``developer.repos_dir``, bound read-write into every admin developer task — a
+task can create ``{repos_dir}/zzz/`` and fill it, and a sweeper enumerating the
+tree would take ``zzz`` for a user id, ask the busy check about a user that
+cannot possibly have a task in flight, and then run a reclaim verb inside a
+directory the model chose. So on the derived layout the caller supplies the
+user ids and this module derives one path each, reading no name back out of
+the tree. Getting that list wrong is safe in both directions: a missing user is
+a cache that goes unswept, an invented one measures zero.
+
+Either way the *resolved* path is what goes on to the subprocess, never the
+entry as read: the check and the use are separated by a tree walk and up to
+four subprocesses, so an unresolved path can be renamed away and replaced with
+a symlink inside the window.
 
 For the same reason the tools are run with their cwd in a fresh temporary
 directory rather than in the cache, with ``uv --no-config``, with npm's user
@@ -153,6 +171,11 @@ logger = logging.getLogger("istota.sandbox_cache_sweeper")
 CACHE_UV = "uv"
 CACHE_NPM = "npm"
 
+# Mirrors executor.SANDBOX_CACHE_ROOT_NAME — the derived cache's name inside a
+# user's own repos subtree. A copy for the same reason the two above are, and
+# held equal by the same test.
+CACHE_ROOT_NAME = ".package-caches"
+
 # Bytes per block in the unit `st_blocks` is defined in. POSIX fixes it at 512
 # regardless of the filesystem's own block size.
 _BLOCK = 512
@@ -180,7 +203,7 @@ DEFAULT_MIN_IDLE_SECONDS = 900.0
 # binary rather than a busy one.
 _TOOL_TIMEOUT = 900
 
-ACTION_OUTSIDE = "outside"          # not a direct child of the root; nothing run
+ACTION_OUTSIDE = "outside"          # not where the layout says it should be; nothing run
 ACTION_BUSY = "busy"                # the user has a task in flight
 ACTION_RECENT = "recent"            # something wrote into the cache too recently
 ACTION_FUTURE_MTIME = "future-mtime"  # stamped ahead of the clock; a pin or a clock fault
@@ -188,6 +211,7 @@ ACTION_NO_TOOLS = "no-tools"        # over the ceiling with no reclaim verb avai
 ACTION_RECLAIMED = "reclaimed"      # swept, and inside the ceiling afterwards
 ACTION_WIPED = "wiped"              # escalated to a full clean, and now inside it
 ACTION_STILL_OVER = "still-over"    # everything available was run and it is still over
+ACTION_SWAPPED = "swapped"          # the directory changed identity mid-sweep; nothing further run
 
 
 class CacheSize(NamedTuple):
@@ -269,16 +293,37 @@ def _largest_child(path: Path) -> tuple[str, int]:
 # Containment
 # --------------------------------------------------------------------------
 
-def _candidates(root: Path) -> Iterator[tuple[Path, bool]]:
-    """Each entry in ``root`` with whether it is a per-user cache we may act on.
+def _is_one_component(user_id: str) -> bool:
+    """Whether *user_id* is a single, ordinary path component.
 
+    Everything a join would treat as navigation rather than as a name: empty,
+    ``.``, ``..``, anything holding a separator, anything absolute. Written out
+    rather than inferred from a parent comparison because ``PurePath`` keeps
+    ``..`` literal, so ``(root / "..").parent == root`` and the comparison says
+    yes to the one value that matters most.
+
+    ``os.altsep`` is checked as well as ``os.sep``: it is ``None`` on Linux and
+    ``\\`` on Windows, and a rule about what is safe to join should not be
+    quietly narrower on the platform nobody tests on.
+    """
+    if not user_id or user_id in (".", ".."):
+        return False
+    if os.sep in user_id or (os.altsep and os.altsep in user_id):
+        return False
+    return not Path(user_id).is_absolute()
+
+
+def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
+    """One-level layout: each entry in ``root`` is a user's cache.
+
+    The shape ``security.sandbox_cache_dir`` produces —
     ``resolve_sandbox_cache_dir`` creates ``{root}/{user_id}`` and nothing
-    deeper, so a candidate is a directory that **resolves to its own name
-    inside the root** — ``entry.resolve() == root.resolve() / entry.name``. A
-    directory that fails that yields ``False`` and is reported rather than
-    silently skipped: a planted symlink is the interesting case, and a sweep
-    that quietly ignored one would look identical to a sweep that found
-    nothing.
+    deeper on that branch — so a candidate is a directory that **resolves to
+    its own name inside the root**: ``entry.resolve() == root.resolve() /
+    entry.name``. A directory that fails that yields ``False`` and is reported
+    rather than silently skipped: a planted symlink is the interesting case,
+    and a sweep that quietly ignored one would look identical to a sweep that
+    found nothing.
 
     **Equality, not "the resolved parent is the root".** The weaker test reads
     as though it excludes every symlink and does not: ``{root}/zzz`` pointing at
@@ -288,11 +333,15 @@ def _candidates(root: Path) -> Iterator[tuple[Path, bool]]:
     bob's real cache. That is guard 1 defeated by a name, and it was found by
     review after the weaker rule had been written down as sufficient. Requiring
     the resolved path to carry the same name closes both that and the
-    target-outside-the-root case in one comparison. It matters
-    because the root's parent can be a directory bound read-write into a task's
-    sandbox: an entry here can then be model-planted, and following one would
-    aim a package manager's reclaim verb at a directory of the model's
-    choosing.
+    target-outside-the-root case in one comparison.
+
+    **The user id still comes from the tree here, and that is now the narrower
+    of the two shapes.** It is sound because this root is an operator-named
+    directory that is not inside ``developer.repos_dir`` — the derived layout
+    is what covers the case where it would be, and
+    :func:`_candidates_for_users` takes the id from the daemon instead. The
+    equality above is what makes a name read back from this tree trustworthy:
+    an entry that is not what it says it is never yields ``True``.
 
     **What is yielded is the resolved path, not the entry as read**, and that is
     the half that makes the rule worth anything. The check and the use are
@@ -304,7 +353,7 @@ def _candidates(root: Path) -> Iterator[tuple[Path, bool]]:
     try:
         resolved_root = root.resolve()
         entries = sorted(root.iterdir())
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("sandbox_cache_sweeper: %s is unreadable (%s); nothing swept.", root, exc)
         return
 
@@ -316,7 +365,7 @@ def _candidates(root: Path) -> Iterator[tuple[Path, bool]]:
                 continue
             resolved = entry.resolve()
             if resolved != resolved_root / entry.name:
-                yield entry, False
+                yield entry.name, entry, False
                 continue
         except OSError:
             continue
@@ -327,7 +376,152 @@ def _candidates(root: Path) -> Iterator[tuple[Path, bool]]:
         # path and handing a different one to `uv cache clean` would leave the
         # containment rule describing a check nothing acted on. A resolved path
         # contains no symlink component, so there is nothing left to swap.
-        yield resolved, True
+        yield entry.name, resolved, True
+
+
+def _candidates_for_users(
+    root: Path, user_ids: Collection[str],
+) -> Iterator[tuple[str, Path, bool]]:
+    """Two-level layout: ``{root}/{user_id}/{CACHE_ROOT_NAME}``, derived.
+
+    The shape ``developer.repos_dir`` produces. ``root`` is the *repos* root, a
+    tree of per-user subtrees, and a user's cache is a fixed name inside their
+    own subtree — so the entries between the root and the cache are that user's
+    clones and worktrees, which are model-written by construction.
+
+    **The user ids come from the caller and are never read back from the tree,
+    and that is the whole difference between this function and the one above.**
+    Under one level the equality made a name found in the root trustworthy;
+    under two it cannot, because the root here is the directory bound
+    read-write into every admin developer task. A task can make
+    ``{repos_dir}/zzz/`` and put anything under it, and an enumerating sweeper
+    would then take ``zzz`` as a user id — asking the busy check about a user
+    that does not exist (which can never be in flight, so guard 1 always
+    passes) and running a reclaim verb against a directory of the model's
+    choosing. So the daemon says who the users are and this derives one path
+    per user. A user the caller omits is a cache that is never swept, which
+    costs disk; a user the caller invents finds no directory and measures zero.
+    Wrong in the safe direction either way.
+
+    The containment rule stays an **equality**, now against the whole derived
+    path: ``candidate.resolve() == root.resolve() / user_id / CACHE_ROOT_NAME``.
+    Both components are model-plantable, and the equality refuses either being
+    a symlink — a link at ``{repos_dir}/{user_id}`` aiming into another user's
+    subtree, or one at ``.package-caches`` aiming anywhere at all.
+
+    A lexical check on the id runs first, and it is worth being exact about
+    what each half does because the obvious division of labour is wrong.
+    ``PurePath`` does *not* collapse ``..``, so ``(root / "..").parent == root``
+    — a parent comparison alone lets a bare ``..`` through to ``resolve()``,
+    which answers perfectly happily for a path outside the root. The equality
+    would still refuse the result, but only after a traversal outside the root
+    had been stat'd. So the id is checked against a small explicit rule
+    instead: not empty, not ``.`` or ``..``, no separator, not absolute. What
+    the *resolved* equality is for is symlinks, which are children by name and
+    somewhere else on disk. Same two-check pair as
+    ``executor.get_user_repos_dir``, with the labour divided the way that
+    function's docstring divides it.
+
+    A user with no cache directory yet is skipped silently rather than reported:
+    on this layout that is every user who has not run a task, and an outcome row
+    each would drown the ones that mean something. Orphans run the other way —
+    a cache whose user is not in the list — and :func:`report_orphan_caches` is
+    what makes those visible without acting on a name from this tree.
+
+    **The equality assumes a case-sensitive filesystem**, stated so nobody
+    hand-tests the guard on a mac and concludes it holds. ``Path.resolve()``
+    uses ``realpath``, which does not canonicalise case, so on darwin two ids
+    differing only in case both satisfy the equality against one real directory
+    and the busy check is then asked about the spelling that was passed rather
+    than the one that owns the cache. The deployment target is Linux, where the
+    kernel makes the two ids different directories.
+    """
+    try:
+        resolved_root = root.resolve()
+    except (OSError, ValueError) as exc:
+        logger.warning("sandbox_cache_sweeper: %s is unreadable (%s); nothing swept.", root, exc)
+        return
+
+    for user_id in sorted({str(u) for u in user_ids}):
+        if not user_id:
+            continue
+        subtree = root / user_id
+        candidate = subtree / CACHE_ROOT_NAME
+        try:
+            # Lexical first, and stated as a rule about the id rather than as a
+            # parent comparison — `PurePath` keeps `..` as a literal component,
+            # so `(root / "..").parent` *is* the root and a bare `..` would
+            # otherwise reach `resolve()` and stat a path outside the tree.
+            if not _is_one_component(user_id) or candidate.parent != subtree:
+                yield user_id, candidate, False
+                continue
+            if not candidate.is_dir():
+                continue
+            if candidate.resolve() != resolved_root / user_id / CACHE_ROOT_NAME:
+                yield user_id, candidate, False
+                continue
+        except (OSError, ValueError, TypeError):
+            # `resolve()` raises ValueError on an embedded NUL and the joins
+            # raise TypeError on an id that is not a string. Both come from a
+            # profile row rather than from this module, and `sweep_caches`
+            # promises never to raise — a generator's exception surfaces at the
+            # caller's `for`, which is outside its per-user `try`.
+            continue
+        # Resolved, for the reason `_candidates_in_root` gives: the check and
+        # the use are separated by a tree walk and up to four subprocesses.
+        yield user_id, candidate.resolve(), True
+
+
+def _identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of *path*, opened without following a final symlink.
+
+    The anchor for :func:`_still_the_same`. ``O_NOFOLLOW`` matters rather than
+    ``lstat``: it refuses at the *last* component, which is the one an attacker
+    can replace, and it does so at open time rather than telling us about a link
+    we would then have to reason about.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return (info.st_dev, info.st_ino)
+
+
+def _still_the_same(path: Path, pinned: tuple[int, int] | None) -> bool:
+    """Whether *path* still names the inode it did when *pinned* was taken.
+
+    **Why a resolved path is not enough on the derived layout, contrary to what
+    this module used to claim.** Under ``security.sandbox_cache_dir`` the cache
+    root's *parent* was never bound into a sandbox, so no component of a
+    resolved cache path was reachable from a task and resolving really did
+    remove everything swappable. Under ``developer.repos_dir`` the whole subtree
+    ``{repos_dir}/{user_id}`` is bound read-write into that user's own admin
+    developer tasks, so ``.package-caches`` is an ordinary entry a task can
+    ``mv`` aside and replace with a symlink — on the host, while the sweep is
+    running. A resolved path is a string of names, and every consumer here
+    re-traverses it: ``measure_cache`` walks the tree, then ``_reclaim`` joins
+    ``uv``/``npm`` onto it and hands those to subprocesses bounded at
+    :data:`_TOOL_TIMEOUT`. That is minutes of window per round, and ``npm cache
+    clean --force`` has no in-use check behind it (guard 3 is uv's alone).
+
+    So the identity is pinned once and re-asserted immediately before each
+    round. **It narrows the window rather than closing it**: the tool still
+    opens the path by name after this returns, so a swap in the microseconds
+    between the check and ``execve`` still lands. Closing it completely means
+    handing the tools an fd-anchored path (``/proc/self/fd/N``), which is
+    Linux-only and changes what the tools are told their cache directory is
+    called. What actually protects a *live* task remains guard 1, the busy set;
+    this is what stops a wipe being aimed somewhere else entirely.
+    """
+    if pinned is None:
+        return False
+    return _identity(path) == pinned
 
 
 # --------------------------------------------------------------------------
@@ -396,7 +590,11 @@ def _npm_argv(binary: str, npm_dir: Path, verb: str) -> list[str]:
 
 
 def _reclaim(
-    user_dir: Path, verbs: tuple[str, str], uv_bin: str | None, npm_bin: str | None,
+    user_dir: Path,
+    verbs: tuple[str, str],
+    uv_bin: str | None,
+    npm_bin: str | None,
+    pinned: tuple[int, int] | None = None,
 ) -> tuple[int, int, list[str]]:
     """Run one round (``verbs`` = the uv verb and the npm verb).
 
@@ -404,6 +602,14 @@ def _reclaim(
     subdirectory is *there* and whose binary is not — which is a different
     outcome from a cache that simply holds nothing of that tool's, and the
     caller reports the two differently.
+
+    ``pinned`` is re-asserted immediately before **each** tool rather than once
+    per round, and the two are far apart in wall-clock terms: the uv call can
+    block for the whole of :data:`_TOOL_TIMEOUT` on uv's own cache lock, and the
+    npm call runs after it. Checking once at the top would leave the npm
+    ``execve`` minutes from its evidence — and npm is the half with no in-use
+    check of its own. ``None`` skips the assertion, which is what the tests and
+    any future caller with no identity to offer get.
     """
     uv_dir = user_dir / CACHE_UV
     npm_dir = user_dir / CACHE_NPM
@@ -423,6 +629,11 @@ def _reclaim(
                 missing += 1
                 notes.append(f"{name} is not installed, so its cache was not reclaimed")
                 continue
+            if pinned is not None and not _still_the_same(user_dir, pinned):
+                notes.append(
+                    f"the cache directory changed identity before {name} ran; stopped"
+                )
+                break
             ok, detail = _run(argv, cwd, env)
             ran += 1
             if not ok:
@@ -439,11 +650,25 @@ def sweep_caches(
     *,
     max_bytes: int = DEFAULT_MAX_BYTES,
     busy_users: Collection[str] = (),
+    user_ids: Collection[str] | None = None,
     min_idle_seconds: float = DEFAULT_MIN_IDLE_SECONDS,
     floor_bytes: int = MIN_MAX_BYTES,
     now: float | None = None,
 ) -> list[SweepOutcome]:
     """Bring every per-user cache under ``root`` inside ``max_bytes``. Never raises.
+
+    **``user_ids`` selects the layout**, because the two the daemon can produce
+    put a cache in different places and only one of them can be enumerated
+    safely:
+
+    * ``None`` — ``root`` is ``security.sandbox_cache_dir`` and each entry in it
+      is a user's cache (:func:`_candidates_in_root`). The shape a deployment
+      running the sandbox without the developer skill has.
+    * a collection — ``root`` is ``developer.repos_dir`` and a user's cache is
+      ``{root}/{user_id}/{CACHE_ROOT_NAME}`` (:func:`_candidates_for_users`).
+      The ids come from the daemon; nothing here reads a user id out of a tree
+      the model can write. Passing an empty collection is a valid answer
+      meaning "no users", and sweeps nothing.
 
     ``floor_bytes`` is the clamp :data:`MIN_MAX_BYTES` describes. It is a
     parameter only so the tests can exercise the ceiling on kilobytes instead of
@@ -467,11 +692,15 @@ def sweep_caches(
     busy = set(busy_users)
     outcomes: list[SweepOutcome] = []
 
-    for entry, usable in _candidates(root_path):
+    candidates = (
+        _candidates_in_root(root_path) if user_ids is None
+        else _candidates_for_users(root_path, user_ids)
+    )
+    for user_id, entry, usable in candidates:
         if not usable:
             outcomes.append(SweepOutcome(
-                entry.name, entry, ACTION_OUTSIDE, 0, 0,
-                "not a directory directly inside the configured root",
+                user_id, entry, ACTION_OUTSIDE, 0, 0,
+                "does not resolve to the path the cache layout names",
             ))
             continue
         # Per user, so one cache that blows up in an unforeseen way cannot end
@@ -479,7 +708,7 @@ def sweep_caches(
         # result as complete.
         try:
             outcomes.append(_sweep_one(
-                entry, max_bytes, busy, min_idle_seconds, stamp, uv_bin, npm_bin,
+                user_id, entry, max_bytes, busy, min_idle_seconds, stamp, uv_bin, npm_bin,
             ))
         except Exception:  # noqa: BLE001 — see above
             logger.exception("sandbox_cache_sweeper: sweeping %s failed", entry)
@@ -487,6 +716,7 @@ def sweep_caches(
 
 
 def _sweep_one(
+    user_id: str,
     user_dir: Path,
     max_bytes: int,
     busy: set[str],
@@ -495,7 +725,11 @@ def _sweep_one(
     uv_bin: str | None,
     npm_bin: str | None,
 ) -> SweepOutcome:
-    user_id = user_dir.name
+    # `user_id` is passed rather than taken from `user_dir.name`, and that is
+    # load-bearing on the derived layout, where the directory is called
+    # `.package-caches` for everybody — reading the name there would ask the
+    # busy check about `.package-caches` instead of about a user, so guard 1
+    # would pass for every cache on the deployment.
     before = measure_cache(user_dir)
 
     if user_id in busy:
@@ -530,7 +764,18 @@ def _sweep_one(
             f"written {idle:.0f}s ago, inside the {min_idle_seconds:.0f}s idle window",
         )
 
-    ran, missing, notes = _reclaim(user_dir, ("prune", "verify"), uv_bin, npm_bin)
+    # Pinned once, re-asserted before each round — see `_still_the_same` for
+    # why the resolved path this was handed is not by itself enough here.
+    pinned = _identity(user_dir)
+    if pinned is None:
+        return SweepOutcome(
+            user_id, user_dir, ACTION_SWAPPED, before.bytes, before.bytes,
+            "the cache directory could not be opened without following a symlink",
+        )
+
+    ran, missing, notes = _reclaim(
+        user_dir, ("prune", "verify"), uv_bin, npm_bin, pinned,
+    )
     after = measure_cache(user_dir)
     if after.bytes <= max_bytes:
         return SweepOutcome(
@@ -588,7 +833,20 @@ def _sweep_one(
         return SweepOutcome(user_id, user_dir, ACTION_RECENT,
                             before.bytes, fresh.bytes, "; ".join(notes))
 
-    wiped, wipe_missing, wipe_notes = _reclaim(user_dir, ("clean", "clean"), uv_bin, npm_bin)
+    # And the identity, for the same reason the mtime is re-taken: the prune
+    # round can stall for minutes on uv's lock, and this is the escalation that
+    # deletes rather than reclaims. A directory that changed identity in that
+    # window is not the one anything above was decided about.
+    if not _still_the_same(user_dir, pinned):
+        notes.append(
+            "the cache directory changed identity during the reclaim; not escalating"
+        )
+        return SweepOutcome(user_id, user_dir, ACTION_SWAPPED,
+                            before.bytes, fresh.bytes, "; ".join(notes))
+
+    wiped, wipe_missing, wipe_notes = _reclaim(
+        user_dir, ("clean", "clean"), uv_bin, npm_bin, pinned,
+    )
     notes.extend(n for n in wipe_notes if n not in notes)
     after = measure_cache(user_dir)
 
@@ -610,6 +868,56 @@ def _sweep_one(
                         "; ".join(notes))
 
 
+def report_orphan_caches(root: Path | str, user_ids: Collection[str]) -> list[Path]:
+    """Caches under *root* belonging to nobody the caller named. Reports only.
+
+    The cost of the derived layout's security property, made visible. Because
+    the sweep derives one path per supplied user id and reads no name back out
+    of the tree, a cache for a user the caller does not name is swept by
+    nothing — forever, on the volume ``worktree_reaper`` is already fighting
+    for. That happens for two ordinary reasons, neither of them a
+    misconfiguration: ``config.users`` is read once at load time, so a user
+    onboarded afterwards accumulates cache the running daemon cannot see; and a
+    removed or renamed account leaves its cache behind. The one-level layout had
+    no such gap because it enumerated the tree, so this is a regression the
+    layout change buys and this function is what stops it being a silent one.
+
+    **It never acts and never returns a user id.** It returns paths, logs a
+    count, and stops. Acting on a name found here is precisely what
+    :func:`_candidates_for_users` exists to prevent — an entry under
+    ``repos_dir`` is model-creatable, so ``{repos_dir}/zzz/.package-caches`` is
+    a directory a task can make, and a "clean up the orphans" pass would aim a
+    reclaim verb at it. Whoever reads the log decides.
+
+    Never raises: an unreadable root is no orphans, which is honest — nothing
+    was established either way, and the caller is a periodic sweep.
+    """
+    known = {str(u) for u in user_ids}
+    orphans: list[Path] = []
+    try:
+        entries = sorted(Path(root).iterdir())
+    except (OSError, ValueError):
+        return []
+    for entry in entries:
+        try:
+            if entry.name in known or entry.is_symlink() or not entry.is_dir():
+                continue
+            if (entry / CACHE_ROOT_NAME).is_dir():
+                orphans.append(entry / CACHE_ROOT_NAME)
+        except OSError:
+            continue
+    if orphans:
+        logger.warning(
+            "sandbox_cache_sweeper: %d package cache(s) under %s belong to no user "
+            "this daemon knows about, so nothing bounds them: %s. A user added since "
+            "the daemon started is the usual cause — restart to pick them up. Not "
+            "swept and not removed: acting on a directory name found here is what "
+            "the per-user layout exists to avoid.",
+            len(orphans), root, ", ".join(str(o) for o in orphans),
+        )
+    return orphans
+
+
 def _human(size: int) -> str:
     value = float(size)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -624,6 +932,7 @@ def sweep_and_report(
     *,
     max_bytes: int = DEFAULT_MAX_BYTES,
     busy_users: Collection[str] = (),
+    user_ids: Collection[str] | None = None,
     min_idle_seconds: float = DEFAULT_MIN_IDLE_SECONDS,
 ) -> list[SweepOutcome]:
     """:func:`sweep_caches`, logged.
@@ -635,17 +944,41 @@ def sweep_and_report(
     """
     try:
         outcomes = sweep_caches(
-            root, max_bytes=max_bytes, busy_users=busy_users,
+            root, max_bytes=max_bytes, busy_users=busy_users, user_ids=user_ids,
             min_idle_seconds=min_idle_seconds,
         )
     except Exception:  # noqa: BLE001 — a periodic sweep must not kill its thread
         logger.exception("sandbox_cache_sweeper: sweep of %s failed", root)
         return []
 
+    if user_ids is not None:
+        # Derived layout only: on the one-level layout the sweep enumerates the
+        # tree itself, so there is no such thing as a cache it cannot see.
+        try:
+            report_orphan_caches(root, user_ids)
+        except Exception:  # noqa: BLE001 — reporting must not cost the sweep
+            logger.exception("sandbox_cache_sweeper: orphan scan of %s failed", root)
+        if not outcomes:
+            # Otherwise this is a completely silent no-op: `skipped` is empty
+            # too, so nothing below logs, and a deployment whose user list is
+            # empty reads exactly like one whose caches are all inside their
+            # ceiling. That is the failure this whole re-rooting was fixing,
+            # arriving through a different door.
+            logger.info(
+                "sandbox_cache_sweeper: no package cache found under %s for any of "
+                "the %d user(s) this daemon knows about.", root, len(set(user_ids)),
+            )
+
     skipped: dict[str, int] = {}
     for outcome in outcomes:
         if outcome.action in (
             ACTION_WIPED, ACTION_STILL_OVER, ACTION_NO_TOOLS, ACTION_FUTURE_MTIME,
+            # Both of these mean a directory was not what the layout says it
+            # should be, which on the derived layout is the security-interesting
+            # event rather than a housekeeping one. Folded into the anonymous
+            # `skipped` count they were reported as "1 outside" with no user and
+            # no path — a planted symlink and an idle deployment reading alike.
+            ACTION_OUTSIDE, ACTION_SWAPPED,
         ):
             level = logger.info if outcome.action == ACTION_WIPED else logger.warning
             level(
